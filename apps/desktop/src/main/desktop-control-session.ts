@@ -12,14 +12,19 @@ import {
   desktopControlStateFolder,
   type DesktopControlSessionVariables,
 } from './desktop-control';
+import {
+  DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE,
+  desktopControlTeamCursorsEnabled,
+} from './desktop-control-build';
 import { endDesktopControlQueue, endDesktopControlQueues } from './desktop-control-queue';
 import { secureLogger } from './secure-logger';
 
 /**
  * The multi-agent session Main keeps for each Task, so that every agent working on the Task draws
- * its own cursor (`session start --cursor --multi-agent`). Off unless the hidden opt-in
- * `SPRINT_CODER_DESKTOP_TEAM_CURSORS=1` was set when Main started (`configureDesktopControlTeamCursors`);
- * off, nothing here runs and every desktop-control run is exactly as before.
+ * its own cursor (`session start --cursor --multi-agent`). On by default where desktop control is
+ * built; off when Main started with `SPRINT_CODER_DESKTOP_TEAM_CURSORS=0`
+ * (`DESKTOP_CONTROL_TEAM_CURSORS_AT_START`, given once to `configureDesktopControlTeamCursors`).
+ * Off, nothing here runs and every desktop-control run is exactly as before the cursors existed.
  *
  * On, Main starts the Task's session itself before the Task's first desktop-control run that is
  * not inert, and every such run of the Task then runs in it: Main sets the session and the agent
@@ -100,12 +105,17 @@ export type DesktopControlWorker = Readonly<{
 }>;
 
 /**
- * The hidden opt-in as this Main process started with it. Main turns the feature on from it once
+ * Whether this Main process started with the Team's cursors on: on by default where desktop
+ * control is built, off with `SPRINT_CODER_DESKTOP_TEAM_CURSORS=0`
+ * (`desktopControlTeamCursorsEnabled`). Main turns the feature on from it once
  * (`configureDesktopControlTeamCursors`), and the Leader's hire tool offers the desktop mark only
- * when it was given, so without it the tool is exactly as it was.
+ * when it is on, so with `0` the tool is exactly as it was before the mark existed.
  */
-export const DESKTOP_CONTROL_TEAM_CURSORS_AT_START =
-  process.env['SPRINT_CODER_DESKTOP_TEAM_CURSORS'] === '1';
+export const DESKTOP_CONTROL_TEAM_CURSORS_AT_START = desktopControlTeamCursorsEnabled(
+  process.env[DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE],
+  process.platform,
+  process.arch,
+);
 
 let teamCursors = false;
 let workerToolOffered: () => boolean = () => false;
@@ -113,7 +123,10 @@ let collected: Promise<void> | null = null;
 const sessions = new Map<string, TaskSession>();
 const desktopWorkers = new Map<string, Map<string, DesktopControlWorker>>();
 
-/** Read once, when Main starts; `false` keeps every run as it was. */
+/**
+ * Given once, when Main starts (`DESKTOP_CONTROL_TEAM_CURSORS_AT_START`); off until then, and
+ * `false` keeps every run as it was before the Team's cursors existed.
+ */
 export function configureDesktopControlTeamCursors(enabled: boolean): void {
   teamCursors = enabled;
 }
@@ -270,7 +283,7 @@ export function markDesktopControlWorker(
   return { worker };
 }
 
-/** The Worker's desktop-control mark, when the Leader gave it one and the opt-in is on. */
+/** The Worker's desktop-control mark, when the Leader gave it one and the Team's cursors are on. */
 export function desktopControlWorker(
   taskId: string,
   workerId: string,
@@ -386,7 +399,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** For tests: forgets every session and the opt-in. */
+/** For tests: forgets every session, and turns the Team's cursors off until configured again. */
 export function resetDesktopControlSessions(): void {
   teamCursors = false;
   workerToolOffered = () => false;

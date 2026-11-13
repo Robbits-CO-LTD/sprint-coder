@@ -23,3 +23,24 @@ export const DESKTOP_CONTROL_EXECUTABLE = 'sprint-coder-desktop-control.exe';
 export function desktopControlSupported(platform: string, arch: string): boolean {
   return platform === 'win32' && arch === 'x64';
 }
+
+/**
+ * The environment variable that turns the Team's desktop cursors off: `0` stops them, so the
+ * Leader cannot mark a Worker for desktop control and every desktop-control run is as it was
+ * before the Team's cursors existed. Any other value, or none, leaves them on.
+ */
+export const DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE = 'SPRINT_CODER_DESKTOP_TEAM_CURSORS';
+
+/**
+ * Whether a process started with this value of `DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE` has the
+ * Team's desktop cursors on: on by default, off with `0`, and never where desktop control is not
+ * built (so the Leader there is not offered Workers that could run nothing). Main and the Runtime
+ * Host (which inherits Main's environment) both read it here, so they never disagree.
+ */
+export function desktopControlTeamCursorsEnabled(
+  value: string | undefined,
+  platform: string,
+  arch: string,
+): boolean {
+  return value !== '0' && desktopControlSupported(platform, arch);
+}

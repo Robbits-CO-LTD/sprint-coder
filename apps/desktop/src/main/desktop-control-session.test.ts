@@ -136,7 +136,7 @@ describe('the arguments of a run Main places in its session', () => {
       expect(desktopControlSessionArgvRefusal(argv)).toBeNull();
   });
 
-  it('keeps how long the cursors stay drawn Main’s alone, with or without the opt-in', () => {
+  it('keeps how long the cursors stay drawn Main’s alone, whether the Team’s cursors are on or off', () => {
     const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
     for (const argv of [
       ['cursor-overlay', 'enable', '--label', 'X', '--linger-ms', '30000'],
@@ -158,8 +158,10 @@ describe('the arguments of a run Main places in its session', () => {
 });
 
 describe('the Task’s desktop-control session', () => {
-  it('is off unless the opt-in was given, and then never runs anything', async () => {
+  it('is off until Main turns it on, and off (`=0`) never runs anything', async () => {
     const { run } = ownRuns();
+    expect(desktopControlTeamCursors()).toBe(false);
+    configureDesktopControlTeamCursors(false);
     expect(desktopControlTeamCursors()).toBe(false);
     await expect(ensureDesktopControlSession('task-1', run)).rejects.toThrow('off');
     expect(run).not.toHaveBeenCalled();
@@ -328,7 +330,7 @@ describe('the Team Workers marked for desktop control', () => {
     expect(markDesktopControlWorker('task-2', 'agent-d', 'four')).toMatchObject({
       worker: { colorIndex: 0 },
     });
-    // Read only with the opt-in on.
+    // Read only with the cursors on.
     expect(desktopControlWorker('task-1', 'agent-a')).toBeUndefined();
     configureDesktopControlTeamCursors(true);
     expect(desktopControlWorker('task-1', 'agent-a')).toEqual((one as { worker: unknown }).worker);

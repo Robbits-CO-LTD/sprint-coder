@@ -16,9 +16,10 @@ import { secureLogger } from './secure-logger';
  * that reads or operates the desktop goes through here, one after another, reads included; a run
  * that only prints (guides, help, version, status) never runs in the session and never waits.
  *
- * Used only for a run Main placed in the Task's session (`SPRINT_CODER_DESKTOP_TEAM_CURSORS=1`);
- * without it nothing here runs. A run waits after its approval card, never before it: the card is
- * decided before the tool's execution starts, so a card left open holds no one's turn.
+ * Used only for a run Main placed in the Task's session (the Team's cursors on, the default);
+ * with `SPRINT_CODER_DESKTOP_TEAM_CURSORS=0` nothing here runs. A run waits after its approval
+ * card, never before it: the card is decided before the tool's execution starts, so a card left
+ * open holds no one's turn.
  *
  * A run whose turn does not come within `DESKTOP_CONTROL_QUEUE_WAIT_MS` does not start, and fails
  * with a message saying so. A run whose Turn is canceled while it waits does not start either. A

@@ -763,7 +763,7 @@ export class TeamCoordinator {
   /**
    * The Leader marked a Worker of the Task for desktop control (`markDesktopControlWorker`), which
    * may also have dropped the marks of Workers no longer at work: publishes the Team, so the Team
-   * view shows each Worker's cursor color now. Nothing is published while the opt-in is off, when
+   * view shows each Worker's cursor color now. Nothing is published while the cursors are off, when
    * no Worker carries a mark.
    */
   notifyDesktopControlMarked(taskId: string): void {
@@ -7322,7 +7322,7 @@ export class TeamCoordinator {
   }
 
   private workerSummary(agent: AgentRecord): WorkerSummary {
-    // Only the cursor's label and color reach the Renderer, only while the opt-in is on, and only
+    // Only the cursor's label and color reach the Renderer, only while the cursors are on, and only
     // for a Worker still at work: a finished Worker's color may go to the next Worker marked.
     const desktop =
       agent.kind === 'worker' && !DESKTOP_MARK_ENDED_STATES.has(agent.state)
