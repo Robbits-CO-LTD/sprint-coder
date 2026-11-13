@@ -1267,18 +1267,37 @@ bool ReadFileIdentity(const wchar_t* path, BY_HANDLE_FILE_INFORMATION* identity)
   return read != FALSE;
 }
 
+// How long a member is given to finish exiting, once terminated or found already exiting.
+constexpr DWORD kMemberExitWaitMs = 5000;
+
+// True when a member that could not be identified has already begun exiting and finishes within the
+// wait: an exiting process no longer reports its image (ERROR_ACCESS_DENIED) though its exit status is
+// set. A member still reporting STILL_ACTIVE, or one that does not finish, stays unidentified.
+bool MemberFinishesExiting(HANDLE process) {
+  DWORD code = STILL_ACTIVE;
+  return GetExitCodeProcess(process, &code) && code != STILL_ACTIVE &&
+         WaitForSingleObject(process, kMemberExitWaitMs) == WAIT_OBJECT_0;
+}
+
 // Terminates every member of the job still running the given image file. False when the image or a
-// member could not be identified, or a member running it could not be terminated.
+// live member could not be identified, or a member running it could not be terminated.
 bool TerminateJobMembersRunningImage(HANDLE job, const std::wstring& image) {
   BY_HANDLE_FILE_INFORMATION expected{};
   if (!ReadFileIdentity(image.c_str(), &expected)) return false;
   std::vector<unsigned char> storage(sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) +
                                      sizeof(ULONG_PTR) * 1024);
   auto* list = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(storage.data());
-  if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, list,
-                                 static_cast<DWORD>(storage.size()), nullptr) ||
-      list->NumberOfProcessIdsInList != list->NumberOfAssignedProcesses)
-    return false;
+  // A member that is exiting can be counted but left out of the list; read it again until every
+  // assigned member is listed.
+  const ULONGLONG deadline = GetTickCount64() + kMemberExitWaitMs;
+  for (;;) {
+    if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, list,
+                                   static_cast<DWORD>(storage.size()), nullptr))
+      return false;
+    if (list->NumberOfProcessIdsInList == list->NumberOfAssignedProcesses) break;
+    if (GetTickCount64() >= deadline) return false;
+    Sleep(10);
+  }
   std::vector<wchar_t> name(32768);
   for (DWORD index = 0; index < list->NumberOfProcessIdsInList; ++index) {
     const DWORD pid = static_cast<DWORD>(list->ProcessIdList[index]);
@@ -1302,7 +1321,9 @@ bool TerminateJobMembersRunningImage(HANDLE job, const std::wstring& image) {
                         running.nFileIndexHigh == expected.nFileIndexHigh &&
                         running.nFileIndexLow == expected.nFileIndexLow;
       ok = !same || (TerminateProcess(process, 1) != FALSE &&
-                     WaitForSingleObject(process, 5000) == WAIT_OBJECT_0);
+                     WaitForSingleObject(process, kMemberExitWaitMs) == WAIT_OBJECT_0);
+    } else if (member != FALSE) {
+      ok = MemberFinishesExiting(process);  // Exiting since the listing.
     }
     CloseHandle(process);
     if (!ok) return false;

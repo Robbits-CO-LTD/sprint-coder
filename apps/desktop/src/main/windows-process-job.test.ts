@@ -112,6 +112,66 @@ describe.skipIf(process.platform !== 'win32')('owned Job release', () => {
     }
   }, 20_000);
 
+  // A command that starts a long-lived process (this Node) and then ends by itself, as a finished
+  // desktop-control run does. Its console host is in the Job too and exits around the release.
+  // Resolves with that process's pid once the command has ended.
+  async function runCommandToEnd(jobId: string, image: string): Promise<number> {
+    const command = spawn(
+      image,
+      [
+        '-e',
+        [
+          "const { spawn } = require('node:child_process');",
+          "process.stdin.once('data', () => {",
+          "  const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
+          '  child.unref();',
+          '  process.stdout.write(String(child.pid), () => process.exit(0));',
+          '});',
+        ].join('\n'),
+        process.execPath,
+      ],
+      { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true },
+    );
+    await new Promise<void>((resolve, reject) => {
+      command.once('spawn', resolve);
+      command.once('error', reject);
+    });
+    assignProcessToOwnedJob(command.pid!, jobId);
+    let output = '';
+    command.stdout!.on('data', (data: Buffer) => (output += data.toString()));
+    const exited = new Promise((resolve) => command.once('close', resolve));
+    command.stdin!.write('go\n');
+    await exited;
+    return Number(output);
+  }
+
+  it('keeps the started process when members are still exiting at a natural end', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'sprint-coder-job-exiting-'));
+    const image = join(folder, 'command-image.exe');
+    await copyFile(process.execPath, image);
+    const pids: number[] = [];
+    try {
+      let fellBack = 0;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const jobId = randomUUID();
+        pids.push(await runCommandToEnd(jobId, image));
+        if (!releaseOwnedJob(jobId, image)) fellBack += 1;
+      }
+      expect(fellBack).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(pids.filter((pid) => !alive(pid))).toEqual([]);
+    } finally {
+      for (const pid of pids) {
+        try {
+          process.kill(pid);
+        } catch {
+          // Already ended.
+        }
+      }
+      await rm(folder, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }, 60_000);
+
   // A host standing in for Sprint Coder: it starts the command as the runner does, puts it in an
   // owned Job, lets it start a long-lived process, releases the Job and exits. Reports that pid.
   // Exits 3 when the release fell back to terminating the whole Job.
@@ -166,12 +226,8 @@ describe.skipIf(process.platform !== 'win32')('owned Job release', () => {
       await new Promise((resolve) => setTimeout(resolve, 500));
       expect(alive(kept)).toBe(true);
       // Any other command: the attached wrapper keeps everything in the host's Job, which ends it
-      // with the host even after the owned Job let it go. The attached command can own a console
-      // host in its Job, whose exit during the release sometimes makes the release fall back to
-      // terminating the whole Job; that ends the process for another reason, so it is tried again.
-      let ended = 0;
-      for (let attempt = 0; attempt < 5 && ended === 0; attempt += 1)
-        ended = await startedPidAfterHostExits(image, windowsJobWrapperDetached(false));
+      // with the host even after the owned Job let it go.
+      const ended = await startedPidAfterHostExits(image, windowsJobWrapperDetached(false));
       expect(ended).toBeGreaterThan(0);
       pids.push(ended);
       expect(await waitUntil(() => !alive(ended))).toBe(true);
