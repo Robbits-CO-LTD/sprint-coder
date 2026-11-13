@@ -12,6 +12,7 @@ import {
 } from './provider-team-worker-runtime';
 import {
   configureDesktopControlTeamCursors,
+  configureDesktopControlWorkerTool,
   desktopControlWorker,
   resetDesktopControlSessions,
 } from './desktop-control-session';
@@ -28,6 +29,12 @@ import {
 } from '../runtime-host/team-mcp-server-source';
 
 afterEach(() => resetDesktopControlSessions());
+
+/** The opt-in on, in a Main whose harness offers its Turns the command tool (the sandbox is there). */
+function cursorsOn(): void {
+  configureDesktopControlTeamCursors(true);
+  configureDesktopControlWorkerTool(() => true);
+}
 
 type HireInput = {
   role: string;
@@ -101,7 +108,7 @@ describe('the Leader’s desktop mark on a hire', () => {
   });
 
   it('marks up to three leaf Workers the Leader hires, and says why not otherwise', async () => {
-    configureDesktopControlTeamCursors(true);
+    cursorsOn();
     expect(teamMcpDesktopHireProperty(true)).toContain("desktopControl: { type: 'boolean'");
     const coordinator = team();
     for (let index = 1; index <= 3; index += 1)
@@ -123,7 +130,7 @@ describe('the Leader’s desktop mark on a hire', () => {
     });
     // Not by a Manager, not for a Manager, and not without asking.
     resetDesktopControlSessions();
-    configureDesktopControlTeamCursors(true);
+    cursorsOn();
     await expect(hire(coordinator, { desktopControl: true }, 'manager-1')).resolves.toMatchObject({
       desktopControl: false,
     });
@@ -141,7 +148,7 @@ describe('the Leader’s desktop mark on a hire', () => {
   });
 
   it('counts the Workers at work, not every Worker ever marked, and reuses a freed accent', async () => {
-    configureDesktopControlTeamCursors(true);
+    cursorsOn();
     const coordinator = team();
     for (let index = 1; index <= 3; index += 1)
       await hire(coordinator, { desktopControl: true, role: `担当${index}` });
@@ -173,8 +180,35 @@ describe('the Leader’s desktop mark on a hire', () => {
       });
   });
 
-  it('marks only a Worker that runs on a CLI', async () => {
+  it('marks no Worker, and holds no place, when the Worker cannot be given the command tool', async () => {
+    // As Main without the command sandbox: the harness offers its Turns no `exec_command`.
     configureDesktopControlTeamCursors(true);
+    let offered = false;
+    configureDesktopControlWorkerTool(() => offered);
+    const coordinator = team();
+    for (let index = 0; index < 4; index += 1) {
+      const refused = await hire(coordinator, { desktopControl: true });
+      expect(refused).toMatchObject({
+        ok: true,
+        desktopControl: false,
+        desktopControlNote: expect.stringContaining('デスクトップ操作の道具を渡せません'),
+      });
+      expect(desktopControlWorker('task-1', refused['workerId'] as string)).toBeUndefined();
+    }
+    // The refused Workers, still at work, hold no place: once the tool can be given, three fit.
+    offered = true;
+    for (let index = 0; index < 3; index += 1)
+      await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+        desktopControl: true,
+      });
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      desktopControl: false,
+      desktopControlNote: expect.stringContaining('同時に 3 人まで'),
+    });
+  });
+
+  it('marks only a Worker that runs on a CLI', async () => {
+    cursorsOn();
     const coordinator = team();
     const api = await hire(coordinator, {
       desktopControl: true,
@@ -215,7 +249,7 @@ describe('the Leader’s desktop mark on a hire', () => {
   });
 
   it('marks a Worker exactly when the Worker runtime hands it to the CLI runtime', async () => {
-    configureDesktopControlTeamCursors(true);
+    cursorsOn();
     const cli = vi.fn(async () => ({ pid: 1 }));
     const runtime = new ProviderAwareTeamWorkerRuntime({
       fallback: { start: cli, execute: vi.fn(), stop: vi.fn() },
@@ -241,7 +275,7 @@ describe('the Leader’s desktop mark on a hire', () => {
     ];
     for (const modelSelection of selections) {
       resetDesktopControlSessions();
-      configureDesktopControlTeamCursors(true);
+      cursorsOn();
       cli.mockClear();
       const coordinator = team();
       const hired = await hire(coordinator, {
@@ -267,7 +301,7 @@ describe('the Leader’s desktop mark on a hire', () => {
   });
 
   it('judges a hire that names no Connection by the selection the Worker inherits, and counts only CLI Workers', async () => {
-    configureDesktopControlTeamCursors(true);
+    cursorsOn();
     // As Main stores a hire that names no Connection (`persistence.ts`): with the Leader's selection.
     let inherited: NonNullable<HireInput['modelSelection']> = {
       connectionId: 'connection-api-1',
@@ -309,6 +343,16 @@ describe('the Leader’s desktop mark on a hire', () => {
     expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain('--session と --agent-id は付けません');
     expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain('set-value');
     expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain('TIMEOUT');
+    // Sent but not checked by the executable is not a failure: the Worker checks it and goes on,
+    // on a snapshot that shows text and state, and does not send it twice first.
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain(
+      'delivered_unverified なら、操作は届いています（結果を自動では確かめていないだけで、失敗ではありません）',
+    );
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain('止まらずに -i なしの snapshot');
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain('-i は操作できる部品を探す時だけ');
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain('確かめる前に繰り返しません（2 回届きます）');
+    for (const delivery of ['delivered_verified', 'not_delivered', 'delivery_uncertain', 'unknown'])
+      expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain(delivery);
     expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain('desktopControl: true');
     expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain('3人まで');
   });
