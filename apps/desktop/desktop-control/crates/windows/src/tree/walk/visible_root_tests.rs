@@ -29,12 +29,12 @@ fn the_view_below_a_root_reported_offscreen_is_empty() {
         "a minimized root is reported offscreen"
     );
 
-    let walk = UiaTreeSource::for_visible_root(&root).expect("a visible source");
+    let walk = UiaTreeSource::for_visible_root(&root, deadline()).expect("a visible source");
     assert!(
         walk.first_child(&root)
             .is_err_and(|failure| failure.is_exhaustion())
     );
-    let descent = UiaTreeSource::for_visible_descent(&root).expect("a descent source");
+    let descent = UiaTreeSource::for_visible_descent(&root, deadline()).expect("a descent source");
     assert!(
         descent
             .first_child(&root)
@@ -63,7 +63,7 @@ fn the_view_below_a_root_reported_onscreen_is_read() {
         // case above is the one this guard is for.
         return;
     }
-    let walk = UiaTreeSource::for_visible_root(&root).expect("a visible source");
+    let walk = UiaTreeSource::for_visible_root(&root, deadline()).expect("a visible source");
     assert!(walk.first_child(&root).is_ok());
 }
 
@@ -76,7 +76,7 @@ fn the_view_below_a_root_that_could_not_be_read_is_a_failed_read_not_an_empty_vi
     let fixture = LocalFixture::create().expect("the fixture window is created");
     let root = root_from_hwnd(fixture.handle(), deadline()).expect("the fixture root resolves");
 
-    let unread = UiaTreeSource::for_visible_root(&root)
+    let unread = UiaTreeSource::for_visible_root(&root, deadline())
         .expect("a visible source")
         .with_root_view(None);
     assert!(
@@ -85,7 +85,7 @@ fn the_view_below_a_root_that_could_not_be_read_is_a_failed_read_not_an_empty_vi
             .is_err_and(|failure| !failure.is_exhaustion() && !failure.is_absence())
     );
 
-    let offscreen = UiaTreeSource::for_visible_root(&root)
+    let offscreen = UiaTreeSource::for_visible_root(&root, deadline())
         .expect("a visible source")
         .with_root_view(Some(false));
     assert!(

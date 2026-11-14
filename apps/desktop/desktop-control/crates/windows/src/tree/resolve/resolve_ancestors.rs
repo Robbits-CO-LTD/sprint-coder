@@ -52,12 +52,18 @@ pub(crate) fn read_ancestor_evidence(
     // root that is not stops the read before any climb (the view no longer
     // shows what the proof was measured in). A root whose place in the view
     // could not be read stops it too, as an identity that could not be
-    // confirmed (which may be retried), not as a stale ref.
+    // confirmed (which may be retried), not as a stale ref. The read is a
+    // live call to the provider, so it is bounded by the deadline like the
+    // climb below: a provider that stalls cannot hold it past the deadline.
     if in_view {
-        match crate::tree::walk::walker_source::root_in_view(&root) {
-            Some(true) => {}
-            Some(false) => return Err(super::resolve_match::stale_ref_error(entry)),
-            None => {
+        let read = with_transaction_timeout(&client, deadline, || {
+            crate::tree::walk::walker_source::root_in_view(&root)
+        });
+        match read {
+            None => return Err(deadline.timeout_error()),
+            Some(Some(true)) => {}
+            Some(Some(false)) => return Err(super::resolve_match::stale_ref_error(entry)),
+            Some(None) => {
                 deadline.ensure_remaining()?;
                 return Err(identity_unknown_error(entry));
             }

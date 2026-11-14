@@ -430,18 +430,30 @@ mod imp {
         /// itself in the view ([`root_in_view`]) has nothing below it here:
         /// the view is empty, as for a window that reports all it holds
         /// offscreen, and no step can leave the root.
-        pub fn for_visible_root(root: &UIAElement) -> Result<Self, AdapterError> {
+        ///
+        /// The root's place in the view is read live here, bounded by what is
+        /// left of `deadline` like every other read of the walk
+        /// (`with_transaction_timeout`): a provider that stalls answers
+        /// within the deadline, as a root that could not be read.
+        pub fn for_visible_root(
+            root: &UIAElement,
+            deadline: agent_desktop_core::Deadline,
+        ) -> Result<Self, AdapterError> {
             let mut source = Self::for_root(root)?;
             source.walker = visible_view_walker(&source.client)?;
             source.visible = true;
-            source.root_in_view = root_in_view(root);
+            source.root_in_view =
+                with_transaction_timeout(&source.client, deadline, || root_in_view(root)).flatten();
             Ok(source)
         }
 
         /// [`Self::for_descent`] in the view [`Self::for_visible_root`] walks,
         /// so a path recorded in that view lands where it was recorded.
-        pub fn for_visible_descent(root: &UIAElement) -> Result<Self, AdapterError> {
-            let mut source = Self::for_visible_root(root)?;
+        pub fn for_visible_descent(
+            root: &UIAElement,
+            deadline: agent_desktop_core::Deadline,
+        ) -> Result<Self, AdapterError> {
+            let mut source = Self::for_visible_root(root, deadline)?;
             source.plain_navigation = true;
             Ok(source)
         }
@@ -796,11 +808,17 @@ mod imp {
             Self::for_root(root)
         }
 
-        pub fn for_visible_root(root: &UIAElement) -> Result<Self, AdapterError> {
+        pub fn for_visible_root(
+            root: &UIAElement,
+            _deadline: agent_desktop_core::Deadline,
+        ) -> Result<Self, AdapterError> {
             Self::for_root(root)
         }
 
-        pub fn for_visible_descent(root: &UIAElement) -> Result<Self, AdapterError> {
+        pub fn for_visible_descent(
+            root: &UIAElement,
+            _deadline: agent_desktop_core::Deadline,
+        ) -> Result<Self, AdapterError> {
             Self::for_root(root)
         }
 
@@ -914,9 +932,9 @@ pub fn walk_uia_visible_subtree(
     root_source: &ObservationRoot<'_>,
     budget: WalkBudget,
 ) -> Result<WalkOutcome, AdapterError> {
-    let source = UiaTreeSource::for_visible_root(root)?;
-    let prepared = source.prepare_root(root)?;
     let deadline = budget.deadline;
+    let source = UiaTreeSource::for_visible_root(root, deadline)?;
+    let prepared = source.prepare_root(root)?;
     source
         .bounded_by(deadline, || {
             walk_from_root(&source, &prepared, root_source, budget)
