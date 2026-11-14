@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  attachmentInteractionPolicy,
+  composerActionPolicy,
+  directTurnAttachmentIds,
+} from '../components/ChatSurface/Composer';
 import type { ImageAttachmentMetadata } from '../types/sprint-coder';
 import { handleTurnEvent, removeAcceptedAttachmentDrafts, useAppStore } from './appStore';
 
@@ -212,6 +217,173 @@ describe('attachment draft store state', () => {
     finishOld([first, second]);
     await loading;
     expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([second]);
+  });
+
+  // Issue #1157: a read started before the send (for example by re-selecting the Task) captured
+  // the image while it was still a draft, and only its capability answer is slow. The send's own
+  // capability answer and acceptance arrive first. The late read must not put the sent image back.
+  it.each([
+    ['between the accepted event and the start reply', true, 'before reply'],
+    ['after the accepted event and the start reply', true, 'after reply'],
+    ['after a start reply without a subscribed event', false, 'after reply'],
+  ] as const)(
+    'keeps an accepted image out of the draft when an older read finishes late (%s)',
+    async (_label, withEvent, lateReadFinishes) => {
+      const capability = {
+        status: 'supported' as const,
+        reason: null,
+        selectionIdentity: 'selection-1',
+      };
+      let finishSlowCapability!: () => void;
+      const slowCapability = new Promise<typeof capability>((resolve) => {
+        finishSlowCapability = () => resolve(capability);
+      });
+      const capabilityApi = vi
+        .fn()
+        .mockReturnValueOnce(slowCapability)
+        .mockResolvedValue(capability);
+      // Main moves the image to the message on acceptance; every read after that sees no draft.
+      let mainDrafts: ImageAttachmentMetadata[] = [first];
+      const listDraft = vi.fn(() => Promise.resolve([...mainDrafts]));
+      const acceptedEvent = (turnId: string, attachments: ImageAttachmentMetadata[]) => ({
+        type: 'turn.accepted' as const,
+        taskId,
+        turnId,
+        seq: 1,
+        userMessage: {
+          id: `message-${turnId}`,
+          taskId,
+          turnId,
+          author: 'user' as const,
+          content: '画像を確認',
+          attachments,
+          createdAt: first.createdAt,
+        },
+      });
+      let lateRead: Promise<void> = Promise.resolve();
+      // Any moment, from Main's acceptance on, at which the Composer would show the sent image.
+      let accepted = false;
+      const resurrected: string[][] = [];
+      const unsubscribe = useAppStore.subscribe((state) => {
+        const ids = (state.draftAttachmentsByTask[taskId] ?? []).map(({ id }) => id);
+        if (accepted && ids.includes(first.id)) resurrected.push(ids);
+      });
+      const start = vi.fn(async (request: { attachmentIds: readonly string[] }) => {
+        if (request.attachmentIds.length > 0) {
+          mainDrafts = mainDrafts.filter(({ id }) => !request.attachmentIds.includes(id));
+          if (withEvent) {
+            handleTurnEvent(taskId, acceptedEvent('turn-image', [first]), (update) =>
+              useAppStore.setState((state) => update(state)),
+            );
+            accepted = true;
+          }
+          if (lateReadFinishes === 'before reply') {
+            finishSlowCapability();
+            await lateRead;
+          }
+        }
+        return { turnId: request.attachmentIds.length > 0 ? 'turn-image' : 'turn-text' };
+      });
+      vi.stubGlobal('window', {
+        sprintCoder: {
+          tasks: {},
+          turns: { start },
+          attachments: { capability: capabilityApi, listDraft },
+        },
+      });
+      useAppStore.setState({
+        messagesByTask: { [taskId]: [] },
+        sendingByTask: {},
+        pendingOptimisticIdByTask: {},
+        lastSeqByTask: { [taskId]: 0 },
+        turnByTask: {},
+        draftAttachmentsByTask: { [taskId]: [first] },
+        attachmentCapabilityByTask: { [taskId]: capability },
+      });
+
+      lateRead = useAppStore.getState().refreshDraftAttachments(taskId);
+      // The late read has already captured the image as a draft before the send.
+      await vi.waitFor(() => expect(listDraft).toHaveBeenCalledTimes(1));
+      expect(
+        await useAppStore.getState().startTurn(taskId, '画像を確認', undefined, [first.id]),
+      ).toBeNull();
+      accepted = true;
+      expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([]);
+
+      finishSlowCapability();
+      await lateRead;
+      // Let the follow-up read started by the accepted send settle as well.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      unsubscribe();
+      const drafts = useAppStore.getState().draftAttachmentsByTask[taskId] ?? [];
+      expect(drafts).toEqual([]);
+      expect(resurrected).toEqual([]);
+      expect(useAppStore.getState().attachmentCapabilityByTask[taskId]).toEqual(capability);
+
+      // While the Turn runs, queueing and interrupting a text message stay available.
+      const attachment = attachmentInteractionPolicy({
+        draftCount: drafts.length,
+        turnActive: true,
+        goalRequested: false,
+        capabilityStatus: 'supported',
+        capabilityReason: '',
+      });
+      const running = composerActionPolicy({
+        turnStatus: 'running',
+        hasDraft: true,
+        canQueue: true,
+        canStopAndSend: true,
+        canCancel: true,
+        actionPending: false,
+        sendBlocked: attachment.sendBlocked,
+      });
+      expect(running.primary).toMatchObject({ kind: 'queue', disabled: false });
+      expect(running.interrupt.disabled).toBe(false);
+
+      // After the Turn, the next text-only send carries no stale image ID.
+      useAppStore.setState({ turnByTask: {} });
+      expect(
+        await useAppStore
+          .getState()
+          .startTurn(taskId, '次の質問', undefined, directTurnAttachmentIds(drafts)),
+      ).toBeNull();
+      expect(start).toHaveBeenLastCalledWith(
+        expect.objectContaining({ text: '次の質問', attachmentIds: [] }),
+      );
+    },
+  );
+
+  it('re-reads the draft from Main when Main rejects an image that is no longer a draft', async () => {
+    const start = vi.fn().mockRejectedValue(new Error('添付画像が古くなっています'));
+    const listDraft = vi.fn().mockResolvedValue([second]);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: {},
+        turns: { start },
+        attachments: {
+          capability: vi
+            .fn()
+            .mockResolvedValue({ status: 'supported', reason: null, selectionIdentity: 's' }),
+          listDraft,
+        },
+      },
+    });
+    useAppStore.setState({
+      messagesByTask: { [taskId]: [] },
+      sendingByTask: {},
+      pendingOptimisticIdByTask: {},
+      turnByTask: {},
+      draftAttachmentsByTask: { [taskId]: [first, second] },
+    });
+
+    const message = await useAppStore
+      .getState()
+      .startTurn(taskId, '画像を確認', undefined, [first.id, second.id]);
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([second]),
+    );
+    expect(message).toContain('添付画像が古くなっています');
+    expect(useAppStore.getState().draftByTask[taskId]).toBe('画像を確認');
   });
 
   it('refreshes from Main after pick and remove instead of clearing optimistically', async () => {
