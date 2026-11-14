@@ -8,6 +8,7 @@ import {
   classifyChanges,
   parseNameStatus,
   parseRelatedShard,
+  relatedChangedBase,
   relatedTestRuns,
   scopeOutputs,
   verifyRequiredJobs,
@@ -559,5 +560,133 @@ describe('GitHub classification entrypoint', () => {
       });
       expect(result.status, result.stderr).toBe(classification === 'success' ? 0 : 1);
     }
+  });
+});
+
+describe('related test comparison base', () => {
+  // Mirrors GitHub: the PR opens on `opened`, the base branch then advances, and the
+  // pull_request checkout is a merge of the PR head into the current base tip.
+  const repository = () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ci-related-base-'));
+    cleanup.push(directory);
+    const git = (...args) => {
+      const result = spawnSync(
+        'git',
+        [
+          '-c',
+          'user.name=CI Test',
+          '-c',
+          'user.email=ci@example.invalid',
+          '-c',
+          'commit.gpgsign=false',
+          '-c',
+          'core.hooksPath=.',
+          ...args,
+        ],
+        { cwd: directory, encoding: 'utf8' },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    const commit = (path, content) => {
+      writeFileSync(join(directory, path), content);
+      git('add', '-A');
+      git('commit', '-q', '-m', `change ${path}`);
+      return git('rev-parse', 'HEAD');
+    };
+    git('init', '-q', '-b', 'main');
+    writeFileSync(join(directory, 'b.ts'), 'base');
+    const opened = commit('a.ts', 'base');
+    git('checkout', '-q', '-b', 'pr');
+    const head = commit('a.ts', 'pr change');
+    git('checkout', '-q', 'main');
+    const current = commit('b.ts', 'merged by another PR');
+    git('checkout', '-q', '--detach', current);
+    git('merge', '-q', '--no-ff', '-m', `Merge ${head} into ${current}`, head);
+    const merge = git('rev-parse', 'HEAD');
+    // vitest --changed <base> lists `git diff --name-only <base>...HEAD`.
+    const changed = (base) => git('diff', '--name-only', `${base}...HEAD`).split('\n').sort();
+    return { directory, git, opened, head, current, merge, changed };
+  };
+
+  it('compares the merge checkout with its current base, matching the classified PR diff', () => {
+    const { directory, git, opened, head, current, changed } = repository();
+    // The PR-open base also selects what the base branch gained since: the CI overrun in #1247.
+    expect(changed(opened)).toEqual(['a.ts', 'b.ts']);
+    const selected = relatedChangedBase({ comparisonBase: opened, prHead: head, cwd: directory });
+    expect(selected).toMatchObject({ base: current, fallback: false });
+    expect(changed(selected.base)).toEqual(['a.ts']);
+
+    const event = join(directory, 'event.json');
+    const output = join(directory, 'output');
+    writeFileSync(
+      event,
+      JSON.stringify({ pull_request: { base: { sha: opened }, head: { sha: head } } }),
+    );
+    const result = spawnSync(process.execPath, [join(root, 'ci-scope.mjs'), 'classify'], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_EVENT_PATH: event,
+        GITHUB_OUTPUT: output,
+        GITHUB_STEP_SUMMARY: '',
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const outputs = Object.fromEntries(
+      readFileSync(output, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+    );
+    expect(outputs.comparison_base).toBe(opened);
+    const classified = git('diff', '--name-only', outputs.diff_base, head).split('\n').sort();
+    expect(changed(selected.base)).toEqual(classified);
+  });
+
+  it('keeps the PR base for a checkout of the PR head, which already diffs from the fork point', () => {
+    const { directory, git, opened, head, changed } = repository();
+    git('checkout', '-q', '--detach', head);
+    const selected = relatedChangedBase({ comparisonBase: opened, prHead: head, cwd: directory });
+    expect(selected).toMatchObject({ base: opened, fallback: false });
+    expect(changed(selected.base)).toEqual(['a.ts']);
+  });
+
+  it('falls back to the PR base, selecting more tests, whenever the checkout is not recognised', () => {
+    const { directory, git, opened, head, current, merge, changed } = repository();
+    const fallsBack = (prHead) => {
+      const selected = relatedChangedBase({ comparisonBase: opened, prHead, cwd: directory });
+      expect(selected).toMatchObject({ base: opened, fallback: true });
+      expect(changed(selected.base)).toEqual(expect.arrayContaining(['a.ts']));
+    };
+    fallsBack('');
+    // The merge does not have this PR head as its second parent.
+    fallsBack(current);
+    // Parents in the other order: the first parent is the PR head, not the base branch.
+    git(
+      'checkout',
+      '-q',
+      '--detach',
+      git('commit-tree', `${merge}^{tree}`, '-p', head, '-p', current, '-m', 'reversed'),
+    );
+    fallsBack(head);
+    // A first parent that does not contain the PR base is not the PR's base branch.
+    const unrelated = git('commit-tree', `${merge}^{tree}`, '-m', 'unrelated root');
+    git(
+      'checkout',
+      '-q',
+      '--detach',
+      git('commit-tree', `${merge}^{tree}`, '-p', unrelated, '-p', head, '-m', 'unrelated'),
+    );
+    fallsBack(head);
+  });
+
+  it('rejects malformed PR SHAs instead of guessing a base', () => {
+    expect(() => relatedChangedBase({ comparisonBase: '' })).toThrow('valid PR base SHA');
+    expect(() =>
+      relatedChangedBase({ comparisonBase: 'a'.repeat(40), prHead: 'refs/pull/1/head' }),
+    ).toThrow('Invalid PR head SHA');
   });
 });

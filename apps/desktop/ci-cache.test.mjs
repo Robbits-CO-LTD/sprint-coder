@@ -684,6 +684,14 @@ describe('full CI partition contract', () => {
     );
     expect(relatedStep.if).toBe("startsWith(matrix.shard, 'related')");
     expect(relatedStep.env.CI_RELATED_SHARD).toBe('${{ matrix.shard }}');
+    // The merge checkout's first parent is recognised only against the PR head; the full
+    // history it needs is already fetched for related shards.
+    expect(relatedStep.env.CI_PR_HEAD).toBe('${{ github.event.pull_request.head.sha }}');
+    expect(
+      workflow.jobs['platform-tests'].steps.find((step) => step.name === 'Checkout').with[
+        'fetch-depth'
+      ],
+    ).toBe("${{ startsWith(matrix.shard, 'related') && '0' || '1' }}");
     for (const name of ['on Linux', 'on Windows'])
       expect(
         workflow.jobs['platform-tests'].steps.find((step) => step.name.endsWith(name)).if,

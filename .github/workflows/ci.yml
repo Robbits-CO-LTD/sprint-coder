@@ -419,6 +419,8 @@ jobs:
         if: startsWith(matrix.shard, 'related')
         env:
           CI_COMPARISON_BASE: ${{ needs.classify.outputs.comparison_base }}
+          # Lets the merge checkout compare against its current base, not the PR-open base.
+          CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
           CI_BOUNDARY_SPECS: ${{ needs.classify.outputs.boundary_specs }}
           CI_RELATED_SHARD: ${{ matrix.shard }}
         run: node ci-scope.mjs related

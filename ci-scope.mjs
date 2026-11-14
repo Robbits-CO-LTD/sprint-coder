@@ -423,15 +423,57 @@ function eventChanges(eventName, eventPath) {
   return { changes: diffChanges(base, head), base, head, comparisonBase };
 }
 
+/**
+ * Base for `vitest list --changed`, which diffs `<base>...HEAD` against the checked-out tree.
+ * A pull_request checkout is GitHub's merge of the PR head into the base branch as it is now,
+ * while `pull_request.base.sha` stays at the base tip from when the PR was opened. Diffing from
+ * that old tip would also select tests for everything merged into the base branch since then,
+ * so a recognised merge checkout compares against its first parent: the merged tree minus the
+ * current base is exactly the PR's own change. Any other shape keeps the old base, whose
+ * selection is a superset, so a misread checkout runs more tests, never fewer.
+ * @param {{comparisonBase: string, prHead?: string, cwd?: string}} options
+ * @returns {{base: string, reason: string, fallback: boolean}}
+ */
+export function relatedChangedBase({ comparisonBase, prHead = '', cwd = process.cwd() }) {
+  if (!GIT_SHA.test(comparisonBase ?? ''))
+    throw new Error('A valid PR base SHA is required for related tests');
+  if (!GIT_SHA.test(prHead ?? '') && prHead !== '')
+    throw new Error('Invalid PR head SHA for related tests');
+  const fallback = (reason) => ({
+    base: comparisonBase,
+    reason: `${reason}; using the PR base, which may select extra tests`,
+    fallback: true,
+  });
+  if (prHead === '') return fallback('PR head not provided');
+  const git = (...args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const listed = git('rev-list', '--parents', '-n', '1', 'HEAD');
+  const [head, ...parents] = listed.status === 0 ? listed.stdout.trim().split(' ') : [];
+  // `<base>...HEAD` from the PR head itself already starts at the PR's fork point.
+  if (head === prHead) return { base: comparisonBase, reason: 'PR head checkout', fallback: false };
+  if (
+    parents.length === 2 &&
+    parents.every((sha) => GIT_SHA.test(sha)) &&
+    parents[1] === prHead &&
+    git('merge-base', '--is-ancestor', comparisonBase, parents[0]).status === 0
+  )
+    return { base: parents[0], reason: 'first parent of the PR merge checkout', fallback: false };
+  return fallback('checkout is not a recognised merge of the PR head');
+}
+
 function runRelatedTests() {
-  const base = process.env.CI_COMPARISON_BASE ?? '';
-  if (!GIT_SHA.test(base)) throw new Error('A valid PR base SHA is required for related tests');
+  const desktop = resolve(dirname(fileURLToPath(import.meta.url)), DESKTOP);
+  const { base, reason, fallback } = relatedChangedBase({
+    comparisonBase: process.env.CI_COMPARISON_BASE ?? '',
+    prHead: process.env.CI_PR_HEAD ?? '',
+    cwd: desktop,
+  });
+  console.log(`Related tests compare against ${base} (${reason})`);
+  if (fallback) console.log(`::warning title=Related test base::${reason}`);
   const shard = process.env.CI_RELATED_SHARD || 'related';
   parseRelatedShard(shard);
   const explicit = JSON.parse(process.env.CI_BOUNDARY_SPECS ?? '[]');
   if (!Array.isArray(explicit) || !explicit.every(safePath))
     throw new Error('Invalid CI boundary specs');
-  const desktop = resolve(dirname(fileURLToPath(import.meta.url)), DESKTOP);
   const vitest = resolve(desktop, '../../node_modules/vitest/vitest.mjs');
   for (const spec of explicit) {
     if (!existsSync(resolve(desktop, spec)))
