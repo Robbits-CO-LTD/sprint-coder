@@ -322,6 +322,13 @@ type AppState = {
   setPinned(taskId: string, pinned: boolean): Promise<void>;
   /** Resolves to null when done, or to the reason Main refused (an archive of a Task still moving). */
   setArchived(taskId: string, archived: boolean): Promise<string | null>;
+  /** Reads afresh from Main what still moves in the Task, and keeps it on the Task (issue #1225). */
+  refreshTaskRunningWork(taskId: string): Promise<void>;
+  /**
+   * Stops every command still running in the Task, those earlier Turns left running included.
+   * Resolves to null when stopped, or to the reason it could not be confirmed.
+   */
+  stopTaskCommands(taskId: string): Promise<string | null>;
   setGoal(taskId: string, goal: string): Promise<void>;
   startGoal(taskId: string, objective: string): Promise<boolean>;
   restoreFailedGoalDraft(taskId: string, expectedRevision: number, text: string): boolean;
@@ -2188,6 +2195,33 @@ export const useAppStore = create<AppState>((set, get) => {
         const message = describeError(err);
         set({ error: message });
         return message;
+      }
+    },
+
+    async refreshTaskRunningWork(taskId: string) {
+      if (typeof window.sprintCoder?.tasks?.runningWork !== 'function') return;
+      try {
+        const runningWork = await window.sprintCoder.tasks.runningWork(taskId);
+        set((state) => ({
+          tasks: state.tasks.map((t) => (t.id === taskId ? { ...t, runningWork } : t)),
+        }));
+      } catch {
+        // The snapshot stays as it was; Main checks afresh on the archive itself.
+      }
+    },
+
+    async stopTaskCommands(taskId: string) {
+      if (typeof window.sprintCoder?.commands?.stopTask !== 'function')
+        return '実行中のコマンドを停止できませんでした。';
+      try {
+        const runningWork = await window.sprintCoder.commands.stopTask(taskId);
+        set((state) => ({
+          tasks: state.tasks.map((t) => (t.id === taskId ? { ...t, runningWork } : t)),
+        }));
+        return null;
+      } catch (err) {
+        void get().refreshTaskRunningWork(taskId);
+        return describeError(err);
       }
     },
 

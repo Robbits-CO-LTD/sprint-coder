@@ -14232,22 +14232,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
   getTaskRecordedWork(taskId: string): Pick<TaskRunningWork, 'turn' | 'team' | 'workers'> {
     this.assertTask(taskId);
     const turn = this.getActiveTurnId(taskId) !== null;
-    // Only a Team not yet ended: an ended Team has nothing left to run (and offers no Stop).
+    // Every Worker not yet stopped, done or failed counts, whatever the Team's state: a Worker hired
+    // again into an ended Team starts while the Team still reads `completed` (it is re-formed only
+    // once the Worker's runtime started), and goes on afterwards. Team work not yet ended counts
+    // only in a Team not ended (an ended Team has none left, and offers no 「すべて停止」).
     const team = this.db
       .prepare(
         `SELECT
            (SELECT COUNT(*) FROM agents a
              WHERE a.team_id = t.id AND a.kind = 'worker'
                AND a.state IN ('invited', 'spawning', 'ready', 'busy', 'waiting')) AS workers,
-           (EXISTS (
+           (t.state NOT IN ('completed', 'failed') AND (EXISTS (
              SELECT 1 FROM team_executions e
               WHERE e.team_id = t.id AND e.state NOT IN ('completed', 'failed', 'canceled')
            ) OR EXISTS (
              SELECT 1 FROM team_missions m
               WHERE m.team_id = t.id AND m.state NOT IN ('completed', 'failed', 'canceled')
-           )) AS unfinished
+           ))) AS unfinished
          FROM teams t
-         WHERE t.task_id = ? AND t.state NOT IN ('completed', 'failed')`,
+         WHERE t.task_id = ?`,
       )
       .get(taskId) as { workers: number; unfinished: number } | undefined;
     const workers = team?.workers ?? 0;

@@ -802,6 +802,19 @@ export class ManagedCodingHarness {
   }
 
   /**
+   * Stops every command still running in the Task, those its earlier Turns left in the background
+   * included, as the person asked (issue #1225). Rejects when an end could not be confirmed.
+   */
+  async stopTaskCommands(taskId: string): Promise<void> {
+    await this.commandSessions?.terminateTaskCommands(taskId);
+  }
+
+  /** Told the Task of each command whose process ended (issue #1225). */
+  onTaskCommandSettled(listener: (taskId: string) => void): void {
+    this.commandSessions?.onSessionSettled(listener);
+  }
+
+  /**
    * Background commands survive finishTurn. Observe every session whose sealed Workspace root
    * overlaps this Turn's snapshot, including previous Turns and other Tasks sharing a root.
    */

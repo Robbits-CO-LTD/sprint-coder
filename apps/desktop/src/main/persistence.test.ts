@@ -12336,6 +12336,46 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('counts a Worker hired again into an ended Team while it starts (the Team still reads completed)', () => {
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const task = persistence.createTask('Team hired again');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const hire = (role: string) =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          role,
+          objective: `${role} の作業`,
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'summary',
+        });
+      const first = hire('reviewer');
+      persistence.transitionWorkerState(first.id, 'stopped');
+      for (const state of ['active', 'winding_down', 'completed'] as const)
+        persistence.transitionTeamState(team.id, state);
+      // The ended Team holds nothing that moves.
+      expect(persistence.getTaskRecordedWork(task.id)).toEqual({
+        turn: false,
+        team: false,
+        workers: 0,
+      });
+      // The Leader hires again: the Worker starts while the Team is re-formed only afterwards
+      // (`TeamCoordinator.hireWorker`: `spawning`, `runtime.start`, then `reformCompletedTeam`).
+      const again = hire('tester');
+      persistence.transitionWorkerState(again.id, 'spawning');
+      expect(persistence.getTeam(team.id).state).toBe('completed');
+      expect(refusedWork(() => persistence.setArchived(task.id, true))).toEqual({
+        turn: false,
+        team: true,
+        workers: 1,
+        commands: 0,
+      });
+      expect(persistence.getTask(task.id).archived).toBe(false);
+      persistence.close();
+    });
+
     it('archives a Task with nothing moving, canceling only the record of a run already gone', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('idle Task');

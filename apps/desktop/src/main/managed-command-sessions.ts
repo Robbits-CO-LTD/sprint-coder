@@ -54,6 +54,7 @@ type Session = {
 
 export class ManagedCommandSessions {
   private readonly sessions = new Map<string, Session>();
+  private sessionSettledListener: ((taskId: string) => void) | undefined;
 
   constructor(
     private readonly runner = new CommandRunner({ sandboxed: true }),
@@ -163,6 +164,13 @@ export class ManagedCommandSessions {
       .finally(() => {
         hooks.signal?.removeEventListener('abort', abortFromCaller);
         session.resolveStarted();
+        // A run gone on in the background after its Turn ends with no Turn to tell; what moves in
+        // the Task is told afresh here (issue #1225).
+        try {
+          this.sessionSettledListener?.(session.taskId);
+        } catch {
+          // Only a snapshot for the window; the archive checks afresh.
+        }
       });
     await session.started;
     if (session.state === 'failed') throw new Error(session.error ?? 'Managed command failed');
@@ -327,6 +335,25 @@ export class ManagedCommandSessions {
       'Managed command permission epoch changed',
       'Managed command Task cancellation could not be confirmed',
     );
+  }
+
+  /**
+   * Stops every run of the Task, those its earlier Turns left in the background included, as
+   * `terminateTurn` stops a Turn's (the whole process tree), and resolves once their processes
+   * have ended; rejects when an end could not be confirmed. Only the person asks for this (the
+   * Task's 「実行中のコマンドを停止」, issue #1225): no agent tool reaches it.
+   */
+  async terminateTaskCommands(taskId: string): Promise<void> {
+    await this.beginTermination(
+      (session) => session.taskId === taskId,
+      'Managed command stopped by the person',
+      'Managed command Task stop could not be confirmed',
+    )();
+  }
+
+  /** Told the Task of each run whose process ended (or whose end could not be confirmed). */
+  onSessionSettled(listener: ((taskId: string) => void) | undefined): void {
+    this.sessionSettledListener = listener;
   }
 
   /**

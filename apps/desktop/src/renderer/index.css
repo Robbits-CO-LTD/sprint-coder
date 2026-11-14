@@ -4310,6 +4310,39 @@ body.is-resizing-sidebar iframe {
   font-size: 13px;
   line-height: 1;
 }
+.sb-task-notice:has(.sb-stop-commands) {
+  flex-wrap: wrap;
+}
+.sb-task-notice:has(.sb-stop-commands) span {
+  flex: 1 1 calc(100% - 24px);
+}
+.sb-task-notice .sb-menu-note {
+  order: 4;
+  flex-basis: 100%;
+  margin: 0;
+}
+.sb-menu-note--error {
+  color: var(--danger);
+}
+.sb-menu-popover button.sb-stop-commands,
+.sb-task-notice button.sb-stop-commands {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-xs);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+.sb-menu-popover button.sb-stop-commands {
+  margin: 0 9px 6px 29px;
+}
+.sb-task-notice button.sb-stop-commands {
+  order: 3;
+}
 
 .project-dialog {
   width: min(440px, calc(100vw - 32px));

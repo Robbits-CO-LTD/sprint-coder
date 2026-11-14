@@ -166,14 +166,29 @@ export function taskHasRunningWork(work: TaskRunningWork | null | undefined): bo
   return work != null && (work.turn || work.team || work.workers > 0 || work.commands > 0);
 }
 
-/** The refusal of an archive while the Task still moves, naming what moves. */
+/**
+ * The refusal of an archive while the Task still moves: what moves, and where each is stopped
+ * (the input box's 「実行を停止」, the Team's 「すべて停止」, and 「実行中のコマンドを停止」 shown with
+ * this refusal, which stops the commands earlier Turns left running too).
+ */
 export function taskRunningWorkArchiveRefusal(work: TaskRunningWork): string {
   const parts: string[] = [];
-  if (work.turn) parts.push('AIの作業');
-  if (work.workers > 0) parts.push(`TeamのWorker ${work.workers}人`);
-  else if (work.team) parts.push('Teamの作業');
-  if (work.commands > 0) parts.push(`実行中のコマンド ${work.commands}件`);
-  return `このTaskは、まだ動いています（${parts.join('／')}）。先に停止してから、アーカイブしてください。`;
+  const stops: string[] = [];
+  if (work.turn) {
+    parts.push('AIの作業');
+    stops.push('AIの作業は入力欄の「実行を停止」');
+  }
+  if (work.workers > 0 || work.team) {
+    parts.push(work.workers > 0 ? `TeamのWorker ${work.workers}人` : 'Teamの作業');
+    // A Worker hired again into an ended Team is starting, and no 「すべて停止」 is offered until it
+    // started; it starts within moments.
+    stops.push('Teamは「すべて停止」（Workerの起動中は、少し待ってから）');
+  }
+  if (work.commands > 0) {
+    parts.push(`実行中のコマンド ${work.commands}件`);
+    stops.push('コマンドは「実行中のコマンドを停止」');
+  }
+  return `このTaskは、まだ動いています（${parts.join('／')}）。${stops.join('、')}で止めてから、アーカイブしてください。`;
 }
 
 export const taskSummarySchema = z
@@ -4659,6 +4674,8 @@ export interface SprintCoderApi {
     rename(taskId: string, title: string): Promise<TaskSummary>;
     setPinned(taskId: string, pinned: boolean): Promise<TaskSummary>;
     setArchived(taskId: string, archived: boolean): Promise<TaskSummary>;
+    /** What still moves in the Task now (null: nothing), read afresh from Main (issue #1225). */
+    runningWork(taskId: string): Promise<TaskRunningWork | null>;
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
@@ -4923,6 +4940,11 @@ export interface SprintCoderApi {
     list(taskId: string): Promise<CommandSummary[]>;
     outputPage(input: CommandOutputPageInput): Promise<CommandOutputPage>;
     outputTail(input: CommandOutputTailInput): Promise<CommandOutputPage>;
+    /**
+     * Stops every command still running in the Task, those its earlier Turns left in the
+     * background included, as the person asked (issue #1225). Resolves to what still moves after.
+     */
+    stopTask(taskId: string): Promise<TaskRunningWork | null>;
   };
   turns: {
     start(input: {
@@ -4984,6 +5006,7 @@ export const IPC_CHANNELS = {
   tasksRename: 'sprint-coder:tasks:rename',
   tasksSetPinned: 'sprint-coder:tasks:set-pinned',
   tasksSetArchived: 'sprint-coder:tasks:set-archived',
+  tasksRunningWork: 'sprint-coder:tasks:running-work',
   tasksSetGoal: 'sprint-coder:tasks:set-goal',
   goalsStart: 'sprint-coder:goals:start',
   goalsPause: 'sprint-coder:goals:pause',
@@ -5110,6 +5133,7 @@ export const IPC_CHANNELS = {
   commandsList: 'sprint-coder:commands:list',
   commandsOutputPage: 'sprint-coder:commands:output-page',
   commandsOutputTail: 'sprint-coder:commands:output-tail',
+  commandsStopTask: 'sprint-coder:commands:stop-task',
   turnsStart: 'sprint-coder:turns:start',
   turnsQueue: 'sprint-coder:turns:queue',
   turnsSteer: 'sprint-coder:turns:steer',

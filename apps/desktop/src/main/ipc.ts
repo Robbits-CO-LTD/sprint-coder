@@ -193,6 +193,7 @@ import {
   taskSummarySchema,
   taskHasRunningWork,
   taskRunningWorkArchiveRefusal,
+  taskRunningWorkSchema,
   taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
@@ -1763,6 +1764,9 @@ export class IpcRouter {
       },
       ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
+    // A command its Turn left in the background ends with no Turn event to tell the window; the
+    // Task's snapshot of what moves is sent afresh when it changed (issue #1225).
+    this.managedCodingHarness.onTaskCommandSettled((taskId) => this.refreshTaskRunningWork(taskId));
     // A Worker marked for desktop control gets the command tool only from this harness's catalog,
     // so the hire marks one only when the harness offers that tool (not without the sandbox).
     configureDesktopControlWorkerTool(() => this.managedCodingHarness.commandToolsOffered());
@@ -3283,6 +3287,34 @@ export class IpcRouter {
           void this.endArchivedTaskDesktopControl(input.taskId);
         }
         return result;
+      },
+    );
+    // Read afresh when the sidebar's menu opens, so a stale snapshot never holds an archive back.
+    this.handle(
+      IPC_CHANNELS.tasksRunningWork,
+      taskIdPayloadSchema,
+      taskRunningWorkSchema.nullable(),
+      (input) => {
+        this.refreshTaskRunningWork(input.taskId);
+        return this.taskRunningWork(input.taskId);
+      },
+    );
+    // The person's own stop of the Task's commands, those earlier Turns left running included
+    // (issue #1225). Only the window reaches it: it is no agent tool, so no agent stops a command
+    // it does not own through it.
+    this.handleMutation(
+      IPC_CHANNELS.commandsStopTask,
+      taskIdPayloadSchema,
+      taskRunningWorkSchema.nullable(),
+      async (input) => {
+        try {
+          await this.managedCodingHarness.stopTaskCommands(input.taskId);
+        } catch (error) {
+          throw new ManagedCommandCancellationError(error);
+        } finally {
+          this.refreshTaskRunningWork(input.taskId);
+        }
+        return this.taskRunningWork(input.taskId);
       },
     );
     this.handleMutation(
@@ -9806,6 +9838,13 @@ export function toPublicError(error: unknown): PublicError {
       code: 'TURN_ACTIVE',
       userMessage: 'このタスクでは別のTurnが実行中です。',
       retryable: false,
+    };
+  if (error instanceof ManagedCommandCancellationError)
+    return {
+      code: 'RUNTIME_STOP_UNCONFIRMED',
+      userMessage:
+        'コマンドの停止を確認できませんでした。アプリを再起動してからもう一度お試しください。',
+      retryable: true,
     };
   if (error instanceof TaskStillRunningError)
     return {

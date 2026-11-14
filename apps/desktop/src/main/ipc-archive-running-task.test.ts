@@ -137,22 +137,22 @@ describe('archiving a Task that still moves is refused (issue #1225)', () => {
     [
       'its Turn runs (or waits for an approval)',
       { recorded: { turn: true, team: false, workers: 0 }, commands: 0 },
-      'このTaskは、まだ動いています（AIの作業）。先に停止してから、アーカイブしてください。',
+      'このTaskは、まだ動いています（AIの作業）。AIの作業は入力欄の「実行を停止」で止めてから、アーカイブしてください。',
     ],
     [
       'its Team’s Workers go on after the Leader’s Turn',
       { recorded: { turn: false, team: true, workers: 2 }, commands: 0 },
-      'このTaskは、まだ動いています（TeamのWorker 2人）。先に停止してから、アーカイブしてください。',
+      'このTaskは、まだ動いています（TeamのWorker 2人）。Teamは「すべて停止」（Workerの起動中は、少し待ってから）で止めてから、アーカイブしてください。',
     ],
     [
       'a command goes on in the background after its Turn',
       { recorded: IDLE, commands: 1 },
-      'このTaskは、まだ動いています（実行中のコマンド 1件）。先に停止してから、アーカイブしてください。',
+      'このTaskは、まだ動いています（実行中のコマンド 1件）。コマンドは「実行中のコマンドを停止」で止めてから、アーカイブしてください。',
     ],
     [
       'all three move',
       { recorded: { turn: true, team: true, workers: 1 }, commands: 3 },
-      'このTaskは、まだ動いています（AIの作業／TeamのWorker 1人／実行中のコマンド 3件）。先に停止してから、アーカイブしてください。',
+      'このTaskは、まだ動いています（AIの作業／TeamのWorker 1人／実行中のコマンド 3件）。AIの作業は入力欄の「実行を停止」、Teamは「すべて停止」（Workerの起動中は、少し待ってから）、コマンドは「実行中のコマンドを停止」で止めてから、アーカイブしてください。',
     ],
   ])('while %s, naming what moves', async (_name, state, message) => {
     const { archive, setArchived, revokePendingHires, endArchivedTaskDesktopControl } =
@@ -216,5 +216,108 @@ describe('archiving a Task that still moves is refused (issue #1225)', () => {
     });
     expect((await refusal(archive(true))).userMessage).toContain('AIの作業');
     expect(setArchived).toHaveBeenCalledOnce();
+  });
+});
+
+describe('the person’s stop of a Task’s running commands (issue #1225)', () => {
+  /** The stop and the fresh read as Main registers them, over a harness holding live runs. */
+  function stopRouter(state: { recorded: Recorded; commands: number; unconfirmed?: boolean }) {
+    const router = Object.create(IpcRouter.prototype) as { register(): void };
+    const handlers = new Map<string, Handler>();
+    const send = vi.fn();
+    const stopTaskCommands = vi.fn(async (_taskId: string) => {
+      if (state.unconfirmed) throw new Error('Managed command Task stop could not be confirmed');
+      state.commands = 0;
+    });
+    Object.assign(router, {
+      handle: (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
+        handlers.set(channel, handler),
+      mailbox: new TaskMailbox(),
+      pendingPermissionChanges: new Set<string>(),
+      updateInstallMutationGate: new UpdateInstallMutationGate(),
+      sentRunningWork: new Map<string, string>(),
+      window: {
+        isDestroyed: () => false,
+        webContents: { once: vi.fn(), isDestroyed: () => false, send },
+      },
+      persistence: {
+        getTaskRecordedWork: () => state.recorded,
+        getActiveTurnId: () => null,
+        getTask: (id: string) => ({
+          id,
+          projectId: null,
+          title: 'Task',
+          pinned: false,
+          archived: false,
+          goal: null,
+          goalState: null,
+          workspacePath: null,
+          localOnly: false,
+          createdAt: '2026-11-14T00:00:00.000Z',
+          updatedAt: '2026-11-14T00:00:00.000Z',
+        }),
+      },
+      managedCodingHarness: {
+        activeTaskCommandCount: () => state.commands,
+        stopTaskCommands,
+      },
+    });
+    router.register();
+    const call = (channel: string) => {
+      const payload = { taskId: 'task-1' };
+      return Promise.resolve(
+        handlers.get(channel)!(payload, {}, { operationId: 'op-1', taskId: 'task-1', payload }),
+      );
+    };
+    return { call, send, stopTaskCommands };
+  }
+
+  it('stops every command of the Task, an earlier Turn’s included, and says what still moves', async () => {
+    // A dev server the first Turn left in the background; no Turn runs.
+    const { call, send, stopTaskCommands } = stopRouter({ recorded: IDLE, commands: 1 });
+    await expect(call(IPC_CHANNELS.commandsStopTask)).resolves.toBeNull();
+    expect(stopTaskCommands).toHaveBeenCalledExactlyOnceWith('task-1');
+    // The window's snapshot follows, so 「アーカイブ」 can be pressed again.
+    expect(send).toHaveBeenLastCalledWith(
+      IPC_CHANNELS.tasksUpdated,
+      expect.objectContaining({ id: 'task-1', runningWork: null }),
+    );
+  });
+
+  it('leaves what else moves to its own stop', async () => {
+    const { call } = stopRouter({ recorded: { turn: true, team: false, workers: 0 }, commands: 2 });
+    await expect(call(IPC_CHANNELS.commandsStopTask)).resolves.toEqual({
+      turn: true,
+      team: false,
+      workers: 0,
+      commands: 0,
+    });
+  });
+
+  it('says so when a command’s end could not be confirmed', async () => {
+    const { call } = stopRouter({ recorded: IDLE, commands: 1, unconfirmed: true });
+    const error = await call(IPC_CHANNELS.commandsStopTask).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(toPublicError(error)).toEqual({
+      code: 'RUNTIME_STOP_UNCONFIRMED',
+      userMessage:
+        'コマンドの停止を確認できませんでした。アプリを再起動してからもう一度お試しください。',
+      retryable: true,
+    });
+  });
+
+  it('reads what moves afresh, so a stale snapshot never holds an archive back', async () => {
+    const state = { recorded: IDLE, commands: 1 };
+    const { call, send } = stopRouter(state);
+    await expect(call(IPC_CHANNELS.tasksRunningWork)).resolves.toMatchObject({ commands: 1 });
+    // The run ended unseen; the next read says nothing moves.
+    state.commands = 0;
+    await expect(call(IPC_CHANNELS.tasksRunningWork)).resolves.toBeNull();
+    expect(send).toHaveBeenLastCalledWith(
+      IPC_CHANNELS.tasksUpdated,
+      expect.objectContaining({ runningWork: null }),
+    );
   });
 });

@@ -16,6 +16,7 @@ import {
   Plus,
   Search,
   Settings,
+  Square,
 } from './icons';
 import { useTaskBoundary } from './TaskBoundary';
 import type { ProjectSummary, TaskRunningWork, TaskSummary } from '../types/sprint-coder';
@@ -78,6 +79,7 @@ export function Sidebar({
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
   const setPinned = useAppStore((s) => s.setPinned);
   const setArchived = useAppStore((s) => s.setArchived);
+  const refreshTaskRunningWork = useAppStore((s) => s.refreshTaskRunningWork);
   const { selectTask, createTask } = useTaskBoundary();
   const [query, setQuery] = useState('');
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
@@ -279,7 +281,10 @@ export function Sidebar({
       setArchiveNotice(null);
       void setArchived(task.id, !task.archived).then((refusal) => {
         // Main still refuses when the row thought the Task idle (it started moving meanwhile).
-        if (refusal !== null) setArchiveNotice({ taskId: task.id, message: refusal });
+        if (refusal === null) return;
+        setArchiveNotice({ taskId: task.id, message: refusal });
+        // What moves now, so the row offers the stop that applies (commands, issue #1225).
+        void refreshTaskRunningWork(task.id);
       });
     },
     archiveNotice,
@@ -724,6 +729,8 @@ export function TaskRow({
     blockingWork === null ? null : taskRunningWorkArchiveRefusal(blockingWork);
   const archiveNoteId = `sb-archive-note-${task.id}`;
   const notice = archiveNotice?.taskId === task.id ? archiveNotice.message : null;
+  const refreshTaskRunningWork = useAppStore((state) => state.refreshTaskRunningWork);
+  const commandsRunning = (blockingWork?.commands ?? 0) > 0;
   return (
     <div className={`sb-row${isActive ? ' active' : ''}`} data-task-id={task.id} tabIndex={-1}>
       <button
@@ -739,7 +746,14 @@ export function TaskRow({
         {task.hasConversation === false && <span className="sb-unstarted">未開始</span>}
       </button>
       {canManage && (
-        <details className="sb-menu sb-task-menu">
+        <details
+          className="sb-menu sb-task-menu"
+          onToggle={(event) => {
+            // Main is asked afresh as the menu opens, so a snapshot gone stale (a command that
+            // ended unseen) never holds the archive back (issue #1225).
+            if (event.currentTarget.open && !task.archived) void refreshTaskRunningWork(task.id);
+          }}
+        >
           <summary aria-label={`${task.title || '無題のTask'}のメニュー`}>
             <MoreHorizontal size={14} />
           </summary>
@@ -765,6 +779,7 @@ export function TaskRow({
                 {archiveBlockedReason}
               </p>
             )}
+            {commandsRunning && <StopTaskCommandsButton taskId={task.id} />}
             {canMove && (task.projectId !== null || activeProjects.length > 0) && (
               <button onClick={() => onMove(task)}>Projectを移動</button>
             )}
@@ -774,6 +789,7 @@ export function TaskRow({
       {notice !== null && (
         <div className="sb-task-notice" role="alert">
           <span>{notice}</span>
+          {commandsRunning && <StopTaskCommandsButton taskId={task.id} />}
           <button
             type="button"
             aria-label="お知らせを閉じる"
@@ -785,6 +801,41 @@ export function TaskRow({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * The person's stop of every command still running in the Task, those its earlier Turns left in
+ * the background included (issue #1225), offered where an archive is held back by them.
+ */
+function StopTaskCommandsButton({ taskId }: { taskId: string }) {
+  const stopTaskCommands = useAppStore((state) => state.stopTaskCommands);
+  const [stopping, setStopping] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        className="sb-stop-commands"
+        disabled={stopping}
+        onClick={() => {
+          setStopping(true);
+          setFailure(null);
+          void stopTaskCommands(taskId).then((reason) => {
+            setStopping(false);
+            setFailure(reason);
+          });
+        }}
+      >
+        <Square size={11} />
+        {stopping ? '停止中…' : '実行中のコマンドを停止'}
+      </button>
+      {failure !== null && (
+        <p className="sb-menu-note sb-menu-note--error" role="alert">
+          {failure}
+        </p>
+      )}
+    </>
   );
 }
 
