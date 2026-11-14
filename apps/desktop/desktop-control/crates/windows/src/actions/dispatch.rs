@@ -34,9 +34,11 @@ mod imp {
     };
     use crate::actions::disclosure::{collapse_steps, expand_steps};
     use crate::actions::focus::focus_element;
-    use crate::actions::foreground_hold::{ForegroundHold, note_target_in_front};
+    use crate::actions::foreground_hold::{
+        ForegroundHold, lock_needed, lock_unavailable_refusal, note_report,
+    };
     use crate::actions::list_item_click::{
-        background_click_refusal, background_click_takes_foreground,
+        ClickCheck, background_click_refusal, check_background_click, read_button,
     };
     use crate::actions::mutation::{classify_success, classify_write};
     use crate::actions::physical_click::{
@@ -73,15 +75,45 @@ mod imp {
         deadline.ensure_remaining()?;
         corroborate_verified_process(element)?;
         // Desktop control (desktop-control) change: an action that may not
-        // take the foreground runs with the foreground locked, so a target
-        // that activates itself in answer cannot come to the front, and a
-        // target found in front afterwards is reported (`foreground_hold`).
-        let Some(hold) = ForegroundHold::begin(request.policy.allow_focus_steal) else {
-            return run_action(handle, element, request, lease);
+        // take the foreground runs with the foreground locked until the
+        // target has handled it, and what the hold found is reported
+        // (`foreground_hold`). Everything read to decide is read before the
+        // lock, each read bounded by the deadline.
+        if request.policy.allow_focus_steal {
+            return run_action(handle, element, request, lease, None);
+        }
+        let gate = matches!(request.action, Action::Click).then(|| {
+            let invoke = invoke_available(element);
+            ClickGate {
+                invoke_available: invoke,
+                check: check_background_click(element, invoke, deadline),
+            }
+        });
+        let target_pid = target_pid(element, deadline);
+        let posts_a_click = matches!(
+            request.action,
+            Action::Click | Action::Toggle | Action::Check | Action::Uncheck
+        );
+        let Some(hold) = ForegroundHold::begin(false) else {
+            return run_action(handle, element, request, lease, gate);
         };
-        let result = run_action(handle, element, request, lease);
-        let came_forward = hold.finish(target_pid(element, deadline), deadline);
-        result.map(|result| note_target_in_front(result, came_forward))
+        if !hold.locked() && posts_a_click {
+            // Read without the lock held: there is none.
+            let button = read_button(element, deadline);
+            if lock_needed(false, true, button) {
+                return Err(lock_unavailable_refusal(request.policy, button));
+            }
+        }
+        let result = run_action(handle, element, request, lease, gate);
+        let report = hold.finish(target_pid, deadline);
+        note_report(result, report)
+    }
+
+    /// What a background click decided before anything was sent.
+    #[derive(Clone, Copy)]
+    struct ClickGate {
+        invoke_available: bool,
+        check: ClickCheck,
     }
 
     /// The target's process: from the ref's verified identity, or read from
@@ -101,10 +133,11 @@ mod imp {
         element: &UIAElement,
         request: ActionRequest,
         lease: &InteractionLease,
+        gate: Option<ClickGate>,
     ) -> Result<ActionResult, AdapterError> {
         let deadline = lease.deadline();
         match &request.action {
-            Action::Click => execute_click(element, request.policy, deadline),
+            Action::Click => execute_click(element, request.policy, deadline, gate),
             Action::SetFocus => focus_element(element, &request, deadline),
             Action::ScrollTo => execute_scroll_to(handle, lease),
             Action::TypeText(text) => {
@@ -241,6 +274,7 @@ mod imp {
         element: &UIAElement,
         policy: InteractionPolicy,
         deadline: Deadline,
+        gate: Option<ClickGate>,
     ) -> Result<ActionResult, AdapterError> {
         // An item of a standard Win32 combo box's list is chosen with the
         // box's own messages: the proxy's Invoke emulates a click that brings
@@ -252,13 +286,19 @@ mod imp {
         }
         // Desktop control (desktop-control) change: any other item of a
         // standard Win32 list, and a list item clicked through its default
-        // action, brings its window to the front (`list_item_click`); a click
-        // that may not take the foreground is refused before anything is sent.
-        let invoke_available = invoke_available(element);
-        if !policy.allow_focus_steal
-            && background_click_takes_foreground(element, invoke_available, deadline)?
-        {
-            return Err(background_click_refusal(policy));
+        // action, brings its window to the front (`list_item_click`). A click
+        // that may not take the foreground carries the decision made before
+        // the lock (`gate`), and one that is not to go ahead, or could not be
+        // decided, is refused before anything is sent.
+        let invoke_available = match gate {
+            Some(gate) => gate.invoke_available,
+            None => invoke_available(element),
+        };
+        if !policy.allow_focus_steal {
+            let check = gate.map_or(ClickCheck::Unread, |gate| gate.check);
+            if check != ClickCheck::Proceed {
+                return Err(background_click_refusal(policy, check));
+            }
         }
         let steps = click_chain_judged_for(
             deadline,

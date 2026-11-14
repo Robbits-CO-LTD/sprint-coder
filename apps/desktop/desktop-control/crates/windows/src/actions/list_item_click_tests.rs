@@ -1,5 +1,8 @@
 // Added by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
-use super::{click_takes_foreground, is_foreground_taking_list_class};
+use super::{
+    ClickCheck, LIST_ITEM_CONTROL_TYPE, ListRead, TypeRead, decide_click,
+    is_foreground_taking_list_class, is_win32_button_class, needs_control_type,
+};
 
 #[test]
 fn the_standard_lists_and_their_winforms_superclasses_are_recognised() {
@@ -35,49 +38,115 @@ fn other_classes_keep_their_click_path() {
 }
 
 #[test]
+fn only_the_system_button_class_is_a_win32_button() {
+    assert!(is_win32_button_class("Button"));
+    assert!(is_win32_button_class("BUTTON"));
+    for class in ["", "ButtonHost", "WindowsForms10.BUTTON.app.0.1", "Static"] {
+        assert!(!is_win32_button_class(class), "{class}");
+    }
+}
+
+#[test]
 fn an_item_of_a_win32_list_is_refused_whatever_it_offers() {
-    assert!(click_takes_foreground(true, None, true));
-    assert!(click_takes_foreground(true, Some(50_000), false));
+    for invoke in [true, false] {
+        for control_type in [
+            TypeRead::Known(LIST_ITEM_CONTROL_TYPE),
+            TypeRead::Unread,
+            TypeRead::NotAsked,
+        ] {
+            assert_eq!(
+                decide_click(ListRead::Item, control_type, invoke),
+                ClickCheck::Refuse
+            );
+        }
+    }
 }
 
 #[test]
 fn a_list_item_without_invoke_is_refused_and_one_with_invoke_is_not() {
-    assert!(click_takes_foreground(false, Some(50_007), false));
-    assert!(!click_takes_foreground(false, Some(50_007), true));
+    let list_item = TypeRead::Known(LIST_ITEM_CONTROL_TYPE);
+    assert_eq!(
+        decide_click(ListRead::NotItem, list_item, false),
+        ClickCheck::Refuse
+    );
+    assert_eq!(
+        decide_click(ListRead::NotItem, TypeRead::NotAsked, true),
+        ClickCheck::Proceed
+    );
 }
 
 #[test]
-fn other_controls_and_unread_control_types_keep_their_click_path() {
+fn other_controls_read_as_such_keep_their_click_path() {
     // Button, check box, hyperlink, data item: not list items.
     for control_type in [50_000, 50_002, 50_005, 50_029] {
-        assert!(!click_takes_foreground(false, Some(control_type), false));
+        assert_eq!(
+            decide_click(ListRead::NotItem, TypeRead::Known(control_type), false),
+            ClickCheck::Proceed
+        );
     }
-    assert!(!click_takes_foreground(false, None, false));
+    assert_eq!(
+        decide_click(ListRead::NotItem, TypeRead::Absent, false),
+        ClickCheck::Proceed
+    );
+}
+
+#[test]
+fn what_could_not_be_read_is_never_taken_for_not_an_item() {
+    for invoke in [true, false] {
+        assert_eq!(
+            decide_click(ListRead::Unread, TypeRead::NotAsked, invoke),
+            ClickCheck::Unread
+        );
+    }
+    assert_eq!(
+        decide_click(ListRead::NotItem, TypeRead::Unread, false),
+        ClickCheck::Unread
+    );
+    // A control type that was needed but not asked counts as unread too.
+    assert_eq!(
+        decide_click(ListRead::NotItem, TypeRead::NotAsked, false),
+        ClickCheck::Unread
+    );
+}
+
+#[test]
+fn the_control_type_is_asked_only_when_it_decides() {
+    assert!(needs_control_type(ListRead::NotItem, false));
+    assert!(!needs_control_type(ListRead::NotItem, true));
+    assert!(!needs_control_type(ListRead::Item, false));
+    assert!(!needs_control_type(ListRead::Unread, false));
 }
 
 #[cfg(target_os = "windows")]
 #[test]
-fn the_refusal_sends_nothing_and_says_how_to_go_on() {
-    let error = super::background_click_refusal(agent_desktop_core::InteractionPolicy::headless());
+fn the_refusals_send_nothing_and_say_how_to_go_on() {
+    let policy = agent_desktop_core::InteractionPolicy::headless();
+    let error = super::background_click_refusal(policy, ClickCheck::Refuse);
     assert_eq!(error.code, agent_desktop_core::ErrorCode::PolicyDenied);
     let suggestion = error.suggestion.as_deref().unwrap_or("");
     assert!(suggestion.contains("'select'"), "{suggestion}");
     assert!(suggestion.contains("--headed"), "{suggestion}");
     let details = error.details.expect("details");
     assert_eq!(details["kind"], "list_item_click_takes_foreground");
+    assert_eq!(details["retryable"], false);
+    let unread = super::background_click_refusal(policy, ClickCheck::Unread);
+    assert_eq!(unread.code, agent_desktop_core::ErrorCode::PolicyDenied);
+    let details = unread.details.expect("details");
+    assert_eq!(details["kind"], "list_item_click_unreadable");
+    assert_eq!(details["retryable"], true);
 }
 
 #[cfg(target_os = "windows")]
 #[test]
-fn a_background_click_asks_before_it_reaches_the_click_chain() {
+fn a_background_click_is_refused_before_it_reaches_the_click_chain() {
     let source = include_str!("dispatch.rs");
     let click = source
         .split("fn execute_click(")
         .nth(1)
         .expect("execute_click");
     let refusal = click
-        .find("background_click_takes_foreground")
-        .expect("the list item check");
+        .find("background_click_refusal(")
+        .expect("the refusal");
     let chain = click
         .find("click_chain_judged_for(")
         .expect("the click chain");
@@ -86,4 +155,28 @@ fn a_background_click_asks_before_it_reaches_the_click_chain() {
         "the check must come before anything is sent"
     );
     assert!(click[..chain].contains("!policy.allow_focus_steal"));
+    // Without a decision made before the lock, a background click is refused.
+    assert!(click[..chain].contains("map_or(ClickCheck::Unread"));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn every_read_of_the_check_is_bounded() {
+    let source = include_str!("list_item_click.rs");
+    let code = source.split("#[cfg(test)]").next().expect("code");
+    let reads = [
+        "client.get_raw_view_walker()",
+        "current.0.get_native_window_handle()",
+        "walker.get_parent(&current.0)",
+        "read_one(element, TreeProperty::ControlType)",
+        "element.0.get_native_window_handle()",
+    ];
+    for read in reads {
+        let at = code.find(read).unwrap_or_else(|| panic!("{read}"));
+        let before = &code[at.saturating_sub(120)..at];
+        assert!(
+            before.contains("with_transaction_timeout("),
+            "{read} is not bounded"
+        );
+    }
 }
