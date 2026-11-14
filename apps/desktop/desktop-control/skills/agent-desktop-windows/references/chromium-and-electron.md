@@ -57,7 +57,10 @@ out of view. A window with thousands of rows cannot be read whole within the
 default 3 s, so the snapshot reads only the elements on screen and says so with
 `"scope": "visible"`. Its refs act only while the view is unchanged. Scroll,
 snapshot again, then act on the new refs. Rows that read the same (same name,
-same text) are still refused as ambiguous.
+same text) are still refused as ambiguous. `find` (a listing or `--first`)
+does the same when it cannot search the whole window within its 5 s, and marks
+its answer `"scope": "visible"` too: an empty answer then means "not on screen",
+not "not in the window".
 
 ## WPF: Reading Too Early Binds the Wrong Provider
 

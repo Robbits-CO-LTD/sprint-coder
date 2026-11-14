@@ -38,9 +38,13 @@ pub(super) fn execute(
     context: &CommandContext,
 ) -> Result<Value, AppError> {
     let deadline = traversal_deadline(args)?;
-    let request = resolve_request(args, deadline);
     let mut resolution = match args.root.as_deref() {
-        Some(root_ref) => rooted_resolution(adapter, query, root_ref, &request, context)?,
+        Some(root_ref) => {
+            let request = resolve_request(args, deadline);
+            let resolution = rooted_resolution(adapter, query, root_ref, &request, context)?;
+            require_complete(&resolution)?;
+            resolution
+        }
         None => {
             let windows = snapshot::surface_windows(
                 adapter,
@@ -49,13 +53,16 @@ pub(super) fn execute(
                 args.surface,
                 deadline,
             )?;
-            snapshot::window_capture::first_surface_owner(windows, |window| {
-                resolve_query(adapter, query, ObservationRoot::Window(window), &request)
+            let found = snapshot::window_capture::first_surface_owner(windows, |window| {
+                search_window(args, query, adapter, window, deadline)
             })?
-            .1
+            .1;
+            match found {
+                WindowSearch::Whole(resolution) => *resolution,
+                WindowSearch::View(view) => return view::respond(args, query, context, *view),
+            }
         }
     };
-    require_complete(&resolution)?;
     let ref_count = resolution.refmap.as_ref().map(RefMap::len);
     let snapshot_id = match resolution.refmap.take() {
         Some(refmap) => Some(persist_refmap(context, &refmap)?),
@@ -73,6 +80,42 @@ pub(super) fn execute(
     }
     emit_resolution(context, &resolution, snapshot_id.as_deref(), ref_count)?;
     format_response(args, query, resolution, snapshot_id.as_deref())
+}
+
+/// What a search of one window answered from.
+enum WindowSearch {
+    /// The whole window, as every find did before.
+    Whole(Box<LocatorResolution>),
+    /// The elements the window shows (see [`view`]).
+    View(Box<snapshot::SnapshotResult>),
+}
+
+/// Searches one window whole, and when that search runs out of time or reaches
+/// its read limit on a window read by its visible elements, answers from those
+/// elements instead ([`view::plan`] says when). When they cannot be read
+/// either, the whole search's own failure is returned, as before.
+fn search_window(
+    args: &FindArgs,
+    query: &LocatorQuery,
+    adapter: &dyn PlatformAdapter,
+    window: &crate::WindowInfo,
+    deadline: crate::Deadline,
+) -> Result<WindowSearch, AppError> {
+    let attempt = view::plan(args, adapter, window, deadline);
+    let request = resolve_request(args, attempt.deadline);
+    let whole = resolve_query(adapter, query, ObservationRoot::Window(window), &request)
+        .and_then(|resolution| require_complete(&resolution).map(|()| resolution));
+    match whole {
+        Err(AppError::Adapter(error))
+            if attempt.view && error.code == crate::ErrorCode::Timeout =>
+        {
+            match view::read_view(adapter, window, deadline)? {
+                Some(found) => Ok(WindowSearch::View(Box::new(found))),
+                None => Err(AppError::Adapter(error)),
+            }
+        }
+        other => other.map(|resolution| WindowSearch::Whole(Box::new(resolution))),
+    }
 }
 
 /// A rooted find draws its matches from the root's own subtree. A root with an
@@ -288,6 +331,9 @@ fn attach_roles_present(
         object.insert("roles_present".into(), json!(roles_present));
     }
 }
+
+#[path = "find_view.rs"]
+mod view;
 
 #[cfg(test)]
 mod tests {

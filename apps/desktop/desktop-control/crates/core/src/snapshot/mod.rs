@@ -76,7 +76,7 @@ pub fn build(
 }
 
 /// Allocates the refs of one window capture and builds the snapshot of it.
-fn allocate_capture(
+pub(crate) fn allocate_capture(
     opts: &TreeOptions,
     window: WindowInfo,
     capture: window_capture::WindowCapture,
