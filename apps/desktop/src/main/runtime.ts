@@ -202,6 +202,36 @@ export class MockRuntimeAdapter {
     ]);
   }
 
+  /**
+   * Runs a write of this Turn in the Task mailbox, unless the Turn is canceled first.
+   *
+   * A stop runs inside that same mailbox (`turns.cancel`, stop-and-send, the stop before an update)
+   * and waits there for this run to settle. A write still waiting for the mailbox when the stop
+   * lands would wait on the stop, which waits on the run: the Turn never ended, and every later
+   * mutation of the Task, the approval card's answers included, queued behind both (Issue #1260).
+   * So once the Turn is canceled the write stops waiting and fails with the cancellation, and the
+   * mailbox entry it left does nothing when reached. A canceled run writes nothing more; the stop
+   * records the cancellation.
+   */
+  private serializeTurn<T>(taskId: string, control: ActiveTurn, action: () => T): Promise<T> {
+    if (control.canceled) return Promise.reject(turnCanceledError());
+    const signal = control.abortController.signal;
+    let stopWaiting = (): void => undefined;
+    const canceled = new Promise<never>((_resolve, reject) => {
+      stopWaiting = () => reject(turnCanceledError());
+      signal.addEventListener('abort', stopWaiting, { once: true });
+    });
+    const queued = this.serialize(taskId, () => {
+      if (control.canceled) throw turnCanceledError();
+      return action();
+    });
+    // Left behind once the Turn is canceled: it settles later with the cancellation, unobserved.
+    queued.catch(() => undefined);
+    return Promise.race([queued, canceled]).finally(() =>
+      signal.removeEventListener('abort', stopWaiting),
+    );
+  }
+
   private async run(
     taskId: string,
     turnId: string,
@@ -209,11 +239,13 @@ export class MockRuntimeAdapter {
     control: ActiveTurn,
     teamTurn: boolean,
   ): Promise<void> {
+    const serialize: Serialize = (serializedTaskId, action) =>
+      this.serializeTurn(serializedTaskId, control, action);
     try {
       for (const stage of executionStages) {
         await pause(this.delayMs);
         if (control.canceled) return;
-        await this.serialize(taskId, () =>
+        await serialize(taskId, () =>
           this.publish(this.persistence.changeStage(taskId, turnId, stage)),
         );
         // Reasoning during understanding/planning only, matching where a real model produces it —
@@ -261,7 +293,7 @@ export class MockRuntimeAdapter {
             this.emitFileEdit?.(taskId, turnId, change.path, upto, upto.length === body.length);
           }
         }
-        await this.serialize(taskId, () => {
+        await serialize(taskId, () => {
           const event = this.persistence.recordFileChanges?.({ taskId, turnId, changes });
           if (event !== undefined && event !== null) this.publish(event);
         });
@@ -289,7 +321,9 @@ export class MockRuntimeAdapter {
           // Only the fixed Team scenario calls Team tools; any other mock Turn is given none.
           ...(teamFixtureActive ? { mockTeamFixture: true, teamTools: true } : {}),
         }) ?? startMockTurnCatalog(this.toolBroker, toolContext);
-      const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
+      // Through the cancelable mailbox too: the step a canceled approval wait leaves behind must not
+      // wait for the mailbox the stop holds (Issue #1260). It stays as it was, like an interrupted one.
+      const recorder = intelligenceRecorder(this.persistence, serialize, taskId);
       // The fixed three-Worker orchestration is an E2E fixture, never a fallback for a natural
       // Team request. Mock cannot interpret arbitrary Team operations such as reading a
       // conversation or changing a member, so those requests fail closed with a truthful reply.
@@ -356,7 +390,7 @@ export class MockRuntimeAdapter {
       // A tool that ran above may already have anchored itself into this Turn's assistant message
       // (a rendered graph); the reply continues in that message rather than starting a second one.
       const messageId = this.persistence.assistantMessageIdFor(taskId, turnId) ?? randomUUID();
-      await this.serialize(taskId, () =>
+      await serialize(taskId, () =>
         this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing')),
       );
       const chunks = chunkReply(loop.text);
@@ -371,7 +405,7 @@ export class MockRuntimeAdapter {
         if (delta === undefined) continue;
         await pause(Math.max(12, Math.floor(this.delayMs / 4)));
         if (control.canceled) return;
-        await this.serialize(taskId, () =>
+        await serialize(taskId, () =>
           this.publish(this.persistence.appendDelta(taskId, turnId, messageId, delta)),
         );
         emittedReplyDeltas += 1;
@@ -386,11 +420,11 @@ export class MockRuntimeAdapter {
         )
           await waitForMockStreamRelease(control.abortController.signal);
       }
-      if (!control.canceled) await this.finish(taskId, turnId, 'completed');
+      if (!control.canceled) await this.finish(taskId, turnId, control, 'completed');
     } catch {
       if (!control.canceled) {
         try {
-          await this.finish(taskId, turnId, 'failed');
+          await this.finish(taskId, turnId, control, 'failed');
         } catch {
           /* already terminal */
         }
@@ -438,7 +472,7 @@ export class MockRuntimeAdapter {
           policyEpoch,
           evaluationTrace: ['approval-policy' as const],
         };
-        await this.serialize(taskId, () => {
+        await this.serializeTurn(taskId, control, () => {
           const event = commit.call(this.persistence, taskId, request, evaluation, {
             id: callId,
             taskId,
@@ -469,9 +503,10 @@ export class MockRuntimeAdapter {
   private async finish(
     taskId: string,
     turnId: string,
+    control: ActiveTurn,
     state: 'completed' | 'failed',
   ): Promise<void> {
-    await this.serialize(taskId, () => {
+    await this.serializeTurn(taskId, control, () => {
       if (this.terminal !== undefined) this.terminal(taskId, turnId, state);
       else this.publish(this.persistence.completeTurn(taskId, turnId, state));
     });
@@ -616,6 +651,10 @@ function chunkReply(reply: string): string[] {
   for (let index = 0; index < characters.length; index += chunkSize)
     chunks.push(characters.slice(index, index + chunkSize).join(''));
   return chunks;
+}
+
+function turnCanceledError(): Error {
+  return new Error('Mock Turn was canceled');
 }
 
 function pause(ms: number): Promise<void> {
