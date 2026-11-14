@@ -1,6 +1,0 @@
-{
-  "controls": [
-    { "sid": "accentColor", "label": "軌道の色" },
-    { "sid": "coreColor", "label": "コアの色" }
-  ]
-}
