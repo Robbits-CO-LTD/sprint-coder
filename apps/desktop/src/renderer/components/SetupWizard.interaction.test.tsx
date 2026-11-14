@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_ASSISTANT_PREFERENCES, type AssistantPreferences } from '@sprint-coder/contracts';
@@ -751,8 +751,30 @@ describe('SetupWizard', () => {
       await flush();
       // Chromium closes a dialog on a second Escape in a row whatever `cancel` did.
       const dialog = q<HTMLDialogElement>('[data-testid="setup-replay-dialog"]')!;
-      await act(async () => dialog.dispatchEvent(new Event('close')));
+      await act(async () => {
+        dialog.removeAttribute('open');
+        dialog.dispatchEvent(new Event('close'));
+      });
       expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('the replay dialog: a close that arrives while it is open again (the development double effect) is not followed', async () => {
+      fullBridge();
+      const onClose = vi.fn();
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <SetupReplayDialog onClose={onClose} onOpenSettings={() => {}} />
+          </StrictMode>,
+        );
+      });
+      await flush();
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      const dialog = q<HTMLDialogElement>('[data-testid="setup-replay-dialog"]')!;
+      expect(dialog.open).toBe(true);
+      await act(async () => dialog.dispatchEvent(new Event('close')));
+      expect(onClose).not.toHaveBeenCalled();
+      expect(q('[data-testid="setup-replay-dialog"]')).not.toBeNull();
     });
 
     it('reply settings that cannot be read are never written over with defaults', async () => {

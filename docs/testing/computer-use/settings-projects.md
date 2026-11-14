@@ -24,6 +24,17 @@
 - 合格条件: Settingsが閉じてSetupがtitle barの下の窓いっぱいに出る（focusは見出し）。今の設定が選ばれた状態で始まる。作業場所の段と「最初の Task を始める」は出ない（分母は作業場所の分だけ少ない）。Escapeか×で閉じ、続けるで出た段の保存は残る。閉じた後、設定ボタンへfocusが戻り、Taskは増えない。
 - 証拠・制約: Settingsの行、もう一度の各画面、閉じた後の画面、settingsの照合。
 
+<a id="setup-wizard-03"></a>
+
+## setup-wizard-03
+
+新規ケース: 古い版から更新した人（Taskがある）に、起動の時に新しいSetupが1回出る
+
+- 前提: setup-wizard-01を終えたprofile（Taskが1つ）。rendererのlocalStorageから`sprint-coder:setup-complete-v2`を消し、`sprint-coder:setup-complete-v1`を`1`にして終了（古い版から更新した状態）。
+- 操作: 起動→×で閉じる→再起動。もう一度v2だけを消して起動→返事の仕方を1つ変えて最後まで進み「完了」→再起動。
+- 合格条件: 起動するとSetupがtitle barの下の窓いっぱいに出る（setup-wizard-02と同じ形。focusは見出し。分母は作業場所の分だけ少なく、「最初の Task を始める」は出ない）。×・Escape・「完了」のどれで閉じても今のTaskの画面に戻り、Taskは増えず、v2が`1`になる。出して閉じただけではsettingsは変わらない。変えた値だけが保存される（`assistant.preferences`。`team.usage-mode`は無いまま）。再起動ではSetupは出ない。Taskが無いprofileでは、v1があってもsetup-wizard-01の初回Setupが出る。
+- 証拠・制約: 起動時・閉じた後・再起動後の画面、localStorageのv1/v2、settingsの照合。印の版は`apps/desktop/src/renderer/lib/setup-preference.ts`の`SETUP_VERSION`。
+
 <a id="settings-dialog-01"></a>
 
 ## settings-dialog-01

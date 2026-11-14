@@ -1672,8 +1672,13 @@ export function SetupReplayDialog({
       }}
       // The browser can close the dialog whatever `cancel` did (Chromium does on a second Escape
       // in a row with nothing pressed in between). Follow it, so the app never keeps a closed
-      // replay mounted and "セットアップをもう一度" switched off.
-      onClose={onClose}
+      // replay mounted and "セットアップをもう一度" switched off. A `close` that arrives while the
+      // dialog is open again is stale (React's development double effect closes and reopens it at
+      // once, and the event lands after) and is not followed.
+      onClose={() => {
+        if (dialogRef.current?.open) return;
+        onClose();
+      }}
     >
       <SetupWizard
         mode="replay"
