@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLogoGlyph } from '../lib/logo-glyph';
 
 function fallbackPlatform(): string {
   const navigatorPlatform = navigator.platform.toLowerCase();
@@ -45,6 +46,7 @@ export function AppTitlebar() {
   const windows = platform === 'win32';
   const macOS = platform === 'darwin';
   const [maximized, setMaximized] = useState(false);
+  const glyph = useLogoGlyph();
 
   useEffect(() => {
     if (!windows || controls === undefined) return;
@@ -73,7 +75,14 @@ export function AppTitlebar() {
       data-testid="app-titlebar"
       data-platform={platform}
     >
-      <span className="app-titlebar-name">Sprint Coder</span>
+      <span className="app-titlebar-name">
+        {/* The logo itself, small: the one place the window says whose it is. Its box is kept while
+            the image is made, so the name does not move when it arrives. */}
+        <span className="app-titlebar-mark" aria-hidden="true">
+          {glyph !== null && <img src={glyph} alt="" />}
+        </span>
+        <span className="app-titlebar-text">Sprint Coder</span>
+      </span>
       {windows && controls !== undefined && (
         <div className="window-controls" role="group" aria-label="ウィンドウ操作">
           <button

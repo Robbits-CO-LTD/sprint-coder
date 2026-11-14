@@ -1,0 +1,819 @@
+/* The Task history panel (components/Sidebar.tsx).
+
+   A standing tool, so it is quiet: one matte plane, no fills of colour, no decoration that moves.
+   What orders it is alignment and type —
+   - one left line: every label, Project name and Task title starts 16px from the window's edge,
+     under the product name in the titlebar; Tasks of a Project start under the Project's name;
+   - one right column: what a row *is* besides its title (count, pin, 未開始, running, waiting,
+     done) sits at the row's end, and the row's actions take that same place while it is pointed
+     at or focused, so nothing in a row moves when the pointer crosses it;
+   - three weights of text: the selected Task (primary, 550), Project names (muted, 550), every
+     other Task (secondary, regular).
+   Colour is spent on four small marks only: the selected Task's rail, the running ring, the
+   waiting triangle and the done check. The shell's rules for the panel as a whole (width, collapse,
+   overlay, resizer) are in index.css. */
+
+.sidebar {
+  --sb-row: 30px;
+  /* A Project's Tasks are set in by this much, so that with a row's own 8px their titles start
+     under the Project's name (4px + 16px chevron + 6px gap = 26px). */
+  --sb-indent: 18px;
+}
+
+/* ---------- New Task / search ---------- */
+
+.sb-new-row {
+  display: flex;
+  padding-top: 2px;
+}
+/* The panel's one raised control: a matte key with a hairline edge. Neutral on purpose — the
+   selected row's rail is the only brand mark in the column. */
+.sb-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  margin-bottom: 8px;
+  padding: 0 10px 0 8px;
+  border-radius: var(--r-md);
+  background: var(--neutral-wash);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 550;
+  text-align: left;
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    box-shadow var(--t-quick) var(--ease-ui);
+}
+.sb-new .icon {
+  color: var(--text-secondary);
+  transition: color var(--t-quick) var(--ease-ui);
+}
+.sb-new:hover:not(:disabled) {
+  background: var(--neutral-wash-strong);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+}
+.sb-new:hover:not(:disabled) .icon {
+  color: var(--text-primary);
+}
+.sb-new:active:not(:disabled) {
+  background: var(--neutral-wash);
+  box-shadow: var(--relief-press);
+}
+.sb-new:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* A field, not a key: a plane a touch off the panel's with the faintest edge, so the key above it
+   stays the stronger of the two. */
+.sb-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--bg-app) 55%, transparent);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  color: var(--text-secondary);
+  transition: box-shadow var(--t-quick) var(--ease-ui);
+}
+/* The field has no outline of its own, so its well carries the focus: one line of the ring colour. */
+.sb-search:focus-within {
+  box-shadow: inset 0 0 0 1px var(--focus-ring);
+}
+.sb-search input {
+  width: 100%;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.sb-search input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+.sb-search input::-webkit-search-cancel-button {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin: 0 -2px 0 4px;
+  background: var(--text-secondary);
+  cursor: pointer;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E")
+    center / 12px no-repeat;
+}
+.sb-search input::-webkit-search-cancel-button:hover {
+  background: var(--text-primary);
+}
+
+/* ---------- The list ---------- */
+
+/* The list runs to the panel's edges. On the left the 8px inset is given back as padding; on the
+   right it is the scrollbar's own gutter, kept whether or not there is anything to scroll, so no
+   row changes width when a scrollbar appears. */
+.sb-scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 8px -8px 0;
+  padding: 0 0 8px 8px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border-top: 1px solid transparent;
+  border-bottom: 1px solid var(--hairline);
+}
+/* Once the list has moved under the search field, a hairline says so. Tied to the scroll position
+   itself, so nothing runs while the list is still. */
+@supports (animation-timeline: scroll()) {
+  .sb-scroll {
+    animation: sb-scrolled linear both;
+    animation-timeline: scroll(self);
+    animation-range: 0 16px;
+  }
+}
+@keyframes sb-scrolled {
+  to {
+    border-top-color: var(--hairline-strong);
+  }
+}
+
+.sb-section {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 16px 8px 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0.04em;
+  line-height: 1.3;
+  text-align: left;
+}
+.sb-scroll > .sb-section:first-child,
+.sb-scroll > section:first-child > .sb-section:first-child {
+  padding-top: 8px;
+}
+.sb-section--toggle {
+  border-radius: var(--r-sm);
+  transition: color var(--t-quick) var(--ease-ui);
+}
+.sb-section--toggle:hover {
+  color: var(--text-primary);
+}
+
+/* The mark of everything that opens and closes. It points down when open and turns to the right
+   when closed. */
+.sb-chevron {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-secondary);
+  transition: transform var(--t-quick) var(--ease-ui);
+}
+[aria-expanded='false'] > .sb-chevron {
+  transform: rotate(-90deg);
+}
+
+.sb-status {
+  margin: 4px 0;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sb-status--warning {
+  box-shadow:
+    inset 0 0 0 1px var(--hairline),
+    inset 2px 0 0 var(--warning);
+}
+.sb-status button {
+  display: block;
+  margin-top: 4px;
+  padding: 0;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ---------- Projects ---------- */
+
+.sb-project {
+  position: relative;
+}
+.sb-project + .sb-project {
+  margin-top: 2px;
+}
+.sb-project-heading {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--r-sm);
+  transition: background var(--t-quick) var(--ease-ui);
+}
+.sb-project-heading:hover {
+  background: var(--neutral-wash);
+}
+/* The right 56px is the heading's own column: the Task count at rest, the two actions on hover or
+   focus. The name never runs under it, so it is cut in the same place in both states. */
+.sb-project-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: var(--sb-row);
+  padding: 0 56px 0 4px;
+  border-radius: inherit;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 550;
+  text-align: left;
+}
+.sb-project-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-count {
+  position: absolute;
+  top: 0;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  min-width: 14px;
+  height: 100%;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  letter-spacing: 0;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.sb-project-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.sb-project-heading:is(:hover, :focus-within) .sb-project-actions,
+.sb-project-heading:has(.sb-menu[open]) .sb-project-actions {
+  opacity: 1;
+}
+.sb-project-heading:is(:hover, :focus-within) .sb-count,
+.sb-project-heading:has(.sb-menu[open]) .sb-count {
+  opacity: 0;
+}
+.sb-project-new-task {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
+}
+.sb-project-new-task:hover,
+.sb-project-new-task:focus-visible {
+  background: var(--neutral-wash-strong);
+  color: var(--text-primary);
+}
+
+/* A Project's Tasks start under its name, and a hairline down from its chevron ties them to it. */
+.sb-project-tasks {
+  position: relative;
+  padding: 1px 0 4px var(--sb-indent);
+  animation: sb-open var(--t-quick) var(--ease-ui);
+}
+.sb-project-tasks::before {
+  position: absolute;
+  top: 3px;
+  bottom: 7px;
+  left: 11.5px;
+  width: 1px;
+  background: var(--hairline);
+  content: '';
+}
+/* Opening only: no `to` and no fill, so nothing is left transformed afterwards (a transformed
+   ancestor would become the containing block of the menus' fixed popovers). */
+@keyframes sb-open {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+.sb-project-empty {
+  padding: 6px 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.sb-task-archive > button {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  text-align: left;
+  transition: color var(--t-quick) var(--ease-ui);
+}
+.sb-task-archive > button:hover {
+  color: var(--text-primary);
+}
+.sb-task-archive > button:hover .sb-chevron,
+.sb-section--toggle:hover .sb-chevron {
+  color: inherit;
+}
+
+/* ---------- Task rows ---------- */
+
+/* The selected Task is said three ways, so none of them has to shout: a brighter plane, heavier
+   and brighter text, and a 2px rail at the row's left edge — the one place the logo's colours
+   appear in the list. */
+.sb-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--r-sm);
+  transition: background var(--t-quick) var(--ease-ui);
+}
+.sb-row + .sb-row,
+.sb-row + .sb-task-archive,
+.sb-task-archive > button + .sb-row {
+  margin-top: 1px;
+}
+.sb-row:hover {
+  background: var(--neutral-wash);
+}
+.sb-row.active {
+  background: var(--neutral-wash-strong);
+}
+.sb-row.active::before {
+  position: absolute;
+  top: 8px;
+  left: 0;
+  width: 2px;
+  height: calc(var(--sb-row) - 16px);
+  border-radius: 1px;
+  background: linear-gradient(
+    to bottom,
+    var(--brand-cyan),
+    var(--brand-blue) 55%,
+    var(--brand-violet)
+  );
+  content: '';
+  animation: sb-rail var(--t-quick) var(--ease-ui);
+}
+@keyframes sb-rail {
+  from {
+    opacity: 0;
+    transform: scaleY(0.4);
+  }
+}
+
+.sb-item {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: var(--sb-row);
+  padding: 0 8px;
+  border-radius: inherit;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--t-quick) var(--ease-ui);
+}
+.sb-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-row:hover .sb-item {
+  color: var(--text-primary);
+}
+.sb-row.active .sb-item {
+  color: var(--text-primary);
+  font-weight: 550;
+}
+
+/* The row's end column. Never narrower than the menu button that takes its place, so a title is
+   cut in the same place whether or not the row is pointed at. */
+.sb-item-meta {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 18px;
+  color: var(--text-secondary);
+  font-weight: 400;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.sb-row:has(.sb-task-menu):is(:hover, :focus-within) .sb-item-meta,
+.sb-row:has(.sb-task-menu[open]) .sb-item-meta {
+  opacity: 0;
+}
+
+.sb-task-activity {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+}
+.sb-task-activity .icon {
+  display: block;
+}
+/* Turns only while the Task runs, and only by `transform`, so it costs no layout and no paint. */
+.sb-task-activity--running {
+  width: 12px;
+  height: 12px;
+  margin: 0 1px;
+  border: 1.5px solid var(--accent-line-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+/* Waiting for the person: still, and a different shape, so it is not told from running by colour
+   alone. */
+.sb-task-activity--waiting {
+  color: var(--warning);
+}
+.sb-task-activity--completed {
+  color: var(--success);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sb-task-activity--running {
+    animation: none;
+    border-color: var(--accent);
+  }
+}
+.sb-unstarted {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+/* ---------- Menus ---------- */
+
+/* `direction: rtl` is here for one thing only: a box with no offsets is placed from the right edge
+   of where it would have been laid out, so the popover below hangs from its button's right edge
+   and grows to the left, into the panel, whatever its width. */
+.sb-menu {
+  position: relative;
+  flex: none;
+  direction: rtl;
+}
+.sb-menu > summary {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  cursor: pointer;
+  list-style: none;
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
+}
+.sb-menu > summary::-webkit-details-marker {
+  display: none;
+}
+.sb-menu > summary:hover,
+.sb-menu[open] > summary {
+  background: var(--neutral-wash-strong);
+  color: var(--text-primary);
+}
+.sb-task-menu {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  opacity: 0;
+  transition: opacity var(--t-quick) var(--ease-ui);
+}
+.sb-row:hover .sb-task-menu,
+.sb-row:focus-within .sb-task-menu,
+.sb-task-menu[open] {
+  opacity: 1;
+}
+/* `position: fixed` with no offsets: the popover stays where it would have been laid out (under its
+   button) but is not clipped by the list's scroll box. It is never wider than the panel, so even
+   with a reason written in it, it does not reach over the conversation. */
+.sb-menu-popover {
+  position: fixed;
+  z-index: 30;
+  direction: ltr;
+  width: max-content;
+  min-width: 164px;
+  max-width: calc(var(--sidebar-width) - 20px);
+  padding: 4px;
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+  transform: translateY(4px);
+  animation: sb-menu-in var(--t-instant) var(--ease-ui);
+}
+@keyframes sb-menu-in {
+  from {
+    opacity: 0;
+  }
+}
+.sb-menu-popover button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  text-align: left;
+  transition: background var(--t-instant) linear;
+}
+.sb-menu-popover button .icon {
+  color: var(--text-secondary);
+}
+.sb-menu-popover button:hover,
+.sb-menu-popover button:focus-visible {
+  background: var(--neutral-wash-strong);
+}
+.sb-menu-popover button[aria-disabled='true'] {
+  color: var(--text-secondary);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.sb-menu-popover button[aria-disabled='true']:hover {
+  background: none;
+}
+/* Why an item cannot be pressed, set under that item's label (past its icon). */
+.sb-menu-note {
+  margin: 0 8px 8px 29px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: normal;
+}
+.sb-menu-note--error {
+  color: var(--danger);
+}
+.sb-menu-popover button.sb-stop-commands,
+.sb-task-notice button.sb-stop-commands {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  box-shadow: inset 0 0 0 1px var(--danger-line);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  line-height: 1.3;
+  transition: background var(--t-quick) var(--ease-ui);
+}
+.sb-menu-popover button.sb-stop-commands .icon,
+.sb-task-notice button.sb-stop-commands .icon {
+  color: var(--danger);
+}
+.sb-menu-popover button.sb-stop-commands:hover:not(:disabled),
+.sb-task-notice button.sb-stop-commands:hover:not(:disabled) {
+  background: var(--danger-wash);
+}
+.sb-stop-commands:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.sb-menu-popover button.sb-stop-commands {
+  margin: 0 8px 8px 29px;
+}
+
+/* ---------- Main's refusal of an archive, on the Task's row ---------- */
+
+.sb-row:has(.sb-task-notice) {
+  flex-wrap: wrap;
+}
+/* A plate with a warning rule down its left edge: the tone says "held back", the area stays
+   neutral. */
+.sb-task-notice {
+  position: relative;
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 2px 4px 4px;
+  padding: 8px 28px 8px 11px;
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px var(--hairline),
+    inset 2px 0 0 var(--warning);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.55;
+}
+.sb-task-notice > span {
+  flex: 1 1 100%;
+}
+.sb-task-notice .sb-menu-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+.sb-task-notice-close {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-xs);
+  color: var(--text-secondary);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
+}
+.sb-task-notice-close:hover {
+  background: var(--neutral-wash-strong);
+  color: var(--text-primary);
+}
+
+/* ---------- Nothing to list ---------- */
+
+.sb-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.sb-empty p {
+  margin: 0;
+}
+.sb-empty-title {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.5;
+}
+.sb-empty-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sb-empty-link {
+  padding: 0;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sb-empty-link:hover {
+  color: var(--accent-hover);
+}
+
+/* ---------- Settings ---------- */
+
+.sb-footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  margin-top: 8px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: left;
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
+}
+.sb-footer:hover:not(:disabled) {
+  background: var(--neutral-wash);
+  color: var(--text-primary);
+}
+.sb-footer:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---------- Focus ---------- */
+
+/* Rows fill the panel from edge to edge, so their ring is drawn inside them: an outer ring would be
+   cut by the list's scroll box. Each keeps its own corner radius while focused. */
+.sb-new:focus-visible,
+.sb-footer:focus-visible,
+.sb-item:focus-visible,
+.sb-project-toggle:focus-visible,
+.sb-section--toggle:focus-visible,
+.sb-task-archive > button:focus-visible {
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
+}
+.sb-new:focus-visible {
+  border-radius: var(--r-md);
+}
+.sb-menu > summary:focus-visible,
+.sb-project-new-task:focus-visible,
+.sb-task-notice-close:focus-visible {
+  outline-offset: 0;
+}
+.sb-row:focus-visible {
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
+}
+
+/* ---------- More contrast / forced colours ---------- */
+
+@media (prefers-contrast: more) {
+  .sb-item {
+    color: var(--text-muted);
+  }
+  .sb-row.active {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .sb-search,
+  .sb-new {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .sb-project-tasks::before {
+    background: var(--hairline-strong);
+  }
+  .sb-scroll {
+    border-bottom-color: var(--hairline-strong);
+  }
+}
+
+/* Forced colours drop fills and shadows, which is all the selected row, the field and the key are
+   drawn with. Each gets a line instead. */
+@media (forced-colors: active) {
+  .sb-row.active {
+    outline: 1px solid Highlight;
+    outline-offset: -1px;
+  }
+  .sb-row.active::before {
+    background: Highlight;
+  }
+  .sb-new,
+  .sb-search,
+  .sb-unstarted,
+  .sb-task-notice,
+  .sb-status,
+  .sb-menu-popover {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+  .sb-search:focus-within {
+    outline: 2px solid Highlight;
+  }
+  .sb-task-activity--running {
+    border-color: CanvasText;
+    border-top-color: Highlight;
+  }
+  .sb-project-tasks::before {
+    background: CanvasText;
+  }
+}
