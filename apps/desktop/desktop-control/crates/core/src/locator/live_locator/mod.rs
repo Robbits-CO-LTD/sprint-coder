@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 mod cardinality;
 mod compiled_clause;
 mod evaluate;
@@ -85,7 +86,7 @@ pub use observed_subtree::ObservedSubtree;
 pub use observed_tree::ObservedTree;
 pub use ref_evidence_requirements::RefEvidenceRequirements;
 pub use resolve::resolve_query;
-pub(crate) use resolve::resolve_query_from;
+pub(crate) use resolve::{observation_deadline, resolve_query_from};
 pub use validate::{validate_query, validate_request};
 
 #[cfg(test)]

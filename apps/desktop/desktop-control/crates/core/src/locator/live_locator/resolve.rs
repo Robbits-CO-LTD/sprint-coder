@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     LocatorResolution, LocatorResolveRequest, LocatorStats, ObservationRequest, ObservationRoot,
     ObservedObservation, validate_query, validate_request,
@@ -213,7 +214,7 @@ fn resolve_observed_attempt(
     Ok(resolution)
 }
 
-fn observation_deadline(request: &LocatorResolveRequest) -> crate::Deadline {
+pub(crate) fn observation_deadline(request: &LocatorResolveRequest) -> crate::Deadline {
     if request.materialization != super::LocatorMaterialization::SelectedMatches {
         return request.deadline;
     }

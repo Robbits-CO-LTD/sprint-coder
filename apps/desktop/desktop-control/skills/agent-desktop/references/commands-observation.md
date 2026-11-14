@@ -87,6 +87,7 @@ agent-desktop find --app "App" --role button --count
 - `--role` is case-insensitive; `textarea`, `textbox` and `searchfield` fold to `textfield`. When a role filter matches nothing, `data.roles_present` lists the roles in the searched tree. Use it to tell a wrong role name from an empty screen.
 - Unnamed elements omit `name`. Their content is in `value`, so search it with `--value`.
 - A large tree, such as a file dialog, can pass the 5000 ms default `--timeout-ms`. Raise it or narrow the search. A timeout here does not mean the app hangs.
+- On Windows, a Chromium-hosted window (Electron, WebView2) too large to search whole in time is searched by the elements shown on screen instead, as `snapshot` reads it. The answer then carries `"scope": "visible"` and a `scope_hint`; `total_matches` counts the shown elements only, and an empty answer means "nothing on screen matches", not "the window has none": scroll, then find again. Its refs carry the proof of that view, like the refs of a `"scope": "visible"` snapshot (see above). Only a listing or `--first` without `--root` or `--surface`, under at least the default `--timeout-ms`, does this; `--count`, `--last` and `--nth` ask about the whole window and keep the timeout.
 
 Every non-count response returns the `snapshot_id` that owns its refs:
 
