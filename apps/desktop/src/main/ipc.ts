@@ -328,8 +328,8 @@ import {
   DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
   configureDesktopControlTeamCursors,
   configureDesktopControlWorkerTool,
-  desktopControlTeamCursors,
   desktopControlWorker,
+  desktopControlWorkerToolOffer,
   endDesktopControlSession,
 } from './desktop-control-session';
 import { configureStartMenuShortcutReader } from './desktop-control-start-menu';
@@ -651,7 +651,7 @@ import {
 import {
   isTeamScenarioInput,
   requiresTeamWorkersInput,
-  LEADER_DESKTOP_CONTROL_GUIDANCE,
+  leaderDesktopControlGuidance,
   LEADER_MCP_SYSTEM_PROMPT,
   MANAGER_PROVIDER_TOOLS,
   MANAGER_MCP_SYSTEM_PROMPT,
@@ -843,8 +843,8 @@ export function teamGuidance(
  * 「Team の使い方」 setting. Only a real CLI Leader (codex・claude・grok) qualifies, and only when
  * everything an offered Turn needs is in place: the Leader MCP, its bridge, and the verified
  * built-in Team Skill. Anything missing leaves the Turn an ordinary one instead of failing it.
- * The API Leader is never offered: it has no Team tools (even a requested Team Turn gets none), so
- * handing it the Skill would only make it talk about Team it cannot run.
+ * The API Leader is never offered: its Team tools come from its own tool loop, not the Leader MCP
+ * checked here, and only on a Team Turn it was given otherwise (`leaderTurnTeamTools`).
  */
 export function teamUsageOfferAvailable(
   input: Readonly<{
@@ -1772,7 +1772,9 @@ export class IpcRouter {
     this.managedCodingHarness.onTaskCommandSettled((taskId) => this.refreshTaskRunningWork(taskId));
     // A Worker marked for desktop control gets the command tool only from this harness's catalog,
     // so the hire marks one only when the harness offers that tool (not without the sandbox).
-    configureDesktopControlWorkerTool(() => this.managedCodingHarness.commandToolsOffered());
+    configureDesktopControlWorkerTool(
+      desktopControlWorkerToolOffer(() => this.managedCodingHarness.commandToolsOffered()),
+    );
     this.mockRuntime = new MockRuntimeAdapter(
       persistence,
       (event) => this.publish(event),
@@ -6393,7 +6395,7 @@ export class IpcRouter {
           )
         : null,
       // Only with the Team's desktop cursors on, so with them off the guidance is as it was.
-      options.teamTurn && desktopControlTeamCursors() ? LEADER_DESKTOP_CONTROL_GUIDANCE : null,
+      leaderDesktopControlGuidance(options.teamTurn),
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
         : null,
