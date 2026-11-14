@@ -58,6 +58,9 @@ import {
   unlockSoundEffects,
 } from '../lib/ui-sound';
 import { useMediaQuery } from '../lib/useMediaQuery';
+import { readLogoIntroSeen, writeLogoIntroSeen } from '../lib/setup-logo-intro';
+import { chooseLogoIntro } from '../lib/setup-logo-timeline';
+import { SetupLogoIntro } from './SetupLogoIntro';
 import { setupPreviewReply } from '../lib/setup-preview';
 import { SetupSky, type SkyTheme } from '../lib/setup-sky';
 import type { CueName } from 'uisfx';
@@ -103,8 +106,6 @@ const KICKERS: Readonly<Record<SetupStepId, string>> = {
   done: 'READY',
 };
 
-/** How long the opening runs before the welcome settles (any click or key ends it sooner). */
-const INTRO_MS = 3400;
 /** The hand-off into the app after "最初の Task を始める". */
 const LEAVE_MS = 520;
 
@@ -511,14 +512,29 @@ export function SetupWizard({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const skyRef = useRef<SetupSky | null>(null);
   const lastPress = useRef<{ x: number; y: number; at: number } | null>(null);
-  // The opening plays once per Setup, with motion only; any click or key ends it at once.
-  const [introState, setIntro] = useState<'playing' | 'done'>(() => (animate ? 'playing' : 'done'));
-  // Switching motion off part-way ends the opening at once.
-  const intro: 'playing' | 'done' = animate ? introState : 'done';
-  const endIntro = useCallback(() => {
-    setIntro('done');
-    skyRef.current?.finishIntro();
-  }, []);
+  // The logo film plays once per Setup, before the welcome: the full one until this person has
+  // seen it — in the first run's Setup and in the one laid over the app at launch alike — a short
+  // one after that, a quiet card with reduced motion. While it plays ('playing') the Setup waits
+  // hidden; it comes in under the film's last scene ('arrive'), then 'done'.
+  const [introVariant] = useState(() => chooseLogoIntro({ animate, seen: readLogoIntroSeen() }));
+  const [introState, setIntro] = useState<'playing' | 'arrive' | 'done'>(() =>
+    introVariant ? 'playing' : 'done',
+  );
+  // Switching motion on or off part-way ends the film at once.
+  const [motionAtStart] = useState(animate);
+  const intro = animate === motionAtStart ? introState : 'done';
+  const endIntro = useCallback(() => setIntro('done'), []);
+  const onIntroHandoff = useCallback(() => {
+    if (introVariant !== 'short') writeLogoIntroSeen();
+    setIntro((current) => (current === 'playing' ? 'arrive' : current));
+    // The stage answers the arrival with a wave from where the logo was.
+    const box = rootRef.current?.getBoundingClientRect();
+    if (box) skyRef.current?.ripple(box.width / 2, box.height * 0.42);
+    // The heading took the focus while hidden; keep it there unless someone moved it already.
+    const active = document.activeElement;
+    if (active === null || active === document.body || active === headingRef.current)
+      headingRef.current?.focus({ preventScroll: true });
+  }, [introVariant]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -534,13 +550,6 @@ export function SetupWizard({
       skyRef.current = null;
     };
   }, [animate]);
-
-  useEffect(() => {
-    if (intro !== 'playing') return;
-    skyRef.current?.playIntro('SPRINT CODER');
-    const timer = window.setTimeout(() => setIntro('done'), INTRO_MS);
-    return () => window.clearTimeout(timer);
-  }, [intro]);
 
   // The stage's colour, pace and crowd follow the step — and, on "返事の仕方", the choices.
   useEffect(() => {
@@ -894,7 +903,7 @@ export function SetupWizard({
 
   const primary = useCallback(() => {
     if (step === 'welcome') {
-      if (intro === 'playing') endIntro();
+      if (intro !== 'done') endIntro();
       cue('start');
       moveTo(index + 1);
     } else if (step === 'workspace') continueFromWorkspace();
@@ -1044,12 +1053,8 @@ export function SetupWizard({
       aria-busy={busy || undefined}
       style={palette}
       onFocus={onFocusIn}
-      onKeyDown={(event) => {
-        if (intro === 'playing') endIntro();
-        onKeyDown(event);
-      }}
+      onKeyDown={onKeyDown}
       onPointerDown={(event) => {
-        if (intro === 'playing') endIntro();
         const box = event.currentTarget.getBoundingClientRect();
         lastPress.current = {
           x: event.clientX - box.left,
@@ -1072,6 +1077,8 @@ export function SetupWizard({
       {/* Decoration only: everything it shows is also said on the board. */}
       <div className="setup-visual" aria-hidden="true">
         <SetupStage
+          // Starts afresh as the Setup comes in, not part-way through while it was hidden.
+          key={intro === 'playing' ? 'held' : 'live'}
           step={step}
           animate={animate}
           burst={burst}
@@ -1096,6 +1103,10 @@ export function SetupWizard({
         <p className="setup-leaving-note" role="status" data-testid="setup-leaving-note">
           最初の Task を準備しています…
         </p>
+      )}
+
+      {introVariant && intro !== 'done' && (
+        <SetupLogoIntro variant={introVariant} onHandoff={onIntroHandoff} onDone={endIntro} />
       )}
 
       <section className="setup-content">
