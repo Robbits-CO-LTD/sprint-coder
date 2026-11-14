@@ -50,9 +50,18 @@ pub(crate) fn read_ancestor_evidence(
     let in_view = entry.identity.in_view.is_some();
     // That view is bounded by the root only while the root is in it, so a
     // root that is not stops the read before any climb (the view no longer
-    // shows what the proof was measured in).
-    if in_view && !crate::tree::walk::walker_source::root_in_view(&root) {
-        return Err(super::resolve_match::stale_ref_error(entry));
+    // shows what the proof was measured in). A root whose place in the view
+    // could not be read stops it too, as an identity that could not be
+    // confirmed (which may be retried), not as a stale ref.
+    if in_view {
+        match crate::tree::walk::walker_source::root_in_view(&root) {
+            Some(true) => {}
+            Some(false) => return Err(super::resolve_match::stale_ref_error(entry)),
+            None => {
+                deadline.ensure_remaining()?;
+                return Err(identity_unknown_error(entry));
+            }
+        }
     }
     // The desktop, for telling a climb that went past the root (the root
     // left the view meanwhile) from one that met it.

@@ -23,8 +23,9 @@ fn the_view_below_a_root_reported_offscreen_is_empty() {
     fixture.minimize();
     std::thread::sleep(std::time::Duration::from_millis(250));
     let root = root_from_hwnd(fixture.handle(), deadline()).expect("the fixture root resolves");
-    assert!(
-        !root_in_view(&root),
+    assert_eq!(
+        root_in_view(&root),
+        Some(false),
         "a minimized root is reported offscreen"
     );
 
@@ -57,11 +58,39 @@ fn the_view_below_a_root_reported_onscreen_is_read() {
     bootstrap();
     let fixture = LocalFixture::create().expect("the fixture window is created");
     let root = root_from_hwnd(fixture.handle(), deadline()).expect("the fixture root resolves");
-    if !root_in_view(&root) {
+    if root_in_view(&root) != Some(true) {
         // The fixture is placed where this desktop reports it offscreen; the
         // case above is the one this guard is for.
         return;
     }
     let walk = UiaTreeSource::for_visible_root(&root).expect("a visible source");
     assert!(walk.first_child(&root).is_ok());
+}
+
+/// A root whose place in the view could not be read is not walked, but the
+/// step answers a failed read (which a caller may retry), never the end of an
+/// empty view: the elements below it are unread, not absent.
+#[test]
+fn the_view_below_a_root_that_could_not_be_read_is_a_failed_read_not_an_empty_view() {
+    bootstrap();
+    let fixture = LocalFixture::create().expect("the fixture window is created");
+    let root = root_from_hwnd(fixture.handle(), deadline()).expect("the fixture root resolves");
+
+    let unread = UiaTreeSource::for_visible_root(&root)
+        .expect("a visible source")
+        .with_root_view(None);
+    assert!(
+        unread
+            .first_child(&root)
+            .is_err_and(|failure| !failure.is_exhaustion() && !failure.is_absence())
+    );
+
+    let offscreen = UiaTreeSource::for_visible_root(&root)
+        .expect("a visible source")
+        .with_root_view(Some(false));
+    assert!(
+        offscreen
+            .first_child(&root)
+            .is_err_and(|failure| failure.is_exhaustion())
+    );
 }

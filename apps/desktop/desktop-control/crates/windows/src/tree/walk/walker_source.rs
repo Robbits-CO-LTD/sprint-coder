@@ -368,7 +368,7 @@ mod imp {
         /// For a source of the visible elements: whether its root itself is
         /// in that view (reported onscreen). A root that is not leaves the
         /// view empty (see [`root_in_view`]).
-        root_in_view: bool,
+        root_in_view: Option<bool>,
     }
 
     /// Whether `root` is itself in the view of visible elements: its provider
@@ -379,10 +379,16 @@ mod imp {
     /// root (the desktop), and stepping to a sibling there leaves the root:
     /// measured on a minimized WinForms host, whose root reports offscreen
     /// while its children do not, the walk reached the next top-level window,
-    /// of another process, after the host's last child. An unreadable answer
-    /// is not onscreen.
-    pub(crate) fn root_in_view(root: &UIAElement) -> bool {
-        read_one(root, TreeProperty::IsOffscreen).flag() == Some(false)
+    /// of another process, after the host's last child.
+    ///
+    /// `Some(true)` is a root read as onscreen and `Some(false)` one read as
+    /// offscreen. `None` is an answer that could not be read (a provider that
+    /// timed out): nothing below such a root is read either, but that is a
+    /// failed read, which may be retried, not a view known to be empty.
+    pub(crate) fn root_in_view(root: &UIAElement) -> Option<bool> {
+        read_one(root, TreeProperty::IsOffscreen)
+            .flag()
+            .map(|offscreen| !offscreen)
     }
 
     /// A walker over the elements the window shows: the raw view without every
@@ -438,6 +444,14 @@ mod imp {
             let mut source = Self::for_visible_root(root)?;
             source.plain_navigation = true;
             Ok(source)
+        }
+
+        /// Replaces what was read of the root's place in the view, for a test
+        /// of the answers a root read offscreen or not read at all leads to.
+        #[cfg(test)]
+        pub(crate) fn with_root_view(mut self, root_in_view: Option<bool>) -> Self {
+            self.root_in_view = root_in_view;
+            self
         }
 
         /// Runs `call` with the client's per-call bound lowered to what is left
@@ -572,7 +586,7 @@ mod imp {
                 properties: &TreeProperty::WALK_SET,
                 plain_navigation: false,
                 visible: false,
-                root_in_view: true,
+                root_in_view: Some(true),
             })
         }
 
@@ -620,9 +634,18 @@ mod imp {
         type Node = UIAElement;
 
         fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
-            // A view whose root is not in it is empty (`for_visible_root`).
-            if !self.root_in_view {
-                return Err(UiaFailure::Sentinel(crate::tree::automation::ERR_NONE));
+            // A view whose root is not in it is empty (`for_visible_root`). A
+            // root whose place in the view could not be read is not walked
+            // either, but as a read that failed, never as an empty view: the
+            // elements below it are unread, not absent.
+            match self.root_in_view {
+                Some(true) => {}
+                Some(false) => {
+                    return Err(UiaFailure::Sentinel(crate::tree::automation::ERR_NONE));
+                }
+                None => {
+                    return Err(UiaFailure::Sentinel(crate::tree::automation::ERR_TIMEOUT));
+                }
             }
             match &self.cache {
                 Some(request) if !self.plain_navigation => {
