@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The bounded sibling enumeration and child-index path descent the locator
 //! anchor drives.
 //!
@@ -85,8 +86,19 @@ pub(crate) fn read_children<S: TreeSource>(
         if elements.len() >= limit {
             break;
         }
-        match source.next_sibling(&current) {
-            Ok(sibling) => current = sibling,
+        // A sibling known to be outside `element`'s list ends the list here:
+        // what was read is still a prefix of it, so an index past it lands
+        // nowhere. A check that could not be read is a failed sibling step,
+        // classified like any other, so a transient provider failure is
+        // retried instead of settling the ref as stale.
+        let next = source.next_sibling(&current).and_then(|sibling| {
+            source
+                .sibling_in_view(element, &sibling)
+                .map(|in_view| in_view.then_some(sibling))
+        });
+        match next {
+            Ok(None) => break,
+            Ok(Some(sibling)) => current = sibling,
             Err(failure) if failure.is_exhaustion() => break,
             Err(failure) => return classified(failure, elements, policy, policy.sibling_context),
         }

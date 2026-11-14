@@ -34,6 +34,10 @@ struct EnumerationFaults {
     first_child: HashSet<i32>,
     next_sibling: HashSet<i32>,
     first_child_delay: HashMap<i32, std::time::Duration>,
+    /// Siblings the view reports outside the list they were reached from.
+    outside_view: HashSet<i32>,
+    /// Siblings whose membership of the list could not be read.
+    unreadable_view: HashSet<i32>,
 }
 
 /// An in-memory enumerator that answers on the same trait the live UI
@@ -121,6 +125,22 @@ impl FakeTree {
         self
     }
 
+    /// Makes the view report `node` outside the list it is reached from as a
+    /// sibling (what a view of visible elements answers once it stepped past
+    /// the element it lists, into another window).
+    pub(crate) fn outside_view(mut self, node: i32) -> Self {
+        self.faults.outside_view.insert(node);
+        self
+    }
+
+    /// Makes the check of whether `node` belongs to the list it is reached
+    /// from fail (a provider that did not answer), which is not an answer
+    /// that it is outside.
+    pub(crate) fn unreadable_view(mut self, node: i32) -> Self {
+        self.faults.unreadable_view.insert(node);
+        self
+    }
+
     fn alias_of(&self, node: i32) -> i32 {
         self.alias.get(&node).copied().unwrap_or(node)
     }
@@ -144,6 +164,13 @@ impl TreeSource for FakeTree {
             return Err(REAL_FAILURE);
         }
         self.next.get(node).copied().ok_or(EXHAUSTION)
+    }
+
+    fn sibling_in_view(&self, _parent: &i32, sibling: &i32) -> Result<bool, UiaFailure> {
+        if self.faults.unreadable_view.contains(sibling) {
+            return Err(REAL_FAILURE);
+        }
+        Ok(!self.faults.outside_view.contains(sibling))
     }
 
     fn identity(&self, node: &i32) -> NodeKey {

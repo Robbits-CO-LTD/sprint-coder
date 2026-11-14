@@ -231,8 +231,22 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
                     }
                     let next = self.source.next_sibling(&current);
                     elements.push(current);
+                    // A sibling outside `node`'s list (the view stepped past
+                    // `node`) is dropped, never read or visited, and the list
+                    // stops there as not whole. A check that could not be
+                    // read drops the sibling too, as a failed step.
+                    let next = next.and_then(|sibling| {
+                        self.source
+                            .sibling_in_view(node, &sibling)
+                            .map(|in_view| in_view.then_some(sibling))
+                    });
                     match next {
-                        Ok(sibling) => current = sibling,
+                        Ok(None) => {
+                            self.stats.reads.health.cannot_complete += 1;
+                            complete = false;
+                            break;
+                        }
+                        Ok(Some(sibling)) => current = sibling,
                         Err(failure) if failure.is_exhaustion() => break,
                         Err(failure) => {
                             self.record(
@@ -418,3 +432,7 @@ fn retained_edge_certainty(prefix_certain: &mut bool, retained: bool) -> bool {
 #[cfg(test)]
 #[path = "walker_cached_children_tests.rs"]
 mod cached_children_tests;
+
+#[cfg(test)]
+#[path = "view_bound_tests.rs"]
+mod view_bound_tests;

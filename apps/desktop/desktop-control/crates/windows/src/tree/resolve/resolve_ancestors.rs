@@ -47,7 +47,40 @@ pub(crate) fn read_ancestor_evidence(
     // The ancestors are read in the view they were recorded in: a view proof
     // recorded them among the visible elements, where an offscreen container
     // between the element and its visible ancestors is not a level.
-    let walker = if entry.identity.in_view.is_some() {
+    let in_view = entry.identity.in_view.is_some();
+    // That view is bounded by the root only while the root is in it, so a
+    // root that is not stops the read before any climb (the view no longer
+    // shows what the proof was measured in). A root whose place in the view
+    // could not be read stops it too, as an identity that could not be
+    // confirmed (which may be retried), not as a stale ref. The read is a
+    // live call to the provider, so it is bounded by the deadline like the
+    // climb below: a provider that stalls cannot hold it past the deadline.
+    if in_view {
+        let read = with_transaction_timeout(&client, deadline, || {
+            crate::tree::walk::walker_source::root_in_view(&root)
+        });
+        match read {
+            None => return Err(deadline.timeout_error()),
+            Some(Some(true)) => {}
+            Some(Some(false)) => return Err(super::resolve_match::stale_ref_error(entry)),
+            Some(None) => {
+                deadline.ensure_remaining()?;
+                return Err(identity_unknown_error(entry));
+            }
+        }
+    }
+    // The desktop, for telling a climb that went past the root (the root
+    // left the view meanwhile) from one that met it.
+    let desktop = if in_view {
+        Some(
+            client
+                .get_root_element()
+                .map_err(|error| uia_error(&error, "read the desktop element"))?,
+        )
+    } else {
+        None
+    };
+    let walker = if in_view {
         crate::tree::walk::walker_source::visible_view_walker(&client)?
     } else {
         client
@@ -68,13 +101,24 @@ pub(crate) fn read_ancestor_evidence(
                     if same_element(&client, &parent, &root) {
                         return Step::End;
                     }
+                    // A window's only ancestor is the desktop, so a climb in
+                    // the view that meets the desktop passed the root: it is
+                    // not read, and the chain cannot be confirmed.
+                    if desktop.as_ref().is_some_and(|desktop| {
+                        client.compare_elements(&parent.0, desktop).unwrap_or(false)
+                    }) {
+                        return Step::Failed;
+                    }
                     let (properties, _) = read_cached_set(&parent, &TreeProperty::IDENTITY_SET);
                     let label = read_label(&parent, true);
                     let vocabulary = walk_vocabulary(&properties, &label);
                     let evidence = properties.locator_evidence(vocabulary);
                     Step::Ancestor(parent, evidence)
                 }
-                Err(error) if failure_of(&error).is_exhaustion() => Step::End,
+                // In the view, running out of parents without meeting the
+                // root is a climb that went past it too.
+                Err(error) if failure_of(&error).is_exhaustion() && !in_view => Step::End,
+                Err(error) if failure_of(&error).is_exhaustion() => Step::Failed,
                 Err(_) => Step::Failed,
             }
         });

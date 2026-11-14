@@ -91,6 +91,24 @@ pub trait TreeSource {
         None
     }
 
+    /// Whether `sibling`, which `next_sibling` just answered while `parent`'s
+    /// child list was enumerated, still belongs to that list. A list that
+    /// meets one that does not is cut there: the sibling is not kept, and the
+    /// list does not count as whole. Only a view that can step outside the
+    /// element it lists (the view of visible elements) answers false.
+    ///
+    /// `Ok(false)` is a sibling known to be outside the list. `Err` is a
+    /// check that could not be read (a provider that timed out): the sibling
+    /// is not kept either, but the caller reports a read that failed, which
+    /// may be retried, rather than a list that ended.
+    fn sibling_in_view(
+        &self,
+        _parent: &Self::Node,
+        _sibling: &Self::Node,
+    ) -> Result<bool, UiaFailure> {
+        Ok(true)
+    }
+
     fn identity(&self, node: &Self::Node) -> NodeKey;
 
     /// Compares two elements when neither carries a runtime id.

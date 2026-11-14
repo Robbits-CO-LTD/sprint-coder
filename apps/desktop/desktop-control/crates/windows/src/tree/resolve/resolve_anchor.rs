@@ -84,7 +84,7 @@ fn resolve_locator_anchor_once(
     // A path a view proof recorded counts positions among the visible elements,
     // so it is descended in that view.
     let source = if entry.identity.in_view.is_some() {
-        UiaTreeSource::for_visible_descent(&root)?
+        UiaTreeSource::for_visible_descent(&root, deadline)?
     } else {
         UiaTreeSource::for_descent(&root)?
     };
