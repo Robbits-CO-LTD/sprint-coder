@@ -286,7 +286,8 @@ export class MockRuntimeAdapter {
             : input.includes('コマンドテスト')
               ? { mockFixture: 'command' as const }
               : {}),
-          ...(teamFixtureActive ? { mockTeamFixture: true } : {}),
+          // Only the fixed Team scenario calls Team tools; any other mock Turn is given none.
+          ...(teamFixtureActive ? { mockTeamFixture: true, teamTools: true } : {}),
         }) ?? startMockTurnCatalog(this.toolBroker, toolContext);
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
       // The fixed three-Worker orchestration is an E2E fixture, never a fallback for a natural

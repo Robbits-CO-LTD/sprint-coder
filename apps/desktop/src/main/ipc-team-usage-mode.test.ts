@@ -8,6 +8,9 @@ import type { StartedTurn } from './persistence';
 import type { RuntimeHostClient } from './runtime-host';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
 import { teamUsageGuidance } from './team-usage-mode';
+import { ManagedCodingHarness } from './provider-workspace-tools';
+import { TEAM_TOOL_NAMES } from './team-tools';
+import type { TeamCoordinator } from './team-coordinator';
 import type * as ProviderEgressModule from './provider-egress';
 
 vi.mock('electron', () => ({
@@ -62,6 +65,9 @@ function createHarness(
   options: {
     teamSkillReady?: boolean;
     leaderMcp?: LeaderMcpOption | undefined;
+    /** A real managed catalog (with the Team tools registered) instead of the fixed one. */
+    managedCodingHarness?: ManagedCodingHarness;
+    projectId?: string | null;
   } = {},
 ) {
   const resources = new TurnStreamingResources(vi.fn());
@@ -72,9 +78,11 @@ function createHarness(
     cancel: vi.fn(async () => undefined),
   });
   const grok = host();
+  const claude = host();
+  const codex = host();
   const persistence = {
     getActiveTurnId: () => 'turn-1',
-    getTask: () => ({ id: 'task-1', projectId: null }),
+    getTask: () => ({ id: 'task-1', projectId: options.projectId ?? null }),
     getPermissionPolicy: () => ({ preset: 'ask', policyEpoch: 1 }),
     getEffort: () => 'high',
     getCodexEffort: () => '',
@@ -111,10 +119,17 @@ function createHarness(
   const handleRuntimeFailure = vi.fn();
   const mockRuntime = { start: vi.fn() };
   const teamRequiredTurns = new Set<string>();
+  const startManagedTurn = vi.fn(
+    (...args: Parameters<ManagedCodingHarness['startTurn']>): ToolCatalogSnapshot =>
+      options.managedCodingHarness?.startTurn(...args) ?? catalog,
+  );
+  const attachManagedTools = vi.fn(() => true);
   Object.assign(router, {
     turnStreamingResources: resources,
     persistence,
     grokRuntime: grok,
+    claudeRuntime: claude,
+    codexRuntime: codex,
     canceledRuntimeTurns: new Set(),
     quarantinedRuntimeTasks: new Set(),
     quarantinedRuntimeKinds: new Set(),
@@ -125,11 +140,11 @@ function createHarness(
     assertTurnWorkspaceHealthy: vi.fn(async () => undefined),
     pushRuntimeStatus: vi.fn(),
     prepareContext,
-    managedCodingHarness: { startTurn: vi.fn(() => catalog) },
+    managedCodingHarness: { startTurn: startManagedTurn },
     registerLeaderMcp,
     registerManagedMcp,
     prepareTurnImageAttachments: async () => undefined,
-    teamMcpBridge: { unregister: vi.fn(), attachManagedTools: vi.fn(() => true) },
+    teamMcpBridge: { unregister: vi.fn(), attachManagedTools },
     teamSkillReady: options.teamSkillReady ?? true,
     teamRequiredTurns,
     mockRuntime,
@@ -138,6 +153,10 @@ function createHarness(
   return {
     router,
     grok,
+    claude,
+    codex,
+    startManagedTurn,
+    attachManagedTools,
     registerLeaderMcp,
     registerManagedMcp,
     prepareContext,
@@ -339,6 +358,130 @@ describe('Team usage mode in dispatch', () => {
     expect(h.registerLeaderMcp).not.toHaveBeenCalled();
     expect(h.prepareContext).toHaveBeenCalledWith('task-1', 'turn-1', false);
     expect(h.grok.start).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('which Leader Turns are given the Team tools', () => {
+  // Found on a real claude Leader at 言った時だけ: an ordinary Turn's `--allowedTools` listed 13
+  // team_* tools from the managed catalog, and team_get_status ran.
+  const harnesses: ManagedCodingHarness[] = [];
+  afterEach(async () => {
+    for (const harness of harnesses.splice(0)) await harness.dispose();
+  });
+  function realCatalog(): ManagedCodingHarness {
+    const harness = new ManagedCodingHarness({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'allow', reason: 'test' }),
+      team: { coordinator: {} as TeamCoordinator },
+    });
+    harnesses.push(harness);
+    return harness;
+  }
+  const names = (tools: readonly { name: string }[] | undefined) =>
+    (tools ?? []).map(({ name }) => name);
+  const teamNamesIn = (tools: readonly { name: string }[] | undefined) =>
+    names(tools).filter((name) => TEAM_TOOL_NAMES.has(name));
+  const cli = (kind: CliKind) => ({
+    runtimeKind: kind,
+    modelSelection: {
+      connectionId: `builtin:${kind}-cli`,
+      requestedProvider: kind === 'claude' ? 'anthropic' : kind === 'grok' ? 'xai' : 'openai',
+      requestedModel: `${kind}-test`,
+    },
+  });
+  const ordinaryLeaderMcp: LeaderMcpOption = {
+    socketPath: '\\\\.\\pipe\\team-test',
+    token: 'leader-token',
+    guidance: 'memory guidance',
+    toolNames: ['project_memory_remember'],
+  };
+
+  it.each(['claude', 'grok', 'codex'] as const)(
+    'gives a plain %s Turn no Team tool',
+    async (kind) => {
+      const h = createHarness({ managedCodingHarness: realCatalog() });
+      await h.router.startSelectedRuntime(startedTurn(cli(kind)));
+      expect(h.handleRuntimeFailure).not.toHaveBeenCalled();
+      expect(h.startManagedTurn.mock.calls[0]?.[2]).toMatchObject({ teamTools: false });
+      const snapshot = h.startManagedTurn.mock.results[0]?.value as ToolCatalogSnapshot;
+      expect(snapshot.entries.some(({ providerName }) => TEAM_TOOL_NAMES.has(providerName))).toBe(
+        false,
+      );
+      if (kind !== 'codex') {
+        // What reaches the CLI's `--allowedTools` and the MCP `tools/list`.
+        const managedTools = (h.registerManagedMcp.mock.calls[0] as unknown[] | undefined)?.[2] as
+          { name: string }[] | undefined;
+        expect(names(managedTools)).toContain('update_plan');
+        expect(teamNamesIn(managedTools)).toEqual([]);
+      }
+      expect(h[kind].start).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['claude', 'grok'] as const)(
+    'gives a %s Project Turn (Leader MCP without Team) no Team tool',
+    async (kind) => {
+      const h = createHarness({
+        managedCodingHarness: realCatalog(),
+        leaderMcp: ordinaryLeaderMcp,
+        projectId: 'project-1',
+      });
+      await h.router.startSelectedRuntime(startedTurn(cli(kind)));
+      expect(h.registerLeaderMcp).toHaveBeenCalledWith('turn-1', 'task-1', {
+        teamTurn: false,
+        skillCreatorTurn: false,
+        memoryTurn: true,
+      });
+      expect(h.startManagedTurn.mock.calls[0]?.[2]).toMatchObject({ teamTools: false });
+      const attached = h.attachManagedTools.mock.calls[0] as unknown[] | undefined;
+      expect(teamNamesIn(attached?.[1] as { name: string }[])).toEqual([]);
+      const teamMcp = h[kind].start.mock.calls[0]?.[7] as unknown as {
+        managedTools?: readonly { name: string }[];
+      };
+      expect(teamNamesIn(teamMcp.managedTools)).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['claude', 'a requested Team Turn', requested],
+    ['grok', 'a requested Team Turn', requested],
+    ['claude', 'an auto-offered Turn', () => offered('auto')],
+    ['grok', 'a proactive-offered Turn', () => offered('proactive')],
+  ] as const)('keeps the Team tools on %s for %s', async (kind, _label, turn) => {
+    const h = createHarness({ managedCodingHarness: realCatalog() });
+    await h.router.startSelectedRuntime({ ...turn(), ...cli(kind) });
+    expect(h.handleRuntimeFailure).not.toHaveBeenCalled();
+    expect(h.startManagedTurn.mock.calls[0]?.[2]).toMatchObject({ teamTools: true });
+    const attached = h.attachManagedTools.mock.calls[0] as unknown[] | undefined;
+    expect(teamNamesIn(attached?.[1] as { name: string }[])).toEqual(
+      expect.arrayContaining(['team_hire_worker', 'team_assign_tasks', 'team_get_status']),
+    );
+    const teamMcp = h[kind].start.mock.calls[0]?.[7] as unknown as {
+      managedTools?: readonly { name: string }[];
+    };
+    expect(teamNamesIn(teamMcp.managedTools)).toContain('team_hire_worker');
+  });
+
+  it('keeps the Team tools in a codex Team Turn catalog (its Team MCP serves them itself)', async () => {
+    const h = createHarness({ managedCodingHarness: realCatalog() });
+    await h.router.startSelectedRuntime({ ...requested(), ...cli('codex') });
+    expect(h.startManagedTurn.mock.calls[0]?.[2]).toMatchObject({ teamTools: true });
+    expect(h.registerLeaderMcp).toHaveBeenCalledWith('turn-1', 'task-1', {
+      teamTurn: true,
+      skillCreatorTurn: false,
+      memoryTurn: false,
+    });
+  });
+
+  it('gives an offered Turn no Team tool when its Team MCP could not be registered', async () => {
+    const h = createHarness({ managedCodingHarness: realCatalog(), leaderMcp: undefined });
+    await h.router.startSelectedRuntime({ ...offered('auto'), ...cli('claude') });
+    expect(h.startManagedTurn.mock.calls[0]?.[2]).toMatchObject({ teamTools: false });
+    const managedTools = (h.registerManagedMcp.mock.calls[0] as unknown[] | undefined)?.[2] as
+      { name: string }[] | undefined;
+    expect(teamNamesIn(managedTools)).toEqual([]);
   });
 });
 

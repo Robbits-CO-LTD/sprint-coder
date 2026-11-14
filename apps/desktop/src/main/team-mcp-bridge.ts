@@ -12,7 +12,12 @@ import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
+import {
+  executeTeamTool,
+  TEAM_TOOL_NAMES,
+  TEAM_TOOLS_UNAVAILABLE_MESSAGE,
+  type ExecuteTeamToolOptions,
+} from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
 import {
@@ -274,6 +279,16 @@ export type TeamMcpRegistration = Readonly<{
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
   initialWaitCursor?: number;
 }>;
+
+/** The managed tools a registration lists and runs: without Team, never a Team tool. */
+function offeredManagedTools(
+  registration: TeamMcpRegistration,
+): readonly RuntimeManagedToolDefinition[] {
+  const managedTools = registration.managedTools ?? [];
+  return registration.allowTeamTools === false
+    ? managedTools.filter(({ name }) => !TEAM_TOOL_NAMES.has(name))
+    : managedTools;
+}
 
 type Registered = TeamMcpRegistration & {
   /** Aborted when the registration ends (Turn cancel/finish/failure unregisters it, or it is
@@ -748,7 +763,7 @@ export class TeamMcpBridge {
             teamTools: registration.allowTeamTools !== false,
           },
           allowedTools: teamMcpToolNamesForCapabilities(registration),
-          managedTools: registration.managedTools ?? [],
+          managedTools: offeredManagedTools(registration),
           toolCatalogDigest: registration.managedToolCatalogDigest ?? null,
         },
       });
@@ -756,7 +771,13 @@ export class TeamMcpBridge {
     }
     const registration = peerRegistration;
     try {
-      const managedTool = registration.managedTools?.find(({ name }) => name === request.tool);
+      // Checked before either path, managed or native: a Turn not given Team never runs a Team
+      // tool, even one attached to its catalog or named without being listed.
+      if (registration.allowTeamTools === false && TEAM_TOOL_NAMES.has(request.tool))
+        throw new Error(TEAM_TOOLS_UNAVAILABLE_MESSAGE);
+      const managedTool = offeredManagedTools(registration).find(
+        ({ name }) => name === request.tool,
+      );
       // These side effects must never fall back to the native callbacks when a Turn omits its
       // managed catalog. The ToolBroker is the sole authorization boundary for both names.
       if (
@@ -799,7 +820,7 @@ export class TeamMcpBridge {
               })
           : registration.allowTeamTools === false
             ? (() => {
-                throw new Error('Team tools are not available for this Turn');
+                throw new Error(TEAM_TOOLS_UNAVAILABLE_MESSAGE);
               })()
             : await executeTeamTool(
                 this.coordinator,

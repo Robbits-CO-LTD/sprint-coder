@@ -44,6 +44,7 @@ import {
   TEAM_ASSIGN_TASKS_MAX,
   TEAM_ASSIGN_TASKS_MAX_BYTES,
   TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+  TEAM_CORE_MCP_TOOL_NAMES,
 } from '../runtime-host/team-mcp-tool-contract';
 
 const teamToolDefinition = (
@@ -285,6 +286,20 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
   TEAM_WAIT_REPORTS_TOOL,
   TEAM_STOP_WORKER_TOOL,
 ]);
+
+/**
+ * Every Team tool name, from the two lists that define them: the managed catalog's `TEAM_TOOLS`
+ * and the Team MCP's own tools. A Turn not given Team (`allowTeamTools: false`) gets none of these
+ * listed, and the Team MCP bridge refuses any of them it is still asked for.
+ */
+export const TEAM_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
+  ...TEAM_TOOLS.map(({ providerName }) => providerName),
+  ...TEAM_CORE_MCP_TOOL_NAMES,
+]);
+
+/** What a Leader not given Team this Turn is told when it calls a Team tool anyway. */
+export const TEAM_TOOLS_UNAVAILABLE_MESSAGE =
+  'このTurnではTeamを利用できません。Teamを使うには、利用者に「Teamで」と依頼してもらってください。';
 
 export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:

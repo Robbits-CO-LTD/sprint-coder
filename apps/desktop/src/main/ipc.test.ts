@@ -133,6 +133,7 @@ import {
   isCompleteProviderWorkspaceRead,
   isTrustedIpcSender,
   leaderMcpCapabilities,
+  leaderTurnTeamTools,
   listAvailableTeamRuntimeModels,
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
@@ -4911,6 +4912,12 @@ describe('Provider Team completion and model errors', () => {
         managedStartCalls: startManagedTurn.mock.calls.length,
       }),
     ).toHaveBeenCalledTimes(1);
+    // An API Leader's plain Turn is given no Team tool in its managed catalog.
+    expect(startManagedTurn).toHaveBeenCalledWith(
+      expect.anything(),
+      connection.providerId,
+      expect.objectContaining({ teamTools: false }),
+    );
     expect(dispatchManagedRuntimeTool).toHaveBeenCalledTimes(1);
     const deniedRequest = evaluate.mock.calls
       .map(([input]) => input['request'] as { resource: Record<string, unknown> })
@@ -6773,6 +6780,11 @@ describe('Provider Team completion and model errors', () => {
   it('derives Leader MCP Team capability only from the sealed Team Turn contract', () => {
     expect(leaderMcpCapabilities(true)).toEqual({ role: 'leader', allowTeamTools: true });
     expect(leaderMcpCapabilities(false)).toEqual({ role: 'leader', allowTeamTools: false });
+    // The managed catalog follows the same contract, and needs a way to reach the Team tools.
+    expect(leaderTurnTeamTools(true, true)).toBe(true);
+    expect(leaderTurnTeamTools(true, false)).toBe(false);
+    expect(leaderTurnTeamTools(false, true)).toBe(false);
+    expect(leaderTurnTeamTools(false, false)).toBe(false);
   });
 
   it('does not mislabel an external Provider model error as a Codex CLI error', () => {

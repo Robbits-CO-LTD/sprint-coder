@@ -888,6 +888,17 @@ export function leaderMcpCapabilities(teamTurn: boolean): TeamMcpToolCapabilitie
   };
 }
 
+/**
+ * Whether a Leader Turn's managed catalog has the Team tools (`team_*`), for every Runtime: only a
+ * Team Turn (`StartedTurn.teamTurn`, sealed with the context: asked Team for, offered it by
+ * 「Team の使い方」, or on a Task that has hired) that has a way to reach them — the Leader MCP
+ * registered with `leaderMcpCapabilities(teamTurn)` for a CLI Leader, the provider tool loop itself
+ * for an API Leader. Any other Turn gets none listed, and the Team MCP bridge refuses one called.
+ */
+export function leaderTurnTeamTools(teamTurn: boolean, teamToolsReachable: boolean): boolean {
+  return teamTurn && teamToolsReachable;
+}
+
 type InvokeEvent = IpcMainInvokeEvent;
 type PortBinding = { taskId: string; port: MessagePortMain };
 type ActiveRuntimeKind = RuntimeKind | 'provider';
@@ -5683,6 +5694,8 @@ export class IpcRouter {
         projectMemory: memoryTurn,
         skillDrafts: skillCreatorTurn,
         skillActivation: autoSkills.length > 0,
+        // The same answer the Leader MCP registration was given (`allowTeamTools: teamTurn`).
+        teamTools: leaderTurnTeamTools(teamTurn, teamMcp !== undefined),
       },
     );
     if (kind === 'codex' && teamMcp !== undefined) {
@@ -7628,6 +7641,7 @@ export class IpcRouter {
               projectMemory: memoryTurn,
               skillDrafts: skillCreatorTurn,
               skillActivation: autoSkills.length > 0,
+              teamTools: leaderTurnTeamTools(teamTurn, true),
             },
           )
         : undefined;
