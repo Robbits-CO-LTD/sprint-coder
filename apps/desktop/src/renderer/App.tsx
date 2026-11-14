@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import './index.css';
+import './sidebar.css';
 import './setup.css';
 import { useAppStore } from './store/appStore';
 import { Sidebar } from './components/Sidebar';

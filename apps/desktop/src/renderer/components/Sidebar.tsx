@@ -9,14 +9,19 @@ import {
 import {
   Archive,
   ArchiveRestore,
+  ArrowRightLeft,
   Check,
+  ChevronDown,
   MoreHorizontal,
+  Pencil,
   Pin,
   PinOff,
   Plus,
   Search,
   Settings,
   Square,
+  TriangleAlert,
+  X,
 } from './icons';
 import { useTaskBoundary } from './TaskBoundary';
 import type { ProjectSummary, TaskRunningWork, TaskSummary } from '../types/sprint-coder';
@@ -379,7 +384,22 @@ export function Sidebar({
             )}
           </>
         ) : !hasAnything ? (
-          <div className="sb-empty">Taskはまだありません</div>
+          query.trim() !== '' ? (
+            // A search that finds nothing is not an empty history: say so, and offer the way back.
+            <div className="sb-empty" role="status">
+              <p className="sb-empty-title">一致するProject・Taskはありません</p>
+              <button type="button" className="sb-empty-link" onClick={() => setQuery('')}>
+                検索をクリア
+              </button>
+            </div>
+          ) : (
+            <div className="sb-empty">
+              <p className="sb-empty-title">Taskはまだありません</p>
+              {/* Points at the key right above it; a second button here would be the window's
+                  third way to do the same thing. */}
+              <p className="sb-empty-hint">「新規タスク」から始められます。</p>
+            </div>
+          )
         ) : (
           <>
             {projection.activeProjects.length > 0 && <div className="sb-section">Projects</div>}
@@ -453,6 +473,7 @@ export function Sidebar({
                   onClick={() => setArchivedProjectsExpanded((value) => !value)}
                 >
                   Archived Projects ({projection.archivedProjects.length})
+                  <Chevron />
                 </button>
                 {(archivedProjectsExpanded || projection.forceArchivedProjectsExpanded) &&
                   projection.archivedProjects.map((group) => (
@@ -643,31 +664,49 @@ function ProjectGroup({
           onClick={onToggle}
           title={project.name}
         >
-          <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-          <span>{project.name}</span>
+          <Chevron />
+          <span className="sb-project-name">{project.name}</span>
           <span className="sb-count">{project.taskCount}</span>
         </button>
-        {onCreateTask && (
-          <button
-            type="button"
-            className="sb-project-new-task"
-            aria-label={`${project.name}にTaskを作成`}
-            title={`${project.name}にTaskを作成`}
-            onClick={onCreateTask}
-          >
-            <Plus size={14} />
-          </button>
-        )}
-        <details className="sb-menu">
-          <summary aria-label={`${project.name}のメニュー`} title="Projectメニュー">
-            <MoreHorizontal size={15} />
-          </summary>
-          <div className="sb-menu-popover">
-            {onRename && <button onClick={onRename}>名前を変更</button>}
-            {onArchive && <button onClick={onArchive}>アーカイブ</button>}
-            {onRestore && <button onClick={onRestore}>復元</button>}
-          </div>
-        </details>
+        {/* Shown in the count's place while the heading is pointed at or holds the focus. */}
+        <div className="sb-project-actions">
+          {onCreateTask && (
+            <button
+              type="button"
+              className="sb-project-new-task"
+              aria-label={`${project.name}にTaskを作成`}
+              title={`${project.name}にTaskを作成`}
+              onClick={onCreateTask}
+            >
+              <Plus size={14} />
+            </button>
+          )}
+          <details className="sb-menu">
+            <summary aria-label={`${project.name}のメニュー`} title="Projectメニュー">
+              <MoreHorizontal size={14} />
+            </summary>
+            <div className="sb-menu-popover">
+              {onRename && (
+                <button onClick={onRename}>
+                  <Pencil size={13} />
+                  名前を変更
+                </button>
+              )}
+              {onArchive && (
+                <button onClick={onArchive}>
+                  <Archive size={13} />
+                  アーカイブ
+                </button>
+              )}
+              {onRestore && (
+                <button onClick={onRestore}>
+                  <ArchiveRestore size={13} />
+                  復元
+                </button>
+              )}
+            </div>
+          </details>
+        </div>
       </div>
       {expanded && (
         <div className="sb-project-tasks">
@@ -699,6 +738,7 @@ function ArchivedTasks({
     <div className="sb-task-archive">
       <button type="button" aria-expanded={expanded} onClick={onToggle}>
         Archived ({tasks.length})
+        <Chevron />
       </button>
       {expanded && tasks.map((task) => <TaskRow key={task.id} task={task} {...rowProps} />)}
     </div>
@@ -722,7 +762,13 @@ export function TaskRow({
   const turnStatus = useAppStore((state) =>
     isActive ? state.turnByTask[task.id]?.status : task.activeTurnId ? 'running' : undefined,
   );
-  const activity = taskActivityState(turnStatus);
+  // Approvals reach the renderer only for the selected Task, so only its row can say it waits.
+  const awaitingApproval = useAppStore(
+    (state) => isActive && (state.approvalsByTask[task.id]?.length ?? 0) > 0,
+  );
+  const running = taskActivityState(turnStatus);
+  const activity: TaskActivityState =
+    running === 'running' && awaitingApproval ? 'waiting' : running;
   // Only an archive is held back while the Task moves; a restore never is.
   const blockingWork = task.archived ? null : taskArchiveBlockingWork(task, turnStatus);
   const archiveBlockedReason =
@@ -740,10 +786,14 @@ export function TaskRow({
         onClick={() => onSelect(task.id)}
         title={task.title}
       >
-        {task.pinned && <Pin size={12} />}
-        <span>{task.title || '無題のTask'}</span>
-        <TaskActivityIndicator activity={activity} />
-        {task.hasConversation === false && <span className="sb-unstarted">未開始</span>}
+        <span className="sb-item-title">{task.title || '無題のTask'}</span>
+        {/* One column at the row's end for everything the Task is, besides its title. The Task's
+            menu takes this place while the row is pointed at or holds the focus. */}
+        <span className="sb-item-meta">
+          {task.pinned && <Pin size={12} />}
+          {task.hasConversation === false && <span className="sb-unstarted">未開始</span>}
+          <TaskActivityIndicator activity={activity} />
+        </span>
       </button>
       {canManage && (
         <details
@@ -781,7 +831,10 @@ export function TaskRow({
             )}
             {commandsRunning && <StopTaskCommandsButton taskId={task.id} />}
             {canMove && (task.projectId !== null || activeProjects.length > 0) && (
-              <button onClick={() => onMove(task)}>Projectを移動</button>
+              <button onClick={() => onMove(task)}>
+                <ArrowRightLeft size={13} />
+                Projectを移動
+              </button>
             )}
           </div>
         </details>
@@ -792,11 +845,12 @@ export function TaskRow({
           {commandsRunning && <StopTaskCommandsButton taskId={task.id} />}
           <button
             type="button"
+            className="sb-task-notice-close"
             aria-label="お知らせを閉じる"
             title="閉じる"
             onClick={() => onDismissArchiveNotice?.()}
           >
-            ×
+            <X size={12} />
           </button>
         </div>
       )}
@@ -839,9 +893,19 @@ function StopTaskCommandsButton({ taskId }: { taskId: string }) {
   );
 }
 
-export type TaskActivityState = 'running' | 'completed' | null;
+/** The disclosure mark of everything in the sidebar that opens and closes; its turn is CSS's. */
+function Chevron() {
+  return (
+    <span className="sb-chevron" aria-hidden="true">
+      <ChevronDown size={12} />
+    </span>
+  );
+}
 
-export function taskActivityState(status: TurnStatus | undefined): TaskActivityState {
+/** `waiting`: the running Turn stands still until the person answers an approval. */
+export type TaskActivityState = 'running' | 'waiting' | 'completed' | null;
+
+export function taskActivityState(status: TurnStatus | undefined): 'running' | 'completed' | null {
   if (status === 'running' || status === 'canceling') return 'running';
   if (status === 'completed') return 'completed';
   return null;
@@ -857,6 +921,17 @@ export function TaskActivityIndicator({ activity }: { activity: TaskActivityStat
         aria-label="実行中"
         title="実行中"
       />
+    );
+  if (activity === 'waiting')
+    return (
+      <span
+        className="sb-task-activity sb-task-activity--waiting"
+        role="status"
+        aria-label="承認待ち"
+        title="承認待ち"
+      >
+        <TriangleAlert size={13} />
+      </span>
     );
   return (
     <span

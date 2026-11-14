@@ -24,6 +24,8 @@ import type { RGB } from './contrast';
 const cssPath = join(__dirname, '..', 'index.css');
 const css = readFileSync(cssPath, 'utf8');
 const tokens = parseRootCustomProperties(css);
+// The Task history panel's own rules live beside index.css; they use the same tokens.
+const sidebarCss = readFileSync(join(__dirname, '..', 'sidebar.css'), 'utf8');
 
 function tokenRgb(name: string): RGB {
   const value = tokens.get(name);
@@ -204,23 +206,25 @@ describe('opacity-dimmed text usages (real text, not decorative)', () => {
   // Placeholder text and de-emphasized list metadata are real, readable content (not disabled or
   // decorative) — WCAG's contrast SC still applies, even though the visual design intentionally
   // dims them below full --text-secondary strength via `opacity`.
-  const cases: Array<{ selector: string; bg: string; label: string }> = [
+  const cases: Array<{ selector: string; bg: string; label: string; source?: string }> = [
     { selector: '.composer-input::placeholder', bg: 'bg-elevated', label: 'Composer placeholder' },
     { selector: '.tlv-timeline small', bg: 'bg-panel', label: 'List View timeline metadata' },
     {
-      // `.sb-search` is now a recessed field filled with --bg-app rather than an outline on the
-      // sidebar's own --bg-panel, so that is the surface this placeholder has to clear.
+      // `.sb-search` is a recessed field: a part-transparent --bg-app over the sidebar, which is
+      // never lighter than --bg-app itself, so that is the surface this placeholder has to clear.
       selector: '.sb-search input::placeholder',
       bg: 'bg-app',
       label: 'Sidebar search placeholder',
+      source: sidebarCss,
     },
     // The hint now sits on its own --bg-panel plate rather than on a near-transparent tint of the
     // canvas, so --bg-panel is the surface its dimmed text has to clear.
     { selector: '.cc-hint', bg: 'bg-panel', label: 'Canvas keyboard-shortcut hint' },
   ];
 
-  it.each(cases)('$label ($selector) meets 4.5:1 on --$bg after opacity', ({ selector, bg }) => {
-    const opacity = findSelectorOpacity(css, selector);
+  it.each(cases)('$label ($selector) meets 4.5:1 on --$bg after opacity', (entry) => {
+    const { selector, bg } = entry;
+    const opacity = findSelectorOpacity(entry.source ?? css, selector);
     expect(opacity, `expected an opacity: declaration on ${selector}`).not.toBeNull();
     const effective = compositeOver(tokenRgb('text-secondary'), tokenRgb(bg), opacity!);
     const ratio = contrastRatio(effective, tokenRgb(bg));
