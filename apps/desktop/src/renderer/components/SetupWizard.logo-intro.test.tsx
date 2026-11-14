@@ -75,6 +75,8 @@ beforeEach(() => {
     ],
   });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => fakeContext());
+  // (The Setup also cuts the logo out of the icon for its own pictures; jsdom cannot encode it.)
+  vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,');
   // The app icon "loads" at once.
   vi.stubGlobal(
     'Image',

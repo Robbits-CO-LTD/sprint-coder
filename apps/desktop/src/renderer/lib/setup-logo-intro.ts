@@ -165,6 +165,30 @@ type TextAssets = {
   digitH: number;
 };
 
+/** Where the logo sits in the app icon, for anything else that shows the logo itself. */
+export const LOGO_SOURCE_SIZE = SOURCE_SIZE;
+export const LOGO_CROP = CROP;
+
+/**
+ * Makes the icon's dark plate transparent in `pixels` (RGBA, in place), leaving the coloured
+ * logo with a soft edge. Returns how many pixels of logo are left (none: not the icon).
+ */
+export function keepLogoPixels(pixels: Uint8ClampedArray): number {
+  let area = 0;
+  for (let p = 0; p < pixels.length; p += 4) {
+    const r = pixels[p]!;
+    const g = pixels[p + 1]!;
+    const b = pixels[p + 2]!;
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+    // The plate is a dark grey; the logo is coloured or bright. A soft edge, not a hard cut.
+    const k = clamp01((Math.max(chroma - 25, lum - 110) - 4) / 34) * (pixels[p + 3]! / 255);
+    pixels[p + 3] = Math.round(k * 255);
+    if (k > 0.5) area += 1;
+  }
+  return area;
+}
+
 function contextOf(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
   try {
     return canvas.getContext('2d');
@@ -603,19 +627,7 @@ export class SetupLogoIntro {
     const data = sctx.getImageData(CROP.x, CROP.y, CROP.w, CROP.h);
     const pixels = data?.data;
     if (!pixels || pixels.length < CROP.w * CROP.h * 4) return false;
-    let area = 0;
-    for (let p = 0; p < pixels.length; p += 4) {
-      const r = pixels[p]!;
-      const g = pixels[p + 1]!;
-      const b = pixels[p + 2]!;
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
-      // The plate is a dark grey; the logo is coloured or bright. A soft edge, not a hard cut.
-      const k = clamp01((Math.max(chroma - 25, lum - 110) - 4) / 34) * (pixels[p + 3]! / 255);
-      pixels[p + 3] = Math.round(k * 255);
-      if (k > 0.5) area += 1;
-    }
-    if (area < 200) return false;
+    if (keepLogoPixels(pixels) < 200) return false;
     const glyph = makeCanvas(CROP.w, CROP.h);
     glyph.getContext('2d')?.putImageData(data, 0, 0);
     this.glyph = glyph;

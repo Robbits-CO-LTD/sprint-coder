@@ -1,4 +1,5 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useLogoGlyph } from '../lib/logo-glyph';
 import type { SetupStepId } from '../lib/setup-flow';
 import { useRetype, usePhaseCycle } from '../lib/setup-motion';
 import { SETUP_PREVIEW_QUESTION, setupPreviewReply } from '../lib/setup-preview';
@@ -10,20 +11,22 @@ import {
   optionLabel,
 } from '../lib/setup-options';
 import type { AssistantPreferences, TeamUsageMode } from '../lib/setup-settings';
+import { SetupTeamField } from '../lib/setup-team-field';
 
-// The left half of the Setup — the stage. One scene per step, drawn with HTML, SVG and CSS keyframes
-// (transform and opacity only), over a slowly turning light whose colours follow the step. Scenes
-// that tell a story in phases use `usePhaseCycle`, which owns a single timer; everything else is
-// CSS that the reduced-motion rules switch off. With motion reduced, each scene shows its finished
-// picture, so nothing it says is lost.
+// The Setup's stage: one picture per step, in the logo film's own language — lanes of light in
+// the logo's three colours that fan out and come together. Drawn with HTML, SVG and CSS keyframes
+// (transform and opacity only); the Team step's field of runners is a small canvas
+// (lib/setup-team-field.ts). Scenes that tell a story in phases use `usePhaseCycle`, which owns a
+// single timer; everything else is CSS that the reduced-motion rules switch off. With motion
+// reduced, each scene shows its finished picture, so nothing it says is lost. The whole stage is
+// decoration (aria-hidden by its parent): everything it shows is also said among the choices.
 
 type Readiness = 'ready' | 'authentication_required' | 'unavailable';
-type Who = 'leader' | 'worker-1' | 'worker-2' | 'worker-3';
 
 export type SetupStageProps = {
   step: SetupStepId;
   animate: boolean;
-  /** Bumped on every choice; each new value sets off one burst of sparks on the stage. */
+  /** Bumped on every choice; each new value sets off one pulse of light on the stage. */
   burst: number;
   /** The opening is still running: the welcome scene waits for its cue. */
   introPlaying: boolean;
@@ -38,16 +41,12 @@ export type SetupStageProps = {
 
 export function SetupStage(props: SetupStageProps) {
   return (
-    <>
-      <span className="setup-aurora" aria-hidden="true" />
-      <span className="setup-bloom" aria-hidden="true" />
-      <div className="setup-stage" data-step={props.step}>
-        <div key={props.step} className="setup-scene">
-          {sceneFor(props)}
-        </div>
-        {props.animate && props.burst > 0 && <SetupBurst key={props.burst} />}
+    <div className="setup-stage" data-step={props.step}>
+      <div key={props.step} className="setup-scene">
+        {sceneFor(props)}
       </div>
-    </>
+      {props.animate && props.burst > 0 && <SetupBurst key={props.burst} />}
+    </div>
   );
 }
 
@@ -70,40 +69,22 @@ function sceneFor(props: SetupStageProps): ReactNode {
   }
 }
 
-/** Sparks thrown out from the middle of the stage when something is chosen. One-shot. */
+/** A pulse of light across the stage when something is chosen: three streaks, left to right, in
+ * the logo's colours. One-shot. */
 function SetupBurst() {
   return (
     <span className="setup-burst" aria-hidden="true">
-      {Array.from({ length: 14 }, (_, index) => (
-        <i
-          key={index}
-          style={
-            {
-              '--a': `${index * (360 / 14) + (index % 2) * 9}deg`,
-              '--len': `${120 + ((index * 41) % 90)}px`,
-              '--c': BURST_COLORS[index % BURST_COLORS.length],
-            } as CSSProperties
-          }
-        />
+      {[0, 1, 2].map((index) => (
+        <i key={index} style={{ '--k': index } as CSSProperties} />
       ))}
     </span>
   );
 }
 
-const BURST_COLORS = ['var(--accent)', 'var(--ai-accent)', 'var(--success)', 'var(--warning)'];
+/** The five rows a fan of lanes spreads over, in % of the scene's height. */
+const FAN_ROWS = [16, 33, 50, 67, 84] as const;
 
-function Pointer({ who }: { who: Who }) {
-  return (
-    <svg viewBox="0 0 8 11" aria-hidden="true">
-      <path
-        d="M0.5 0.5 L0.5 9.5 L2.9 7.3 L4.5 10.6 L6 10 L4.4 6.6 L7.5 6.6 Z"
-        style={{ fill: `var(--setup-${who})` }}
-      />
-    </svg>
-  );
-}
-
-// ---------- ようこそ: a request is typed, code pours out, and the team's cursors dive in ----------
+// ---------- ようこそ: one request fans out to a team, and comes back as one result ----------
 
 const WELCOME_STORIES = [
   { request: 'ログイン画面を作って', result: 'login' },
@@ -111,34 +92,16 @@ const WELCOME_STORIES = [
   { request: '動かない所を直して', result: 'fixed' },
 ] as const;
 
-/** When the window's typing starts during the opening (ms after it began). */
+/** When the typing starts during the opening (ms after it began). */
 const WELCOME_CUE_MS = 1900;
 
-/** typing → code → team → result. */
-const WELCOME_PHASES = [800, 650, 2600, 2400] as const;
+/** typing → the request fans out → the team works → the result. */
+const WELCOME_PHASES = [900, 700, 2400, 2600] as const;
 
-const CODE_LINES: readonly (readonly number[])[] = [
-  [16, 30],
-  [8, 20, 26],
-  [8, 12, 34],
-  [16, 22, 12],
-  [8, 28],
-  [8, 14, 20],
-  [16, 26],
-  [8, 18, 22],
-  [16, 12],
-];
-
-/** Where each cursor comes from (off the window) and where it lands, in % of the window's width. */
-const WELCOME_CURSORS: readonly { who: Who; from: [number, number]; to: [number, number] }[] = [
-  { who: 'leader', from: [104, 92], to: [30, 37] },
-  { who: 'worker-1', from: [-16, 64], to: [60, 47] },
-  { who: 'worker-2', from: [74, -14], to: [20, 58] },
-  { who: 'worker-3', from: [112, 30], to: [48, 68] },
-];
+const WELCOME_TEAM = ['仲間', '仲間', 'AI', '仲間', '仲間'] as const;
 
 function WelcomeScene({ animate, held }: { animate: boolean; held: boolean }) {
-  // During the opening the window arrives empty and the typing starts on its cue (or at once, if the
+  // During the opening the scene arrives empty and the typing starts on its cue (or at once, if the
   // opening is skipped).
   const [cued, setCued] = useState(false);
   useEffect(() => {
@@ -154,55 +117,37 @@ function WelcomeScene({ animate, held }: { animate: boolean; held: boolean }) {
   const typing = typed !== story.request;
   return (
     <div className="setup-sw" data-phase={animate && !running ? 0 : phase}>
-      <span className="setup-sw-ghost setup-sw-ghost--a" />
-      <span className="setup-sw-ghost setup-sw-ghost--b" />
-      <div className="setup-sw-window">
-        <div className="setup-sw-bar">
-          <i />
-          <i />
-          <i />
-        </div>
-        <div className="setup-sw-prompt">
-          <span className="setup-sw-you">あなた</span>
-          <span className="setup-sw-typed">
-            {typed}
-            <i className={`setup-sw-caret${typing ? ' is-typing' : ''}`} />
-          </span>
-        </div>
-        <div className="setup-sw-code">
-          {CODE_LINES.map((tokens, line) => (
-            <span key={line} className="setup-sw-line" style={{ '--i': line } as CSSProperties}>
-              {tokens.map((width, token) => (
-                <i key={token} style={{ width: `${width}%` }} data-t={(line + token) % 4} />
-              ))}
-            </span>
-          ))}
-        </div>
-        {WELCOME_CURSORS.map((cursor, index) => (
-          <span
-            key={cursor.who}
-            className="setup-sw-cursor"
-            style={
-              {
-                '--x0': `${cursor.from[0]}cqw`,
-                '--y0': `${cursor.from[1]}cqw`,
-                '--x1': `${cursor.to[0]}cqw`,
-                // Below the prompt, whatever the window's width: a fixed drop plus a share of it.
-                '--y1': `calc(100px + ${cursor.to[1] - 26}cqw)`,
-                '--k': index,
-              } as CSSProperties
-            }
-          >
-            <i className="setup-sw-spark" />
-            <Pointer who={cursor.who} />
-            <b style={{ background: `var(--setup-${cursor.who})` }}>
-              {index === 0 ? 'AI' : '仲間'}
-            </b>
-          </span>
+      <svg className="setup-sw-flow" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {FAN_ROWS.map((y, k) => (
+          <g key={y} data-tone={k < 2 ? 0 : k === 2 ? 1 : 2} style={{ '--k': k } as CSSProperties}>
+            <path className="setup-sw-out" d={`M34 50C40 50 38 ${y} 44 ${y}`} pathLength={1} />
+            <path className="setup-sw-in" d={`M66 ${y}C72 ${y} 70 50 76 50`} pathLength={1} />
+          </g>
         ))}
+      </svg>
+      <div className="setup-sw-ask">
+        <span className="setup-sw-tag">あなたの言葉</span>
+        <span className="setup-sw-typed">
+          {typed}
+          <i className={`setup-sw-caret${typing ? ' is-typing' : ''}`} />
+        </span>
       </div>
+      <ul className="setup-sw-team">
+        {WELCOME_TEAM.map((who, k) => (
+          <li
+            key={k}
+            data-tone={k < 2 ? 0 : k === 2 ? 1 : 2}
+            style={{ '--k': k, '--y': `${FAN_ROWS[k]}%` } as CSSProperties}
+          >
+            <b>{who}</b>
+            <span className="setup-sw-bar">
+              <i />
+            </span>
+          </li>
+        ))}
+      </ul>
       <div className={`setup-sw-result setup-sw-result--${story.result}`}>
-        <span className="setup-sw-result-tag">できあがり</span>
+        <span className="setup-sw-tag">できあがり</span>
         {story.result === 'login' && (
           <span className="setup-sw-login">
             <i />
@@ -229,36 +174,58 @@ function WelcomeScene({ animate, held }: { animate: boolean; held: boolean }) {
   );
 }
 
-// ---------- AI: looking around this computer for AIs ----------
+// ---------- AI: the AIs on this computer, as the logo's three nodes joining into one ----------
 
 const AI_NODES = [
-  { key: 'codex', label: 'Codex' },
-  { key: 'claude', label: 'Claude Code' },
-  { key: 'grok', label: 'Grok' },
+  { key: 'codex', label: 'Codex', y: 20 },
+  { key: 'claude', label: 'Claude Code', y: 50 },
+  { key: 'grok', label: 'Grok', y: 80 },
 ] as const;
 
 function ScanScene({ runtime }: { runtime: SetupStageProps['runtime'] }) {
   return (
     <div className="setup-ss">
-      <span className="setup-ss-ring setup-ss-ring--1" />
-      <span className="setup-ss-ring setup-ss-ring--2" />
-      <span className="setup-ss-sweep" />
+      <svg className="setup-ss-flow" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {AI_NODES.map((node, index) => (
+          <g
+            key={node.key}
+            className={`setup-ss-lane setup-ss-lane--${runtime[node.key]}`}
+            data-tone={index}
+            style={{ '--i': index } as CSSProperties}
+          >
+            <path d={`M30 ${node.y}C52 ${node.y} 48 50 70 50`} pathLength={1} />
+            <path
+              className="setup-ss-glint"
+              d={`M30 ${node.y}C52 ${node.y} 48 50 70 50`}
+              pathLength={1}
+            />
+          </g>
+        ))}
+      </svg>
+      {AI_NODES.map((node, index) => (
+        <span
+          key={node.key}
+          className={`setup-ss-node setup-ss-node--${runtime[node.key]}`}
+          data-tone={index}
+          style={{ '--i': index, '--y': `${node.y}%` } as CSSProperties}
+        >
+          <i>
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              {runtime[node.key] === 'ready' && <path d="M3.6 8.4 6.7 11.3 12.4 4.9" />}
+              {runtime[node.key] === 'authentication_required' && <path d="M8 3.6v5.6M8 11.9v.4" />}
+              {runtime[node.key] === 'unavailable' && <path d="M4.6 8h6.8" />}
+            </svg>
+          </i>
+          <b>{node.label}</b>
+        </span>
+      ))}
       <span className="setup-ss-core">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="3.5" y="4.5" width="17" height="11.5" rx="2" />
           <path d="M8.5 19.5h7M12 16v3.5" />
         </svg>
+        <b>このパソコン</b>
       </span>
-      {AI_NODES.map((node, index) => (
-        <span
-          key={node.key}
-          className={`setup-ss-node setup-ss-node--${runtime[node.key]}`}
-          style={{ '--i': index } as CSSProperties}
-        >
-          <i />
-          <b>{node.label}</b>
-        </span>
-      ))}
     </div>
   );
 }
@@ -281,7 +248,7 @@ function ReplyScene({
     optionLabel(DEPTH_OPTIONS, preferences.depth),
   ];
   return (
-    <div className="setup-sr">
+    <div className="setup-sr" data-tone={preferences.tone}>
       <p className="setup-sr-title">返事の見本</p>
       <div className="setup-sr-chat">
         <p className="setup-sr-bubble setup-sr-bubble--you">{SETUP_PREVIEW_QUESTION}</p>
@@ -306,101 +273,47 @@ function ReplyScene({
   );
 }
 
-// ---------- Team: cursors actually working through a board ----------
+// ---------- Team: a field of runners, as many as the choice puts to work ----------
 
-/** One full loop of the board, in ms. */
-const TEAM_CYCLE = [5200] as const;
-
-type TeamRun = {
-  label: string;
-  who: Who;
-  /** Start and length as a fraction of the loop. */
-  start: number;
-  length: number;
-  /** Arrives part-way through, flying in. */
-  join?: boolean;
+/** The line under the field: [small lead-in, the large figure, the rest]. */
+const TEAM_HEADLINE: Readonly<Record<TeamUsageMode, readonly [string, string, string]>> = {
+  explicit: ['ひとつずつ', '1', '人の AI が、順番に進める'],
+  auto: ['ふだんは', '1＋', '人。大きな作業には、仲間が加わる'],
+  proactive: ['最大', '100', 'の AI が、同時に動く'],
 };
-
-const TEAM_RUNS: Readonly<Record<TeamUsageMode, readonly TeamRun[]>> = {
-  // One AI, one job after another.
-  explicit: [
-    { label: '作業 1', who: 'leader', start: 0.04, length: 0.24 },
-    { label: '作業 2', who: 'leader', start: 0.32, length: 0.24 },
-    { label: '作業 3', who: 'leader', start: 0.6, length: 0.24 },
-  ],
-  // Small things alone; when a big job lands, teammates dive in and split it.
-  auto: [
-    { label: '小さな作業', who: 'leader', start: 0.04, length: 0.18 },
-    { label: '大きな作業', who: 'leader', start: 0.36, length: 0.42 },
-    { label: '', who: 'worker-1', start: 0.42, length: 0.36, join: true },
-    { label: '', who: 'worker-2', start: 0.47, length: 0.31, join: true },
-  ],
-  // Everyone from the start, side by side.
-  proactive: [
-    { label: '作業 1', who: 'leader', start: 0.04, length: 0.42 },
-    { label: '作業 2', who: 'worker-1', start: 0.05, length: 0.36 },
-    { label: '作業 3', who: 'worker-2', start: 0.06, length: 0.46 },
-    { label: '作業 4', who: 'worker-3', start: 0.07, length: 0.39 },
-  ],
-};
-
-const TEAM_CAPTION: Readonly<Record<TeamUsageMode, string>> = {
-  explicit: 'AI が 1 人で、順番に片付けます',
-  auto: '小さな作業は 1 人で。大きな作業には仲間が飛び込みます',
-  proactive: '最初から、みんなで並んで進めます',
-};
-
-const ms = (fraction: number) => `${Math.round(fraction * TEAM_CYCLE[0])}ms`;
 
 function TeamScene({ mode, animate }: { mode: TeamUsageMode; animate: boolean }) {
-  const { cycle } = usePhaseCycle(TEAM_CYCLE, animate);
-  const runs = TEAM_RUNS[mode];
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fieldRef = useRef<SetupTeamField | null>(null);
+  const modeRef = useRef(mode);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const field = new SetupTeamField(canvas, { animate, mode: modeRef.current });
+    fieldRef.current = field;
+    return () => {
+      field.destroy();
+      fieldRef.current = null;
+    };
+  }, [animate]);
+  useEffect(() => {
+    modeRef.current = mode;
+    fieldRef.current?.setMode(mode);
+  }, [mode]);
+  const [lead, figure, rest] = TEAM_HEADLINE[mode];
   return (
     <div className="setup-st" data-mode={mode}>
-      <span className="setup-st-ghost" />
-      <div className="setup-st-board" key={`${mode}-${cycle}`}>
-        {mode === 'auto' && (
-          <span className="setup-st-big" style={{ '--at': ms(0.3) } as CSSProperties}>
-            大きな作業が来た！
-          </span>
-        )}
-        {runs.map((run, index) => (
-          <div
-            key={index}
-            className={`setup-st-row${run.join ? ' is-join' : ''}${mode === 'auto' && index > 0 ? ' is-big' : ''}`}
-            style={
-              {
-                '--start': ms(run.start),
-                '--len': ms(run.length),
-                '--c': `var(--setup-${run.who})`,
-              } as CSSProperties
-            }
-          >
-            <span className="setup-st-label">{run.label}</span>
-            <span className="setup-st-track">
-              <span className="setup-st-fill">
-                <span className="setup-st-cursor">
-                  <Pointer who={run.who} />
-                  <b>{run.who === 'leader' ? 'AI' : '仲間'}</b>
-                </span>
-              </span>
-            </span>
-            <span className="setup-st-done">
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M3.5 8.4 6.6 11.4 12.5 4.8" />
-              </svg>
-            </span>
-          </div>
-        ))}
-      </div>
-      <p className="setup-st-caption" key={`caption-${mode}`}>
-        {TEAM_CAPTION[mode]}
+      <canvas ref={canvasRef} className="setup-st-field" />
+      <p className="setup-st-count" key={mode}>
+        <small>{lead}</small>
+        <b>{figure}</b>
+        <span>{rest}</span>
       </p>
     </div>
   );
 }
 
-// ---------- 細かい好み: a card that becomes "your" AI as the choices change ----------
+// ---------- 細かい好み: a greeting that becomes "your" AI as the choices change ----------
 
 function greetingFor(preferences: AssistantPreferences, assistantSupported: boolean): string {
   if (!assistantSupported) return 'こんにちは。今日も一緒に進めましょう。';
@@ -443,34 +356,43 @@ function DetailsScene({
   chips.push(accessLabel);
   return (
     <div className="setup-sd">
-      <div className="setup-sd-card">
-        <span className="setup-sd-avatar" aria-hidden="true">
-          {initial ? <b key={initial}>{initial}</b> : <i />}
-        </span>
-        <p className="setup-sd-greeting" key={greeting}>
-          {greeting}
-        </p>
-        <p className="setup-sd-chips">
-          {chips.map((chip) => (
-            <span key={chip}>{chip}</span>
-          ))}
-        </p>
-        <span className={`setup-sd-sound${soundEnabled ? ' is-on' : ''}`} aria-hidden="true">
-          <i />
-          <i />
-          <i />
-          <i />
-        </span>
-      </div>
+      <span className="setup-sd-avatar" aria-hidden="true">
+        {initial ? <b key={initial}>{initial}</b> : <i />}
+      </span>
+      <p className="setup-sd-greeting" key={greeting}>
+        {greeting}
+      </p>
+      <p className="setup-sd-chips">
+        {chips.map((chip) => (
+          <span key={chip}>{chip}</span>
+        ))}
+      </p>
+      <span className={`setup-sd-sound${soundEnabled ? ' is-on' : ''}`} aria-hidden="true">
+        <i />
+        <i />
+        <i />
+        <i />
+      </span>
     </div>
   );
 }
 
-// ---------- 作業場所 ----------
+// ---------- 作業場所: the lanes lead to one folder ----------
 
 function WorkspaceScene({ folderLabel }: { folderLabel: string | null }) {
   return (
     <div className={`setup-sf${folderLabel ? ' is-picked' : ''}`}>
+      <svg className="setup-sf-flow" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {FAN_ROWS.map((y, k) => (
+          <path
+            key={y}
+            data-tone={k < 2 ? 0 : k === 2 ? 1 : 2}
+            style={{ '--k': k } as CSSProperties}
+            d={`M0 ${y}C24 ${y} 22 50 46 50`}
+            pathLength={1}
+          />
+        ))}
+      </svg>
       <span className="setup-sf-folder">
         <span className="setup-sf-back" />
         <span className="setup-sf-files">
@@ -485,54 +407,61 @@ function WorkspaceScene({ folderLabel }: { folderLabel: string | null }) {
   );
 }
 
-// ---------- 完了 ----------
+// ---------- 完了: the film's last picture again — the lanes, the logo, the beam ----------
+
+/** Eight lanes into each of the logo's three nodes: [where it leaves the left edge, the node], in
+ * % of the lanes' own box (three logo-heights tall, centred on the logo). */
+const DONE_LANES: readonly (readonly [number, number, number])[] = [0, 1, 2].flatMap((node) =>
+  Array.from({ length: 8 }, (_, k): readonly [number, number, number] => [
+    node,
+    node * 33.3 + 2 + k * 4.2,
+    [37.7, 50, 62.4][node]!,
+  ]),
+);
 
 function DoneScene() {
+  const glyph = useLogoGlyph();
   return (
     <div className="setup-sk">
-      <span className="setup-sk-rays" />
-      <span className="setup-sk-wave setup-sk-wave--1" />
-      <span className="setup-sk-wave setup-sk-wave--2" />
-      <span className="setup-sk-wave setup-sk-wave--3" />
-      <span className="setup-sk-ring">
-        <svg viewBox="0 0 64 64" aria-hidden="true">
-          <circle cx="32" cy="32" r="29" pathLength={1} />
-          <path d="M19 33.5 28 42 45.5 23" pathLength={1} />
+      <span className="setup-sk-mark">
+        <svg className="setup-sk-lanes" viewBox="0 0 100 100" preserveAspectRatio="none">
+          {DONE_LANES.map(([node, from, to], index) => (
+            <path
+              key={index}
+              data-tone={node}
+              style={{ '--k': index % 8 } as CSSProperties}
+              d={`M0 ${from}C55 ${from} 60 ${to} 100 ${to}`}
+              pathLength={1}
+            />
+          ))}
         </svg>
+        <span className="setup-sk-beam" />
+        <span className="setup-sk-halo" />
+        {glyph !== null && <img className="setup-sk-glyph" src={glyph} alt="" />}
       </span>
     </div>
   );
 }
 
-// ---------- Confetti (done step only, motion allowed only) ----------
-
-const CONFETTI_COLORS = [
-  'var(--accent)',
-  'var(--ai-accent)',
-  'var(--success)',
-  'var(--warning)',
-  'var(--setup-worker-2)',
-  'var(--info)',
-];
+// ---------- Sparks off the arrow's tip (done step only, motion allowed only) ----------
 
 /** Deterministic, so a snapshot of the page is stable; varied enough to look scattered. */
-function confettiPiece(index: number): CSSProperties {
-  const angle = (index * 137.508 * Math.PI) / 180;
-  const reach = 140 + ((index * 53) % 170);
+function sparkPiece(index: number): CSSProperties {
+  const angle = ((index * 137.508) % 100) - 50; // degrees either side of straight ahead
+  const reach = 120 + ((index * 53) % 220);
   return {
-    '--dx': `${Math.round(Math.cos(angle) * reach)}px`,
-    '--dy': `${Math.round(Math.sin(angle) * reach * 0.75 - 90)}px`,
-    '--r': `${(index * 71) % 360}deg`,
-    '--d': `${(index % 7) * 28}ms`,
-    '--c': CONFETTI_COLORS[index % CONFETTI_COLORS.length],
+    '--a': `${angle}deg`,
+    '--len': `${reach}px`,
+    '--d': `${(index % 9) * 34}ms`,
+    '--tone': index % 3,
   } as CSSProperties;
 }
 
 export function SetupConfetti() {
   return (
     <div className="setup-confetti" aria-hidden="true" data-testid="setup-confetti">
-      {Array.from({ length: 44 }, (_, index) => (
-        <i key={index} className={index % 3 === 0 ? 'is-round' : ''} style={confettiPiece(index)} />
+      {Array.from({ length: 30 }, (_, index) => (
+        <i key={index} data-tone={index % 3} style={sparkPiece(index)} />
       ))}
     </div>
   );
