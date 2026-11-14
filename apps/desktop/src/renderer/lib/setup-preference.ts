@@ -1,4 +1,12 @@
-export const SETUP_COMPLETE_KEY = 'sprint-coder:setup-complete-v1';
+/**
+ * Which Setup a person has been through. Raise it when the Setup changes enough that everyone
+ * should see it again: the mark of an older one is no longer read, so the next launch shows the
+ * new Setup to every profile — the first run's form when there is no Task yet, and the form
+ * without the Workspace step (the one "セットアップをもう一度" opens) to people who already work
+ * here. v1 was the Setup before #1238.
+ */
+export const SETUP_VERSION = 2;
+export const SETUP_COMPLETE_KEY = `sprint-coder:setup-complete-v${SETUP_VERSION}`;
 
 function storage(): Storage | null {
   try {
@@ -45,10 +53,17 @@ export function subscribeSetupShowing(listener: () => void): () => void {
   return () => showingListeners.delete(listener);
 }
 
-export function shouldShowSetupWizard(input: {
+/** What the launch shows: the first run's Setup (no Task yet), the same Setup without the Workspace
+ * step over the app (Tasks already exist, as after an update), or nothing (this Setup was already
+ * gone through). `null` until the app has read its Tasks, so nothing is decided on a guess. */
+export type LaunchSetup = 'first-run' | 'returning' | 'none';
+
+export function launchSetupFor(input: {
   initialized: boolean;
   taskCount: number;
   setupComplete: boolean;
-}): boolean {
-  return input.initialized && input.taskCount === 0 && !input.setupComplete;
+}): LaunchSetup | null {
+  if (!input.initialized) return null;
+  if (input.setupComplete) return 'none';
+  return input.taskCount === 0 ? 'first-run' : 'returning';
 }

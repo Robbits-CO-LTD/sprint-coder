@@ -36,10 +36,12 @@ import {
 import type { TeamViewPreference } from './lib/team-view-preference';
 import {
   SETUP_REPLAY_EVENT,
+  launchSetupFor,
   readSetupComplete,
   setSetupShowing,
-  shouldShowSetupWizard,
+  writeSetupComplete,
 } from './lib/setup-preference';
+import type { LaunchSetup } from './lib/setup-preference';
 import { SetupReplayDialog, SetupWizard } from './components/SetupWizard';
 import { focusAfterFirstSetup, focusAfterSetupReplay } from './lib/setup-focus';
 import { unlockSoundEffects } from './lib/ui-sound';
@@ -129,7 +131,8 @@ export default function App() {
       if (view.taskId === store.selectedTaskId) store.requestGraphOpen(view.taskId);
     });
   }, []);
-  const [setupComplete] = useState(readSetupComplete);
+  // Decided once, as soon as the Tasks are known (render-time, below), and kept for this run.
+  const [launchSetup, setLaunchSetup] = useState<LaunchSetup | null>(null);
   const [setupReveal, setSetupReveal] = useState(false);
   const setupWasVisibleRef = useRef(false);
   const openSettings = useCallback(() => {
@@ -145,6 +148,7 @@ export default function App() {
   // its replay form. The workspace underneath stays mounted (and inert) so closing returns to it.
   const [setupReplayOpen, setSetupReplayOpen] = useState(false);
   const closeSetupReplay = useCallback(() => {
+    writeSetupComplete();
     setSetupReplayOpen(false);
     // Back to the button that led here; if it is gone or hidden (inert), to the next sensible place.
     requestAnimationFrame(() => focusAfterSetupReplay());
@@ -282,11 +286,25 @@ export default function App() {
   }
 
   const showTeamCanvas = (teamCanvasActive || exiting) && selectedTask !== null;
-  const showSetupWizard = shouldShowSetupWizard({
-    initialized,
-    taskCount: tasks.length,
-    setupComplete,
-  });
+  // The launch's Setup, decided the first time the Tasks are known (render-time sync, as above).
+  if (launchSetup === null && initialized) {
+    setLaunchSetup(
+      launchSetupFor({ initialized, taskCount: tasks.length, setupComplete: readSetupComplete() }),
+    );
+  }
+  // The first run's Setup holds the whole window until its "最初の Task を始める" makes a Task.
+  const showSetupWizard = launchSetup === 'first-run' && tasks.length === 0;
+  // People who already have Tasks get the same Setup over the app, without the Workspace step.
+  const launchReplayOpen = launchSetup === 'returning';
+  // However it ends (×, Escape, "完了", or the browser closing the dialog), this Setup counts as
+  // gone through: it is not shown at the next launch. Nothing else is written here — the Setup
+  // itself stores only the steps changed and continued from.
+  const closeLaunchReplay = useCallback(() => {
+    writeSetupComplete();
+    setLaunchSetup('none');
+    // Into the Task that was open before, as after the first run.
+    requestAnimationFrame(() => focusAfterFirstSetup());
+  }, []);
 
   useEffect(() => {
     if (showSetupWizard) {
@@ -295,6 +313,8 @@ export default function App() {
     }
     if (!setupWasVisibleRef.current) return;
     setupWasVisibleRef.current = false;
+    // Done for this run too: removing every Task later does not bring the first run back.
+    setLaunchSetup('none');
     setSetupReveal(true);
     // The Setup took the focus with it: it goes to the Composer, so the first Task can be written
     // at once. Tried on the next frame (the Composer only), and again once the reveal is over (then
@@ -316,16 +336,16 @@ export default function App() {
     const onReplay = () => {
       setSettingsOpen(false);
       // During the first-run Setup (reachable through "接続を設定"), the Setup is already showing.
-      if (!showSetupWizard) setSetupReplayOpen(true);
+      if (!showSetupWizard && !launchReplayOpen) setSetupReplayOpen(true);
     };
     window.addEventListener(SETUP_REPLAY_EVENT, onReplay);
     return () => window.removeEventListener(SETUP_REPLAY_EVENT, onReplay);
-  }, [showSetupWizard]);
+  }, [launchReplayOpen, showSetupWizard]);
 
   // Settings offers "セットアップをもう一度" only while no Setup is on screen.
   useEffect(() => {
-    setSetupShowing(showSetupWizard || setupReplayOpen);
-  }, [setupReplayOpen, showSetupWizard]);
+    setSetupShowing(showSetupWizard || setupReplayOpen || launchReplayOpen);
+  }, [launchReplayOpen, setupReplayOpen, showSetupWizard]);
   useEffect(() => () => setSetupShowing(false), []);
 
   const requestEnterTeam = useCallback(() => {
@@ -555,8 +575,12 @@ export default function App() {
           {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
           layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
           across the Chat<->Team morph. */}
-          {setupReplayOpen && (
-            <SetupReplayDialog onClose={closeSetupReplay} onOpenSettings={openSettings} />
+          {launchReplayOpen ? (
+            <SetupReplayDialog onClose={closeLaunchReplay} onOpenSettings={openSettings} />
+          ) : (
+            setupReplayOpen && (
+              <SetupReplayDialog onClose={closeSetupReplay} onOpenSettings={openSettings} />
+            )
           )}
           <SettingsDialog
             open={settingsOpen}
