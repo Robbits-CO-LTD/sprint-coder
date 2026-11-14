@@ -320,7 +320,15 @@ type AppState = {
   unassignTaskFromProject(taskId: string): Promise<TaskSummary | null>;
   renameTask(taskId: string, title: string): Promise<void>;
   setPinned(taskId: string, pinned: boolean): Promise<void>;
-  setArchived(taskId: string, archived: boolean): Promise<void>;
+  /** Resolves to null when done, or to the reason Main refused (an archive of a Task still moving). */
+  setArchived(taskId: string, archived: boolean): Promise<string | null>;
+  /** Reads afresh from Main what still moves in the Task, and keeps it on the Task (issue #1225). */
+  refreshTaskRunningWork(taskId: string): Promise<void>;
+  /**
+   * Stops every command still running in the Task, those earlier Turns left running included.
+   * Resolves to null when stopped, or to the reason it could not be confirmed.
+   */
+  stopTaskCommands(taskId: string): Promise<string | null>;
   setGoal(taskId: string, goal: string): Promise<void>;
   startGoal(taskId: string, objective: string): Promise<boolean>;
   restoreFailedGoalDraft(taskId: string, expectedRevision: number, text: string): boolean;
@@ -2144,7 +2152,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!trimmed) return;
       try {
         const updated = await window.sprintCoder.tasks.rename(taskId, trimmed);
-        set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
+        set((state) => ({
+          tasks: state.tasks.map((t) => (t.id === taskId ? keepTaskActivity(updated, t) : t)),
+        }));
         if (updated.projectId !== null) void get().refreshProjects();
       } catch (err) {
         set({ error: describeError(err) });
@@ -2155,7 +2165,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!window.sprintCoder || typeof window.sprintCoder.tasks.setPinned !== 'function') return;
       try {
         const updated = await window.sprintCoder.tasks.setPinned(taskId, pinned);
-        set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
+        set((state) => ({
+          tasks: state.tasks.map((t) => (t.id === taskId ? keepTaskActivity(updated, t) : t)),
+        }));
         if (updated.projectId !== null) void get().refreshProjects();
       } catch (err) {
         set({ error: describeError(err) });
@@ -2163,13 +2175,53 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async setArchived(taskId: string, archived: boolean) {
-      if (!window.sprintCoder || typeof window.sprintCoder.tasks.setArchived !== 'function') return;
+      if (!window.sprintCoder || typeof window.sprintCoder.tasks.setArchived !== 'function')
+        return null;
       try {
         const updated = await window.sprintCoder.tasks.setArchived(taskId, archived);
-        set((state) => ({ tasks: state.tasks.map((t) => (t.id === taskId ? updated : t)) }));
+        set((state) => ({
+          tasks: state.tasks.map((t) =>
+            t.id !== taskId
+              ? t
+              : // Main archives only a Task with nothing moving in it (issue #1225).
+                archived
+                ? { ...updated, activeTurnId: null, runningWork: null }
+                : keepTaskActivity(updated, t),
+          ),
+        }));
         if (updated.projectId !== null) void get().refreshProjects();
+        return null;
       } catch (err) {
-        set({ error: describeError(err) });
+        const message = describeError(err);
+        set({ error: message });
+        return message;
+      }
+    },
+
+    async refreshTaskRunningWork(taskId: string) {
+      if (typeof window.sprintCoder?.tasks?.runningWork !== 'function') return;
+      try {
+        const runningWork = await window.sprintCoder.tasks.runningWork(taskId);
+        set((state) => ({
+          tasks: state.tasks.map((t) => (t.id === taskId ? { ...t, runningWork } : t)),
+        }));
+      } catch {
+        // The snapshot stays as it was; Main checks afresh on the archive itself.
+      }
+    },
+
+    async stopTaskCommands(taskId: string) {
+      if (typeof window.sprintCoder?.commands?.stopTask !== 'function')
+        return '実行中のコマンドを停止できませんでした。';
+      try {
+        const runningWork = await window.sprintCoder.commands.stopTask(taskId);
+        set((state) => ({
+          tasks: state.tasks.map((t) => (t.id === taskId ? { ...t, runningWork } : t)),
+        }));
+        return null;
+      } catch (err) {
+        void get().refreshTaskRunningWork(taskId);
+        return describeError(err);
       }
     },
 
@@ -3129,6 +3181,22 @@ function errorCode(err: unknown): string | undefined {
     return (err as { code: string }).code;
   }
   return undefined;
+}
+
+/**
+ * A Task returned by a rename, pin or archive carries no activity snapshot (Main sends that with
+ * `tasks:updated`), so the one already held is kept rather than read as "nothing moves".
+ */
+function keepTaskActivity(updated: TaskSummary, previous: TaskSummary): TaskSummary {
+  return {
+    ...updated,
+    ...(updated.activeTurnId === undefined && previous.activeTurnId !== undefined
+      ? { activeTurnId: previous.activeTurnId }
+      : {}),
+    ...(updated.runningWork === undefined && previous.runningWork !== undefined
+      ? { runningWork: previous.runningWork }
+      : {}),
+  };
 }
 
 function describeError(err: unknown): string {

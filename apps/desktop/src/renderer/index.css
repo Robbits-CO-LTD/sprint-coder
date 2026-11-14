@@ -4365,6 +4365,78 @@ body.is-resizing-sidebar iframe {
 .sb-menu-popover button:focus-visible {
   background: var(--bg-hover);
 }
+.sb-menu-popover button[aria-disabled='true'] {
+  color: var(--text-secondary);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.sb-menu-note {
+  max-width: 220px;
+  margin: 0 9px 6px 29px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: normal;
+}
+.sb-row:has(.sb-task-notice) {
+  flex-wrap: wrap;
+}
+.sb-task-notice {
+  flex-basis: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 2px 6px 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-xs);
+  background: var(--danger-wash);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.sb-task-notice span {
+  flex: 1;
+}
+.sb-task-notice button {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+}
+.sb-task-notice:has(.sb-stop-commands) {
+  flex-wrap: wrap;
+}
+.sb-task-notice:has(.sb-stop-commands) span {
+  flex: 1 1 calc(100% - 24px);
+}
+.sb-task-notice .sb-menu-note {
+  order: 4;
+  flex-basis: 100%;
+  margin: 0;
+}
+.sb-menu-note--error {
+  color: var(--danger);
+}
+.sb-menu-popover button.sb-stop-commands,
+.sb-task-notice button.sb-stop-commands {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-xs);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+.sb-menu-popover button.sb-stop-commands {
+  margin: 0 9px 6px 29px;
+}
+.sb-task-notice button.sb-stop-commands {
+  order: 3;
+}
 
 .project-dialog {
   width: min(440px, calc(100vw - 32px));

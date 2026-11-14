@@ -1156,10 +1156,12 @@ export function registerManagedCommandControlTools(
 }
 
 /**
- * Records a stopped background run's activity as canceled. The Task's archive (and a permission
- * change) cancels the Task's activities in persistence before it stops their runs
- * (`quarantineStaleBackgroundInTransaction`), so the activity of a run stopped that way is already
- * canceled; it stays as it is, and the run's end is not recorded over it a second time.
+ * Records a stopped background run's activity as canceled. A permission change cancels the Task's
+ * activities in persistence before it stops their runs (`quarantineBackgroundForPolicyEpoch`), so
+ * the activity of a run stopped that way is already canceled; it stays as it is, and the run's end
+ * is not recorded over it a second time. (The Task's archive is refused while one of its commands
+ * runs, issue #1225, so it stops none; a desktop-control run that slipped through is stopped by
+ * `endArchivedTaskDesktopControl` after the archive canceled its activity.)
  */
 function cancelBackgroundActivity(
   persistence: CommandToolBoundary['persistence'],

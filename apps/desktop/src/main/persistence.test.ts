@@ -79,6 +79,7 @@ import {
   SqliteEditSagaLeaseGuard,
   SqlitePersistenceClient,
   SteerStaleError,
+  TaskStillRunningError,
   TurnActiveError,
   validateCanvasCamera,
   validateCanvasNodePositions,
@@ -12254,6 +12255,157 @@ else
       },
       persistenceBridgeTimeoutMs + 5_000,
     );
+  });
+
+if (runsWithElectronAbi)
+  describe('archiving a Task that still moves (issue #1225)', () => {
+    function refusedWork(action: () => unknown): unknown {
+      try {
+        action();
+      } catch (error) {
+        expect(error).toBeInstanceOf(TaskStillRunningError);
+        return (error as TaskStillRunningError).work;
+      }
+      throw new Error('archive was not refused');
+    }
+
+    it('refuses while a Turn runs, archives once it ended, and always restores', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('running Turn');
+      const turn = persistence.startTurn(task.id, 'まだ動いている');
+      expect(persistence.getTaskRecordedWork(task.id)).toEqual({
+        turn: true,
+        team: false,
+        workers: 0,
+      });
+      expect(refusedWork(() => persistence.setArchived(task.id, true))).toEqual({
+        turn: true,
+        team: false,
+        workers: 0,
+        commands: 0,
+      });
+      // The refusal changed nothing.
+      expect(persistence.getTask(task.id).archived).toBe(false);
+      for (const stage of ['understanding', 'planning', 'executing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      expect(() => persistence.setArchived(task.id, true)).toThrow(TaskStillRunningError);
+      persistence.cancelTurn(task.id, turn.turnId);
+      expect(persistence.getTaskRecordedWork(task.id).turn).toBe(false);
+      expect(persistence.setArchived(task.id, true).archived).toBe(true);
+      // A restore is never refused, even with a Turn running in the archived Task again.
+      persistence.startTurn(task.id, 'archive 後の発言');
+      expect(persistence.setArchived(task.id, false).archived).toBe(false);
+      persistence.close();
+    });
+
+    it('refuses while the Team has a Worker not yet stopped, after the Leader’s Turn ended', () => {
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const task = persistence.createTask('running Team');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const workers = ['reviewer', 'tester'].map((role) =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          role,
+          objective: `${role} の作業`,
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'summary',
+        }),
+      );
+      expect(refusedWork(() => persistence.setArchived(task.id, true))).toEqual({
+        turn: false,
+        team: true,
+        workers: 2,
+        commands: 0,
+      });
+      persistence.transitionWorkerState(workers[0]!.id, 'stopped');
+      expect(persistence.getTaskRecordedWork(task.id)).toEqual({
+        turn: false,
+        team: true,
+        workers: 1,
+      });
+      persistence.transitionWorkerState(workers[1]!.id, 'stopped');
+      expect(persistence.getTaskRecordedWork(task.id)).toEqual({
+        turn: false,
+        team: false,
+        workers: 0,
+      });
+      expect(persistence.setArchived(task.id, true).archived).toBe(true);
+      persistence.close();
+    });
+
+    it('counts a Worker hired again into an ended Team while it starts (the Team still reads completed)', () => {
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const task = persistence.createTask('Team hired again');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const hire = (role: string) =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          role,
+          objective: `${role} の作業`,
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'summary',
+        });
+      const first = hire('reviewer');
+      persistence.transitionWorkerState(first.id, 'stopped');
+      for (const state of ['active', 'winding_down', 'completed'] as const)
+        persistence.transitionTeamState(team.id, state);
+      // The ended Team holds nothing that moves.
+      expect(persistence.getTaskRecordedWork(task.id)).toEqual({
+        turn: false,
+        team: false,
+        workers: 0,
+      });
+      // The Leader hires again: the Worker starts while the Team is re-formed only afterwards
+      // (`TeamCoordinator.hireWorker`: `spawning`, `runtime.start`, then `reformCompletedTeam`).
+      const again = hire('tester');
+      persistence.transitionWorkerState(again.id, 'spawning');
+      expect(persistence.getTeam(team.id).state).toBe('completed');
+      expect(refusedWork(() => persistence.setArchived(task.id, true))).toEqual({
+        turn: false,
+        team: true,
+        workers: 1,
+        commands: 0,
+      });
+      expect(persistence.getTask(task.id).archived).toBe(false);
+      persistence.close();
+    });
+
+    it('archives a Task with nothing moving, canceling only the record of a run already gone', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('idle Task');
+      const turn = persistence.startTurn(task.id, 'dev server を起動');
+      persistence.createBackgroundActivity({
+        id: 'activity-gone',
+        taskId: task.id,
+        ownerThreadId: task.id,
+        ownerTurnId: turn.turnId,
+        kind: 'command',
+        wakePolicy: 'nextSafePoint',
+        requiredCapabilities: ['shell.execute'],
+        volumeQuotaBytes: 64_000,
+        createdAt: '2026-11-14T00:00:00.000Z',
+      });
+      persistence.transitionBackgroundActivity(
+        'activity-gone',
+        'running',
+        '2026-11-14T00:00:01.000Z',
+      );
+      persistence.cancelTurn(task.id, turn.turnId);
+      // The recorded Turn and Team are all the database knows; a command's process is Main's.
+      expect(persistence.setArchived(task.id, true).archived).toBe(true);
+      persistence.close();
+      const raw = new Database(path, { readonly: true });
+      expect(
+        raw.prepare("SELECT state FROM background_activities WHERE id = 'activity-gone'").get(),
+      ).toEqual({ state: 'canceled' });
+      raw.close();
+    });
   });
 
 function persistenceBridgeGapSummary(gapFile: string | undefined): string {

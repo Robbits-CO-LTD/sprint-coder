@@ -1276,6 +1276,97 @@ describe('desktop control Workspace roots', () => {
     },
   );
 
+  it('records a background run its Turn left as canceled, once, when the person stops the Task’s commands (issue #1225)', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-stop-task-commands-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    const { boundary, commandRows } = createCommandBoundary(workspace);
+    const activities = new Map<string, BackgroundActivityState>();
+    const persistence = boundary.persistence as unknown as Record<string, unknown>;
+    persistence['createBackgroundActivity'] = ({ id }: { id: string }) => {
+      activities.set(id, 'registered');
+      return {} as never;
+    };
+    persistence['transitionBackgroundActivity'] = (id: string, state: BackgroundActivityState) => {
+      activities.set(id, transitionBackgroundActivity(activities.get(id)!, state));
+      return {} as never;
+    };
+    persistence['completeBackgroundActivity'] = () => {
+      throw new Error('a stopped run is not recorded as completed');
+    };
+    const runner = new CommandRunner({ sandboxed: true });
+    const run = vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+      options.beforeSpawn?.();
+      options.onStarted?.({
+        executionId: spec.argv.join(' '),
+        pid: 1,
+        startedAt: Date.now(),
+        processStartIdentity: 'identity',
+        executionImageDigest: 'a'.repeat(64),
+        executionImageIdentity: 'identity',
+      });
+      // A dev server: it ends only when it is stopped.
+      await new Promise<void>((resolve) =>
+        options.signal!.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      return {
+        executionId: spec.argv.join(' '),
+        exitCode: null,
+        signal: null,
+        canceled: true,
+        termination: 'forced' as const,
+        durationMs: 1,
+        outputBytes: 0,
+        truncated: false,
+      };
+    });
+    const sessions = new ManagedCommandSessions(runner);
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => true,
+        approvalDecision: 'allow_once',
+      }),
+    );
+    registerCommandRunnerTool(broker, runner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions, 50);
+    const owner = {
+      taskId: 'task-stop-commands',
+      turnId: 'turn-left-server',
+      workspaceId: 'workspace-stop-commands',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'codex');
+    try {
+      const server = (await broker.dispatch({
+        ...owner,
+        callId: 'dev-server',
+        providerName: 'exec_command',
+        input: { executable: process.execPath, argv: ['-e', 'serve'], purpose: 'dev server' },
+      })) as Record<string, unknown>;
+      expect(server).toMatchObject({ state: 'running' });
+      // The Turn ends; its dev server goes on in the background.
+      broker.finishTurn(owner.taskId, owner.turnId);
+      const sessionId = server['sessionId'] as string;
+      expect(activities.get(sessionId)).toBe('running');
+      expect(sessions.activeTaskSessionCount(owner.taskId)).toBe(1);
+
+      await sessions.terminateTaskCommands(owner.taskId);
+
+      expect(sessions.activeTaskSessionCount(owner.taskId)).toBe(0);
+      // The records follow the process: the command and its activity read canceled, once.
+      await vi.waitFor(() => expect(activities.get(sessionId)).toBe('canceled'));
+      expect([...commandRows.values()].map(({ state }) => state)).toEqual(['canceled']);
+    } finally {
+      run.mockRestore();
+      await broker.dispose();
+      await sessions.dispose();
+    }
+  });
+
   it('bounds the wait for a Worker’s desktop-control run by the timeouts it names', () => {
     expect(desktopControlWorkerWaitMs(['click', '@s1:e1'])).toBe(60_000);
     expect(desktopControlWorkerWaitMs(['click', '@s1:e1', '--timeout-ms', '90000'])).toBe(105_000);

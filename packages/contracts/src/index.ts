@@ -146,6 +146,70 @@ export const goalSummarySchema = z
   .strict();
 export type GoalSummary = z.infer<typeof goalSummarySchema>;
 
+/**
+ * What is still moving in a Task (issue #1225): its Turn (the Leader's AI, a Turn waiting for an
+ * approval included), its Team (Workers not yet stopped, or Team work not yet ended), and the
+ * commands still running in it (those gone on in the background after their Turn included). A Task
+ * is not archived while any of these moves, so nothing goes on unseen behind an archived Task.
+ */
+export const taskRunningWorkSchema = z
+  .object({
+    turn: z.boolean(),
+    team: z.boolean(),
+    workers: z.number().int().nonnegative(),
+    commands: z.number().int().nonnegative(),
+    /**
+     * A stop of the Task's AI work whose end could not be confirmed: its Turn is recorded as
+     * canceled, yet its process may go on. Only a restart of the app clears it.
+     */
+    stopUnconfirmed: z.boolean().optional(),
+  })
+  .strict();
+export type TaskRunningWork = z.infer<typeof taskRunningWorkSchema>;
+
+export function taskHasRunningWork(work: TaskRunningWork | null | undefined): boolean {
+  return (
+    work != null &&
+    (work.turn ||
+      work.team ||
+      work.workers > 0 ||
+      work.commands > 0 ||
+      work.stopUnconfirmed === true)
+  );
+}
+
+/**
+ * The refusal of an archive while the Task still moves: what moves, and where each is stopped
+ * (the input box's 「実行を停止」, the Team's 「すべて停止」, and 「実行中のコマンドを停止」 shown with
+ * this refusal, which stops the commands earlier Turns left running too). AI work whose stop could
+ * not be confirmed has no stop left to offer; a restart of the app clears it.
+ */
+export function taskRunningWorkArchiveRefusal(work: TaskRunningWork): string {
+  const parts: string[] = [];
+  const stops: string[] = [];
+  if (work.turn) {
+    parts.push('AIの作業');
+    stops.push('AIの作業は入力欄の「実行を停止」');
+  }
+  if (work.workers > 0 || work.team) {
+    parts.push(work.workers > 0 ? `TeamのWorker ${work.workers}人` : 'Teamの作業');
+    // A Worker hired again into an ended Team is starting, and no 「すべて停止」 is offered until it
+    // started; it starts within moments.
+    stops.push('Teamは「すべて停止」（Workerの起動中は、少し待ってから）');
+  }
+  if (work.commands > 0) {
+    parts.push(`実行中のコマンド ${work.commands}件`);
+    stops.push('コマンドは「実行中のコマンドを停止」');
+  }
+  if (work.stopUnconfirmed === true) {
+    // No stop is left to offer: the stop was asked for, and its end was not confirmed.
+    parts.push('停止を確認できなかったAIの作業');
+    const first = stops.length > 0 ? `${stops.join('、')}で止め、` : '';
+    return `このTaskは、まだ動いています（${parts.join('／')}）。${first}停止を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。`;
+  }
+  return `このTaskは、まだ動いています（${parts.join('／')}）。${stops.join('、')}で止めてから、アーカイブしてください。`;
+}
+
 export const taskSummarySchema = z
   .object({
     id: idSchema,
@@ -162,6 +226,8 @@ export const taskSummarySchema = z
     hasConversation: z.boolean().optional(),
     /** Window-wide activity snapshot; independent of the selected Task's event port. */
     activeTurnId: idSchema.nullable().optional(),
+    /** Window-wide snapshot of what still moves in the Task (null: nothing). Older backends omit it. */
+    runningWork: taskRunningWorkSchema.nullable().optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
@@ -2655,6 +2721,7 @@ export type WorkspaceSelection = z.infer<typeof workspaceSelectionSchema>;
 export const publicErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'TURN_ACTIVE',
+  'TASK_STILL_RUNNING',
   'TASK_RECOVERY_REQUIRED',
   'REFERENCE_IN_USE',
   'STEER_STALE',
@@ -4626,6 +4693,8 @@ export interface SprintCoderApi {
     rename(taskId: string, title: string): Promise<TaskSummary>;
     setPinned(taskId: string, pinned: boolean): Promise<TaskSummary>;
     setArchived(taskId: string, archived: boolean): Promise<TaskSummary>;
+    /** What still moves in the Task now (null: nothing), read afresh from Main (issue #1225). */
+    runningWork(taskId: string): Promise<TaskRunningWork | null>;
     setGoal(taskId: string, goal: string): Promise<TaskSummary>;
     getDraft(taskId: string): Promise<string>;
     setDraft(taskId: string, draft: string): Promise<void>;
@@ -4890,6 +4959,11 @@ export interface SprintCoderApi {
     list(taskId: string): Promise<CommandSummary[]>;
     outputPage(input: CommandOutputPageInput): Promise<CommandOutputPage>;
     outputTail(input: CommandOutputTailInput): Promise<CommandOutputPage>;
+    /**
+     * Stops every command still running in the Task, those its earlier Turns left in the
+     * background included, as the person asked (issue #1225). Resolves to what still moves after.
+     */
+    stopTask(taskId: string): Promise<TaskRunningWork | null>;
   };
   turns: {
     start(input: {
@@ -4951,6 +5025,7 @@ export const IPC_CHANNELS = {
   tasksRename: 'sprint-coder:tasks:rename',
   tasksSetPinned: 'sprint-coder:tasks:set-pinned',
   tasksSetArchived: 'sprint-coder:tasks:set-archived',
+  tasksRunningWork: 'sprint-coder:tasks:running-work',
   tasksSetGoal: 'sprint-coder:tasks:set-goal',
   goalsStart: 'sprint-coder:goals:start',
   goalsPause: 'sprint-coder:goals:pause',
@@ -5077,6 +5152,7 @@ export const IPC_CHANNELS = {
   commandsList: 'sprint-coder:commands:list',
   commandsOutputPage: 'sprint-coder:commands:output-page',
   commandsOutputTail: 'sprint-coder:commands:output-tail',
+  commandsStopTask: 'sprint-coder:commands:stop-task',
   turnsStart: 'sprint-coder:turns:start',
   turnsQueue: 'sprint-coder:turns:queue',
   turnsSteer: 'sprint-coder:turns:steer',

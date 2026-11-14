@@ -191,6 +191,9 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  taskHasRunningWork,
+  taskRunningWorkArchiveRefusal,
+  taskRunningWorkSchema,
   taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
@@ -241,6 +244,7 @@ import {
   type ProjectFolder,
   type ProjectReference,
   type RuntimeKind,
+  type TaskRunningWork,
   type TaskSummary,
   type TurnEvent,
   type TurnSkillSelection,
@@ -305,6 +309,7 @@ import {
   ReferenceInUseError,
   SteerStaleError,
   TaskAssignmentBlockedError,
+  TaskStillRunningError,
   TurnActiveError,
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
@@ -1098,6 +1103,8 @@ export class IpcRouter {
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
   private readonly canceledRuntimeTurns = new Set<string>();
+  /** What moves in each Task, as last sent to the window (`refreshTaskRunningWork`). */
+  private readonly sentRunningWork = new Map<string, string>();
   /** A failed stop confirmation blocks new work until the app is relaunched. */
   private readonly quarantinedRuntimeKinds = new Set<'codex' | 'claude' | 'grok'>();
   private readonly quarantinedRuntimeTasks = new Set<string>();
@@ -1569,7 +1576,11 @@ export class IpcRouter {
     this.teamCoordinator = new TeamCoordinator(
       persistence,
       this.teamWorkerRuntime,
-      (taskId, detail) => this.teamDetailStream.publish(taskId, detail),
+      (taskId, detail) => {
+        this.teamDetailStream.publish(taskId, detail);
+        // Workers keep the Task moving after the Leader's Turn (issue #1225).
+        this.refreshTaskRunningWork(taskId);
+      },
       undefined,
       // Long Team work is split into bounded Mission steps. A step may run for up to 30 minutes;
       // heartbeat and progress leases inside TeamCoordinator detect dead/stalled runtimes sooner.
@@ -1753,6 +1764,9 @@ export class IpcRouter {
       },
       ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
+    // A command its Turn left in the background ends with no Turn event to tell the window; the
+    // Task's snapshot of what moves is sent afresh when it changed (issue #1225).
+    this.managedCodingHarness.onTaskCommandSettled((taskId) => this.refreshTaskRunningWork(taskId));
     // A Worker marked for desktop control gets the command tool only from this harness's catalog,
     // so the hire marks one only when the harness offers that tool (not without the sandbox).
     configureDesktopControlWorkerTool(() => this.managedCodingHarness.commandToolsOffered());
@@ -3252,14 +3266,55 @@ export class IpcRouter {
           envelope,
           input.taskId,
           IPC_CHANNELS.tasksSetArchived,
-          () => this.persistence.setArchived(input.taskId, input.archived),
+          () => {
+            // An archive tidies a Task away; it does not stop work. While anything of the Task
+            // still moves the archive is refused, so nothing goes on unseen behind it (issue
+            // #1225). This runs in the Task's mailbox, as a Turn's start does, and the check and
+            // the archive are one synchronous step: no Turn, Worker or command starts in between.
+            // `setArchived` checks the recorded Turn and Team once more in its own transaction.
+            if (input.archived) {
+              const work = this.taskRunningWork(input.taskId);
+              if (work !== null) throw new TaskStillRunningError(work);
+            }
+            return this.persistence.setArchived(input.taskId, input.archived);
+          },
         ).value;
         if (input.archived) {
+          // Kept after the refusal above: an archive that passes still ends the Task's
+          // desktop-control session (and its cursors), and stops a run that slipped through.
           // A hire still checking the Workspace must not create a Worker in an archived Task.
           this.teamCoordinator.revokePendingHires(input.taskId);
           void this.endArchivedTaskDesktopControl(input.taskId);
         }
         return result;
+      },
+    );
+    // Read afresh when the sidebar's menu opens, so a stale snapshot never holds an archive back.
+    this.handle(
+      IPC_CHANNELS.tasksRunningWork,
+      taskIdPayloadSchema,
+      taskRunningWorkSchema.nullable(),
+      (input) => {
+        this.refreshTaskRunningWork(input.taskId);
+        return this.taskRunningWork(input.taskId);
+      },
+    );
+    // The person's own stop of the Task's commands, those earlier Turns left running included
+    // (issue #1225). Only the window reaches it: it is no agent tool, so no agent stops a command
+    // it does not own through it.
+    this.handleMutation(
+      IPC_CHANNELS.commandsStopTask,
+      taskIdPayloadSchema,
+      taskRunningWorkSchema.nullable(),
+      async (input) => {
+        try {
+          await this.managedCodingHarness.stopTaskCommands(input.taskId);
+        } catch (error) {
+          throw new ManagedCommandCancellationError(error);
+        } finally {
+          this.refreshTaskRunningWork(input.taskId);
+        }
+        return this.taskRunningWork(input.taskId);
       },
     );
     this.handleMutation(
@@ -7407,6 +7462,10 @@ export class IpcRouter {
 
   private pushTaskUpdated(task: ReturnType<PersistenceClient['getTask']>): void {
     this.graphSourceMonitor.invalidate(task.id);
+    this.sendTaskSummary(task);
+  }
+
+  private sendTaskSummary(task: ReturnType<PersistenceClient['getTask']>): void {
     if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.tasksUpdated,
@@ -7417,7 +7476,40 @@ export class IpcRouter {
   private taskWithActivity(
     task: ReturnType<PersistenceClient['getTask']>,
   ): ReturnType<PersistenceClient['getTask']> {
-    return { ...task, activeTurnId: this.persistence.getActiveTurnId(task.id) };
+    const runningWork = this.taskRunningWork(task.id);
+    this.sentRunningWork.set(task.id, JSON.stringify(runningWork));
+    return { ...task, activeTurnId: this.persistence.getActiveTurnId(task.id), runningWork };
+  }
+
+  /**
+   * What still moves in the Task (null: nothing): its recorded Turn and Team, its commands whose
+   * processes still run, and AI work whose stop could not be confirmed (its Turn is recorded as
+   * canceled, yet its process may go on; issue #1225). The window's sidebar shows it, and an
+   * archive is refused while it is not null.
+   */
+  private taskRunningWork(taskId: string): TaskRunningWork | null {
+    const recorded = this.persistence.getTaskRecordedWork(taskId);
+    const work: TaskRunningWork = {
+      ...recorded,
+      commands: this.managedCodingHarness.activeTaskCommandCount(taskId),
+      ...(this.quarantinedRuntimeTasks.has(taskId) ? { stopUnconfirmed: true } : {}),
+    };
+    return taskHasRunningWork(work) ? work : null;
+  }
+
+  /** Sends the Task's summary again when what moves in it changed since it was last sent. */
+  private refreshTaskRunningWork(taskId: string): void {
+    try {
+      if (this.sentRunningWork.get(taskId) === JSON.stringify(this.taskRunningWork(taskId))) return;
+      this.sendTaskSummary(this.persistence.getTask(taskId));
+    } catch (error) {
+      // Only the sidebar's snapshot; the archive checks afresh, so a missed refresh is harmless.
+      secureLogger.info(
+        'Task running-work refresh skipped',
+        { taskId, error: error instanceof Error ? error.message : String(error) },
+        { event: 'task.running_work_refresh_skipped' },
+      );
+    }
   }
 
   private async cancelRuntime(taskId: string, turnId: string): Promise<boolean> {
@@ -8800,6 +8892,9 @@ export class IpcRouter {
     this.recordTurnDiagnosticEvent(event);
     if (event.type === 'turn.accepted' || event.type === 'turn.completed')
       this.pushTaskUpdated(this.persistence.getTask(event.taskId));
+    // A command gone on in the background keeps the Task moving after its Turn (issue #1225).
+    else if (event.type === 'command.started' || event.type === 'command.completed')
+      this.refreshTaskRunningWork(event.taskId);
     for (const binding of this.ports) {
       if (binding.taskId === event.taskId) binding.port.postMessage(event);
     }
@@ -9744,6 +9839,19 @@ export function toPublicError(error: unknown): PublicError {
     return {
       code: 'TURN_ACTIVE',
       userMessage: 'このタスクでは別のTurnが実行中です。',
+      retryable: false,
+    };
+  if (error instanceof ManagedCommandCancellationError)
+    return {
+      code: 'RUNTIME_STOP_UNCONFIRMED',
+      userMessage:
+        'コマンドの停止を確認できませんでした。アプリを再起動してからもう一度お試しください。',
+      retryable: true,
+    };
+  if (error instanceof TaskStillRunningError)
+    return {
+      code: 'TASK_STILL_RUNNING',
+      userMessage: taskRunningWorkArchiveRefusal(error.work),
       retryable: false,
     };
   if (error instanceof ProjectConflictError)

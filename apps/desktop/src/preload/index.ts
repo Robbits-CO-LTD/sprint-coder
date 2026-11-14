@@ -137,6 +137,7 @@ import {
   taskPinnedInputSchema,
   taskRenameInputSchema,
   taskSummarySchema,
+  taskRunningWorkSchema,
   taskSkillSelectionInputSchema,
   teamDetailSchema,
   teamEventSchema,
@@ -420,6 +421,10 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.tasksSetArchived, taskArchivedInputSchema, taskSummarySchema, {
         taskId,
         archived,
+      }),
+    runningWork: (taskId) =>
+      invoke(IPC_CHANNELS.tasksRunningWork, taskIdPayloadSchema, taskRunningWorkSchema.nullable(), {
+        taskId,
       }),
     setGoal: (taskId, goal) =>
       invoke(IPC_CHANNELS.tasksSetGoal, taskGoalInputSchema, taskSummarySchema, { taskId, goal }),
@@ -1195,6 +1200,10 @@ const api: SprintCoderApi = {
         commandOutputPageSchema,
         input,
       ),
+    stopTask: (taskId) =>
+      invoke(IPC_CHANNELS.commandsStopTask, taskIdPayloadSchema, taskRunningWorkSchema.nullable(), {
+        taskId,
+      }),
   },
   turns: {
     start: (input) =>

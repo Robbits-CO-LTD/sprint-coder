@@ -4,6 +4,7 @@ import type { ApprovalSummary, SprintCoderApi, TurnSnapshot } from '@sprint-code
 export type {
   GoalSummary,
   TaskSummary,
+  TaskRunningWork,
   ProjectSummary,
   ProjectFolder,
   ProjectFolderInput,

@@ -233,6 +233,142 @@ describe('stopping a Task’s desktop-control runs (when the Task is archived)',
   );
 });
 
+describe('counting a Task’s running commands (an archive is refused while one runs, issue #1225)', () => {
+  it.skipIf(process.platform === 'darwin')(
+    'counts every run of the Task, a background one after its Turn included, until it ends',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-count-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: process.execPath,
+        argv: ['-e', 'setInterval(() => undefined, 1000)'],
+      });
+      const sessions = new ManagedCommandSessions(new CommandRunner());
+      try {
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(0);
+        // A dev server the first Turn left in the background, and a build of the next Turn.
+        const server = await sessions.start(spec, { taskId: 'task-1', turnId: 'turn-1' });
+        await sessions.start(spec, { taskId: 'task-1', turnId: 'turn-2' });
+        await sessions.start(spec, { taskId: 'task-2', turnId: 'turn-3' });
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(2);
+        expect(sessions.activeTaskSessionCount('task-2')).toBe(1);
+        await sessions.terminateTurn({ taskId: 'task-1', turnId: 'turn-2' });
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(1);
+        sessions.terminate(server.sessionId, { taskId: 'task-1', turnId: 'turn-1' });
+        await sessions.wait(server.sessionId, { taskId: 'task-1', turnId: 'turn-1' });
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(0);
+        expect(sessions.activeTaskSessionCount('task-2')).toBe(1);
+      } finally {
+        await sessions.dispose();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'darwin')(
+    'tells the Task when a run its Turn left in the background ends by itself',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-settled-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: process.execPath,
+        argv: ['-e', 'setTimeout(() => undefined, 1500)'],
+      });
+      const sessions = new ManagedCommandSessions(new CommandRunner());
+      const settled: { taskId: string; running: number }[] = [];
+      sessions.onSessionSettled((taskId) =>
+        settled.push({ taskId, running: sessions.activeTaskSessionCount(taskId) }),
+      );
+      try {
+        const owner = { taskId: 'task-1', turnId: 'turn-1' };
+        const run = await sessions.start(spec, owner);
+        // Its Turn has ended; nothing waits for the run.
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(1);
+        expect(settled).toEqual([]);
+        await sessions.wait(run.sessionId, owner);
+        // Told once, with the run already counted as ended.
+        expect(settled).toEqual([{ taskId: 'task-1', running: 0 }]);
+      } finally {
+        await sessions.dispose();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'darwin')(
+    'stops every run of the Task as the person asked, an earlier Turn’s included, not another Task’s',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-stop-task-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: process.execPath,
+        argv: ['-e', 'setInterval(() => undefined, 1000)'],
+      });
+      const sessions = new ManagedCommandSessions(new CommandRunner());
+      const pids: number[] = [];
+      const onStarted = (started: { pid: number }) => void pids.push(started.pid);
+      const alive = (pid: number) => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === 'EPERM';
+        }
+      };
+      try {
+        const first = { taskId: 'task-1', turnId: 'turn-1' };
+        const second = { taskId: 'task-1', turnId: 'turn-2' };
+        const other = { taskId: 'task-2', turnId: 'turn-3' };
+        const server = await sessions.start(spec, first, { onStarted });
+        const build = await sessions.start(spec, second, { onStarted });
+        const elsewhere = await sessions.start(spec, other, { onStarted });
+        await sessions.terminateTaskCommands('task-1');
+        expect(sessions.poll(server.sessionId, first).state).toBe('canceled');
+        expect(sessions.poll(build.sessionId, second).state).toBe('canceled');
+        expect(sessions.poll(elsewhere.sessionId, other).state).toBe('running');
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(0);
+        // Resolved only once their processes had ended.
+        expect(alive(pids[0]!)).toBe(false);
+        expect(alive(pids[1]!)).toBe(false);
+        expect(alive(pids[2]!)).toBe(true);
+        await expect(sessions.terminateTaskCommands('task-1')).resolves.toBeUndefined();
+      } finally {
+        await sessions.dispose();
+      }
+    },
+  );
+
+  it('rejects when a run’s end could not be confirmed, and keeps counting it', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-stop-unconfirmed-'));
+    roots.push(workspace);
+    const spec = await prepareExecutionSpec({
+      workspacePath: workspace,
+      executable: process.execPath,
+      argv: ['-e', ''],
+    });
+    const runner = new CommandRunner();
+    const run = vi
+      .spyOn(runner, 'run')
+      .mockRejectedValueOnce(
+        new CommandRunnerError('PROCESS_TREE_TERMINATION_FAILED', 'unconfirmed'),
+      );
+    const sessions = new ManagedCommandSessions(runner);
+    try {
+      await expect(sessions.start(spec, { taskId: 'task-1', turnId: 'turn-1' })).rejects.toThrow(
+        'unconfirmed',
+      );
+      expect(sessions.activeTaskSessionCount('task-1')).toBe(1);
+      await expect(sessions.terminateTaskCommands('task-1')).rejects.toThrow(
+        'could not be confirmed',
+      );
+    } finally {
+      await sessions.dispose();
+      run.mockRestore();
+    }
+  });
+});
+
 describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
   'ManagedCommandSessions',
   () => {
