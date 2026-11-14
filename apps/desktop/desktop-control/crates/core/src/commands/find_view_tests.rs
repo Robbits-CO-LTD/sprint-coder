@@ -10,6 +10,7 @@ use crate::wait::deadline::VirtualClock;
 use crate::{AdapterError, RefEntry};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 /// How the fixture answers a read of the whole window.
 #[derive(Clone)]
@@ -138,9 +139,13 @@ impl ObservationOps for ViewAdapter {
         _window: &WindowInfo,
         _surface: crate::SnapshotSurface,
         _deadline: Deadline,
-    ) -> bool {
+    ) -> Option<Duration> {
         self.probes.fetch_add(1, Ordering::SeqCst);
-        self.view.lock().unwrap().is_some()
+        self.view
+            .lock()
+            .unwrap()
+            .is_some()
+            .then_some(Duration::ZERO)
     }
 
     fn list_windows(

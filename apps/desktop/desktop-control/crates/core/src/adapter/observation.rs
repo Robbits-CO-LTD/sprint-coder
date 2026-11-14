@@ -144,17 +144,20 @@ pub trait ObservationOps: Send + Sync {
 
     /// Whether this adapter reads the visible elements alone
     /// (`ObservationMode::visible_only`) of `window`'s `surface`, rather than
-    /// refusing such a read. A cheap check that reads no tree: a capture asks
-    /// it before its whole-window read, to keep time for the visible read only
-    /// where one can follow. `false` (the default) leaves the capture's split
-    /// as it was.
+    /// refusing such a read, and if so the least time that read needs once a
+    /// whole-window read has run out (`Some(Duration::ZERO)` when the time a
+    /// capture leaves it anyway is enough). A cheap check that reads no tree,
+    /// answered within `deadline`: a capture asks it before its whole-window
+    /// read, to keep that time only where such a read follows and needs it.
+    /// `None` (the default, and the answer of a check that could not answer in
+    /// time) leaves the capture's split as it was.
     fn reads_visible_elements(
         &self,
         _window: &WindowInfo,
         _surface: SnapshotSurface,
         _deadline: Deadline,
-    ) -> bool {
-        false
+    ) -> Option<std::time::Duration> {
+        None
     }
 
     /// Checks platform-specific context that the saved ref's identity predicate

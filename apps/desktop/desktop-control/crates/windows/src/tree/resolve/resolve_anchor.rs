@@ -80,21 +80,28 @@ fn resolve_locator_anchor_once(
         return Err(stale_ref_error(entry));
     }
 
-    use crate::tree::walk::shown_view::{ShownNode, ShownView, VisibleView, visible_view_of};
+    use crate::tree::walk::shown_view::{
+        ShownNode, ShownView, VisibleView, checked_view_of, proof_view,
+    };
 
     let root = crate::tree::resolve::resolve_window_root(entry, deadline)?;
     // A path a view proof recorded counts positions among the visible elements,
     // so it is descended in the view this window is read in (the one the
     // capture walked): the shown view for a window read in it, the onscreen
     // view otherwise, as before the shown view existed. Either way the landing
-    // must carry the recorded runtime identifier.
-    let view = entry.identity.in_view.as_ref().map(|_| {
-        if visible_view_of(&root) == Some(VisibleView::Shown) {
-            VisibleView::Shown
-        } else {
-            VisibleView::Onscreen
-        }
-    });
+    // must carry the recorded runtime identifier. A window whose view could
+    // not be told in time is not descended in a guessed one: the identity
+    // could not be confirmed, which may be retried.
+    let view = match entry.identity.in_view {
+        Some(_) => match proof_view(checked_view_of(&root, deadline)) {
+            Some(view) => Some(view),
+            None => {
+                deadline.ensure_remaining()?;
+                return Err(identity_unknown_error(entry));
+            }
+        },
+        None => None,
+    };
     let source = match view {
         Some(VisibleView::Onscreen) => UiaTreeSource::for_visible_descent(&root, deadline)?,
         Some(VisibleView::Shown) => UiaTreeSource::for_shown_root(&root, deadline)?,

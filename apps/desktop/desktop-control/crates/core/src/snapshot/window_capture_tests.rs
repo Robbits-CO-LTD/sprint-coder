@@ -1,6 +1,6 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
-    ANSWER_READ_FLOOR, WHOLE_READ_CAP, needs_whole_window, visible_share, whole_read_budget,
+    VISIBLE_CHECK_CAP, WHOLE_READ_CAP, needs_whole_window, visible_share, whole_read_budget,
 };
 use std::time::Duration;
 
@@ -37,27 +37,34 @@ fn the_cap_leaves_the_view_fallback_reachable() {
 /// The whole read's time for a full default deadline or more, which a read of
 /// the visible elements that can follow does not change.
 fn budget(remaining: Duration) -> Duration {
-    let budget = whole_read_budget(remaining, false);
-    assert_eq!(budget, whole_read_budget(remaining, true), "{remaining:?}");
+    let budget = whole_read_budget(remaining, Duration::ZERO);
+    assert_eq!(budget, whole_read_budget(remaining, FLOOR), "{remaining:?}");
     budget
 }
 
-/// Past the window listing, a default snapshot has about 2.55 s left. When a
-/// read of the visible elements can follow, the whole read leaves it at least
-/// the floor; any other window keeps three quarters for its whole read.
+/// The floor the Windows adapter answers for a WPF window.
+const FLOOR: Duration = Duration::from_millis(750);
+
+/// Past the window listing, a default snapshot has about 2.55 s left. A read
+/// of the visible elements that needs a floor (a WPF window) is left at least
+/// that; a zero floor (a Chromium-hosted window, or a window not read that
+/// way) keeps three quarters for the whole read, as before.
 #[test]
-fn the_floor_for_the_visible_read_applies_only_where_one_can_follow() {
+fn the_floor_for_the_visible_read_applies_only_where_one_is_asked_for() {
     let remaining = Duration::from_millis(2_550);
     assert_eq!(
-        whole_read_budget(remaining, false),
+        whole_read_budget(remaining, Duration::ZERO),
         remaining * 3 / 4,
-        "a window read whole or not at all is split as before"
+        "a zero floor splits as before"
     );
-    assert_eq!(
-        whole_read_budget(remaining, true),
-        remaining - ANSWER_READ_FLOOR
-    );
-    assert_eq!(ANSWER_READ_FLOOR, Duration::from_millis(750));
+    assert_eq!(whole_read_budget(remaining, FLOOR), remaining - FLOOR);
+}
+
+/// The check whether a window is read by its visible elements gets a short cap
+/// of its own, the same as the probe a find makes.
+#[test]
+fn the_check_for_a_view_has_a_short_cap() {
+    assert_eq!(VISIBLE_CHECK_CAP, Duration::from_millis(500));
 }
 
 /// The visible read gets all that is left when the whole read left a tree to

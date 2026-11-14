@@ -66,13 +66,14 @@ impl ObservationOps for WindowsAdapter {
     }
 
     /// Whether the window's root has a view of its visible elements
-    /// (`shown_view::visible_view_of`): Chromium-hosted or WPF.
+    /// (`shown_view::checked_view_of`): Chromium-hosted (no floor) or WPF
+    /// (`shown_view::SHOWN_READ_FLOOR`).
     fn reads_visible_elements(
         &self,
         window: &WindowInfo,
         surface: agent_desktop_core::SnapshotSurface,
         deadline: Deadline,
-    ) -> bool {
+    ) -> Option<std::time::Duration> {
         crate::tree::observe::reads_visible_elements(window, surface, deadline)
     }
 

@@ -85,8 +85,21 @@ pub(crate) fn read_ancestor_evidence(
     } else {
         None
     };
-    use crate::tree::walk::shown_view::{VisibleView, visible_view_of};
-    let onscreen_view = in_view && visible_view_of(&root) != Some(VisibleView::Shown);
+    // The view is told within the deadline like the reads above; one that
+    // cannot be told is an identity that could not be confirmed, never a
+    // guess at one view or the other.
+    use crate::tree::walk::shown_view::{VisibleView, checked_view_of, proof_view};
+    let onscreen_view = if in_view {
+        match proof_view(checked_view_of(&root, deadline)) {
+            Some(view) => view == VisibleView::Onscreen,
+            None => {
+                deadline.ensure_remaining()?;
+                return Err(identity_unknown_error(entry));
+            }
+        }
+    } else {
+        false
+    };
     let walker = if onscreen_view {
         crate::tree::walk::walker_source::visible_view_walker(&client)?
     } else {

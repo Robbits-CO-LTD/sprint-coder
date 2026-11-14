@@ -55,13 +55,33 @@ pub(crate) enum VisibleView {
 }
 
 /// The UI Automation framework name WPF's provider reports.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const WPF_FRAMEWORK: &str = "WPF";
+
+/// The least time the shown view's read needs after a whole-window read ran
+/// out (`PlatformAdapter::reads_visible_elements`): the visible elements of a
+/// WPF window holding a 2,000-row list (85 of them) took 0.48 to 0.75 s to
+/// read, against the 0.52 to 0.58 s a default snapshot leaves after its whole
+/// read, so the switch failed about half the time without it. The onscreen
+/// view (Chromium) asks for none: what is left has been enough for it.
+pub(crate) const SHOWN_READ_FLOOR: std::time::Duration = std::time::Duration::from_millis(750);
+
+impl VisibleView {
+    /// The least time this view's read needs after a whole read ran out.
+    pub(crate) fn read_floor(self) -> std::time::Duration {
+        match self {
+            Self::Onscreen => std::time::Duration::ZERO,
+            Self::Shown => SHOWN_READ_FLOOR,
+        }
+    }
+}
 
 /// The view the visible elements of a window are read in, or `None` when the
 /// window is not read that way (only frameworks whose offscreen reporting was
 /// measured are): Chromium provenance first, so a WPF window that holds
 /// WebView2 content keeps the view it had, then a WPF root. Every other
 /// framework (WinForms, Win32, WinUI, ...) is refused.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn visible_view_for(
     chromium_provenance: bool,
     framework_id: Option<&str>,
@@ -75,20 +95,84 @@ pub(crate) fn visible_view_for(
     }
 }
 
-/// [`visible_view_for`] of a live root. The framework is read only when the
-/// root is not of Chromium provenance.
-#[cfg(target_os = "windows")]
-pub(crate) fn visible_view_of(root: &crate::tree::element::UIAElement) -> Option<VisibleView> {
-    if crate::tree::chromium::has_chromium_provenance(root) {
-        return visible_view_for(true, None);
+/// What the check of a window's view found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewCheck {
+    /// The root was read: the view it is read in, or `None` for none.
+    Read(Option<VisibleView>),
+    /// The root's class, window or framework could not be read within the
+    /// check's time: which view applies is not known.
+    Unread,
+}
+
+impl ViewCheck {
+    /// The view, taking a check that could not answer for "no view" (the
+    /// narrow answer where the alternative is the way the window was read
+    /// before: a capture keeps its split, an observation refuses).
+    pub(crate) fn or_none(self) -> Option<VisibleView> {
+        match self {
+            Self::Read(view) => view,
+            Self::Unread => None,
+        }
     }
-    let framework = root.0.get_framework_id().ok();
-    visible_view_for(false, framework.as_deref())
+}
+
+/// The view a ref proven among the visible elements is resolved in: the shown
+/// view for a window read in it, the onscreen view for any other window read
+/// (as before the shown view existed), and `None` when the check could not
+/// answer, so that a resolution reports an identity it could not confirm
+/// (which may be retried) rather than descending a guessed view and settling
+/// the ref stale.
+pub(crate) fn proof_view(check: ViewCheck) -> Option<VisibleView> {
+    match check {
+        ViewCheck::Read(Some(VisibleView::Shown)) => Some(VisibleView::Shown),
+        ViewCheck::Read(_) => Some(VisibleView::Onscreen),
+        ViewCheck::Unread => None,
+    }
+}
+
+/// The most the check of a window's view may take: three reads of the root
+/// (class, window handle, framework). The same cap as core's
+/// `VISIBLE_CHECK_CAP`, which bounds the whole question from its side.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const VIEW_CHECK_CAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// [`visible_view_for`] of a live root, its reads bounded by what is left of
+/// `deadline` and never more than [`VIEW_CHECK_CAP`] (the client's own bound
+/// is far longer, up to 20 s). The framework is read only when the root is
+/// not of Chromium provenance. A read that fails, or does not answer in time,
+/// is [`ViewCheck::Unread`], never taken for another framework.
+#[cfg(target_os = "windows")]
+pub(crate) fn checked_view_of(
+    root: &crate::tree::element::UIAElement,
+    deadline: agent_desktop_core::Deadline,
+) -> ViewCheck {
+    let Ok(client) = crate::tree::automation::automation_client() else {
+        return ViewCheck::Unread;
+    };
+    let read = || -> Result<Option<VisibleView>, ()> {
+        if crate::tree::chromium::chromium_provenance_checked(root)? {
+            return Ok(visible_view_for(true, None));
+        }
+        let framework = root.0.get_framework_id().map_err(drop)?;
+        Ok(visible_view_for(false, Some(&framework)))
+    };
+    match crate::tree::walk::walker_source::with_transaction_timeout(
+        &client,
+        deadline.capped(VIEW_CHECK_CAP),
+        read,
+    ) {
+        Some(Ok(view)) => ViewCheck::Read(view),
+        Some(Err(())) | None => ViewCheck::Unread,
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn visible_view_of(_root: &crate::tree::element::UIAElement) -> Option<VisibleView> {
-    None
+pub(crate) fn checked_view_of(
+    _root: &crate::tree::element::UIAElement,
+    _deadline: agent_desktop_core::Deadline,
+) -> ViewCheck {
+    ViewCheck::Read(None)
 }
 
 /// What the shown view needs from the source it filters.

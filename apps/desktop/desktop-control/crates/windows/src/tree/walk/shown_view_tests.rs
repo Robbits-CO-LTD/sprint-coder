@@ -311,3 +311,39 @@ fn a_descent_past_a_row_whose_report_cannot_be_read_fails() {
     assert_eq!(landed, Some(101));
     assert!(descend_path(&view, &ShownNode::root(1), &[1, 2], &budget, &surfaced).is_err());
 }
+
+/// A check of a window's view that could not answer in time is never taken for
+/// a view: a capture keeps its split and an observation refuses (`or_none`),
+/// and a resolution reports an identity it could not confirm (`proof_view`
+/// answers `None`) instead of descending the onscreen view and settling the
+/// ref stale. A window read and found with no view resolves in the onscreen
+/// view, as before the shown view existed.
+#[test]
+fn a_view_check_that_could_not_answer_is_never_taken_for_a_view() {
+    assert_eq!(ViewCheck::Unread.or_none(), None);
+    assert_eq!(proof_view(ViewCheck::Unread), None);
+    assert_eq!(
+        proof_view(ViewCheck::Read(Some(VisibleView::Shown))),
+        Some(VisibleView::Shown)
+    );
+    assert_eq!(
+        proof_view(ViewCheck::Read(Some(VisibleView::Onscreen))),
+        Some(VisibleView::Onscreen)
+    );
+    assert_eq!(
+        proof_view(ViewCheck::Read(None)),
+        Some(VisibleView::Onscreen)
+    );
+}
+
+/// Only the shown view asks a capture for a floor after its whole read; the
+/// onscreen view (Chromium) asks for none, so its windows are split as before.
+#[test]
+fn only_the_shown_view_asks_for_a_floor() {
+    assert_eq!(
+        VisibleView::Onscreen.read_floor(),
+        std::time::Duration::ZERO
+    );
+    assert_eq!(VisibleView::Shown.read_floor(), SHOWN_READ_FLOOR);
+    assert_eq!(SHOWN_READ_FLOOR, std::time::Duration::from_millis(750));
+}

@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::chromium;
 use super::surfaces::surface_root;
-use super::walk::shown_view::{VisibleView, visible_view_of};
+use super::walk::shown_view::{VisibleView, checked_view_of};
 use super::walk::walker::{DEFAULT_MAX_RAW_DEPTH, WalkBudget, WalkOutcome};
 use super::walk::walker_source::{
     walk_uia_shown_subtree, walk_uia_subtree_for, walk_uia_visible_subtree,
@@ -63,7 +63,11 @@ pub(crate) fn observe_tree(
     let budget = WalkBudget::new(request.max_logical_depth, request.deadline)
         .with_max_raw_depth(request.max_raw_depth.min(DEFAULT_MAX_RAW_DEPTH));
     let visible_only = request.observation_mode.visible_only;
-    let view = view_or_refuse(visible_only, || visible_view_of(&element))?;
+    // A check that cannot answer in time refuses, as for a window with no
+    // view: the caller keeps the read it had.
+    let view = view_or_refuse(visible_only, || {
+        checked_view_of(&element, request.deadline).or_none()
+    })?;
     let walk_started = Instant::now();
     let outcome = match view {
         Some(VisibleView::Onscreen) => walk_uia_visible_subtree(&element, &root, budget)?,
@@ -93,15 +97,20 @@ pub(crate) fn observe_tree(
 }
 
 /// Whether a read of the visible elements alone of `window`'s `surface` would
-/// be served rather than refused: the root is resolved and its view chosen as
-/// [`observe_tree`] does, without walking. Anything that fails answers `false`.
+/// be served rather than refused, and the least time it needs after a whole
+/// read ran out ([`VisibleView::read_floor`]): the root is resolved and its
+/// view chosen as [`observe_tree`] does, without walking, within `deadline`.
+/// Anything that fails or does not answer in time answers `None`, which keeps
+/// the caller's split and its reads as they were.
 pub(crate) fn reads_visible_elements(
     window: &agent_desktop_core::WindowInfo,
     surface: agent_desktop_core::SnapshotSurface,
     deadline: Deadline,
-) -> bool {
-    surface_root(ObservationRoot::Window(window), surface, deadline)
-        .is_ok_and(|element| visible_view_of(&element).is_some())
+) -> Option<std::time::Duration> {
+    let element = surface_root(ObservationRoot::Window(window), surface, deadline).ok()?;
+    checked_view_of(&element, deadline)
+        .or_none()
+        .map(VisibleView::read_floor)
 }
 
 /// The view a read of the visible elements alone walks, `None` for any other

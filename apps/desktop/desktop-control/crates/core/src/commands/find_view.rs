@@ -22,13 +22,6 @@ use crate::{
     trace::trace_artifacts,
 };
 use serde_json::{Value, json};
-use std::time::Duration;
-
-/// The most the probe that asks whether the window is read by its visible
-/// elements may take. It reads the window's root alone; a probe that does not
-/// answer in this time counts as "not read that way", which leaves the whole
-/// search its full deadline, as before.
-const PROBE_CAP: Duration = Duration::from_millis(500);
 
 /// Whether this find answers from the visible elements of `window` when its
 /// whole-window search does not finish: a find of that shape
@@ -105,11 +98,13 @@ pub(super) fn search_whole(
 /// asks before its whole-window read (`PlatformAdapter::reads_visible_elements`),
 /// so no window is read by its view for one command and not the other.
 fn reads_view(adapter: &dyn PlatformAdapter, window: &WindowInfo, deadline: Deadline) -> bool {
-    adapter.reads_visible_elements(
-        window,
-        crate::SnapshotSurface::Window,
-        deadline.capped(PROBE_CAP),
-    )
+    adapter
+        .reads_visible_elements(
+            window,
+            crate::SnapshotSurface::Window,
+            deadline.capped(snapshot::window_capture::VISIBLE_CHECK_CAP),
+        )
+        .is_some()
 }
 
 /// The options of the snapshot of the visible elements a find answers from:

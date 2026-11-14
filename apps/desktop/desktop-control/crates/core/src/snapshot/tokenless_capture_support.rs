@@ -35,7 +35,17 @@ pub(super) struct CaptureAdapter {
     /// How long the check of whether the window is read by its visible
     /// elements takes to answer (a busy window answers it slowly).
     view_check_ms: std::sync::atomic::AtomicU64,
+    /// The least time the fixture says its read of the visible elements needs
+    /// after a whole read (`reads_visible_elements`): [`WPF_FLOOR_MS`] unless a
+    /// test serves a view that needs none, as a Chromium-hosted window does.
+    view_floor_ms: std::sync::atomic::AtomicU64,
+    /// How long the last check of whether the window is read by its visible
+    /// elements was given to answer.
+    pub(super) view_check_given_ms: std::sync::atomic::AtomicU64,
 }
+
+/// The floor the Windows adapter answers for a WPF window.
+pub(super) const WPF_FLOOR_MS: u64 = 750;
 
 impl CaptureAdapter {
     pub(super) fn new(tree: AccessibilityNode) -> Self {
@@ -50,6 +60,8 @@ impl CaptureAdapter {
             view: std::sync::atomic::AtomicBool::new(false),
             view_tree: Mutex::new(None),
             view_check_ms: std::sync::atomic::AtomicU64::new(0),
+            view_floor_ms: std::sync::atomic::AtomicU64::new(WPF_FLOOR_MS),
+            view_check_given_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -65,6 +77,13 @@ impl CaptureAdapter {
 
     pub(super) fn serve_view(&self) {
         self.view.store(true, Ordering::SeqCst);
+    }
+
+    /// Serves a read of the visible elements that needs no floor of its own
+    /// (a Chromium-hosted window).
+    pub(super) fn serve_view_without_floor(&self) {
+        self.view_floor_ms.store(0, Ordering::SeqCst);
+        self.serve_view();
     }
 
     /// Serves a read of the visible elements that returns `tree`.
@@ -173,13 +192,19 @@ impl ObservationOps for CaptureAdapter {
         &self,
         _window: &WindowInfo,
         _surface: crate::SnapshotSurface,
-        _deadline: Deadline,
-    ) -> bool {
+        deadline: Deadline,
+    ) -> Option<std::time::Duration> {
+        self.view_check_given_ms.store(
+            u64::try_from(deadline.remaining().as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
         let wait = self.view_check_ms.load(Ordering::SeqCst);
         if wait > 0 {
             std::thread::sleep(std::time::Duration::from_millis(wait));
         }
-        self.view.load(Ordering::SeqCst)
+        self.view
+            .load(Ordering::SeqCst)
+            .then(|| std::time::Duration::from_millis(self.view_floor_ms.load(Ordering::SeqCst)))
     }
 
     fn resolve_element_strict(

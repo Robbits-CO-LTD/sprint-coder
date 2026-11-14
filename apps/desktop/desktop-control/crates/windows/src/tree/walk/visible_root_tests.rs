@@ -148,3 +148,37 @@ fn only_the_onscreen_view_checks_the_parent_of_each_sibling() {
     let shown = UiaTreeSource::for_shown_root(&root, deadline()).expect("a shown source");
     assert_eq!(shown.sibling_in_view(&root, &root), Ok(true));
 }
+
+/// A check of the view that has no time left answers that it could not tell,
+/// and the question a capture asks then answers "not read that way" (`None`),
+/// which keeps the capture's split as it was.
+#[test]
+fn a_view_check_without_time_could_not_tell() {
+    bootstrap();
+    let fixture = LocalFixture::create().expect("the fixture window is created");
+    let root = root_from_hwnd(fixture.handle(), deadline()).expect("the fixture root resolves");
+    let spent = Deadline::after(1).expect("a deadline");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    assert_eq!(
+        crate::tree::walk::shown_view::checked_view_of(&root, spent),
+        crate::tree::walk::shown_view::ViewCheck::Unread
+    );
+    let window = agent_desktop_core::WindowInfo {
+        id: format!("w-{}", fixture.handle()),
+        title: String::new(),
+        app: String::new(),
+        pid: agent_desktop_core::ProcessId::new(std::process::id()),
+        process_instance: None,
+        bounds: None,
+        state: Default::default(),
+    };
+    assert_eq!(
+        crate::tree::observe::reads_visible_elements(
+            &window,
+            agent_desktop_core::SnapshotSurface::Window,
+            spent
+        ),
+        None
+    );
+}

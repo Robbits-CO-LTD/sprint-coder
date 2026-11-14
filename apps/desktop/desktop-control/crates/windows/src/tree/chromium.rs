@@ -74,6 +74,22 @@ pub(crate) fn has_chromium_provenance(_root: &UIAElement) -> bool {
     false
 }
 
+/// [`has_chromium_provenance`] with a failed read kept apart from a "no":
+/// `Err` when the root's class or window handle could not be read, so a
+/// caller that must not guess (a ref resolved in the view it was proven in)
+/// can say it could not tell. The child windows are listed as there, without
+/// sending the target a message.
+#[cfg(target_os = "windows")]
+pub(crate) fn chromium_provenance_checked(root: &UIAElement) -> Result<bool, ()> {
+    use windows::Win32::Foundation::HWND;
+    let class = root.0.get_classname().map_err(drop)?;
+    if is_chromium_class(&class) {
+        return Ok(true);
+    }
+    let handle: HWND = root.0.get_native_window_handle().map_err(drop)?.into();
+    Ok(!handle.0.is_null() && has_child_window_of_class(handle.0, CHROMIUM_CONTENT_CLASS))
+}
+
 #[cfg(target_os = "windows")]
 fn holds_chromium_content(root: &UIAElement) -> bool {
     use windows::Win32::Foundation::HWND;
