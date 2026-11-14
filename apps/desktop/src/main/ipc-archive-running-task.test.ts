@@ -28,7 +28,12 @@ const IDLE: Recorded = { turn: false, team: false, workers: 0 };
  * The archive handler as Main registers it: the real mailbox, mutation wrapper and refusal, over a
  * persistence that records what moves in the Task and a harness that counts its live commands.
  */
-function archiveRouter(state: { recorded: Recorded; commands: number; stopUnconfirmed?: boolean }) {
+function archiveRouter(state: {
+  recorded: Recorded;
+  commands: number;
+  stopUnconfirmed?: boolean;
+  unconfirmedWorkers?: number;
+}) {
   const router = Object.create(IpcRouter.prototype) as { register(): void; mailbox: TaskMailbox };
   const handlers = new Map<string, Handler>();
   const setArchived = vi.fn((taskId: string, archived: boolean) => {
@@ -55,6 +60,8 @@ function archiveRouter(state: { recorded: Recorded; commands: number; stopUnconf
     managedCodingHarness: { activeTaskCommandCount: () => state.commands },
     // Tasks whose runtime stop was not confirmed (Main's own set; lost on a restart).
     quarantinedRuntimeTasks: new Set<string>(state.stopUnconfirmed ? ['task-1'] : []),
+    // Workers whose Turn exit is not yet confirmed (the Team runtime's own count; issue #1263).
+    cliTeamWorkerRuntime: { unsettledWorkerCount: () => state.unconfirmedWorkers ?? 0 },
     teamCoordinator: { revokePendingHires },
     endArchivedTaskDesktopControl,
   });
@@ -89,7 +96,7 @@ describe('the window’s snapshot of what moves in a Task (issue #1225)', () => 
   };
 
   it('sends the Task again only when what moves in it changed', () => {
-    const state = { recorded: IDLE, commands: 0 };
+    const state = { recorded: IDLE, commands: 0, unconfirmedWorkers: 0 };
     const router = Object.create(IpcRouter.prototype) as ActivityProbe;
     const send = vi.fn();
     Object.assign(router, {
@@ -114,6 +121,7 @@ describe('the window’s snapshot of what moves in a Task (issue #1225)', () => 
       },
       managedCodingHarness: { activeTaskCommandCount: () => state.commands },
       quarantinedRuntimeTasks: new Set<string>(),
+      cliTeamWorkerRuntime: { unsettledWorkerCount: () => state.unconfirmedWorkers },
     });
     expect(router.taskWithActivity({ id: 'task-1' })).toMatchObject({ runningWork: null });
     router.refreshTaskRunningWork('task-1');
@@ -132,6 +140,17 @@ describe('the window’s snapshot of what moves in a Task (issue #1225)', () => 
     router.refreshTaskRunningWork('task-1');
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls[1]![1]).toMatchObject({ runningWork: null });
+    // A Worker failed with its exit unconfirmed; the background check later confirms it (#1263).
+    state.unconfirmedWorkers = 1;
+    router.refreshTaskRunningWork('task-1');
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[2]![1]).toMatchObject({
+      runningWork: { turn: false, team: false, workers: 0, commands: 0, unconfirmedWorkers: 1 },
+    });
+    state.unconfirmedWorkers = 0;
+    router.refreshTaskRunningWork('task-1');
+    expect(send).toHaveBeenCalledTimes(4);
+    expect(send.mock.calls[3]![1]).toMatchObject({ runningWork: null });
   });
 });
 
@@ -168,6 +187,22 @@ describe('archiving a Task that still moves is refused (issue #1225)', () => {
       { recorded: IDLE, commands: 1, stopUnconfirmed: true },
       'このTaskは、まだ動いています（実行中のコマンド 1件／停止を確認できなかったAIの作業）。コマンドは「実行中のコマンドを停止」で止め、停止を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。',
     ],
+    [
+      // The Worker is recorded as failed, so nothing recorded moves; its process may still run.
+      'a Worker’s exit could not be confirmed yet (issue #1263)',
+      { recorded: IDLE, commands: 0, unconfirmedWorkers: 2 },
+      'このTaskは、まだ動いています（終了を確かめているWorker 2人）。Workerの終了を確かめ終わるまで少し待ってから、アーカイブしてください。待っても続く時は、アプリを再起動してください。',
+    ],
+    [
+      'an unconfirmed Worker exit and a running command',
+      { recorded: IDLE, commands: 1, unconfirmedWorkers: 1 },
+      'このTaskは、まだ動いています（実行中のコマンド 1件／終了を確かめているWorker 1人）。コマンドは「実行中のコマンドを停止」で止め、Workerの終了を確かめ終わるまで少し待ってから、アーカイブしてください。待っても続く時は、アプリを再起動してください。',
+    ],
+    [
+      'an unconfirmed Worker exit and an unconfirmed stop of the Leader',
+      { recorded: IDLE, commands: 0, stopUnconfirmed: true, unconfirmedWorkers: 1 },
+      'このTaskは、まだ動いています（終了を確かめているWorker 1人／停止を確認できなかったAIの作業）。停止や終了を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。',
+    ],
   ])('while %s, naming what moves', async (_name, state, message) => {
     const { archive, setArchived, revokePendingHires, endArchivedTaskDesktopControl } =
       archiveRouter(state);
@@ -189,6 +224,16 @@ describe('archiving a Task that still moves is refused (issue #1225)', () => {
     expect(setArchived).toHaveBeenCalledExactlyOnceWith('task-1', true);
     expect(revokePendingHires).toHaveBeenCalledWith('task-1');
     expect(endArchivedTaskDesktopControl).toHaveBeenCalledWith('task-1');
+  });
+
+  it('archives the Task once the background check confirms the Worker’s exit (issue #1263)', async () => {
+    const state = { recorded: IDLE, commands: 0, unconfirmedWorkers: 1 };
+    const { archive, setArchived } = archiveRouter(state);
+    expect((await refusal(archive(true))).userMessage).toContain('終了を確かめているWorker 1人');
+    expect(setArchived).not.toHaveBeenCalled();
+    state.unconfirmedWorkers = 0;
+    await expect(archive(true)).resolves.toEqual({ id: 'task-1', archived: true });
+    expect(setArchived).toHaveBeenCalledExactlyOnceWith('task-1', true);
   });
 
   it('never refuses a restore, whatever moves', async () => {
@@ -276,6 +321,7 @@ describe('the person’s stop of a Task’s running commands (issue #1225)', () 
         stopTaskCommands,
       },
       quarantinedRuntimeTasks: new Set<string>(),
+      cliTeamWorkerRuntime: { unsettledWorkerCount: () => 0 },
     });
     router.register();
     const call = (channel: string) => {

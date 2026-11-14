@@ -220,6 +220,7 @@ function runtime(
     selectRuntimes?: TeamWorkerRuntimeDeps['selectRuntimes'];
     availability?: TeamRuntimeAvailabilityTracker;
     catalogFor?: TeamWorkerRuntimeDeps['catalogFor'];
+    onUnsettledTurnsChanged?: TeamWorkerRuntimeDeps['onUnsettledTurnsChanged'];
   } = {},
 ): RuntimeHostTeamWorkerRuntime {
   return new RuntimeHostTeamWorkerRuntime({
@@ -239,6 +240,9 @@ function runtime(
     ...(overrides.writeApprovalRequiredFor === undefined
       ? {}
       : { writeApprovalRequiredFor: overrides.writeApprovalRequiredFor }),
+    ...(overrides.onUnsettledTurnsChanged === undefined
+      ? {}
+      : { onUnsettledTurnsChanged: overrides.onUnsettledTurnsChanged }),
   });
 }
 
@@ -868,6 +872,83 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     confirmExit?.();
     await vi.waitFor(() => expect(subject.hasUnsettledTurn(agent.id, 'execution-1')).toBe(false));
     subject.dispose();
+  });
+
+  it('counts the Task’s Workers whose Turn exit is not yet confirmed, and tells Main when that changes (issue #1263)', async () => {
+    let confirmFirstWait: (() => void) | undefined;
+    let confirmExit: (() => void) | undefined;
+    runtimeHostMock.waitForExit
+      // worker-2's Turn exits normally, but only once confirmed.
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            confirmFirstWait = resolve;
+          }),
+      )
+      .mockRejectedValueOnce(
+        new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            confirmExit = resolve;
+          }),
+      );
+    const changed = vi.fn<(taskId: string) => void>();
+    const subject = runtime({ onUnsettledTurnsChanged: changed });
+    const agent = worker(false);
+    const run = (id: string) =>
+      subject.execute({
+        worker: { ...agent, id },
+        envelope: { ...envelope, targetAgentId: id },
+        content: '調査する',
+        executionId: `execution-${id}`,
+      });
+    try {
+      expect(subject.unsettledWorkerCount('task-1')).toBe(0);
+
+      // A Turn still inside its exit wait counts: a stopped execution may return before it ends.
+      const waiting = run('worker-2');
+      await vi.waitFor(() => expect(subject.unsettledWorkerCount('task-1')).toBe(1));
+      expect(changed).toHaveBeenLastCalledWith('task-1');
+      confirmFirstWait?.();
+      await expect(waiting).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+      expect(subject.unsettledWorkerCount('task-1')).toBe(0);
+
+      changed.mockClear();
+      await expect(run('worker-1')).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(3));
+      // Recorded as failed, the Worker still counts until its exit is confirmed, in its Task only.
+      expect(subject.unsettledWorkerCount('task-1')).toBe(1);
+      expect(subject.unsettledWorkerCount('task-2')).toBe(0);
+      expect(changed).toHaveBeenCalledWith('task-1');
+
+      changed.mockClear();
+      confirmExit?.();
+      await vi.waitFor(() => expect(subject.unsettledWorkerCount('task-1')).toBe(0));
+      // The clearing is told, so the window can offer the archive again.
+      expect(changed).toHaveBeenCalledExactlyOnceWith('task-1');
+    } finally {
+      subject.dispose();
+    }
+  });
+
+  it('keeps counting a Worker whose exit nothing can confirm any more once disposed (issue #1263)', async () => {
+    runtimeHostMock.waitForExit.mockRejectedValue(
+      new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+    );
+    const subject = runtime();
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      }),
+    ).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    subject.dispose();
+    expect(subject.unsettledWorkerCount('task-1')).toBe(1);
+    // Held in memory only: the runtime of a restarted app starts with nothing counted.
+    expect(runtime().unsettledWorkerCount('task-1')).toBe(0);
   });
 
   it('keeps a Worker blocked and checking again when the Runtime Host goes away before the exit is confirmed', async () => {

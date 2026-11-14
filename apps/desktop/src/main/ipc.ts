@@ -1503,6 +1503,9 @@ export class IpcRouter {
         this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
+      // A Worker whose exit is confirmed only later no longer holds the Task's archive back
+      // (issue #1263).
+      onUnsettledTurnsChanged: (taskId) => this.refreshTaskRunningWork(taskId),
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
       fallback: this.cliTeamWorkerRuntime,
@@ -7483,16 +7486,21 @@ export class IpcRouter {
 
   /**
    * What still moves in the Task (null: nothing): its recorded Turn and Team, its commands whose
-   * processes still run, and AI work whose stop could not be confirmed (its Turn is recorded as
-   * canceled, yet its process may go on; issue #1225). The window's sidebar shows it, and an
-   * archive is refused while it is not null.
+   * processes still run, and the processes that may go on although their record says they ended.
+   * Those are the Leader's AI work whose stop could not be confirmed (its Turn is recorded as
+   * canceled; issue #1225), which only a restart clears, and the Team's Workers whose Turn exit is
+   * still awaited or could not be confirmed (the Worker is recorded as stopped or failed; issue
+   * #1263), which clear once the Runtime Host confirms the exit. The window's sidebar shows it,
+   * and an archive is refused while it is not null.
    */
   private taskRunningWork(taskId: string): TaskRunningWork | null {
     const recorded = this.persistence.getTaskRecordedWork(taskId);
+    const unconfirmedWorkers = this.cliTeamWorkerRuntime.unsettledWorkerCount(taskId);
     const work: TaskRunningWork = {
       ...recorded,
       commands: this.managedCodingHarness.activeTaskCommandCount(taskId),
       ...(this.quarantinedRuntimeTasks.has(taskId) ? { stopUnconfirmed: true } : {}),
+      ...(unconfirmedWorkers > 0 ? { unconfirmedWorkers } : {}),
     };
     return taskHasRunningWork(work) ? work : null;
   }

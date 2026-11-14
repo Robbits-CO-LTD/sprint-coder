@@ -138,6 +138,34 @@ describe('the sidebar’s archive of a Task that still moves (issue #1225)', () 
     expect(onToggleArchive).not.toHaveBeenCalled();
   });
 
+  it('holds the archive while a Worker’s exit is still being confirmed, and frees it once cleared (issue #1263)', async () => {
+    const onToggleArchive = vi.fn();
+    // The Worker is recorded as failed: nothing else moves, yet its process may go on.
+    await renderRow(
+      {
+        ...task,
+        runningWork: { turn: false, team: false, workers: 0, commands: 0, unconfirmedWorkers: 1 },
+      },
+      { onToggleArchive },
+    );
+    const button = archiveButton();
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    const reason =
+      'このTaskは、まだ動いています（終了を確かめているWorker 1人）。Workerの終了を確かめ終わるまで少し待ってから、アーカイブしてください。待っても続く時は、アプリを再起動してください。';
+    expect(button.title).toBe(reason);
+    expect(document.getElementById(button.getAttribute('aria-describedby')!)?.textContent).toBe(
+      reason,
+    );
+    await act(async () => button.click());
+    expect(onToggleArchive).not.toHaveBeenCalled();
+
+    // Main sends the Task again once the background check confirms the exit.
+    await renderRow({ ...task, runningWork: null }, { onToggleArchive });
+    expect(archiveButton().hasAttribute('aria-disabled')).toBe(false);
+    await act(async () => archiveButton().click());
+    expect(onToggleArchive).toHaveBeenCalledOnce();
+  });
+
   it('holds the selected Task’s archive while its live Turn runs, even before Main’s snapshot', async () => {
     useAppStore.setState({
       turnByTask: {
