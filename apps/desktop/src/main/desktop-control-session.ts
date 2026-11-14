@@ -53,7 +53,8 @@ const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/u;
  * (`--linger-ms`; the executable's own is about 6 seconds). An agent's actions are often several
  * seconds apart, so with the executable's own, the Team's cursors were rarely on screen together.
  * Finite, because a cursor is drawn above every window, the user's own included, whether or not
- * the window it acted on is still in view; a finished Worker's cursor goes away by the same time.
+ * the window it acted on is still in view. A finished Worker's cursor goes away at once
+ * (`retireDesktopControlWorkerCursor`), or by the same time if that could not run.
  */
 export const DESKTOP_CONTROL_CURSOR_LINGER_MS = 30_000;
 const LINGER = ['--linger-ms', String(DESKTOP_CONTROL_CURSOR_LINGER_MS)] as const;
@@ -123,6 +124,8 @@ let workerToolOffered: () => boolean = () => false;
 let collected: Promise<void> | null = null;
 const sessions = new Map<string, TaskSession>();
 const desktopWorkers = new Map<string, Map<string, DesktopControlWorker>>();
+/** Per Task, the accent given to the Worker marked last (`markDesktopControlWorker`). */
+const lastAccent = new Map<string, number>();
 
 /**
  * Given once, when Main starts (`DESKTOP_CONTROL_TEAM_CURSORS_AT_START`); off until then, and
@@ -262,8 +265,13 @@ function taskSession(taskId: string, run: DesktopControlOwnRun): TaskSession {
  *
  * Given the Team's Workers that are still at work (`live`), the marks of every other Worker (one
  * that finished, failed, was stopped, or whose Team ended) are dropped first, so the bound counts
- * Workers at once rather than ever, and a freed accent goes to the next Worker. Without it, no mark
- * is dropped, which only refuses more.
+ * Workers at once rather than ever. Without it, no mark is dropped, which only refuses more.
+ *
+ * The accents go around the palette: a Worker gets the first accent after the one given last that
+ * no Worker at work holds. A finished Worker's cursor stays drawn until it fades
+ * (`DESKTOP_CONTROL_CURSOR_LINGER_MS` after its last action), so its accent is the last one to be
+ * given out again: the next Worker's cursor and marks do not repeat a color that may still be on
+ * screen, short of the whole palette going round within that time.
  */
 export function markDesktopControlWorker(
   taskId: string,
@@ -283,10 +291,13 @@ export function markDesktopControlWorker(
     return {
       refusal: `デスクトップ操作を任せられる Worker は、同時に ${DESKTOP_CONTROL_WORKERS} 人までです。この Worker にはデスクトップ操作の道具を渡しません。`,
     };
-  // The first accent no Worker at work holds.
+  // The first accent after the one given last that no Worker at work holds. There is always one:
+  // the palette is longer than the Workers a Task may hold at once.
   const held = new Set([...workers.values()].map(({ colorIndex }) => colorIndex));
-  let colorIndex = 0;
-  while (held.has(colorIndex)) colorIndex += 1;
+  const count = DESKTOP_CONTROL_WORKER_ACCENTS.length;
+  let colorIndex = ((lastAccent.get(taskId) ?? -1) + 1) % count;
+  while (held.has(colorIndex)) colorIndex = (colorIndex + 1) % count;
+  lastAccent.set(taskId, colorIndex);
   const worker: DesktopControlWorker = Object.freeze({
     workerId,
     agentId: desktopControlAgentId(workerId),
@@ -296,6 +307,40 @@ export function markDesktopControlWorker(
   workers.set(workerId, worker);
   desktopWorkers.set(taskId, workers);
   return { worker };
+}
+
+/**
+ * Takes down the cursor of a Worker that is no longer at work (it finished, failed or was
+ * stopped), at once, rather than leaving it drawn for up to `DESKTOP_CONTROL_CURSOR_LINGER_MS`
+ * after its last action, where a Worker marked next with the freed accent could be seen beside a
+ * cursor of the same color. Run by Main itself (`cursor-overlay retire`, as the Worker's agent in
+ * the Task's session), which ends that one Worker's renderer and no other agent's.
+ *
+ * Only for a Worker the Leader marked whose cursor was styled in the Task's session: one that never
+ * drew a cursor has none to take down, and nothing runs. Called again for the same Worker, nothing
+ * runs again, until the Worker draws its cursor once more (its next run styles it again). Best
+ * effort: never throws, and a run that fails is only logged, so the Worker's end goes on.
+ */
+export async function retireDesktopControlWorkerCursor(
+  taskId: string,
+  workerId: string,
+): Promise<void> {
+  if (!teamCursors || workerId === '') return;
+  const worker = desktopWorkers.get(taskId)?.get(workerId);
+  if (worker === undefined) return;
+  const entry = sessions.get(taskId);
+  const styled = entry?.styled.get(worker.agentId);
+  if (entry === undefined || entry.id === null || styled === undefined) return;
+  // Forgotten first, so a second call for the same end runs nothing.
+  entry.styled.delete(worker.agentId);
+  try {
+    await styled;
+    await entry.run(['cursor-overlay', 'retire'], { id: entry.id, agentId: worker.agentId });
+  } catch (error) {
+    secureLogger.warn('Desktop control could not take down a finished Worker cursor', {
+      error: errorText(error),
+    });
+  }
 }
 
 /** The Worker's desktop-control mark, when the Leader gave it one and the Team's cursors are on. */
@@ -316,15 +361,22 @@ export function desktopControlAgentId(workerId: string): string {
     : `w-${createHash('sha256').update(workerId).digest('hex').slice(0, 24)}`;
 }
 
-/** The cursor's label: the role without control or invisible characters, cut short. */
+/** The cursor's label: the role as a label, or the Worker's place when nothing is left of it. */
 export function desktopControlWorkerLabel(role: string, colorIndex: number): string {
+  return desktopControlRoleLabel(role) || `Worker ${colorIndex + 1}`;
+}
+
+/**
+ * A Worker's role as a cursor or an approval card names it: without control or invisible
+ * characters, cut short. Empty when nothing is left of it.
+ */
+export function desktopControlRoleLabel(role: string): string {
   const characters = Array.from(
     role
       .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
       .replace(/\s+/gu, ' ')
       .trim(),
   );
-  if (characters.length === 0) return `Worker ${colorIndex + 1}`;
   return characters.length > LABEL_MAX
     ? `${characters.slice(0, LABEL_MAX - 1).join('')}…`
     : characters.join('');
@@ -366,6 +418,8 @@ export async function endDesktopControlSession(
   // The runs still waiting for their turn in it do not start (`desktop-control-queue.ts`).
   endDesktopControlQueue(taskId);
   desktopWorkers.delete(taskId);
+  // Its cursors end with its session, so its accents start from the first again.
+  lastAccent.delete(taskId);
   const entry = sessions.get(taskId);
   // A run of the Task from now on starts a new session, never this one.
   if (entry !== undefined) sessions.delete(taskId);
@@ -421,5 +475,6 @@ export function resetDesktopControlSessions(): void {
   collected = null;
   sessions.clear();
   desktopWorkers.clear();
+  lastAccent.clear();
   endDesktopControlQueues();
 }

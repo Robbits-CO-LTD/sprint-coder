@@ -107,6 +107,7 @@ const COMMANDS: Readonly<Record<string, readonly [Kind, string]>> = {
   'session help': ['read', '使い方を読みます'],
   'cursor-overlay enable': ['other', 'カーソルの表示を切り替えます'],
   'cursor-overlay disable': ['other', 'カーソルの表示を切り替えます'],
+  'cursor-overlay retire': ['other', 'カーソルの表示を切り替えます'],
   'cursor-overlay help': ['read', '使い方を読みます'],
 };
 const UNKNOWN: readonly [Kind, string] = ['other', 'デスクトップを操作します'];
@@ -153,6 +154,7 @@ const NO_TARGET_COMMANDS = new Set([
   'session gc',
   'cursor-overlay enable',
   'cursor-overlay disable',
+  'cursor-overlay retire',
 ]);
 // Semantic operations on a part. Without `--headed` they take no mouse or keyboard and leave the
 // part's window where it is, behind the one the person is using.

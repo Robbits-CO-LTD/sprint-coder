@@ -1,14 +1,16 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TeamDetail } from '@sprint-coder/contracts';
 import { SqlitePersistenceClient } from './persistence';
 import { DeterministicTeamWorkerRuntime, TeamCoordinator } from './team-coordinator';
 import {
   configureDesktopControlTeamCursors,
+  ensureDesktopControlSession,
   markDesktopControlWorker,
   resetDesktopControlSessions,
+  type DesktopControlOwnRun,
 } from './desktop-control-session';
 
 const cleanup: (() => void)[] = [];
@@ -85,5 +87,43 @@ describe('the Team detail’s desktop-control mark of a Worker', () => {
     const stopped = workerOf(coordinator.get(taskId), workerId)!;
     expect(stopped.state).toBe('stopped');
     expect(stopped).not.toHaveProperty('desktopControl');
+  });
+});
+
+describe('the cursor of a marked Worker that ends', () => {
+  const started = JSON.stringify({ ok: true, data: { session_id: 'run-1' } });
+
+  function ownRun() {
+    return vi.fn<DesktopControlOwnRun>(async (argv) =>
+      argv[0] === 'session' && argv[1] === 'start' ? started : '{"ok":true}',
+    );
+  }
+
+  it('is taken down once, by Main, when the Worker stops', async () => {
+    const { coordinator, taskId, workerId } = await teamWithWorker();
+    configureDesktopControlTeamCursors(true);
+    const marked = markDesktopControlWorker(taskId, workerId, '画面の確認係');
+    if (!('worker' in marked)) throw new Error('the Worker was not marked');
+    const run = ownRun();
+    await ensureDesktopControlSession(taskId, run, marked.worker);
+    run.mockClear();
+    await coordinator.stopWorker(taskId, workerId);
+    coordinator.get(taskId);
+    await vi.waitFor(() => expect(run).toHaveBeenCalled());
+    expect(run.mock.calls).toEqual([
+      [['cursor-overlay', 'retire'], { id: 'run-1', agentId: marked.worker.agentId }],
+    ]);
+  });
+
+  it('runs nothing for a Worker without a mark', async () => {
+    const { coordinator, taskId, workerId } = await teamWithWorker();
+    configureDesktopControlTeamCursors(true);
+    const run = ownRun();
+    await ensureDesktopControlSession(taskId, run);
+    run.mockClear();
+    await coordinator.stopWorker(taskId, workerId);
+    coordinator.get(taskId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(run).not.toHaveBeenCalled();
   });
 });

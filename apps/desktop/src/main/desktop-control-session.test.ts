@@ -31,6 +31,7 @@ import {
   ensureDesktopControlSession,
   markDesktopControlWorker,
   resetDesktopControlSessions,
+  retireDesktopControlWorkerCursor,
   type DesktopControlOwnRun,
   type DesktopControlWorker,
 } from './desktop-control-session';
@@ -472,13 +473,15 @@ describe('a Worker marked again, and the marks of an archived Task', () => {
 });
 
 describe('the desktop Workers of a Task at once', () => {
-  it('drops the marks of Workers no longer at work, and gives the freed accent to the next', () => {
+  it('drops the marks of Workers no longer at work, and gives the next Worker an accent not just freed', () => {
     for (const id of ['a', 'b', 'c']) markDesktopControlWorker('task-1', id, id);
     expect(markDesktopControlWorker('task-1', 'd', 'd', new Set(['a', 'b', 'c', 'd']))).toEqual({
       refusal: expect.stringContaining('同時に 3 人まで'),
     });
+    // The finished Worker's cursor may still be drawn (it lingers after its last action), so the
+    // next Worker does not take its accent: it takes the one after the last accent given.
     expect(markDesktopControlWorker('task-1', 'd', 'd', new Set(['a', 'c', 'd']))).toMatchObject({
-      worker: { workerId: 'd', colorIndex: 1 },
+      worker: { workerId: 'd', colorIndex: 3 },
     });
     configureDesktopControlTeamCursors(true);
     expect(desktopControlWorker('task-1', 'b')).toBeUndefined();
@@ -487,6 +490,106 @@ describe('the desktop Workers of a Task at once', () => {
     expect(markDesktopControlWorker('task-1', 'e', 'e')).toMatchObject({
       refusal: expect.any(String),
     });
+  });
+
+  it('comes back to a freed accent only after every other accent, and never to one in use', () => {
+    const count = DESKTOP_CONTROL_WORKER_ACCENTS.length;
+    const given: number[] = [];
+    // One Worker stays at work throughout; the others finish as soon as the next is hired.
+    const stays = markDesktopControlWorker('task-1', 'stays', 'stays');
+    expect(stays).toMatchObject({ worker: { colorIndex: 0 } });
+    for (let index = 0; index < count * 2; index += 1) {
+      const id = `w${index}`;
+      const marked = markDesktopControlWorker('task-1', id, id, new Set(['stays', id]));
+      given.push((marked as { worker: DesktopControlWorker }).worker.colorIndex);
+    }
+    // Every accent but the one in use, in order, then the same again: the accent a Worker just
+    // freed is the last one to be given out again.
+    const others = Array.from({ length: count - 1 }, (_, index) => index + 1);
+    expect(given.slice(0, others.length * 2)).toEqual([...others, ...others]);
+    expect(given).not.toContain(0);
+    // Each Task keeps its own order.
+    expect(markDesktopControlWorker('task-2', 'a', 'a')).toMatchObject({
+      worker: { colorIndex: 0 },
+    });
+  });
+});
+
+describe('the cursor of a Worker no longer at work', () => {
+  const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
+
+  async function workerWithCursor() {
+    configureDesktopControlTeamCursors(true);
+    const runs = ownRuns();
+    const marked = markDesktopControlWorker('task-1', 'agent-b', 'Checker');
+    if (!('worker' in marked)) throw new Error('the Worker was not marked');
+    const other = markDesktopControlWorker('task-1', 'agent-c', 'Typist');
+    if (!('worker' in other)) throw new Error('the other Worker was not marked');
+    await ensureDesktopControlSession('task-1', runs.run, marked.worker);
+    await ensureDesktopControlSession('task-1', runs.run, other.worker);
+    runs.calls.length = 0;
+    runs.run.mockClear();
+    return { ...runs, worker: marked.worker };
+  }
+
+  it('is taken down once, by Main, as that Worker in the Task’s session', async () => {
+    const { run, calls, id } = await workerWithCursor();
+    await retireDesktopControlWorkerCursor('task-1', 'agent-b');
+    expect(calls).toEqual([
+      { argv: ['cursor-overlay', 'retire'], session: { id, agentId: 'agent-b' } },
+    ]);
+    // The same end seen again runs nothing more.
+    await retireDesktopControlWorkerCursor('task-1', 'agent-b');
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('goes on when the run fails, and only logs it', async () => {
+    const { run } = await workerWithCursor();
+    run.mockImplementationOnce(async () => {
+      throw new Error('retire failed');
+    });
+    await expect(retireDesktopControlWorkerCursor('task-1', 'agent-b')).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('runs nothing for a Worker without a mark, without a cursor, or with the cursors off', async () => {
+    const { run } = await workerWithCursor();
+    await retireDesktopControlWorkerCursor('task-1', 'never-marked');
+    await retireDesktopControlWorkerCursor('task-2', 'agent-b');
+    await retireDesktopControlWorkerCursor('task-1', '');
+    // Marked, but it never drew its cursor in the session.
+    markDesktopControlWorker('task-1', 'agent-d', 'Reader');
+    await retireDesktopControlWorkerCursor('task-1', 'agent-d');
+    configureDesktopControlTeamCursors(false);
+    await retireDesktopControlWorkerCursor('task-1', 'agent-b');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('is taken down again after the Worker draws its cursor once more', async () => {
+    const { run, worker } = await workerWithCursor();
+    await retireDesktopControlWorkerCursor('task-1', 'agent-b');
+    await ensureDesktopControlSession('task-1', run, worker);
+    await retireDesktopControlWorkerCursor('task-1', 'agent-b');
+    expect(run.mock.calls.map(([argv]) => argv.join(' '))).toEqual([
+      'cursor-overlay retire',
+      `cursor-overlay enable --label Checker --accent ${desktopControlWorkerAccent(0)} --linger-ms 30000`,
+      'cursor-overlay retire',
+    ]);
+  });
+
+  it('is Main’s alone: refused to the agent, with or without the Team’s cursors, and allowed to Main', () => {
+    for (const argv of [
+      ['cursor-overlay', 'retire'],
+      ['cursor-overlay', 'retire', '--agent-id', 'agent-c'],
+      ['cursor-overlay', 'retire', '--help'],
+    ])
+      expect(desktopControlMainOnlyOptionRefusal(argv)).toBe(
+        'デスクトップ操作の実行を拒否した: cursor-overlay retire は使えない（Sprint Coder だけが使う）。',
+      );
+    expect(desktopControlSessionArgvRefusal(['cursor-overlay', 'retire'])).not.toBeNull();
+    // Main's own run is judged on the table alone, which accepts it.
+    expect(desktopControlArgvRefusal(['cursor-overlay', 'retire'], [], lookup)).toBeNull();
+    expect(desktopControlMainOnlyOptionRefusal(['cursor-overlay', 'disable'])).toBeNull();
   });
 });
 

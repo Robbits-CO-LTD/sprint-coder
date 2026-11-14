@@ -2,8 +2,9 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { Monitor, TriangleAlert } from './icons';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
 import { desktopModeLabel, desktopTargetText, desktopTextLabel } from '../lib/desktop-action';
-import { DESKTOP_CONTROL_LEADER_LABEL } from '@sprint-coder/contracts';
+import { DESKTOP_CONTROL_LEADER_LABEL, type ApprovalRequester } from '@sprint-coder/contracts';
 import { DesktopCursorSwatch, desktopCursorColor } from './DesktopCursorSwatch';
+import { WorkerAvatar } from './WorkerAvatar';
 
 type ApprovalCardProps = {
   approval: ApprovalSummary;
@@ -21,12 +22,34 @@ export function ApprovalCard(props: ApprovalCardProps) {
   );
 }
 
+/**
+ * Whose call the card is for, when it is a Team Worker's. A Worker's calls are raised in the
+ * Leader's Task, so the card opens with this: the Worker's face as the Team view draws it (in its
+ * desktop cursor's color, when it has one) and its name in words, which never depend on the color.
+ * Main names the Worker from its own binding of the call. Nothing for the Leader's own calls.
+ */
+function WorkerRequester({ id, requester }: { id: string; requester: ApprovalRequester }) {
+  return (
+    <div
+      id={id}
+      className="approval-card__requester-strip"
+      data-testid="approval-requester"
+      data-requester-color={requester.colorIndex ?? 'none'}
+    >
+      <WorkerAvatar name={requester.label} colorIndex={requester.colorIndex} small />
+      <span className="approval-card__requester-label">依頼した Worker</span>
+      <strong>{requester.label}</strong>
+    </div>
+  );
+}
+
 function CommandApprovalCard({ approval, busy, onDecision }: ApprovalCardProps) {
   const cardRef = useRef<HTMLElement>(null);
   const [executionExpanded, setExecutionExpanded] = useState(false);
   const ids = useId();
   const headingId = `${ids}-heading`;
   const targetId = `${ids}-target`;
+  const requesterId = `${ids}-requester`;
   // A stdin write is approved on its exact characters, and those characters are live-only: they
   // are never stored, so a card rebuilt from a snapshot or from the durable event does not have
   // them (Issue #473). Approving without them would approve bytes nobody read, so the card fails
@@ -66,10 +89,14 @@ function CommandApprovalCard({ approval, busy, onDecision }: ApprovalCardProps) 
       ref={cardRef}
       className="approval-card"
       aria-label={userInput === null ? 'ツール実行の承認' : 'AIからの確認'}
+      aria-describedby={approval.requester === undefined ? undefined : requesterId}
       aria-busy={busy}
       data-testid="approval-card"
       tabIndex={-1}
     >
+      {approval.requester === undefined ? null : (
+        <WorkerRequester id={requesterId} requester={approval.requester} />
+      )}
       <div className="approval-card__head">
         <span className="approval-card__icon">
           <TriangleAlert size={16} />
@@ -209,8 +236,16 @@ function DesktopControlApprovalCard({
   const ids = useId();
   const headingId = `${ids}-heading`;
   const targetId = `${ids}-target`;
+  const requesterId = `${ids}-requester`;
   const labelledBy = action.target === undefined ? headingId : `${headingId} ${targetId}`;
   const badge = desktopModeLabel(action);
+  // A Team Worker's run opens with the Worker, as every other card of its calls does: as its
+  // cursor names and colors it. The Leader's own run keeps the Leader's cursor beside the title.
+  const worker =
+    action.requester !== undefined && !('leader' in action.requester)
+      ? action.requester
+      : approval.requester;
+  const leader = worker === undefined && action.requester !== undefined;
   // Offered by Main beside 「Task中許可」 only; Main refuses it for a card that did not offer it.
   const appGrant = action.allowTaskGrant ? action.appGrant : undefined;
 
@@ -223,11 +258,13 @@ function DesktopControlApprovalCard({
       ref={cardRef}
       className={`approval-card approval-card--desktop approval-card--${action.mode}`}
       aria-labelledby={labelledBy}
+      aria-describedby={worker === undefined ? undefined : requesterId}
       aria-busy={busy}
       data-testid="approval-card"
       data-desktop-mode={action.mode}
       tabIndex={-1}
     >
+      {worker === undefined ? null : <WorkerRequester id={requesterId} requester={worker} />}
       <div className="approval-card__head">
         <span className="approval-card__icon">
           <Monitor size={16} />
@@ -235,21 +272,17 @@ function DesktopControlApprovalCard({
         <div>
           <strong id={headingId}>{action.title}</strong>
           <div className="approval-card__tool">デスクトップ操作</div>
-          {action.requester === undefined ? null : (
-            // Who asked, named and colored as its cursor on the desktop is.
+          {leader ? (
+            // The Leader's own run, named and colored as the Leader's cursor on the desktop is.
             <div
               className="approval-card__tool approval-card__requester"
               data-testid="desktop-approval-requester"
-              data-requester-color={
-                'leader' in action.requester ? 'leader' : action.requester.colorIndex
-              }
+              data-requester-color="leader"
             >
-              <DesktopCursorSwatch color={desktopCursorColor(action.requester)} />
-              {'leader' in action.requester
-                ? `${DESKTOP_CONTROL_LEADER_LABEL} の依頼`
-                : `依頼した Worker: ${action.requester.label}`}
+              <DesktopCursorSwatch color={desktopCursorColor({ leader: true })} />
+              {`${DESKTOP_CONTROL_LEADER_LABEL} の依頼`}
             </div>
-          )}
+          ) : null}
         </div>
         {badge === null ? null : (
           <span

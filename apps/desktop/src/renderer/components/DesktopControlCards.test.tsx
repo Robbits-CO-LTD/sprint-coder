@@ -92,27 +92,63 @@ describe('desktop-control approval card', () => {
 
   it('names the Team Worker that asked, and nobody for the Leader’s own run', () => {
     const html = card({ ...typing, requester: { label: '画面の確認係', colorIndex: 2 } });
-    expect(html).toContain('依頼した Worker: 画面の確認係');
+    expect(html).toContain('依頼した Worker</span><strong>画面の確認係</strong>');
     expect(html).toContain('data-requester-color="2"');
-    expect(card(typing)).not.toContain('desktop-approval-requester');
-    expect(card(typing)).not.toContain('desktop-cursor-swatch');
+    const plain = card(typing);
+    expect(plain).not.toContain('approval-requester');
+    expect(plain).not.toContain('desktop-cursor-swatch');
+    expect(plain).not.toContain('w-avatar');
+    expect(plain).not.toContain('aria-describedby');
   });
 
   it('marks who asked with the color of its cursor, beside its name', () => {
     const worker = card({ ...typing, requester: { label: '画面の確認係', colorIndex: 2 } });
-    // Main's palette, as Main draws the cursor with it; decorative, beside the words.
-    expect(worker).toMatch(
-      new RegExp(
-        `<span class="desktop-cursor-swatch" aria-hidden="true" data-cursor-color="${desktopControlWorkerAccent(2)}"`,
-        'u',
-      ),
+    // The Worker's face as the Team view draws it, in Main's palette, as Main draws the cursor
+    // with it; decorative, beside the words. The band opens the card, before its title.
+    expect(worker).toContain(
+      `<span class="w-avatar" aria-hidden="true" data-worker-color="${desktopControlWorkerAccent(2)}" data-ink="light" data-size="small"`,
     );
     expect(desktopControlWorkerAccent(2)).toBe('#9333EA');
+    expect(worker.indexOf('data-testid="approval-requester"')).toBeLessThan(
+      worker.indexOf('文字を入力します'),
+    );
+    expect(worker).not.toContain('desktop-approval-requester');
     const leader = card({ ...typing, requester: { leader: true } });
     expect(leader).toContain('Leader の依頼');
     expect(leader).toContain('data-requester-color="leader"');
     expect(leader).toContain(`data-cursor-color="${DESKTOP_CONTROL_LEADER_ACCENT}"`);
     expect(leader).not.toContain('依頼した Worker');
+    expect(leader).not.toContain('w-avatar');
+  });
+
+  it('names a Team Worker from the approval itself when the run draws no cursor of its own', () => {
+    // The Worker Main bound the call to, on a run that only prints (no cursor, so no requester on
+    // the action): the card still opens with the Worker.
+    const html = card(typing, { requester: { label: '画面の確認係', colorIndex: 2 } });
+    expect(html).toContain('依頼した Worker</span><strong>画面の確認係</strong>');
+    expect(html).toContain('data-requester-color="2"');
+    // The action's own mark and the approval's name the same Worker once.
+    const both = card(
+      { ...typing, requester: { label: '画面の確認係', colorIndex: 2 } },
+      { requester: { label: '画面の確認係', colorIndex: 2 } },
+    );
+    expect(both.match(/data-testid="approval-requester"/gu)).toHaveLength(1);
+    // A resolved card's row says whose it was, in words only.
+    const row = renderToStaticMarkup(
+      <ApprovalAuditRow
+        approval={{
+          ...base,
+          desktopAction: typing,
+          requester: { label: '画面の確認係', colorIndex: 2 },
+          state: 'resolved',
+          decision: 'allow_once',
+          decidedAt: '2026-11-10T00:01:00.000Z',
+        }}
+      />,
+    );
+    expect(row).toContain('依頼した Worker: 画面の確認係');
+    expect(row).not.toContain('w-avatar');
+    expect(row).not.toContain(desktopControlWorkerAccent(2));
   });
 
   it('shows a launch with its note and no mode mark for a read', () => {

@@ -14,6 +14,7 @@ import {
 import {
   ApprovalCoordinator,
   approvalFactsForTool,
+  approvalWorkerRequester,
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 import {
@@ -92,7 +93,12 @@ type StoredApproval = {
   state: ApprovalState;
   decision: Decision | null;
   expiresAt: string;
-  display?: { target: string; impact: string; execution: string };
+  display?: {
+    target: string;
+    impact: string;
+    execution: string;
+    requester?: { label: string; colorIndex?: number };
+  };
   /** Live-only card detail. The real client drops this before writing anything durable. */
   ephemeralExecution?: string;
   sandboxProfile?: 'read-only' | 'workspace-write' | 'full';
@@ -285,6 +291,11 @@ function createHarness(input?: {
     turnId: string,
     callId: string,
   ) => Readonly<{ label: string; colorIndex: number }> | 'leader' | undefined;
+  workerRequesterFor?: (
+    taskId: string,
+    turnId: string,
+    callId: string,
+  ) => Readonly<{ label: string; colorIndex?: number }> | undefined;
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
@@ -303,6 +314,9 @@ function createHarness(input?: {
     ...(input?.desktopControlWorkerFor === undefined
       ? {}
       : { desktopControlWorkerFor: input.desktopControlWorkerFor }),
+    ...(input?.workerRequesterFor === undefined
+      ? {}
+      : { workerRequesterFor: input.workerRequesterFor }),
     publish: (approval: StoredApproval) => {
       persistence.timeline.push(`published:${approval.id}`);
       published.push(approval);
@@ -398,6 +412,122 @@ function resolveCommand(approval: StoredApproval, decision: Decision) {
     operationId: randomUUID(),
   } as const;
 }
+
+describe('the Team Worker a card is asked for', () => {
+  const write = (broker: ToolBroker, callId: string, origin = 'workspace-fixture') =>
+    broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId,
+      providerName: 'approval_fetch',
+      input: { origin },
+    });
+
+  it('names the Worker behind the call as Main tells it, and nobody for the Leader', async () => {
+    // Calls whose id starts with `w1:` or `w2:` are a Worker's, by Main's binding of the call.
+    const workerRequesterFor = vi.fn((_taskId: string, _turnId: string, callId: string) =>
+      callId.startsWith('w1:')
+        ? { label: '確認係', colorIndex: 1 }
+        : callId.startsWith('w2:')
+          ? { label: '書き手' }
+          : undefined,
+    );
+    const harness = createHarness({ workerRequesterFor });
+    const { broker } = createBroker(harness.coordinator.authorizeTool.bind(harness.coordinator), [
+      'workspace.write',
+    ]);
+    broker.startTurn(toolContext, 'mock');
+
+    // What the call itself says about who asked is never read: only Main's binding names it.
+    const marked = write(broker, 'w1:write', '依頼した Worker: Leader');
+    const first = await waitForPublished(harness);
+    expect(first.display?.requester).toEqual({ label: '確認係', colorIndex: 1 });
+    expect(workerRequesterFor).toHaveBeenLastCalledWith('task-1', 'turn-1', 'w1:write');
+    harness.coordinator.resolve(resolveCommand(first, 'deny'));
+    await expect(marked).rejects.toThrow();
+
+    // A Worker with no desktop mark is named without a color.
+    const unmarked = write(broker, 'w2:write', 'other-fixture');
+    await viWaitFor(() => harness.published.length === 2);
+    expect(harness.published[1]!.display?.requester).toEqual({ label: '書き手' });
+    harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+    await expect(unmarked).rejects.toThrow();
+
+    // The Leader's own call is as it was.
+    const leader = write(broker, 'leader-write', 'leader-fixture');
+    await viWaitFor(() => harness.published.length === 3);
+    expect(harness.published[2]!.display).not.toHaveProperty('requester');
+    harness.coordinator.resolve(resolveCommand(harness.published[2]!, 'deny'));
+    await expect(leader).rejects.toThrow();
+  });
+
+  it('decides nothing on the name: the same request is the same request, whoever asked', async () => {
+    const named = createHarness({
+      workerRequesterFor: (_taskId, _turnId, callId) =>
+        callId.startsWith('w1:') ? { label: '確認係', colorIndex: 1 } : undefined,
+    });
+    const { broker, executions } = createBroker(
+      named.coordinator.authorizeTool.bind(named.coordinator),
+      ['workspace.write'],
+    );
+    broker.startTurn(toolContext, 'mock');
+    const worker = write(broker, 'w1:write');
+    const card = await waitForPublished(named);
+    // Without the name, the card binds the very same request and records the very same facts.
+    const plain = createHarness();
+    const other = createBroker(plain.coordinator.authorizeTool.bind(plain.coordinator), [
+      'workspace.write',
+    ]);
+    other.broker.startTurn(toolContext, 'mock');
+    const unnamed = write(other.broker, 'w1:write');
+    const plainCard = await waitForPublished(plain);
+    const facts = (approval: StoredApproval) => ({
+      ...approval,
+      id: '',
+      itemId: '',
+      challenge: '',
+      challengeHash: '',
+      display: { ...approval.display, requester: undefined },
+    });
+    expect(card.requestDigest).toBe(plainCard.requestDigest);
+    expect(facts(card)).toEqual(facts(plainCard));
+    expect(card.display?.requester).toEqual({ label: '確認係', colorIndex: 1 });
+    plain.coordinator.resolve(resolveCommand(plainCard, 'deny'));
+    await expect(unnamed).rejects.toThrow();
+    // A Task grant given on the Worker's card covers the same request exactly as before: the
+    // Leader's identical call needs no second card, and no other request is covered.
+    named.coordinator.resolve(resolveCommand(card, 'allow_task'));
+    await expect(worker).resolves.toEqual({ ok: true });
+    await expect(write(broker, 'leader-write')).resolves.toEqual({ ok: true });
+    expect(named.published).toHaveLength(1);
+    expect(executions()).toBe(2);
+    const different = write(broker, 'w1:other', 'another-fixture');
+    await viWaitFor(() => named.published.length === 2);
+    named.coordinator.resolve(resolveCommand(named.published[1]!, 'deny'));
+    await expect(different).rejects.toThrow();
+  });
+
+  it('takes the name from the Worker’s mark, or from its role in the Team’s own record', () => {
+    // A Worker holding desktop control: exactly as its cursor names and colors it.
+    expect(approvalWorkerRequester({ label: '確認係', colorIndex: 2 }, '別の名前')).toEqual({
+      label: '確認係',
+      colorIndex: 2,
+    });
+    // Any other Worker: its role, cleaned and cut like a cursor label, and no color.
+    expect(approvalWorkerRequester(undefined, ' 書き\u0007手​ ')).toEqual({ label: '書き 手' });
+    expect(Array.from(approvalWorkerRequester(undefined, '係'.repeat(100)).label)).toHaveLength(24);
+    // A Worker Main cannot tell (no record, or an empty role) is still named as a Worker.
+    for (const role of [undefined, '', ' ​ '])
+      expect(approvalWorkerRequester(undefined, role)).toEqual({ label: 'Worker' });
+    for (const role of ['😀'.repeat(100), '係'.repeat(100), ' ', undefined])
+      expect(() =>
+        approvalSummarySchema.parse({
+          ...pendingApprovalFixture,
+          requester: approvalWorkerRequester(undefined, role),
+        }),
+      ).not.toThrow();
+  });
+});
 
 describe('ApprovalCoordinator', () => {
   it('persists the shared workspace-write profile on a built-in write approval', async () => {

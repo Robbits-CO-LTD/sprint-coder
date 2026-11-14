@@ -138,7 +138,11 @@ export type TeamResultReadSource = Readonly<{
   integratedHead: string;
 }>;
 import { WORKER_ACTIVITY_LOG_LIMIT, workerActivityEntry } from './worker-activity-log';
-import { desktopControlTeamCursors, desktopControlWorker } from './desktop-control-session';
+import {
+  desktopControlTeamCursors,
+  desktopControlWorker,
+  retireDesktopControlWorkerCursor,
+} from './desktop-control-session';
 import {
   allCriteriaDone,
   confirmWorkerReport,
@@ -7415,10 +7419,12 @@ export class TeamCoordinator {
   private workerSummary(agent: AgentRecord): WorkerSummary {
     // Only the cursor's label and color reach the Renderer, only while the cursors are on, and only
     // for a Worker still at work: a finished Worker's color may go to the next Worker marked.
+    const ended = agent.kind === 'worker' && DESKTOP_MARK_ENDED_STATES.has(agent.state);
     const desktop =
-      agent.kind === 'worker' && !DESKTOP_MARK_ENDED_STATES.has(agent.state)
-        ? desktopControlWorker(agent.taskId, agent.id)
-        : undefined;
+      agent.kind === 'worker' && !ended ? desktopControlWorker(agent.taskId, agent.id) : undefined;
+    // Where the mark stops being shown, its cursor is taken down too, so a cursor of the freed
+    // color is never drawn twice. Once per end, and best effort: it never throws nor waits here.
+    if (ended) void retireDesktopControlWorkerCursor(agent.taskId, agent.id);
     return workerSummarySchema.parse({
       id: agent.id,
       teamId: agent.teamId,

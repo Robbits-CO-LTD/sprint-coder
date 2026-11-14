@@ -116,7 +116,9 @@ mod imp {
                         }
                     }
                     listener.finish();
-                    if ours && control.is_disable() {
+                    // A retire names this renderer's own agent (`serves_agent`),
+                    // so it ends this one renderer and no other.
+                    if ours && (control.is_disable() || control.is_retire()) {
                         return Ok(());
                     }
                     if ours {

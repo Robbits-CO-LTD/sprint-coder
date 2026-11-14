@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AppError, CursorOverlayControl, PlatformAdapter, commands::cursor_overlay,
     context::CommandContext,
@@ -49,6 +50,7 @@ pub(crate) fn dispatch(
                 (!multi_agent).then_some(control),
             )
         }
+        CursorOverlayAction::Retire => return retire(adapter, context, session_id),
         CursorOverlayAction::Disable => (
             cursor_overlay::CursorOverlayAction::Disable,
             Some(CursorOverlayControl::disable(session_id.to_owned())),
@@ -72,6 +74,35 @@ pub(crate) fn dispatch(
         }
     }
     Ok(value)
+}
+
+/// Takes down the selected agent's cursor and leaves the session as it is.
+///
+/// The manifest is not touched: the session still wants its overlay, and the
+/// other agents keep drawing theirs. An agent with nothing on screen answers
+/// the same as one whose cursor was just taken down, because both end with
+/// that agent drawing nothing. A teardown that could not be confirmed is an
+/// error, as it is for `disable`.
+fn retire(
+    adapter: &dyn PlatformAdapter,
+    context: &CommandContext,
+    session_id: &str,
+) -> Result<Value, AppError> {
+    let agent_id = context.agent_id().ok_or_else(|| {
+        AppError::invalid_input_with_suggestion(
+            "Retiring a cursor requires the agent whose cursor it is",
+            "Pass --agent-id or AGENT_DESKTOP_AGENT_ID.",
+        )
+    })?;
+    tear_down(
+        adapter,
+        &CursorOverlayControl::retire(session_id.to_owned(), agent_id.to_owned()),
+    )?;
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "agent_id": agent_id,
+        "retired": true,
+    }))
 }
 
 fn nothing_to_tear_down(error: &agent_desktop_core::AdapterError) -> bool {

@@ -2324,6 +2324,20 @@ export const desktopApprovalActionSchema = desktopActionStepSchema
   .strict();
 export type DesktopApprovalAction = z.infer<typeof desktopApprovalActionSchema>;
 
+/**
+ * The Team Worker whose tool call an approval is asked for, for the card to name: its role as Main
+ * holds it, and, while it holds desktop control, the place of its cursor's color in
+ * `DESKTOP_CONTROL_WORKER_ACCENTS`. A Worker with no desktop mark has a name and no color. Display
+ * only: nothing is decided, granted or matched on it.
+ */
+export const approvalRequesterSchema = z
+  .object({
+    label: desktopControlMarkSchema.shape.label,
+    colorIndex: desktopControlMarkSchema.shape.colorIndex.optional(),
+  })
+  .strict();
+export type ApprovalRequester = z.infer<typeof approvalRequesterSchema>;
+
 export const approvalSummarySchema = z
   .object({
     id: idSchema,
@@ -2356,6 +2370,11 @@ export const approvalSummarySchema = z
       .optional(),
     /** A desktop-control run's own card (absent on every other approval and on older rows). */
     desktopAction: desktopApprovalActionSchema.optional(),
+    /**
+     * The Team Worker whose call this is, whatever the tool (absent for the Leader's own calls and
+     * on older rows). A Worker's calls are raised in the Leader's Task, so the card says whose.
+     */
+    requester: approvalRequesterSchema.optional(),
     risk: toolRiskSchema,
     capability: toolCapabilitySchema,
     challenge: z.string().min(8).max(256),
