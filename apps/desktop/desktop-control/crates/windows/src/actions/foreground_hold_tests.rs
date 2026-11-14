@@ -155,7 +155,12 @@ fn dispatch_decides_before_it_locks() {
     let refusal = body
         .find("lock_unavailable_refusal(")
         .expect("lock refusal");
-    let send = body.find("let result = run_action(").expect("the action");
+    let send = body.find("with_button_delivery(").expect("the action");
+    let window = body.find("read_element_window(").expect("window read");
+    assert!(
+        window < lock,
+        "the element's window is read before the lock"
+    );
     assert!(
         refusal < send,
         "a missing lock is refused before anything is sent"
@@ -176,6 +181,20 @@ fn holds_that_overlap_in_one_process_share_the_lock() {
         );
     }
     assert!(super::ForegroundHold::begin(true).is_none());
+    let shared = first.locked();
     drop(second);
     drop(first);
+    if shared {
+        // Released by the last hold: this process can take it again, and a
+        // second LSFW_LOCK while it is held would fail.
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            LSFW_LOCK, LSFW_UNLOCK, LockSetForegroundWindow,
+        };
+        assert_ne!(
+            unsafe { LockSetForegroundWindow(LSFW_LOCK) },
+            0,
+            "the lock was released"
+        );
+        unsafe { LockSetForegroundWindow(LSFW_UNLOCK) };
+    }
 }

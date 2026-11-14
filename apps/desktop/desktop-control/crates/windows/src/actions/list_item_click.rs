@@ -33,6 +33,11 @@
 //! does not answer in time is "could not tell" ([`ClickCheck::Unread`]),
 //! never "not such an item": that click is refused too, as an answer that may
 //! be retried, while an element read as something else keeps its click path.
+//! The climb to the element's window goes up to 16 elements, so a list view's
+//! sub-item under a row under a group still reaches the list's window. When no
+//! window is found, an element of a framework the Win32 proxies serve (`Win32`,
+//! `WinForm`) could not be told and is refused; one of any other framework
+//! (WPF, Chromium, ...) is not a Win32 list item.
 
 /// Whether a window class (its own, or the system class it is built on) is
 /// a standard Win32 list whose items' Invoke takes the foreground: the
@@ -62,13 +67,94 @@ pub(crate) enum ListRead {
     /// An item (not the list itself) of a list in
     /// [`is_foreground_taking_list_class`].
     Item,
-    /// Read as anything else: the element, its parent or its grandparent
-    /// has a window of another class, or none of them has a window (an item
-    /// of a Win32 list always sits right under the list, or under a group of
-    /// it), or the climb reached the top.
+    /// Read as anything else (see [`list_read`]).
     NotItem,
     /// A read failed or did not answer in time.
     Unread,
+}
+
+/// The most elements an item of a Win32 list sits below the list's own
+/// window: a list view's sub-item is under its row, which may be under a
+/// group (sub-item, row, group: 3).
+pub(crate) const LIST_ITEM_DEPTH: usize = 3;
+
+/// The first element with a window of its own, met climbing from the element
+/// (the element itself is depth 0): what its window is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowRead {
+    Found {
+        depth: usize,
+        /// Its class is a list in [`is_foreground_taking_list_class`].
+        list: bool,
+        /// Its class is [`is_win32_button_class`].
+        button: bool,
+    },
+    /// No element up to the climb's limit, or up to the top, has a window.
+    NotFound,
+    /// A read failed or did not answer in time.
+    Unread,
+}
+
+/// What the element's framework (`FrameworkId`) was read as, asked only when
+/// no window was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameworkRead {
+    /// `Win32` or `WinForm`: an element served by the Win32 proxies, which
+    /// always have a window close above them.
+    Win32Like,
+    /// Any other framework (WPF, Chrome, DirectUI, XAML, ...), or none.
+    Other,
+    Unread,
+    NotAsked,
+}
+
+/// Whether `id` is a framework whose elements sit close under a window.
+pub(crate) fn framework_read_of(id: &str) -> FrameworkRead {
+    if id.eq_ignore_ascii_case("Win32") || id.eq_ignore_ascii_case("WinForm") {
+        FrameworkRead::Win32Like
+    } else {
+        FrameworkRead::Other
+    }
+}
+
+/// The list answer from the window found. An element with its own window is
+/// a control, not an item (the list itself included). An item of a Win32 list
+/// sits at most [`LIST_ITEM_DEPTH`] below it, so a list window further up, or
+/// a window of another class, is not such a list. With no window found, an
+/// element of WPF, Chromium and the like is not an item; one the Win32
+/// proxies serve, or one whose framework could not be read, could not be told.
+pub(crate) fn list_read(window: WindowRead, framework: FrameworkRead) -> ListRead {
+    match window {
+        WindowRead::Found { depth, list, .. } => {
+            if list && (1..=LIST_ITEM_DEPTH).contains(&depth) {
+                ListRead::Item
+            } else {
+                ListRead::NotItem
+            }
+        }
+        WindowRead::Unread => ListRead::Unread,
+        WindowRead::NotFound => match framework {
+            FrameworkRead::Other => ListRead::NotItem,
+            FrameworkRead::Win32Like | FrameworkRead::Unread | FrameworkRead::NotAsked => {
+                ListRead::Unread
+            }
+        },
+    }
+}
+
+/// Whether the element is a Win32 button: it has a window of its own whose
+/// class is the button's.
+pub(crate) fn button_read(window: WindowRead) -> crate::actions::foreground_hold::ButtonRead {
+    use crate::actions::foreground_hold::ButtonRead;
+    match window {
+        WindowRead::Found {
+            depth: 0,
+            button: true,
+            ..
+        } => ButtonRead::Button,
+        WindowRead::Found { .. } | WindowRead::NotFound => ButtonRead::NotButton,
+        WindowRead::Unread => ButtonRead::Unread,
+    }
 }
 
 /// What was read of the element's control type.
@@ -115,10 +201,9 @@ pub(crate) fn needs_control_type(list: ListRead, invoke: bool) -> bool {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::{
-        ClickCheck, ListRead, TypeRead, decide_click, is_foreground_taking_list_class,
-        is_win32_button_class, needs_control_type,
+        ClickCheck, FrameworkRead, TypeRead, WindowRead, decide_click, framework_read_of,
+        is_foreground_taking_list_class, is_win32_button_class, list_read, needs_control_type,
     };
-    use crate::actions::foreground_hold::ButtonRead;
     use crate::tree::automation::{automation_client, failure_of};
     use crate::tree::element::UIAElement;
     use crate::tree::properties::property_ids::TreeProperty;
@@ -128,21 +213,88 @@ mod imp {
     use uiautomation::UIAutomation;
     use windows::Win32::Foundation::HWND;
 
-    /// The elements the climb looks at: the element, its parent and its
-    /// grandparent (an item of a list view may sit under a group).
-    const CLIMB: usize = 3;
+    /// The most elements the climb looks at for a window: enough for the
+    /// deepest Win32 list item and for a WPF or Chromium element to reach its
+    /// host window in most trees; beyond it the window is "not found".
+    const WINDOW_CLIMB: usize = 16;
+
+    /// The element's window, read once before the foreground is locked and
+    /// used by every check of the action: the window read, and the window
+    /// itself when one was found.
+    #[derive(Clone, Copy)]
+    pub(crate) struct ElementWindow {
+        pub(crate) read: WindowRead,
+        pub(crate) hwnd: Option<isize>,
+    }
+
+    /// Climbs from `element` to the first element with a window of its own,
+    /// each read bounded by what is left of `deadline`.
+    pub(crate) fn read_element_window(element: &UIAElement, deadline: Deadline) -> ElementWindow {
+        let unread = ElementWindow {
+            read: WindowRead::Unread,
+            hwnd: None,
+        };
+        let Ok(client) = automation_client() else {
+            return unread;
+        };
+        let Some(Ok(walker)) =
+            with_transaction_timeout(&client, deadline, || client.get_raw_view_walker())
+        else {
+            return unread;
+        };
+        let mut current = element.clone();
+        for depth in 0..WINDOW_CLIMB {
+            let Some(Ok(handle)) = with_transaction_timeout(&client, deadline, || {
+                current.0.get_native_window_handle()
+            }) else {
+                return unread;
+            };
+            let hwnd: HWND = handle.into();
+            if !hwnd.0.is_null() {
+                let hwnd = hwnd.0 as isize;
+                return ElementWindow {
+                    read: WindowRead::Found {
+                        depth,
+                        list: classes_match(hwnd, is_foreground_taking_list_class),
+                        button: classes_match(hwnd, is_win32_button_class),
+                    },
+                    hwnd: Some(hwnd),
+                };
+            }
+            let Some(parent) =
+                with_transaction_timeout(&client, deadline, || walker.get_parent(&current.0))
+            else {
+                return unread;
+            };
+            match parent {
+                Ok(parent) => current = UIAElement::from(parent),
+                Err(error) if failure_of(&error).is_exhaustion() => break,
+                Err(_) => return unread,
+            }
+        }
+        ElementWindow {
+            read: WindowRead::NotFound,
+            hwnd: None,
+        }
+    }
 
     /// The decision on a background click on `element`
-    /// ([`super::decide_click`]).
+    /// ([`super::decide_click`]), from its window read before the lock.
     pub(crate) fn check_background_click(
         element: &UIAElement,
+        window: &ElementWindow,
         invoke_available: bool,
         deadline: Deadline,
     ) -> ClickCheck {
         let Ok(client) = automation_client() else {
             return ClickCheck::Unread;
         };
-        let list = read_list(&client, element, deadline);
+        let framework = if window.read == WindowRead::NotFound {
+            read_framework(&client, element, deadline)
+        } else {
+            FrameworkRead::NotAsked
+        };
+        let list = list_read(window.read, framework);
         let control_type = if needs_control_type(list, invoke_available) {
             read_control_type(&client, element, deadline)
         } else {
@@ -151,46 +303,15 @@ mod imp {
         decide_click(list, control_type, invoke_available)
     }
 
-    fn read_list(client: &UIAutomation, element: &UIAElement, deadline: Deadline) -> ListRead {
-        let Some(Ok(walker)) =
-            with_transaction_timeout(client, deadline, || client.get_raw_view_walker())
-        else {
-            return ListRead::Unread;
-        };
-        let mut current = element.clone();
-        for depth in 0..CLIMB {
-            let Some(handle) =
-                with_transaction_timeout(client, deadline, || current.0.get_native_window_handle())
-            else {
-                return ListRead::Unread;
-            };
-            let Ok(handle) = handle else {
-                return ListRead::Unread;
-            };
-            let hwnd: HWND = handle.into();
-            if !hwnd.0.is_null() {
-                // The element with the window is the list itself when the
-                // climb has not moved: that is not an item.
-                return if depth > 0
-                    && classes_match(hwnd.0 as isize, is_foreground_taking_list_class)
-                {
-                    ListRead::Item
-                } else {
-                    ListRead::NotItem
-                };
-            }
-            let Some(parent) =
-                with_transaction_timeout(client, deadline, || walker.get_parent(&current.0))
-            else {
-                return ListRead::Unread;
-            };
-            match parent {
-                Ok(parent) => current = UIAElement::from(parent),
-                Err(error) if failure_of(&error).is_exhaustion() => return ListRead::NotItem,
-                Err(_) => return ListRead::Unread,
-            }
+    fn read_framework(
+        client: &UIAutomation,
+        element: &UIAElement,
+        deadline: Deadline,
+    ) -> FrameworkRead {
+        match with_transaction_timeout(client, deadline, || element.0.get_framework_id()) {
+            Some(Ok(id)) => framework_read_of(&id),
+            _ => FrameworkRead::Unread,
         }
-        ListRead::NotItem
     }
 
     fn read_control_type(
@@ -207,28 +328,14 @@ mod imp {
         }
     }
 
-    /// Whether `element`'s own window is a Win32 button, read within
-    /// `deadline`.
-    pub(crate) fn read_button(element: &UIAElement, deadline: Deadline) -> ButtonRead {
-        let Ok(client) = automation_client() else {
-            return ButtonRead::Unread;
-        };
-        match with_transaction_timeout(&client, deadline, || element.0.get_native_window_handle()) {
-            Some(Ok(handle)) => {
-                let hwnd: HWND = handle.into();
-                if !hwnd.0.is_null() && classes_match(hwnd.0 as isize, is_win32_button_class) {
-                    ButtonRead::Button
-                } else {
-                    ButtonRead::NotButton
-                }
-            }
-            _ => ButtonRead::Unread,
-        }
+    /// Whether `hwnd` is still a Win32 button, read again right before a
+    /// click is sent to it.
+    pub(crate) fn is_win32_button_window(hwnd: isize) -> bool {
+        classes_match(hwnd, is_win32_button_class)
     }
-
     /// Whether the window's own class or its system class matches. Reads the
     /// window's class only; nothing is sent to the window.
-    fn classes_match(hwnd: isize, matches: fn(&str) -> bool) -> bool {
+    pub(crate) fn classes_match(hwnd: isize, matches: fn(&str) -> bool) -> bool {
         use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, RealGetWindowClassW};
         let mut own = [0u16; 128];
         let own_length = unsafe {
@@ -294,7 +401,9 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::{background_click_refusal, check_background_click, read_button};
+pub(crate) use imp::{
+    background_click_refusal, check_background_click, is_win32_button_window, read_element_window,
+};
 
 #[cfg(test)]
 #[path = "list_item_click_tests.rs"]

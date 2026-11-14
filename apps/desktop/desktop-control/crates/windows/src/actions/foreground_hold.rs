@@ -13,15 +13,25 @@
 //!
 //! So an action that may not take the foreground
 //! (`InteractionPolicy::allow_focus_steal` is false) runs with the foreground
-//! locked (`LockSetForegroundWindow`), and the lock is dropped only after the
-//! target's window threads have answered two sent `WM_NULL` messages in turn
-//! (`settle`): a thread answers a sent message only when it next asks for
-//! messages, so the second answer comes after the posted click the thread had
-//! already taken. With that, the same button and check box took the
-//! foreground 0 of 5 times each, and so did a click handler that calls
-//! `SetForegroundWindow` itself, one that does so after sleeping 400 ms, and
-//! one that does so from a timer 300 ms later (the later calls failed: the
-//! window had already been kept from activating).
+//! locked (`LockSetForegroundWindow`). What keeps the window behind is that
+//! its first attempt to activate is made, and fails, while the lock holds;
+//! later attempts fail too (measured: a click handler calling
+//! `SetForegroundWindow` 400 ms later, or from a timer 300 ms later, failed
+//! after the unlock, 0 of 5 each). How sure that is depends on the path:
+//!
+//! - Certain: a click, toggle, check or uncheck of a Win32 button is sent as
+//!   `BM_CLICK` from this process (`win32_button`), and the send returns only
+//!   after the button's handler has run, so its first attempt is inside the
+//!   lock (0 of 5 each for push buttons and check boxes).
+//! - Likely, not certain: any other action. The proxy or provider may answer
+//!   later on the target's thread, so the lock is held until each window
+//!   thread of the target (the element's own window's thread first) has
+//!   answered two sent `WM_NULL` messages, and 50 ms more (`LATE_HOLD`). A
+//!   sent message is handed out before posted ones, so a thread busy when the
+//!   action posted can answer both sends first: the review of PR #1276
+//!   measured 19 to 26 of 200 on a loaded CPU with the two sends alone, and
+//!   0 of 200 with 20 ms between them. A thread waiting on a send of its own
+//!   can answer them without taking the posted message at all.
 //!
 //! What this does not promise, so the result says it instead:
 //! - The wait is bounded (`SETTLE_CAP` and the action's deadline). A target
@@ -49,6 +59,14 @@ pub(crate) const LOCK_UNAVAILABLE: &str = "unavailable";
 pub(crate) const SETTLE_INCOMPLETE: &str = "incomplete";
 /// `details.foreground_settle` when the target had no window to wait on.
 pub(crate) const SETTLE_NO_WINDOW: &str = "no_window";
+/// `details.foreground_settle` when the element's own window, and so its
+/// thread, was not known (the other threads of the target were waited on).
+pub(crate) const SETTLE_THREAD_UNKNOWN: &str = "element_thread_unknown";
+
+/// How long the lock is held after the target's threads answered, for an
+/// action not sent as a Win32 button's `BM_CLICK`: 20 ms between the two
+/// sends was enough in the review's 200 runs on a loaded CPU; this is more.
+pub(crate) const LATE_HOLD: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How the wait for the target after the action ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +77,9 @@ pub(crate) enum Settle {
     Incomplete,
     /// The target's process showed no top-level window to wait on.
     NoWindow,
+    /// The element's own thread was not known; the target's other window
+    /// threads answered.
+    ThreadUnknown,
     /// Not waited for: no lock was held, or the target's process is unknown.
     NotTried,
 }
@@ -85,6 +106,7 @@ impl HoldReport {
         match self.settle {
             Settle::Incomplete => entries.push(("foreground_settle", SETTLE_INCOMPLETE)),
             Settle::NoWindow => entries.push(("foreground_settle", SETTLE_NO_WINDOW)),
+            Settle::ThreadUnknown => entries.push(("foreground_settle", SETTLE_THREAD_UNKNOWN)),
             Settle::Settled | Settle::NotTried => {}
         }
         entries
@@ -227,16 +249,29 @@ mod imp {
         /// Waits, while the lock still holds, for the target's window threads
         /// to handle what the action sent them ([`settle`]), drops the lock,
         /// and reports. `target_pid` is the target's process, when known.
+        ///
+        /// `element_window` is the element's own window (or the first above
+        /// it), whose thread is waited on first; `hold_after` is how long the
+        /// lock stays after the answers ([`super::LATE_HOLD`], or zero for a
+        /// click sent as `BM_CLICK`), within `deadline`.
         pub(crate) fn finish(
             mut self,
             target_pid: Option<u32>,
+            element_window: Option<isize>,
+            hold_after: std::time::Duration,
             deadline: agent_desktop_core::Deadline,
         ) -> HoldReport {
             use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
             let settle = match target_pid {
-                Some(pid) if self.locked => settle(pid, deadline),
+                Some(pid) if self.locked => settle(pid, element_window, deadline),
                 _ => Settle::NotTried,
             };
+            if self.locked {
+                let hold = hold_after.min(deadline.remaining());
+                if !hold.is_zero() {
+                    std::thread::sleep(hold);
+                }
+            }
             let locked = self.locked;
             self.unlock();
             let came_forward = target_pid.is_some_and(|pid| {
@@ -289,11 +324,16 @@ mod imp {
     /// next asks for messages, after the posted message it is already
     /// handling, so the second answer comes after a click the thread had
     /// taken by the time the first was answered.
-    fn settle(pid: u32, deadline: agent_desktop_core::Deadline) -> Settle {
+    fn settle(
+        pid: u32,
+        element_window: Option<isize>,
+        deadline: agent_desktop_core::Deadline,
+    ) -> Settle {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL,
         };
-        let windows = thread_windows(pid);
+        let first = element_window.and_then(|window| element_root(window as HWND, pid));
+        let windows = thread_windows(pid, first);
         if windows.is_empty() {
             return Settle::NoWindow;
         }
@@ -322,12 +362,30 @@ mod imp {
                 }
             }
         }
-        Settle::Settled
+        if first.is_some() {
+            Settle::Settled
+        } else {
+            Settle::ThreadUnknown
+        }
     }
 
-    /// One visible top-level window per window thread of `pid`. Reads the
-    /// window list only; nothing is sent to the windows.
-    fn thread_windows(pid: u32) -> Vec<HWND> {
+    /// The top-level window of the element's window (`GA_ROOT`), when it is
+    /// still a window of `pid`.
+    fn element_root(window: HWND, pid: u32) -> Option<HWND> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, IsWindow};
+        if window.is_null() || unsafe { IsWindow(window) } == 0 {
+            return None;
+        }
+        let root = unsafe { GetAncestor(window, GA_ROOT) };
+        let root = if root.is_null() { window } else { root };
+        (window_pid(root) == Some(pid)).then_some(root)
+    }
+
+    /// One window per window thread of `pid`: `first` (the element's own
+    /// top-level window) before any other, then one visible top-level window
+    /// per further thread, up to [`SETTLE_THREADS`] in all. Reads the window
+    /// list only; nothing is sent to the windows.
+    fn thread_windows(pid: u32, first: Option<HWND>) -> Vec<HWND> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
         };
@@ -355,6 +413,13 @@ mod imp {
             threads: Vec::new(),
             windows: Vec::new(),
         };
+        if let Some(first) = first {
+            let thread = unsafe { GetWindowThreadProcessId(first, std::ptr::null_mut()) };
+            if thread != 0 {
+                search.threads.push(thread);
+                search.windows.push(first);
+            }
+        }
         unsafe { EnumWindows(Some(visit), &mut search as *mut Search as isize) };
         search.windows
     }

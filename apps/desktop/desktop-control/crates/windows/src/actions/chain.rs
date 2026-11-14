@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Activation-chain engine for UIA pattern dispatch.
 //!
 //! Rung closures return a delivery outcome or `Err`. A genuine `Err` always
@@ -238,6 +239,12 @@ pub(crate) fn invoke_available(element: &UIAElement) -> bool {
 /// with [`DeliveryOutcome::from_delivery`].
 #[cfg(target_os = "windows")]
 pub(crate) fn invoke_pattern_delivered(element: &UIAElement) -> Result<bool, AdapterError> {
+    // Desktop control (desktop-control) change: a background click of a Win32
+    // button is sent as BM_CLICK instead (`win32_button`).
+    #[cfg(target_os = "windows")]
+    if let Some(sent) = crate::actions::win32_button::sent_click() {
+        return sent;
+    }
     match element.0.get_pattern::<UIInvokePattern>() {
         Ok(pattern) => match pattern.invoke() {
             Ok(()) => classify_success(),

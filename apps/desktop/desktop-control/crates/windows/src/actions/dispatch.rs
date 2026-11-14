@@ -35,10 +35,11 @@ mod imp {
     use crate::actions::disclosure::{collapse_steps, expand_steps};
     use crate::actions::focus::focus_element;
     use crate::actions::foreground_hold::{
-        ForegroundHold, lock_needed, lock_unavailable_refusal, note_report,
+        ButtonRead, ForegroundHold, LATE_HOLD, lock_needed, lock_unavailable_refusal, note_report,
     };
     use crate::actions::list_item_click::{
-        ClickCheck, background_click_refusal, check_background_click, read_button,
+        ClickCheck, background_click_refusal, button_read, check_background_click,
+        read_element_window,
     };
     use crate::actions::mutation::{classify_success, classify_write};
     use crate::actions::physical_click::{
@@ -53,6 +54,7 @@ mod imp {
     use crate::actions::select_search::selection_item_available;
     use crate::actions::toggle_state::{check_steps, toggle_steps, uncheck_steps};
     use crate::actions::value_write::{clear_steps, left_list_unchosen, set_value_steps};
+    use crate::actions::win32_button::{ButtonTarget, HANDLER_STILL_RUNNING, with_button_delivery};
     use crate::tree::element::{UIAElement, uia_element};
     use crate::tree::live_read::corroborate_verified_process;
     use crate::tree::properties::property_ids::TreeProperty;
@@ -82,11 +84,12 @@ mod imp {
         if request.policy.allow_focus_steal {
             return run_action(handle, element, request, lease, None);
         }
+        let window = read_element_window(element, deadline);
         let gate = matches!(request.action, Action::Click).then(|| {
             let invoke = invoke_available(element);
             ClickGate {
                 invoke_available: invoke,
-                check: check_background_click(element, invoke, deadline),
+                check: check_background_click(element, &window, invoke, deadline),
             }
         });
         let target_pid = target_pid(element, deadline);
@@ -94,19 +97,68 @@ mod imp {
             request.action,
             Action::Click | Action::Toggle | Action::Check | Action::Uncheck
         );
+        let button = button_read(window.read);
         let Some(hold) = ForegroundHold::begin(false) else {
             return run_action(handle, element, request, lease, gate);
         };
-        if !hold.locked() && posts_a_click {
-            // Read without the lock held: there is none.
-            let button = read_button(element, deadline);
-            if lock_needed(false, true, button) {
-                return Err(lock_unavailable_refusal(request.policy, button));
-            }
+        if !hold.locked() && posts_a_click && lock_needed(false, true, button) {
+            return Err(lock_unavailable_refusal(request.policy, button));
         }
-        let result = run_action(handle, element, request, lease, gate);
-        let report = hold.finish(target_pid, deadline);
-        note_report(result, report)
+        // A Win32 button's click is sent as BM_CLICK, inside the lock
+        // (`win32_button`), when its window and process are known.
+        let button_target = match (
+            posts_a_click && hold.locked(),
+            button,
+            window.hwnd,
+            target_pid,
+        ) {
+            (true, ButtonRead::Button, Some(hwnd), Some(pid)) => Some(ButtonTarget {
+                hwnd,
+                pid,
+                deadline,
+            }),
+            _ => None,
+        };
+        let (result, still_running) = with_button_delivery(button_target, || {
+            run_action(handle, element, request, lease, gate)
+        });
+        let hold_after = if button_target.is_some() {
+            std::time::Duration::ZERO
+        } else {
+            LATE_HOLD
+        };
+        let report = hold.finish(target_pid, window.hwnd, hold_after, deadline);
+        let result = note_report(result, report);
+        if button_target.is_none() {
+            return result;
+        }
+        note_button_delivery(result, still_running)
+    }
+
+    /// Says a button's click was sent as `BM_CLICK` (the step keeps the
+    /// pattern's label the chain chose it by), and that its handler was
+    /// still running when the wait ran out.
+    fn note_button_delivery(
+        result: Result<ActionResult, AdapterError>,
+        still_running: bool,
+    ) -> Result<ActionResult, AdapterError> {
+        result.map(|mut result| {
+            let mut details = match result.details.take() {
+                Some(serde_json::Value::Object(details)) => details,
+                Some(other) => {
+                    let mut details = serde_json::Map::new();
+                    details.insert("details".into(), other);
+                    details
+                }
+                None => serde_json::Map::new(),
+            };
+            details.insert("delivery".into(), "win32_bm_click_sent".into());
+            if still_running {
+                details.insert("click_handler".into(), HANDLER_STILL_RUNNING.into());
+            }
+            result.details = Some(details.into());
+            result
+        })
     }
 
     /// What a background click decided before anything was sent.
@@ -355,6 +407,11 @@ mod imp {
     }
 
     fn legacy_default_action(element: &UIAElement) -> Result<DeliveryOutcome, AdapterError> {
+        // A background click of a Win32 button is sent as BM_CLICK instead
+        // (`win32_button`).
+        if let Some(sent) = crate::actions::win32_button::sent_click() {
+            return Ok(DeliveryOutcome::from_delivery(sent?, false));
+        }
         let delivered = match element.0.get_pattern::<UILegacyIAccessiblePattern>() {
             Ok(pattern) => match pattern.do_default_action() {
                 Ok(()) => classify_success()?,
