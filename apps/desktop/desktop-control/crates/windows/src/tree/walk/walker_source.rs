@@ -642,15 +642,33 @@ mod imp {
         /// view can step past an element that left it while it was walked (a
         /// root that turned offscreen), into another window. Any other source
         /// walks the raw view, where siblings share their parent.
-        fn sibling_in_view(&self, parent: &UIAElement, sibling: &UIAElement) -> bool {
+        ///
+        /// A sibling with no parent in the view is known to be outside the
+        /// list. A parent that could not be read, or compared, is a failed
+        /// read, not an answer: the caller must not take it for the end of
+        /// the list.
+        fn sibling_in_view(
+            &self,
+            parent: &UIAElement,
+            sibling: &UIAElement,
+        ) -> Result<bool, UiaFailure> {
             if !self.visible {
-                return true;
+                return Ok(true);
             }
-            self.walker.get_parent(&sibling.0).is_ok_and(|view_parent| {
-                self.client
-                    .compare_elements(&view_parent, &parent.0)
-                    .unwrap_or(false)
-            })
+            let view_parent = match self.walker.get_parent(&sibling.0) {
+                Ok(view_parent) => view_parent,
+                Err(error) => {
+                    let failure = failure_of(&error);
+                    return if failure.is_exhaustion() {
+                        Ok(false)
+                    } else {
+                        Err(failure)
+                    };
+                }
+            };
+            self.client
+                .compare_elements(&view_parent, &parent.0)
+                .map_err(|error| failure_of(&error))
         }
 
         fn next_sibling(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
