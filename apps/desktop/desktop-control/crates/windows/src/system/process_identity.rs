@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ProcessId};
 
 /// The process-generation token: a creation-time-derived identity that
@@ -162,6 +163,22 @@ pub(crate) fn wait_for_exit(_pid: ProcessId, _window: std::time::Duration) -> bo
 /// copy of this loop before it was pulled out from underneath them.
 #[cfg(target_os = "windows")]
 pub(crate) fn process_image_name(pid: ProcessId) -> Option<String> {
+    let mut found = None;
+    walk_process_table(|entry_pid, name| {
+        if entry_pid == u32::from(pid) {
+            found = Some(name());
+            return false;
+        }
+        true
+    });
+    found
+}
+
+/// Visits every ToolHelp process entry as `(pid, image name)` until `visit`
+/// returns `false`; the name is decoded only when asked for. `false` when the
+/// table could not be read.
+#[cfg(target_os = "windows")]
+fn walk_process_table(mut visit: impl FnMut(u32, &dyn Fn() -> String) -> bool) -> bool {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -170,17 +187,16 @@ pub(crate) fn process_image_name(pid: ProcessId) -> Option<String> {
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        return None;
+        return false;
     }
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
-    let mut found = None;
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     while ok != 0 {
-        if entry.th32ProcessID == u32::from(pid) {
-            found = Some(wide_buffer_to_string(&entry.szExeFile));
+        let name = || wide_buffer_to_string(&entry.szExeFile);
+        if !visit(entry.th32ProcessID, &name) {
             break;
         }
         ok = unsafe { Process32NextW(snapshot, &mut entry) };
@@ -188,12 +204,56 @@ pub(crate) fn process_image_name(pid: ProcessId) -> Option<String> {
     unsafe {
         windows_sys::Win32::Foundation::CloseHandle(snapshot);
     }
-    found
+    true
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn process_image_name(_pid: ProcessId) -> Option<String> {
     None
+}
+
+// Desktop control (desktop-control) change: one window listing read the whole
+// ToolHelp table once per window to name its process (about 20 ms a window on
+// a desktop with a few hundred processes, so about 0.28 s a listing, and a
+// ref action lists the windows twice). The listing reads the table once and
+// names every window from it. A pid the table does not have (a process
+// started after the read) is read on its own, as before. The listing's
+// re-verification still reads the name of each listed window afresh
+// (`window_identity::WindowIdentityEvidence`), so a pid reused between the
+// read and the window is caught there, as a race the listing retries.
+/// The image names of every process, read in one ToolHelp walk.
+pub(crate) struct ImageNameTable {
+    names: Option<std::collections::HashMap<u32, String>>,
+}
+
+impl ImageNameTable {
+    /// Reads the table; when it cannot be read, every name is looked up on
+    /// its own, as before.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn capture() -> Self {
+        let mut names = std::collections::HashMap::new();
+        let read = walk_process_table(|pid, name| {
+            names.insert(pid, name());
+            true
+        });
+        Self {
+            names: read.then_some(names),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn capture() -> Self {
+        Self { names: None }
+    }
+
+    /// The image name of `pid`: from the table, or read on its own when the
+    /// table does not have it.
+    pub(crate) fn name(&self, pid: ProcessId) -> Option<String> {
+        self.names
+            .as_ref()
+            .and_then(|names| names.get(&u32::from(pid)).cloned())
+            .or_else(|| process_image_name(pid))
+    }
 }
 
 /// Verifies a stored token against the process's current generation.
@@ -243,6 +303,37 @@ mod tests {
             name.is_some_and(|name| !name.is_empty()),
             "the current process must find its own image name in the process table"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_name_table_answers_what_the_single_lookup_answers() {
+        let table = ImageNameTable::capture();
+        assert!(table.names.is_some(), "the process table is readable here");
+        let own = ProcessId::from(std::process::id());
+        assert_eq!(table.name(own), process_image_name(own));
+        let parent_of_all = ProcessId::from(4);
+        assert_eq!(table.name(parent_of_all), process_image_name(parent_of_all));
+    }
+
+    #[test]
+    fn a_pid_missing_from_the_table_is_looked_up_on_its_own() {
+        let table = ImageNameTable {
+            names: Some(std::collections::HashMap::new()),
+        };
+        let own = ProcessId::from(std::process::id());
+        assert_eq!(table.name(own), process_image_name(own));
+        let unread = ImageNameTable { names: None };
+        assert_eq!(unread.name(own), process_image_name(own));
+    }
+
+    #[test]
+    fn a_name_in_the_table_is_answered_from_it() {
+        let own = ProcessId::from(std::process::id());
+        let mut names = std::collections::HashMap::new();
+        names.insert(u32::from(own), "from-table.exe".to_string());
+        let table = ImageNameTable { names: Some(names) };
+        assert_eq!(table.name(own).as_deref(), Some("from-table.exe"));
     }
 
     #[test]

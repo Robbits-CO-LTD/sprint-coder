@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, Deadline, ErrorCode, ProcessId, WindowFilter, WindowInfo, WindowState,
     app_name_matches,
@@ -9,6 +10,7 @@ use super::listing_retry::retry_transient_window_race;
 use super::window_enum::{EnumeratedWindow, enumerate_top_level};
 use super::window_identity::WindowIdentityEvidence;
 use crate::system::process_identity;
+use crate::system::process_identity::ImageNameTable;
 
 /// The filter the A16-1 census justifies: a window an agent means is
 /// visible, has a non-zero rect, is not cloaked by the shell, and is not a
@@ -25,16 +27,18 @@ pub(crate) fn passes_filter(window: &EnumeratedWindow) -> bool {
 #[cfg(target_os = "windows")]
 fn process_facts(
     handle: super::window_enum::WindowHandle,
+    names: &ImageNameTable,
 ) -> Option<(ProcessId, Option<String>, String)> {
     let pid = super::window_identity::live_window_owner(handle)?;
     let token = process_identity::token_for_pid(pid).ok().flatten();
-    let name = process_identity::process_image_name(pid).unwrap_or_default();
+    let name = names.name(pid).unwrap_or_default();
     Some((pid, token, name))
 }
 
 #[cfg(not(target_os = "windows"))]
 fn process_facts(
     _handle: super::window_enum::WindowHandle,
+    _names: &ImageNameTable,
 ) -> Option<(ProcessId, Option<String>, String)> {
     None
 }
@@ -69,20 +73,22 @@ pub(crate) fn window_class_name(_handle: super::window_enum::WindowHandle) -> Op
 #[cfg(target_os = "windows")]
 fn identity_facts(
     handle: super::window_enum::WindowHandle,
+    names: &ImageNameTable,
 ) -> Option<(ProcessId, Option<String>, String)> {
     if let Some(pid) = frame_identity::hosted_application_pid(handle) {
         let token = process_identity::token_for_pid(pid).ok().flatten();
-        let name = process_identity::process_image_name(pid).unwrap_or_default();
+        let name = names.name(pid).unwrap_or_default();
         return Some((pid, token, name));
     }
-    process_facts(handle)
+    process_facts(handle, names)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn identity_facts(
     handle: super::window_enum::WindowHandle,
+    names: &ImageNameTable,
 ) -> Option<(ProcessId, Option<String>, String)> {
-    process_facts(handle)
+    process_facts(handle, names)
 }
 
 /// Builds one `WindowInfo` from an enumerated window: the frame's handle,
@@ -146,6 +152,9 @@ fn list_windows_live_once(
     let app_filter = filter.app.as_deref();
     let failure = std::cell::RefCell::new(None);
     let mut seen = 0usize;
+    // Desktop control (desktop-control) change: the process names for the
+    // whole listing, read in one walk (`ImageNameTable`).
+    let names = ImageNameTable::capture();
 
     enumerate_top_level(|window| {
         if seen > 0 {
@@ -158,7 +167,7 @@ fn list_windows_live_once(
         if !passes_filter(&window) {
             return true;
         }
-        let Some((pid, token, app)) = identity_facts(window.handle) else {
+        let Some((pid, token, app)) = identity_facts(window.handle, &names) else {
             return true;
         };
         if let Some(filter_name) = app_filter {
