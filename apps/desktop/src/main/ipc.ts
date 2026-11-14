@@ -7482,15 +7482,17 @@ export class IpcRouter {
   }
 
   /**
-   * What still moves in the Task (null: nothing): its recorded Turn and Team, and its commands
-   * whose processes still run (issue #1225). The window's sidebar shows it, and an archive is
-   * refused while it is not null.
+   * What still moves in the Task (null: nothing): its recorded Turn and Team, its commands whose
+   * processes still run, and AI work whose stop could not be confirmed (its Turn is recorded as
+   * canceled, yet its process may go on; issue #1225). The window's sidebar shows it, and an
+   * archive is refused while it is not null.
    */
   private taskRunningWork(taskId: string): TaskRunningWork | null {
     const recorded = this.persistence.getTaskRecordedWork(taskId);
-    const work = {
+    const work: TaskRunningWork = {
       ...recorded,
       commands: this.managedCodingHarness.activeTaskCommandCount(taskId),
+      ...(this.quarantinedRuntimeTasks.has(taskId) ? { stopUnconfirmed: true } : {}),
     };
     return taskHasRunningWork(work) ? work : null;
   }

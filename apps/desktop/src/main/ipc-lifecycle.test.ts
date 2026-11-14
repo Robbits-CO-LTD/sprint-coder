@@ -48,6 +48,7 @@ it('broadcasts terminal activity to the window even without a Task event port', 
     recordTurnDiagnosticEvent: vi.fn(),
     graphSourceMonitor: { invalidate },
     sentRunningWork: new Map(),
+    quarantinedRuntimeTasks: new Set(),
     managedCodingHarness: { activeTaskCommandCount: () => 0 },
     persistence: {
       getActiveTurnId: () => null,

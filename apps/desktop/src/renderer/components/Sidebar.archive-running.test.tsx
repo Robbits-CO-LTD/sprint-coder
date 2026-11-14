@@ -119,6 +119,25 @@ describe('the sidebar’s archive of a Task that still moves (issue #1225)', () 
     },
   );
 
+  it('holds the archive of a Task whose AI stop could not be confirmed, and points to a restart', async () => {
+    const onToggleArchive = vi.fn();
+    // Its Turn is recorded as canceled: nothing else moves, yet its process may go on.
+    await renderRow(
+      {
+        ...task,
+        runningWork: { turn: false, team: false, workers: 0, commands: 0, stopUnconfirmed: true },
+      },
+      { onToggleArchive },
+    );
+    const button = archiveButton();
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(button.title).toBe(
+      'このTaskは、まだ動いています（停止を確認できなかったAIの作業）。停止を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。',
+    );
+    await act(async () => button.click());
+    expect(onToggleArchive).not.toHaveBeenCalled();
+  });
+
   it('holds the selected Task’s archive while its live Turn runs, even before Main’s snapshot', async () => {
     useAppStore.setState({
       turnByTask: {

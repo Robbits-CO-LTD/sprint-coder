@@ -28,7 +28,7 @@ const IDLE: Recorded = { turn: false, team: false, workers: 0 };
  * The archive handler as Main registers it: the real mailbox, mutation wrapper and refusal, over a
  * persistence that records what moves in the Task and a harness that counts its live commands.
  */
-function archiveRouter(state: { recorded: Recorded; commands: number }) {
+function archiveRouter(state: { recorded: Recorded; commands: number; stopUnconfirmed?: boolean }) {
   const router = Object.create(IpcRouter.prototype) as { register(): void; mailbox: TaskMailbox };
   const handlers = new Map<string, Handler>();
   const setArchived = vi.fn((taskId: string, archived: boolean) => {
@@ -53,6 +53,8 @@ function archiveRouter(state: { recorded: Recorded; commands: number }) {
       setArchived,
     },
     managedCodingHarness: { activeTaskCommandCount: () => state.commands },
+    // Tasks whose runtime stop was not confirmed (Main's own set; lost on a restart).
+    quarantinedRuntimeTasks: new Set<string>(state.stopUnconfirmed ? ['task-1'] : []),
     teamCoordinator: { revokePendingHires },
     endArchivedTaskDesktopControl,
   });
@@ -111,6 +113,7 @@ describe('the window’s snapshot of what moves in a Task (issue #1225)', () => 
         }),
       },
       managedCodingHarness: { activeTaskCommandCount: () => state.commands },
+      quarantinedRuntimeTasks: new Set<string>(),
     });
     expect(router.taskWithActivity({ id: 'task-1' })).toMatchObject({ runningWork: null });
     router.refreshTaskRunningWork('task-1');
@@ -153,6 +156,17 @@ describe('archiving a Task that still moves is refused (issue #1225)', () => {
       'all three move',
       { recorded: { turn: true, team: true, workers: 1 }, commands: 3 },
       'このTaskは、まだ動いています（AIの作業／TeamのWorker 1人／実行中のコマンド 3件）。AIの作業は入力欄の「実行を停止」、Teamは「すべて停止」（Workerの起動中は、少し待ってから）、コマンドは「実行中のコマンドを停止」で止めてから、アーカイブしてください。',
+    ],
+    [
+      // The Turn is recorded as canceled, so nothing recorded moves; its process may still run.
+      'a stop of its AI work could not be confirmed',
+      { recorded: IDLE, commands: 0, stopUnconfirmed: true },
+      'このTaskは、まだ動いています（停止を確認できなかったAIの作業）。停止を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。',
+    ],
+    [
+      'an unconfirmed stop and a running command',
+      { recorded: IDLE, commands: 1, stopUnconfirmed: true },
+      'このTaskは、まだ動いています（実行中のコマンド 1件／停止を確認できなかったAIの作業）。コマンドは「実行中のコマンドを停止」で止め、停止を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。',
     ],
   ])('while %s, naming what moves', async (_name, state, message) => {
     const { archive, setArchived, revokePendingHires, endArchivedTaskDesktopControl } =
@@ -261,6 +275,7 @@ describe('the person’s stop of a Task’s running commands (issue #1225)', () 
         activeTaskCommandCount: () => state.commands,
         stopTaskCommands,
       },
+      quarantinedRuntimeTasks: new Set<string>(),
     });
     router.register();
     const call = (channel: string) => {

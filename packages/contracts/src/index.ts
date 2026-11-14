@@ -158,18 +158,31 @@ export const taskRunningWorkSchema = z
     team: z.boolean(),
     workers: z.number().int().nonnegative(),
     commands: z.number().int().nonnegative(),
+    /**
+     * A stop of the Task's AI work whose end could not be confirmed: its Turn is recorded as
+     * canceled, yet its process may go on. Only a restart of the app clears it.
+     */
+    stopUnconfirmed: z.boolean().optional(),
   })
   .strict();
 export type TaskRunningWork = z.infer<typeof taskRunningWorkSchema>;
 
 export function taskHasRunningWork(work: TaskRunningWork | null | undefined): boolean {
-  return work != null && (work.turn || work.team || work.workers > 0 || work.commands > 0);
+  return (
+    work != null &&
+    (work.turn ||
+      work.team ||
+      work.workers > 0 ||
+      work.commands > 0 ||
+      work.stopUnconfirmed === true)
+  );
 }
 
 /**
  * The refusal of an archive while the Task still moves: what moves, and where each is stopped
  * (the input box's 「実行を停止」, the Team's 「すべて停止」, and 「実行中のコマンドを停止」 shown with
- * this refusal, which stops the commands earlier Turns left running too).
+ * this refusal, which stops the commands earlier Turns left running too). AI work whose stop could
+ * not be confirmed has no stop left to offer; a restart of the app clears it.
  */
 export function taskRunningWorkArchiveRefusal(work: TaskRunningWork): string {
   const parts: string[] = [];
@@ -187,6 +200,12 @@ export function taskRunningWorkArchiveRefusal(work: TaskRunningWork): string {
   if (work.commands > 0) {
     parts.push(`実行中のコマンド ${work.commands}件`);
     stops.push('コマンドは「実行中のコマンドを停止」');
+  }
+  if (work.stopUnconfirmed === true) {
+    // No stop is left to offer: the stop was asked for, and its end was not confirmed.
+    parts.push('停止を確認できなかったAIの作業');
+    const first = stops.length > 0 ? `${stops.join('、')}で止め、` : '';
+    return `このTaskは、まだ動いています（${parts.join('／')}）。${first}停止を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。`;
   }
   return `このTaskは、まだ動いています（${parts.join('／')}）。${stops.join('、')}で止めてから、アーカイブしてください。`;
 }
