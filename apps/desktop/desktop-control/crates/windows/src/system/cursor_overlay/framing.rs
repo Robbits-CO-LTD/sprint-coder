@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The control wire format and the single acknowledgement byte.
 //!
 //! Pure, and deliberately the same shape macOS uses: one JSON-encoded
@@ -62,7 +63,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<CursorOverlayControl, AdapterError>
 /// acknowledgement, and the bootstrap that starts the child is a one-way
 /// stdin write with no return path of its own.
 pub(crate) fn is_acknowledged(control: &CursorOverlayControl) -> bool {
-    control.is_enable() || control.is_disable() || control.is_hide() || control.is_travel()
+    control.is_enable()
+        || control.is_disable()
+        || control.is_retire()
+        || control.is_hide()
+        || control.is_travel()
 }
 
 /// Whether a control may bring a renderer into existence when none is
