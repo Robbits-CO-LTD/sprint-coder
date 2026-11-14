@@ -212,6 +212,20 @@ pub(super) fn owns_a_shown_window(pid: ProcessId, windows: &[TopWindow]) -> bool
 
 /// Every top-level window whose owner can be read, or `None` when the
 /// windows could not be enumerated.
+///
+/// Dropping a window whose owner cannot be read does not let a child with a
+/// window of its own pass as a helper. The owner is read with
+/// `GetWindowThreadProcessId` alone (`window_identity::live_window_owner`),
+/// which opens no process and checks no access: a window of a protected or
+/// elevated process still names its pid (measured on this desktop: every
+/// window of the five processes this user could not open named its owner).
+/// It reads no pid only for a handle that is no longer a window, one
+/// destroyed between `EnumWindows` taking its list and this read, so there is
+/// no pid left to match against a candidate either. A child whose window
+/// closed at that moment is read as a child that has not shown its window
+/// yet, the same unavoidable gap as a child counted before its first window.
+/// The same holds for the app a shell frame hosts: its pid is read the same
+/// way, from the `CoreWindow` inside the frame.
 fn top_level_windows() -> Option<Vec<TopWindow>> {
     use super::super::window::{frame_identity, window_enum, window_identity};
     let mut windows = Vec::new();

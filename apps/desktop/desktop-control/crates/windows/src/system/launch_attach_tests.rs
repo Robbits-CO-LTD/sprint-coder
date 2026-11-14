@@ -256,3 +256,104 @@ fn the_ambiguity_suggestion_lists_each_instance_and_the_way_out() {
     assert!(suggestion.contains("pid 200"), "{suggestion}");
     assert!(suggestion.contains("--no-attach"), "{suggestion}");
 }
+
+/// Why the window list may drop a window whose owner cannot be read: the
+/// owner read opens no process, so it fails only for a handle that is no
+/// longer a window, which has no pid left to match a candidate.
+#[cfg(target_os = "windows")]
+mod owner_reads {
+    use super::*;
+    use crate::system::window::window_identity::live_window_owner;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, IsWindow, IsWindowVisible,
+    };
+
+    /// A hidden top-level window of this process: never shown, so it takes
+    /// neither the foreground nor the focus.
+    fn hidden_window() -> crate::system::window::window_enum::WindowHandle {
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let handle = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                10,
+                10,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!handle.is_null(), "a hidden window is created");
+        handle
+    }
+
+    #[test]
+    fn a_window_names_its_owner_until_it_is_destroyed() {
+        let handle = hidden_window();
+        let own = ProcessId::from(std::process::id());
+        assert_eq!(live_window_owner(handle), Some(own));
+        assert_eq!(unsafe { IsWindowVisible(handle) }, 0, "it is never shown");
+        let listed = top_level_windows().expect("the windows are enumerated");
+        let ours = listed
+            .iter()
+            .find(|top| top.window.handle == handle)
+            .expect("the list keeps a window whose owner is read");
+        assert_eq!(ours.owner, own);
+        assert!(
+            !owns_a_shown_window(own, &[*ours]),
+            "a hidden window is no window of its own"
+        );
+
+        assert_ne!(unsafe { DestroyWindow(handle) }, 0);
+        assert_eq!(
+            live_window_owner(handle),
+            None,
+            "only a handle that is no longer a window has no owner to read"
+        );
+    }
+
+    /// Every window on the desktop names its owner, also one whose process
+    /// this user cannot open; a window that names none is already gone.
+    #[test]
+    fn an_enumerated_window_names_no_owner_only_once_it_is_gone() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let mut unreadable_still_windows = 0usize;
+        let mut named_by_unopenable_owner = 0usize;
+        crate::system::window::window_enum::enumerate_top_level(|window| {
+            match live_window_owner(window.handle) {
+                Some(pid) => {
+                    // Opening is only probed here; the owner read never opens.
+                    let process = unsafe {
+                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, u32::from(pid))
+                    };
+                    if process.is_null() {
+                        named_by_unopenable_owner += 1;
+                    } else {
+                        unsafe { CloseHandle(process) };
+                    }
+                }
+                None => {
+                    if unsafe { IsWindow(window.handle) } != 0 {
+                        unreadable_still_windows += 1;
+                    }
+                }
+            }
+            true
+        })
+        .expect("the windows are enumerated");
+        eprintln!("windows naming an owner this user cannot open: {named_by_unopenable_owner}");
+        assert_eq!(
+            unreadable_still_windows, 0,
+            "a window that is still a window always names its owner"
+        );
+    }
+}
