@@ -396,3 +396,26 @@ fn partial_projection_reports_completeness_when_the_walk_finished() {
     assert_eq!(projected.identity.name, strict.identity.name);
     assert_eq!(projected.children.len(), strict.children.len());
 }
+
+/// A list the view it was read in cut short is presented as truncated, yet the
+/// observation stays whole for that view: the cut is the view's own rule, not
+/// a read that ran out.
+#[test]
+fn a_list_cut_by_its_view_is_presented_truncated_and_stays_exhaustive() {
+    let list = subtree(
+        "list",
+        "Rows",
+        vec![subtree("listitem", "Row 0", Vec::new())],
+    )
+    .with_view_cut(true);
+    let window = subtree("window", "Fixture", vec![list]);
+    let tree = ObservedTree::from_roots(vec![window], source(), Default::default(), true)
+        .expect("the tree assembles");
+    assert!(tree.is_exhaustive());
+    let presented = tree
+        .into_accessibility_tree()
+        .expect("a whole tree projects");
+    assert!(!presented.subtree_truncated);
+    assert!(presented.children[0].subtree_truncated);
+    assert!(!presented.children[0].children[0].subtree_truncated);
+}

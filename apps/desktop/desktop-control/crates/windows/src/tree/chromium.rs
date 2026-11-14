@@ -74,6 +74,22 @@ pub(crate) fn has_chromium_provenance(_root: &UIAElement) -> bool {
     false
 }
 
+/// [`has_chromium_provenance`] with a failed read kept apart from a "no":
+/// `Err` when the root's class or window handle could not be read, so a
+/// caller that must not guess (a ref resolved in the view it was proven in)
+/// can say it could not tell. The child windows are listed as there, without
+/// sending the target a message.
+#[cfg(target_os = "windows")]
+pub(crate) fn chromium_provenance_checked(root: &UIAElement) -> Result<bool, ()> {
+    use windows::Win32::Foundation::HWND;
+    let class = root.0.get_classname().map_err(drop)?;
+    if is_chromium_class(&class) {
+        return Ok(true);
+    }
+    let handle: HWND = root.0.get_native_window_handle().map_err(drop)?.into();
+    Ok(!handle.0.is_null() && has_child_window_of_class(handle.0, CHROMIUM_CONTENT_CLASS))
+}
+
 #[cfg(target_os = "windows")]
 fn holds_chromium_content(root: &UIAElement) -> bool {
     use windows::Win32::Foundation::HWND;
@@ -82,6 +98,33 @@ fn holds_chromium_content(root: &UIAElement) -> bool {
     };
     let handle: HWND = handle.into();
     !handle.0.is_null() && has_child_window_of_class(handle.0, CHROMIUM_CONTENT_CLASS)
+}
+
+/// [`has_chromium_provenance`] of a top-level window by its handle alone: its
+/// class is Chromium's top-level class, or a window below it is the one
+/// Chromium draws web content into. Read with `GetClassNameW` and
+/// `EnumChildWindows`, which send the window no message.
+#[cfg(target_os = "windows")]
+pub(crate) fn window_has_chromium_provenance(handle: isize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let window = handle as *mut std::ffi::c_void;
+    if window.is_null() {
+        return false;
+    }
+    let mut buffer = [0u16; 256];
+    // SAFETY: `buffer` is writable for the length passed.
+    let length = unsafe { GetClassNameW(window, buffer.as_mut_ptr(), buffer.len() as i32) };
+    let class = String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or(0)]);
+    chromium_provenance_of(&class, || {
+        has_child_window_of_class(window, CHROMIUM_CONTENT_CLASS)
+    })
+}
+
+/// [`window_has_chromium_provenance`]'s verdict from the window's class and,
+/// only when the class is not Chromium's, whether it holds Chromium content.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn chromium_provenance_of(class: &str, holds_content: impl FnOnce() -> bool) -> bool {
+    is_chromium_class(class) || holds_content()
 }
 
 /// Whether any window below `parent` has the class `class`. Stops at the
@@ -332,6 +375,25 @@ mod tests {
             "the surface clause must be satisfied, so only the root clause can refuse this"
         );
         assert!(!activation_eligible(element_root, &request));
+    }
+
+    /// A top-level window is of Chromium provenance by its own class, or else
+    /// by Chromium content below it, which is looked for only when the class
+    /// is another toolkit's.
+    #[test]
+    fn a_window_is_of_chromium_provenance_by_its_class_or_its_content() {
+        let looked = std::cell::Cell::new(false);
+        assert!(chromium_provenance_of("Chrome_WidgetWin_1", || {
+            looked.set(true);
+            false
+        }));
+        assert!(!looked.get(), "a Chromium class needs no search below it");
+        assert!(chromium_provenance_of("Tauri Window", || true));
+        assert!(!chromium_provenance_of(
+            "HwndWrapper[DefaultDomain;;]",
+            || false
+        ));
+        assert!(!chromium_provenance_of("", || false));
     }
 
     /// Only Chromium's own top-level class reads as Chromium: the content

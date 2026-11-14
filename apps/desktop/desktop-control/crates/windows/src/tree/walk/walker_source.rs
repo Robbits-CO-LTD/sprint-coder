@@ -367,8 +367,23 @@ mod imp {
         visible: bool,
         /// For a source of the visible elements: whether its root itself is
         /// in that view (reported onscreen). A root that is not leaves the
-        /// view empty (see [`root_in_view`]).
+        /// view empty (see [`root_in_view`]). Both views of visible elements
+        /// hold to it: the onscreen view, whose steps would otherwise leave
+        /// the root, and the shown view, which would otherwise read what a
+        /// minimized window still lists.
         root_in_view: Option<bool>,
+        /// Whether this source walks with the onscreen-condition walker
+        /// ([`visible_view_walker`]), the one view whose sibling steps can
+        /// leave the element being listed, so only it checks each sibling
+        /// (`sibling_in_view`). The shown view walks the raw view, where a
+        /// sibling always shares its parent.
+        onscreen_walker: bool,
+        /// The request navigation steps fetch instead of `cache`: only
+        /// `IsOffscreen`, held by a source of the shown view
+        /// (`shown_view::ShownView`), which steps over many offscreen siblings
+        /// it never reads otherwise. A node it keeps is read with `cache` in
+        /// `evidence`.
+        navigation: Option<UICacheRequest>,
     }
 
     /// Whether `root` is itself in the view of visible elements: its provider
@@ -385,11 +400,39 @@ mod imp {
     /// offscreen. `None` is an answer that could not be read (a provider that
     /// timed out): nothing below such a root is read either, but that is a
     /// failed read, which may be retried, not a view known to be empty.
+    ///
+    /// A root whose own window is minimized is known not to be in the view
+    /// (`Some(false)`), though its provider may say otherwise: a minimized WPF
+    /// window reports its root and every row it lists onscreen (measured: the
+    /// root at -32000,-32000, all its rows read), and a minimized Electron
+    /// window does the same. Such a window shows nothing on screen, so its
+    /// view is empty. `IsIconic` sends the window no message.
     pub(crate) fn root_in_view(root: &UIAElement) -> Option<bool> {
+        if root_window_minimized(root) {
+            return Some(false);
+        }
         read_one(root, TreeProperty::IsOffscreen)
             .flag()
             .map(|offscreen| !offscreen)
     }
+
+    /// Whether the root is a window's own element and that window is
+    /// minimized. A root without a window of its own, or whose window could
+    /// not be read, answers false (its `IsOffscreen` then decides).
+    fn root_window_minimized(root: &UIAElement) -> bool {
+        use windows::Win32::Foundation::HWND;
+        let Ok(handle) = root.0.get_native_window_handle() else {
+            return false;
+        };
+        let handle: HWND = handle.into();
+        // SAFETY: `IsIconic` only reads the window's state; a stale handle
+        // answers false.
+        !handle.0.is_null()
+            && unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(handle.0) } != 0
+    }
+
+    /// What the shown view's navigation fetches with each step.
+    const OFFSCREEN_SET: [TreeProperty; 1] = [TreeProperty::IsOffscreen];
 
     /// A walker over the elements the window shows: the raw view without every
     /// element its provider reports offscreen. As in any conditional view, an
@@ -442,6 +485,7 @@ mod imp {
             let mut source = Self::for_root(root)?;
             source.walker = visible_view_walker(&source.client)?;
             source.visible = true;
+            source.onscreen_walker = true;
             source.root_in_view =
                 with_transaction_timeout(&source.client, deadline, || root_in_view(root)).flatten();
             Ok(source)
@@ -464,6 +508,30 @@ mod imp {
         pub(crate) fn with_root_view(mut self, root_in_view: Option<bool>) -> Self {
             self.root_in_view = root_in_view;
             self
+        }
+
+        /// A source for the shown view (`shown_view::ShownView`): the raw
+        /// view walker, each step fetching `IsOffscreen` alone when the
+        /// provider class batches (a client-side provider is read live), and
+        /// each node it keeps read with the walk set and its runtime
+        /// identifier. No subtree prefetch. The same source serves a path
+        /// descent in that view, which must step the same way.
+        ///
+        /// A root reported offscreen (a minimized window) shows nothing, as in
+        /// the onscreen view: nothing below it is read. The root's place in
+        /// the view is read within `deadline`, as there.
+        pub fn for_shown_root(
+            root: &UIAElement,
+            deadline: agent_desktop_core::Deadline,
+        ) -> Result<Self, AdapterError> {
+            let mut source = Self::for_root(root)?;
+            source.visible = true;
+            source.root_in_view =
+                with_transaction_timeout(&source.client, deadline, || root_in_view(root)).flatten();
+            if source.cache.is_some() {
+                source.navigation = Some(build_set_cache_request(&source.client, &OFFSCREEN_SET)?);
+            }
+            Ok(source)
         }
 
         /// Runs `call` with the client's per-call bound lowered to what is left
@@ -599,6 +667,8 @@ mod imp {
                 plain_navigation: false,
                 visible: false,
                 root_in_view: Some(true),
+                onscreen_walker: false,
+                navigation: None,
             })
         }
 
@@ -646,10 +716,10 @@ mod imp {
         type Node = UIAElement;
 
         fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
-            // A view whose root is not in it is empty (`for_visible_root`). A
-            // root whose place in the view could not be read is not walked
-            // either, but as a read that failed, never as an empty view: the
-            // elements below it are unread, not absent.
+            // A view whose root is not in it is empty (`for_visible_root`,
+            // `for_shown_root`). A root whose place in the view could not be
+            // read is not walked either, but as a read that failed, never as
+            // an empty view: the elements below it are unread, not absent.
             match self.root_in_view {
                 Some(true) => {}
                 Some(false) => {
@@ -658,6 +728,13 @@ mod imp {
                 None => {
                     return Err(UiaFailure::Sentinel(crate::tree::automation::ERR_TIMEOUT));
                 }
+            }
+            if let Some(request) = &self.navigation {
+                return self
+                    .walker
+                    .get_first_child_build_cache(&node.0, request)
+                    .map(UIAElement::from)
+                    .map_err(|error| failure_of(&error));
             }
             match &self.cache {
                 Some(request) if !self.plain_navigation => {
@@ -687,7 +764,7 @@ mod imp {
             parent: &UIAElement,
             sibling: &UIAElement,
         ) -> Result<bool, UiaFailure> {
-            if !self.visible {
+            if !self.onscreen_walker {
                 return Ok(true);
             }
             let view_parent = match self.walker.get_parent(&sibling.0) {
@@ -707,6 +784,13 @@ mod imp {
         }
 
         fn next_sibling(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
+            if let Some(request) = &self.navigation {
+                return self
+                    .walker
+                    .get_next_sibling_build_cache(&node.0, request)
+                    .map(UIAElement::from)
+                    .map_err(|error| failure_of(&error));
+            }
             match &self.cache {
                 Some(request) if !self.plain_navigation => {
                     self.walker.get_next_sibling_build_cache(&node.0, request)
@@ -753,13 +837,27 @@ mod imp {
             agent_desktop_core::LocatorEvidence,
             u64,
         ) {
-            let (properties, errors) = if self.reads_cache() {
+            // A node the shown view's navigation reached carries `IsOffscreen`
+            // alone in its cache: it is read with the walk set here, in one
+            // call, or live when that call fails.
+            let prepared = self.navigation.as_ref().map(|_| {
+                self.cache
+                    .as_ref()
+                    .and_then(|request| node.0.build_updated_cache(request).ok())
+                    .map(UIAElement::from)
+            });
+            let (node, cached) = match &prepared {
+                Some(Some(prepared)) => (prepared, true),
+                Some(None) => (node, false),
+                None => (node, self.reads_cache()),
+            };
+            let (properties, errors) = if cached {
                 read_cached_set(node, self.properties)
             } else {
                 read_live_set(node, self.properties)
             };
             let failed = u64::try_from(errors.len()).unwrap_or(u64::MAX);
-            let label = read_label(node, self.reads_cache());
+            let label = read_label(node, cached);
             let vocabulary = walk_vocabulary(&properties, &label);
             let mut evidence = properties.locator_evidence(vocabulary);
             if self.visible {
@@ -774,6 +872,17 @@ mod imp {
             properties: &crate::tree::properties::ElementProperties,
         ) -> bool {
             self.chromium_provenance && crate::tree::walk::wrapper::is_web_wrapper(properties)
+        }
+    }
+
+    impl crate::tree::walk::shown_view::OffscreenReport for UiaTreeSource {
+        /// From the step's cache when the navigation fetched it, otherwise
+        /// one live read, with a failed read kept apart from an answer that
+        /// carries no value (`read_flag`).
+        fn reported_offscreen(&self, node: &UIAElement) -> Result<bool, UiaFailure> {
+            let cached = self.navigation.is_some() || self.reads_cache();
+            crate::tree::properties::read_flag(node, TreeProperty::IsOffscreen, cached)
+                .map(|offscreen| offscreen == Some(true))
         }
     }
 }
@@ -816,6 +925,13 @@ mod imp {
         }
 
         pub fn for_visible_descent(
+            root: &UIAElement,
+            _deadline: agent_desktop_core::Deadline,
+        ) -> Result<Self, AdapterError> {
+            Self::for_root(root)
+        }
+
+        pub fn for_shown_root(
             root: &UIAElement,
             _deadline: agent_desktop_core::Deadline,
         ) -> Result<Self, AdapterError> {
@@ -885,6 +1001,12 @@ mod imp {
             false
         }
     }
+
+    impl crate::tree::walk::shown_view::OffscreenReport for UiaTreeSource {
+        fn reported_offscreen(&self, _node: &UIAElement) -> Result<bool, UiaFailure> {
+            Ok(false)
+        }
+    }
 }
 
 pub use imp::UiaTreeSource;
@@ -938,6 +1060,26 @@ pub fn walk_uia_visible_subtree(
     source
         .bounded_by(deadline, || {
             walk_from_root(&source, &prepared, root_source, budget)
+        })
+        .unwrap_or_else(|| Err(deadline.timeout_error()))
+}
+
+/// Walks the shown view of the elements the window shows
+/// (`shown_view::ShownView` over `UiaTreeSource::for_shown_root`), with each
+/// call bounded by what was left of the walk's deadline when the walk began.
+pub fn walk_uia_shown_subtree(
+    root: &UIAElement,
+    root_source: &ObservationRoot<'_>,
+    budget: WalkBudget,
+) -> Result<WalkOutcome, AdapterError> {
+    use super::shown_view::{ShownNode, ShownView};
+    let deadline = budget.deadline;
+    let source = UiaTreeSource::for_shown_root(root, deadline)?;
+    let prepared = source.prepare_root(root)?;
+    let view = ShownView::new(&source, deadline);
+    source
+        .bounded_by(deadline, || {
+            walk_from_root(&view, &ShownNode::root(prepared), root_source, budget)
         })
         .unwrap_or_else(|| Err(deadline.timeout_error()))
 }

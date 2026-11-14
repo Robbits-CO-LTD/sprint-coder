@@ -355,6 +355,48 @@ fn root_and_wait_for_are_mutually_exclusive() {
     }
 }
 
+/// A capture of the visible elements that read a long list only from its
+/// start says so, beside the node it marks truncated; one that cut nothing,
+/// and a capture of the whole window, say nothing of it.
+#[test]
+fn a_view_that_cut_a_list_says_its_further_items_are_not_read() {
+    let mut result = crate::snapshot::SnapshotResult {
+        tree: crate::adapter::minimal_accessibility_node("window", "Fixture"),
+        refmap: crate::RefMap::new(),
+        window: WindowInfo {
+            id: "w-1".into(),
+            title: "Fixture".into(),
+            app: "Fixture".into(),
+            pid: crate::ProcessId::new(1),
+            process_instance: None,
+            bounds: None,
+            state: crate::WindowState::default(),
+        },
+        snapshot_id: None,
+        complete: false,
+        nodes_observed: 2,
+        identity_unproven: None,
+        visible_scope: true,
+    };
+    let whole_view = format_snapshot_fields(&result, None, None).unwrap();
+    assert_eq!(whole_view["scope"], "visible");
+    assert!(whole_view.get("scope_cut_hint").is_none());
+
+    let mut list = crate::adapter::minimal_accessibility_node("list", "Rows");
+    list.subtree_truncated = true;
+    result.tree.children.push(list);
+    let cut = format_snapshot_fields(&result, None, None).unwrap();
+    assert!(
+        cut["scope_cut_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("subtree_truncated"))
+    );
+
+    result.visible_scope = false;
+    let whole = format_snapshot_fields(&result, None, None).unwrap();
+    assert!(whole.get("scope_cut_hint").is_none());
+}
+
 #[test]
 fn an_unproven_capture_is_flagged_in_the_payload() {
     let mut result = crate::snapshot::SnapshotResult {

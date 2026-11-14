@@ -344,7 +344,9 @@ impl ObservedTree {
                 descriptors: node.evidence.ref_evidence.descriptors.clone(),
             },
             children_count: node.children_count,
-            subtree_truncated: !node.completeness.subtree_complete,
+            // A list the view cut short is presented as truncated too, though
+            // the view it belongs to was read whole.
+            subtree_truncated: !node.completeness.subtree_complete || node.completeness.view_cut,
             children: Vec::with_capacity(child_indices.len()),
         };
         Ok((projected, child_indices))

@@ -1,14 +1,16 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
-use super::{WHOLE_READ_CAP, needs_whole_window, whole_read_budget};
+use super::{
+    VISIBLE_CHECK_CAP, WHOLE_READ_CAP, needs_whole_window, visible_share, whole_read_budget,
+};
 use std::time::Duration;
 
 /// The default snapshot keeps the share it always had: three quarters.
 #[test]
 fn a_default_deadline_gives_the_whole_read_three_quarters() {
     let default = Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
-    assert_eq!(whole_read_budget(default), default * 3 / 4);
+    assert_eq!(budget(default), default * 3 / 4);
     assert_eq!(
-        whole_read_budget(Duration::from_millis(4_000)),
+        budget(Duration::from_millis(4_000)),
         Duration::from_millis(3_000)
     );
 }
@@ -18,18 +20,9 @@ fn a_default_deadline_gives_the_whole_read_three_quarters() {
 #[test]
 fn a_long_deadline_caps_the_whole_read_independently_of_its_length() {
     assert_eq!(WHOLE_READ_CAP, Duration::from_millis(4_500));
-    assert_eq!(
-        whole_read_budget(Duration::from_millis(10_000)),
-        WHOLE_READ_CAP
-    );
-    assert_eq!(
-        whole_read_budget(Duration::from_millis(20_000)),
-        WHOLE_READ_CAP
-    );
-    assert_eq!(
-        whole_read_budget(Duration::from_secs(3_600)),
-        WHOLE_READ_CAP
-    );
+    assert_eq!(budget(Duration::from_millis(10_000)), WHOLE_READ_CAP);
+    assert_eq!(budget(Duration::from_millis(20_000)), WHOLE_READ_CAP);
+    assert_eq!(budget(Duration::from_secs(3_600)), WHOLE_READ_CAP);
 }
 
 /// The cap never starves the fallback gate: a capped read still had more than
@@ -38,7 +31,52 @@ fn a_long_deadline_caps_the_whole_read_independently_of_its_length() {
 fn the_cap_leaves_the_view_fallback_reachable() {
     let default = Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
     assert!(WHOLE_READ_CAP >= default / 2);
-    assert!(WHOLE_READ_CAP >= whole_read_budget(default));
+    assert!(WHOLE_READ_CAP >= budget(default));
+}
+
+/// The whole read's time for a full default deadline or more, which a read of
+/// the visible elements that can follow does not change.
+fn budget(remaining: Duration) -> Duration {
+    let budget = whole_read_budget(remaining, Duration::ZERO);
+    assert_eq!(budget, whole_read_budget(remaining, FLOOR), "{remaining:?}");
+    budget
+}
+
+/// The floor the Windows adapter answers for a WPF window.
+const FLOOR: Duration = Duration::from_millis(750);
+
+/// Past the window listing, a default snapshot has about 2.55 s left. A read
+/// of the visible elements that needs a floor (a WPF window) is left at least
+/// that; a zero floor (a Chromium-hosted window, or a window not read that
+/// way) keeps three quarters for the whole read, as before.
+#[test]
+fn the_floor_for_the_visible_read_applies_only_where_one_is_asked_for() {
+    let remaining = Duration::from_millis(2_550);
+    assert_eq!(
+        whole_read_budget(remaining, Duration::ZERO),
+        remaining * 3 / 4,
+        "a zero floor splits as before"
+    );
+    assert_eq!(whole_read_budget(remaining, FLOOR), remaining - FLOOR);
+}
+
+/// The check whether a window is read by its visible elements gets a short cap
+/// of its own, the same as the probe a find makes.
+#[test]
+fn the_check_for_a_view_has_a_short_cap() {
+    assert_eq!(VISIBLE_CHECK_CAP, Duration::from_millis(500));
+}
+
+/// The visible read gets all that is left when the whole read left a tree to
+/// answer with in its place, and two thirds when it did not (a shallow walk
+/// then answers).
+#[test]
+fn the_visible_read_keeps_a_third_only_when_no_tree_is_left_to_answer() {
+    let deadline = crate::Deadline::after(900).expect("a deadline");
+    let all = visible_share(deadline, true).remaining();
+    let part = visible_share(deadline, false).remaining();
+    assert!(all > Duration::from_millis(850), "{all:?}");
+    assert!(part <= Duration::from_millis(600), "{part:?}");
 }
 use crate::locator::live_locator::{ObservationRoot, ObservedTree};
 use crate::{AccessibilityNode, WindowInfo};

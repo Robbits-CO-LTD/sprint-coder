@@ -259,6 +259,77 @@ fn a_long_deadline_gives_the_whole_read_no_more_than_the_cap() {
     );
 }
 
+static FLOOR_READ_GIVEN_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn cut_short_noting_floor(
+    request: &ObservationRequest,
+    tree: AccessibilityNode,
+) -> Result<AccessibilityNode, AdapterError> {
+    let given = u64::try_from(request.deadline.remaining().as_millis()).unwrap_or(u64::MAX);
+    FLOOR_READ_GIVEN_MS.store(given, Ordering::SeqCst);
+    cut_short(request, tree)
+}
+
+/// A default snapshot that starts its whole read with 2.5 s left leaves the
+/// read of the visible elements at least the floor when the window has one,
+/// and keeps three quarters for the whole read of a window that has none. The
+/// time the window takes to say whether it has one comes out of the whole
+/// read, never out of the floor.
+#[test]
+fn a_window_with_a_view_leaves_its_visible_read_the_floor() {
+    let _guard = HomeGuard::new();
+    let given = |view: bool, check_ms: u64| {
+        let adapter = CaptureAdapter::new(anchored_window());
+        adapter.fault_whole_read(cut_short_noting_floor);
+        if view {
+            adapter.serve_view();
+        }
+        adapter.slow_view_check(check_ms);
+        let started = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(500))
+            .expect("the clock is past its first seconds");
+        let deadline = Deadline::at(started, crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS)
+            .expect("a deadline");
+        let captured =
+            crate::snapshot::build(&adapter, &skeleton_opts(), Some("Fixture"), None, deadline)
+                .expect("the window snapshots");
+        assert_eq!(captured.visible_scope, view);
+        FLOOR_READ_GIVEN_MS.load(Ordering::SeqCst)
+    };
+    let given_for = |view: bool| given(view, 0);
+    let floor = WPF_FLOOR_MS;
+    // The window takes 400 ms to say it has a view, so 2.1 s are left when the
+    // whole read starts: it gets what is left less the floor, not what was
+    // left before the check (which would leave the visible read 350 ms).
+    let after_slow_check = given(true, 400);
+    assert!(
+        after_slow_check <= 2_100 - floor,
+        "the whole read was given {after_slow_check} ms"
+    );
+    assert!(
+        after_slow_check >= 2_100 - floor - 100,
+        "the whole read was given {after_slow_check} ms"
+    );
+    let with_view = given_for(true);
+    assert!(
+        with_view <= 2_500 - floor,
+        "the whole read was given {with_view} ms"
+    );
+    assert!(
+        with_view >= 2_500 - floor - 100,
+        "the whole read was given {with_view} ms"
+    );
+    let without = given_for(false);
+    assert!(
+        without > 2_500 - floor,
+        "the whole read was given {without} ms"
+    );
+    assert!(
+        without <= 2_500 * 3 / 4,
+        "the whole read was given {without} ms"
+    );
+}
+
 #[test]
 fn a_deadline_shorter_than_the_default_never_falls_back_to_the_view() {
     let _guard = HomeGuard::new();
@@ -315,4 +386,35 @@ fn a_whole_window_that_reads_in_time_keeps_the_whole_window_proof() {
             .iter()
             .all(|entry| entry.identity.in_view.is_none())
     );
+}
+
+/// A window whose visible elements need no floor of their own (a
+/// Chromium-hosted window) gives its whole read the same time as a window not
+/// read that way: three quarters of what is left, as before the floor existed.
+/// The check that asks is given no more than its own cap.
+#[test]
+fn a_view_that_needs_no_floor_leaves_the_whole_read_its_time() {
+    let _guard = HomeGuard::new();
+    let given = |serve: fn(&CaptureAdapter)| {
+        let adapter = CaptureAdapter::new(anchored_window());
+        adapter.fault_whole_read(cut_short_noting_floor);
+        serve(&adapter);
+        let started = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(500))
+            .expect("the clock is past its first seconds");
+        let deadline = Deadline::at(started, crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS)
+            .expect("a deadline");
+        crate::snapshot::build(&adapter, &skeleton_opts(), Some("Fixture"), None, deadline)
+            .expect("the window snapshots");
+        let check = adapter.view_check_given_ms.load(Ordering::SeqCst);
+        (FLOOR_READ_GIVEN_MS.load(Ordering::SeqCst), check)
+    };
+    let (without_floor, check) = given(CaptureAdapter::serve_view_without_floor);
+    let (not_read, _) = given(|_| {});
+    assert!(
+        without_floor.abs_diff(not_read) <= 50,
+        "{without_floor} ms against {not_read} ms"
+    );
+    assert!(without_floor > 2_500 - WPF_FLOOR_MS, "{without_floor} ms");
+    assert!(check <= 500, "the check was given {check} ms");
 }

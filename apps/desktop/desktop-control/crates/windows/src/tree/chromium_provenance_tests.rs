@@ -114,3 +114,20 @@ fn a_class_sharing_only_a_prefix_is_not_matched() {
 
     assert!(!has_child_window_of_class(root.cast(), CONTENT_CLASS));
 }
+
+/// By its handle alone, a top-level window of another toolkit with no Chromium
+/// content below it is not of Chromium provenance, and no window at all is
+/// not either, so the menu detector's Chromium arm searches neither. (The
+/// class and content verdicts are driven by `chromium_provenance_of` and
+/// `has_child_window_of_class`; this test registers neither Chromium class,
+/// which other tests register at the same time.)
+#[test]
+fn a_plain_window_or_none_is_not_taken_for_chromium_by_its_handle() {
+    let mut windows = Windows::new();
+    let host_class = unique_class_name();
+    let plain = windows.create(&host_class, None);
+    windows.create(&host_class, Some(plain));
+
+    assert!(!super::window_has_chromium_provenance(plain as isize));
+    assert!(!super::window_has_chromium_provenance(0));
+}

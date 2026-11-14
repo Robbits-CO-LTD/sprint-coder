@@ -57,7 +57,23 @@ pub(crate) fn capture_window(
     let shallow = depth < crate::refs::resolve_saved_ref::WHOLE_WINDOW_DEPTH;
     let mut unproven = None;
     if shallow && !adapter.retains_element_tokens() {
-        let budget = whole_read_budget(deadline.remaining());
+        let remaining = deadline.remaining();
+        // Whether a read of the visible elements can follow a whole read that
+        // runs out, judged before that read so it can leave the time for it.
+        // The check is a read of the window's root alone, bounded by
+        // [`VISIBLE_CHECK_CAP`]; one that cannot answer in that time counts
+        // as "not read that way", which keeps the split as before.
+        let floor = if view_fallback_allowed(deadline, whole_read_share(remaining)) {
+            adapter.reads_visible_elements(window, opts.surface, deadline.capped(VISIBLE_CHECK_CAP))
+        } else {
+            None
+        };
+        // That check reads the window itself, and a busy one answers it
+        // slowly: the whole read is given its time out of what is left after
+        // the check, so the time the check took never comes out of what is
+        // kept for the read of the visible elements. Whether the capture may
+        // fall back is still judged on the time before the check, as before.
+        let budget = whole_read_budget(deadline.remaining(), floor.unwrap_or_default());
         let attempt = deadline.capped(budget);
         match whole_window(adapter, opts, window, attempt) {
             Ok(observed) => {
@@ -69,10 +85,8 @@ pub(crate) fn capture_window(
                 });
             }
             Err(failure) => {
-                if failure.ran_out && view_fallback_allowed(deadline, budget) {
-                    // A third stays for the shallow walk that answers when this
-                    // read cannot finish either.
-                    let share = deadline.capped(deadline.remaining() * 2 / 3);
+                if failure.ran_out && view_fallback_allowed(deadline, whole_read_share(remaining)) {
+                    let share = visible_share(deadline, failure.partial.is_some());
                     match visible_window(adapter, opts, window, share) {
                         VisibleRead::Proven(observed) => {
                             return Ok(WindowCapture {
@@ -148,9 +162,43 @@ pub(crate) const WHOLE_READ_CAP: std::time::Duration =
 
 /// The time the whole-window read is given out of `remaining`: three quarters
 /// of it, leaving the rest for the read that answers when it cannot finish,
-/// and never more than [`WHOLE_READ_CAP`].
-pub(crate) fn whole_read_budget(remaining: std::time::Duration) -> std::time::Duration {
+/// and never more than [`WHOLE_READ_CAP`]. When a read of the visible
+/// elements follows that needs at least `floor` (the adapter says how much,
+/// `reads_visible_elements`), the rest is never less than `floor`. A zero
+/// floor (a Chromium-hosted window, whose visible elements the rest has
+/// always been enough for, or a window not read that way) splits as before.
+pub(crate) fn whole_read_budget(
+    remaining: std::time::Duration,
+    floor: std::time::Duration,
+) -> std::time::Duration {
+    whole_read_share(remaining).min(remaining.saturating_sub(floor))
+}
+
+/// The most the check whether a window is read by its visible elements may
+/// take (`reads_visible_elements`, a read of the window's root alone). A
+/// check that does not answer in this time counts as "not read that way",
+/// which leaves the split, and the whole search of a find, as before.
+pub(crate) const VISIBLE_CHECK_CAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Three quarters of `remaining`, never more than [`WHOLE_READ_CAP`]: the
+/// whole-window read's time before a floor is set aside, which is what
+/// [`view_fallback_allowed`] judges, so a floor does not change which captures
+/// may fall back to the visible elements.
+fn whole_read_share(remaining: std::time::Duration) -> std::time::Duration {
     (remaining * 3 / 4).min(WHOLE_READ_CAP)
+}
+
+/// The part of what is left of `deadline` the read of the visible elements gets
+/// after the whole-window read ran out. When that read left a tree, a visible
+/// read that cannot finish either answers with it and starts no further walk,
+/// so the read gets all that is left. Otherwise a third stays for the shallow
+/// walk that answers in its place.
+fn visible_share(deadline: crate::Deadline, whole_read_left_a_tree: bool) -> crate::Deadline {
+    if whole_read_left_a_tree {
+        deadline
+    } else {
+        deadline.capped(deadline.remaining() * 2 / 3)
+    }
 }
 
 /// Whether a capture may fall back to the window's visible elements: only when
@@ -159,13 +207,23 @@ pub(crate) fn whole_read_budget(remaining: std::time::Duration) -> std::time::Du
 /// default read proves whole onto the narrower proof; it gets the unproven
 /// shallow capture instead, as before.
 ///
-/// `whole_read_budget` is the time the whole-window read was actually given.
-/// A deadline shared by several captures (a wait that polls) keeps its long
-/// span while little of it is left, so the span alone would let a late poll,
-/// whose whole-window read got only a fraction of a default one's time, switch
-/// a window that a default read proves whole. The read must have had most of
-/// what a default snapshot gives it (measured: about 1.9 s of the 2.25 s, after
-/// the window listing; half the default leaves room for a slower listing).
+/// `whole_read_budget` is the whole-window read's share before a floor is set
+/// aside ([`whole_read_share`]). A deadline shared by several captures (a wait
+/// that polls) keeps its long span while little of it is left, so the span
+/// alone would let a late poll, whose whole-window read got only a fraction of
+/// a default one's time, switch a window that a default read proves whole. The
+/// share must be most of what a default snapshot gives it (measured: about
+/// 1.9 s of the 2.25 s, after the window listing; half the default leaves room
+/// for a slower listing).
+///
+/// The read itself can get less than that share where the adapter asks for a
+/// floor: a WPF window (`reads_visible_elements` answers 0.75 s for it) left
+/// 2.0 to 2.25 s after the listing gives its whole read 1.25 to 1.5 s. Such a
+/// window is judged on its share all the same: a WPF window that a whole read
+/// would prove in 1.5 s but not in 1.25 s holds a few hundred elements at most
+/// (about 4 ms each, measured), while the WPF windows this switch is for (a
+/// list of 200 rows or more of a button and a text) cannot be read whole in a
+/// default deadline at all (measured: 200, 2,000 and 20,000 rows).
 fn view_fallback_allowed(
     deadline: crate::Deadline,
     whole_read_budget: std::time::Duration,

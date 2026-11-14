@@ -22,13 +22,6 @@ use crate::{
     trace::trace_artifacts,
 };
 use serde_json::{Value, json};
-use std::time::Duration;
-
-/// The most the probe that asks whether the window is read by its visible
-/// elements may take. It reads the window's root alone; a probe that does not
-/// answer in this time counts as "not read that way", which leaves the whole
-/// search its full deadline, as before.
-const PROBE_CAP: Duration = Duration::from_millis(500);
 
 /// Whether this find answers from the visible elements of `window` when its
 /// whole-window search does not finish: a find of that shape
@@ -36,7 +29,7 @@ const PROBE_CAP: Duration = Duration::from_millis(500);
 /// ([`view_allowed`]), of a window the adapter reads that way.
 ///
 /// The window is asked first, by a read of its root alone, so that a window not
-/// read that way (anything not Chromium-hosted, as the adapter decides) keeps
+/// read that way (anything neither Chromium-hosted nor WPF, as the adapter decides) keeps
 /// its whole-window search exactly as before ([`search_whole`] is only used
 /// for a window that is).
 pub(super) fn plan(
@@ -100,27 +93,18 @@ pub(super) fn search_whole(
     })
 }
 
-/// Whether the adapter reads this window by its visible elements, asked with a
-/// read of the window's root alone. An adapter that does not read a window
-/// that way refuses before it reads anything.
+/// Whether the adapter reads this window by its visible elements: the same
+/// question, answered by the same check of the window's root, that a snapshot
+/// asks before its whole-window read (`PlatformAdapter::reads_visible_elements`),
+/// so no window is read by its view for one command and not the other.
 fn reads_view(adapter: &dyn PlatformAdapter, window: &WindowInfo, deadline: Deadline) -> bool {
-    let options = TreeOptions {
-        max_depth: 0,
-        ..TreeOptions::default()
-    };
-    let Ok(mut request) =
-        ObservationRequest::snapshot(&options, deadline.capped(PROBE_CAP)).validate()
-    else {
-        return false;
-    };
-    request.observation_mode.visible_only = true;
-    crate::tree::renderer_accessibility::observe_tree(
-        adapter,
-        ObservationRoot::Window(window),
-        &request,
-        None,
-    )
-    .is_ok_and(|observed| observed.is_visible_scope())
+    adapter
+        .reads_visible_elements(
+            window,
+            crate::SnapshotSurface::Window,
+            deadline.capped(snapshot::window_capture::VISIBLE_CHECK_CAP),
+        )
+        .is_some()
 }
 
 /// The options of the snapshot of the visible elements a find answers from:
@@ -260,6 +244,12 @@ pub(super) fn respond(
     } else {
         VISIBLE_NO_MATCH_HINT
     });
+    // A long list the view read only from its start: scrolling an item
+    // further down into view does not bring it into this read, as the hint
+    // above would suggest, so the response says so as a snapshot of it does.
+    if crate::commands::snapshot::has_view_cut(&view.tree) {
+        response["scope_cut_hint"] = json!(crate::commands::snapshot::VIEW_CUT_HINT);
+    }
     Ok(response)
 }
 

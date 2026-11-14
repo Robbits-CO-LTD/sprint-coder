@@ -165,6 +165,9 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
             self.budget.deadline
         };
         let read = self.read_children(node, raw_depth, read_deadline);
+        // Asked before the children are visited, which enumerate lists of
+        // their own.
+        let view_cut = self.source.children_cut();
         let truncated_by_raw_depth =
             raw_depth >= self.budget.max_raw_depth && !read.elements.is_empty();
         let at_boundary =
@@ -187,7 +190,8 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
         }
         Some(
             ObservedSubtree::new(evidence, children, subtree_complete, children_count)
-                .with_wrapper(web_wrapper),
+                .with_wrapper(web_wrapper)
+                .with_view_cut(view_cut),
         )
     }
 

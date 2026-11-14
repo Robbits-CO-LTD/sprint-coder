@@ -241,6 +241,28 @@ mod imp {
             .map_err(|error| failed(&error, property, "read a cached element property"))
     }
 
+    /// One flag property, read with its failure kept apart from its value:
+    /// `Ok(Some(flag))` is a value the provider answered, `Ok(None)` an answer
+    /// that carries none (the property not implemented, an empty or a
+    /// non-flag answer: the same every time it is read), and `Err` a read
+    /// that failed (the call's own HRESULT, a timeout, a property missing
+    /// from the cache), which may answer otherwise when read again. The
+    /// tri-state reads above fold that failure into `Unknown`.
+    pub(crate) fn read_flag(
+        element: &UIAElement,
+        property: TreeProperty,
+        cached: bool,
+    ) -> Result<Option<bool>, crate::tree::automation::UiaFailure> {
+        let answer = if cached {
+            element.0.get_cached_property_value(uia_property(property))
+        } else {
+            element.0.get_property_value(uia_property(property))
+        };
+        answer
+            .map(|variant| classify(&variant).flag())
+            .map_err(|error| failure_of(&error))
+    }
+
     fn failed(error: &UiaError, property: TreeProperty, context: &str) -> AdapterError {
         property_read_error(uia_failure_error(failure_of(error), context), property)
     }
@@ -363,7 +385,7 @@ pub use imp::{
 };
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::rect_from_uia;
+pub(crate) use imp::{read_flag, rect_from_uia};
 
 pub mod element_properties;
 pub mod property_ids;

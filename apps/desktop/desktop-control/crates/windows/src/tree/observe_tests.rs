@@ -653,28 +653,33 @@ fn walk_fault_error_never_folds_a_failures_message_text_into_the_aggregate() {
     assert!(!serialized.contains(MARKER));
 }
 
-/// A read of the visible elements alone is refused for a window that is not
-/// Chromium-hosted, with the code core takes for "not read that way".
+/// A read of the visible elements alone is refused for a window that has no
+/// view of them (neither Chromium-hosted nor WPF), with the code core takes
+/// for "not read that way".
 #[test]
-fn a_view_of_a_window_outside_chromium_is_refused_as_not_supported() {
-    let error = refuse_view_outside_chromium(true, || false)
-        .expect_err("a window outside Chromium is not read by its view");
+fn a_view_of_a_window_without_a_visible_view_is_refused_as_not_supported() {
+    let error = view_or_refuse(true, || None)
+        .expect_err("a window without a visible view is not read by its view");
     assert_eq!(error.code, ErrorCode::ActionNotSupported);
 }
 
+/// A window with a view of its visible elements is read in that view, and in
+/// no other.
 #[test]
-fn a_view_of_a_chromium_window_is_read() {
-    assert!(refuse_view_outside_chromium(true, || true).is_ok());
+fn a_view_of_a_window_is_read_in_the_view_it_has() {
+    for view in [VisibleView::Onscreen, VisibleView::Shown] {
+        assert_eq!(view_or_refuse(true, || Some(view)).unwrap(), Some(view));
+    }
 }
 
-/// Any other read never asks for the window's provenance.
+/// Any other read never asks for the window's view.
 #[test]
 fn a_read_of_the_whole_window_asks_no_provenance() {
     let asked = std::cell::Cell::new(false);
-    let result = refuse_view_outside_chromium(false, || {
+    let result = view_or_refuse(false, || {
         asked.set(true);
-        false
+        None
     });
-    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), None);
     assert!(!asked.get());
 }

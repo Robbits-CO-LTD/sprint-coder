@@ -9,8 +9,11 @@ use serde_json::json;
 
 use super::chromium;
 use super::surfaces::surface_root;
+use super::walk::shown_view::{VisibleView, checked_view_of};
 use super::walk::walker::{DEFAULT_MAX_RAW_DEPTH, WalkBudget, WalkOutcome};
-use super::walk::walker_source::{walk_uia_subtree_for, walk_uia_visible_subtree};
+use super::walk::walker_source::{
+    walk_uia_shown_subtree, walk_uia_subtree_for, walk_uia_visible_subtree,
+};
 
 /// Runs one observation: resolve the root, walk it, detect a Chromium shell,
 /// and report completeness honestly.
@@ -60,17 +63,21 @@ pub(crate) fn observe_tree(
     let budget = WalkBudget::new(request.max_logical_depth, request.deadline)
         .with_max_raw_depth(request.max_raw_depth.min(DEFAULT_MAX_RAW_DEPTH));
     let visible_only = request.observation_mode.visible_only;
-    refuse_view_outside_chromium(visible_only, || chromium::has_chromium_provenance(&element))?;
+    // A check that cannot answer in time refuses, as for a window with no
+    // view: the caller keeps the read it had.
+    let view = view_or_refuse(visible_only, || {
+        checked_view_of(&element, request.deadline).or_none()
+    })?;
     let walk_started = Instant::now();
-    let outcome = if visible_only {
-        walk_uia_visible_subtree(&element, &root, budget)?
-    } else {
-        walk_uia_subtree_for(
+    let outcome = match view {
+        Some(VisibleView::Onscreen) => walk_uia_visible_subtree(&element, &root, budget)?,
+        Some(VisibleView::Shown) => walk_uia_shown_subtree(&element, &root, budget)?,
+        None => walk_uia_subtree_for(
             &element,
             &root,
             budget,
             request.observation_mode.identity_only,
-        )?
+        )?,
     };
     let mut observed = finish_observation(
         root,
@@ -89,23 +96,43 @@ pub(crate) fn observe_tree(
     Ok(observed)
 }
 
-/// Refuses a read of the visible elements alone of a window that is not
-/// Chromium-hosted: only such a window's provider was measured to report what
-/// scrolled out of view, which the proof of a view rests on. The refusal is
-/// `ACTION_NOT_SUPPORTED`, which core takes as "this window is not read that
-/// way" and keeps its narrower, unproven capture. `chromium_provenance` is
-/// only asked for such a read.
-fn refuse_view_outside_chromium(
+/// Whether a read of the visible elements alone of `window`'s `surface` would
+/// be served rather than refused, and the least time it needs after a whole
+/// read ran out ([`VisibleView::read_floor`]): the root is resolved and its
+/// view chosen as [`observe_tree`] does, without walking, within `deadline`.
+/// Anything that fails or does not answer in time answers `None`, which keeps
+/// the caller's split and its reads as they were.
+pub(crate) fn reads_visible_elements(
+    window: &agent_desktop_core::WindowInfo,
+    surface: agent_desktop_core::SnapshotSurface,
+    deadline: Deadline,
+) -> Option<std::time::Duration> {
+    let element = surface_root(ObservationRoot::Window(window), surface, deadline).ok()?;
+    checked_view_of(&element, deadline)
+        .or_none()
+        .map(VisibleView::read_floor)
+}
+
+/// The view a read of the visible elements alone walks, `None` for any other
+/// read; a window with no such view is refused. Only windows whose provider
+/// was measured reporting what scrolled out of view are read that way:
+/// Chromium-hosted windows in the onscreen view, WPF windows in the shown view
+/// (`shown_view::visible_view_for`). The refusal is `ACTION_NOT_SUPPORTED`,
+/// which core takes as "this window is not read that way" and keeps its
+/// narrower, unproven capture. `view` is only asked for such a read.
+fn view_or_refuse(
     visible_only: bool,
-    chromium_provenance: impl FnOnce() -> bool,
-) -> Result<(), AdapterError> {
-    if visible_only && !chromium_provenance() {
-        return Err(AdapterError::new(
-            ErrorCode::ActionNotSupported,
-            "Reading only the visible elements is supported for Chromium-hosted windows",
-        ));
+    view: impl FnOnce() -> Option<VisibleView>,
+) -> Result<Option<VisibleView>, AdapterError> {
+    if !visible_only {
+        return Ok(None);
     }
-    Ok(())
+    view().map(Some).ok_or_else(|| {
+        AdapterError::new(
+            ErrorCode::ActionNotSupported,
+            "Reading only the visible elements is supported for Chromium-hosted and WPF windows",
+        )
+    })
 }
 
 /// The walk's own output, grouped so `finish_observation` stays within the
