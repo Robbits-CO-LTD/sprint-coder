@@ -1285,6 +1285,196 @@ function canceledApprovalIds(persistence: SqlitePersistenceClient, taskId: strin
     .flatMap((event) => (event.type === 'approval.canceled' ? [event.approvalId] : []));
 }
 
+/**
+ * Writes a `turn_events` row the way a build before #1164 did (`appendEvent`: the type column is
+ * the payload's type, the payload carries its seq), straight into the file (Issue #1166).
+ */
+function insertStoredTurnEvent(
+  path: string,
+  taskId: string,
+  turnId: string | null,
+  payload: (seq: number) => Record<string, unknown> & { type: string },
+): number {
+  const raw = new Database(path);
+  try {
+    const { seq } = raw
+      .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM turn_events WHERE task_id = ?')
+      .get(taskId) as { seq: number };
+    const event = payload(seq);
+    raw
+      .prepare(
+        'INSERT INTO turn_events(id, task_id, turn_id, seq, schema_version, type, payload_json, created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
+      )
+      .run(
+        randomUUID(),
+        taskId,
+        turnId,
+        seq,
+        event.type,
+        JSON.stringify(event),
+        '2026-11-10T00:00:00.000Z',
+      );
+    return seq;
+  } finally {
+    raw.close();
+  }
+}
+
+/** The shapes the removed Computer Use wrote: a late end with no Turn, and a terminated helper. */
+function legacyDiscoveryResult(taskId: string, turnId: string | null, seq: number) {
+  return {
+    type: 'computer_use.discovery_result',
+    taskId,
+    turnId,
+    seq,
+    result:
+      turnId === null
+        ? {
+            kind: 'discovery_result',
+            late: true,
+            taskId,
+            turnId: null,
+            reason: 'user_stop',
+            results: [{ kind: 'terminated', helperGeneration: 1, result: 'terminated_clean' }],
+          }
+        : {
+            kind: 'discovery_result',
+            late: false,
+            taskId,
+            turnId,
+            reason: 'user_stop',
+            results: [
+              { kind: 'terminated', helperGeneration: 2, result: 'terminated_target_suspect' },
+              { kind: 'not_submitted' },
+            ],
+          },
+  };
+}
+
+if (runsWithElectronAbi)
+  describe('turn events stored by a build that had a since-removed feature (issue #1166)', () => {
+    it.each([
+      { legacy: true, decision: 'allow_once' as const },
+      { legacy: true, decision: 'deny' as const },
+      { legacy: false, decision: 'allow_once' as const },
+      { legacy: false, decision: 'deny' as const },
+    ])(
+      'finds the decided approval in the history after deciding a card (legacy events: $legacy, $decision)',
+      async ({ legacy, decision }) => {
+        const created = createPersistence();
+        const task = created.persistence.createTask();
+        created.persistence.close();
+        const legacySeqs: number[] = [];
+        if (legacy)
+          legacySeqs.push(
+            insertStoredTurnEvent(created.path, task.id, null, (seq) =>
+              legacyDiscoveryResult(task.id, null, seq),
+            ),
+          );
+        // Opened again as the current build, through its migrations.
+        const persistence = new SqlitePersistenceClient(created.path, verifyTestNativeSession);
+        try {
+          const turn = startExecutingTurn(persistence, task.id);
+          if (legacy)
+            legacySeqs.push(
+              insertStoredTurnEvent(created.path, task.id, turn.turnId, (seq) =>
+                legacyDiscoveryResult(task.id, turn.turnId, seq),
+              ),
+            );
+          // Selecting the Task reads its snapshot.
+          expect(persistence.snapshot(task.id).activeTurn?.turnId).toBe(turn.turnId);
+          const fixture = turnApprovalFixture(persistence, task.id, turn.turnId);
+          // Settled either way here, so a failing read below cannot leave it unhandled.
+          const pending = fixture.call('call-1').then(
+            () => undefined,
+            () => undefined,
+          );
+          const card = await fixture.cardFor('call-1');
+          fixture.decide(card, decision);
+          // What `approvals.resolve` does right after the coordinator returns: read the history
+          // and publish the approval's own `approval.resolved`.
+          let history: ReturnType<SqlitePersistenceClient['listEventsAfter']>;
+          try {
+            history = persistence.listEventsAfter(task.id, 0);
+          } finally {
+            await pending;
+          }
+          const resolved = [...history]
+            .reverse()
+            .find((event) => event.type === 'approval.resolved' && event.approvalId === card.id);
+          expect(resolved).toMatchObject({ type: 'approval.resolved', decision });
+          expect(persistence.getApproval(task.id, card.id)).toMatchObject({
+            state: 'resolved',
+            decision,
+          });
+          expect(fixture.executions()).toBe(decision === 'deny' ? 0 : 1);
+          // The removed events are not replayed, but keep their seq: nothing reuses it.
+          expect(history.map(({ type }) => type)).not.toContain('computer_use.discovery_result');
+          const seqs = history.map(({ seq }) => seq);
+          expect(new Set([...seqs, ...legacySeqs]).size).toBe(seqs.length + legacySeqs.length);
+          expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+          if (legacy) expect(resolved!.seq).toBeGreaterThan(Math.max(...legacySeqs));
+          const latest = persistence.listEventsAfter(task.id, 0).map(({ seq }) => seq);
+          expect(persistence.snapshot(task.id).lastSeq).toBe(Math.max(...latest, ...legacySeqs));
+        } finally {
+          persistence.close();
+        }
+      },
+    );
+
+    it('replays a subscription from before the removed events without them', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      try {
+        const turn = startExecutingTurn(persistence, task.id);
+        const before = persistence.listEventsAfter(task.id, 0);
+        const legacySeq = insertStoredTurnEvent(path, task.id, turn.turnId, (seq) =>
+          legacyDiscoveryResult(task.id, turn.turnId, seq),
+        );
+        persistence.changeStage(task.id, turn.turnId, 'synthesizing');
+        const replay = persistence.listEventsAfter(task.id, 0);
+        expect(replay.slice(0, before.length)).toEqual(before);
+        expect(replay.slice(before.length)).toEqual([
+          expect.objectContaining({
+            type: 'stage.changed',
+            stage: 'synthesizing',
+            seq: legacySeq + 1,
+          }),
+        ]);
+        // A subscription that already has everything up to the removed event.
+        expect(persistence.listEventsAfter(task.id, legacySeq - 1).map(({ seq }) => seq)).toEqual([
+          legacySeq + 1,
+        ]);
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it('still refuses a stored row this build does not know, and a damaged event of its own', () => {
+      for (const stored of [
+        // A type no build of this app has written.
+        { type: 'not_a.turn_event' },
+        // A type this build writes, damaged.
+        { type: 'stage.changed', stage: 'no_such_stage' },
+      ]) {
+        const { persistence, path } = createPersistence();
+        try {
+          const task = persistence.createTask();
+          const turn = startExecutingTurn(persistence, task.id);
+          insertStoredTurnEvent(path, task.id, turn.turnId, (seq) => ({
+            ...stored,
+            taskId: task.id,
+            turnId: turn.turnId,
+            seq,
+          }));
+          expect(() => persistence.listEventsAfter(task.id, 0)).toThrow();
+        } finally {
+          persistence.close();
+        }
+      }
+    });
+  });
+
 if (runsWithElectronAbi)
   describe('SqlitePersistenceClient v27', () => {
     it('deduplicates operations and rejects operation id hash conflicts', () => {

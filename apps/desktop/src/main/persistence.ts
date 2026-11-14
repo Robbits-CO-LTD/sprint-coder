@@ -4726,6 +4726,24 @@ const migrations = [
   },
 ];
 
+/**
+ * `turn_events` rows that are not a `TurnEvent` of this build, so the history replay
+ * (`listEventsAfter`: Turn subscription, and the read after an approval is decided) never parses
+ * them. Their `seq` stays taken, so later events still number after them (Issue #1166).
+ *
+ * - `context.compacted`: the compaction audit this build itself writes, read only as a summary.
+ * - `computer_use.discovery_result`: written by builds before the in-house Computer Use was removed
+ *   (#1164), when a discovery ended late or its helper was terminated. Nothing this build decides
+ *   on (approvals, permissions, Turn state) ever read it; it only drew a notice on the Timeline.
+ *
+ * Named one by one rather than skipping whatever fails to parse: a row of a type this build writes
+ * that stops parsing is damage, and has to keep failing where it is read instead of vanishing.
+ */
+const NON_REPLAYED_TURN_EVENT_TYPES = [
+  'context.compacted',
+  'computer_use.discovery_result',
+] as const;
+
 /** The newest 200 denials and the newest 200 other Auto decisions of a Task, oldest first
  * (issue #863). Exported so a test can pin its query plan to keyed reads. */
 export const AUTO_DECISION_LIST_SQL = `SELECT event.payload_json FROM (
@@ -19983,9 +20001,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return (
       this.db
         .prepare(
-          "SELECT payload_json FROM turn_events WHERE task_id = ? AND seq > ? AND type != 'context.compacted' ORDER BY seq",
+          `SELECT payload_json FROM turn_events WHERE task_id = ? AND seq > ?
+           AND type NOT IN (${NON_REPLAYED_TURN_EVENT_TYPES.map(() => '?').join(', ')})
+           ORDER BY seq`,
         )
-        .all(taskId, afterSeq) as { payload_json: string }[]
+        .all(taskId, afterSeq, ...NON_REPLAYED_TURN_EVENT_TYPES) as { payload_json: string }[]
     ).map((row) => turnEventSchema.parse(JSON.parse(row.payload_json)));
   }
 
