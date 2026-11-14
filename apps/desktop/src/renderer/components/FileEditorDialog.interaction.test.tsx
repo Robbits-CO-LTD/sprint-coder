@@ -285,3 +285,23 @@ describe('FileEditorDialog dirty confirmations before a save (issue #958 AC-3)',
     expect(save).not.toHaveBeenCalled();
   });
 });
+
+describe('FileEditorDialog entry point', () => {
+  it('is not rendered while the Task has no folder to open from', async () => {
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<FileEditorDialog taskId="task-2" hasWorkspace={false} />));
+
+    expect(container.querySelector('[data-testid="open-file-button"]')).toBeNull();
+    expect(container.textContent).not.toContain('ファイルを開く');
+  });
+
+  it('is rendered once the Task has a folder', async () => {
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<FileEditorDialog taskId="task-2" hasWorkspace />));
+
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="open-file-button"]');
+    expect(button?.disabled).toBe(false);
+  });
+});

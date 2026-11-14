@@ -212,20 +212,21 @@ export function FileEditorDialog({
 
   return (
     <>
-      <button
-        type="button"
-        className="ctx-chip chip-btn"
-        data-testid="open-file-button"
-        disabled={!supported || !hasWorkspace || busy || opened?.editable === true}
-        title={
-          hasWorkspace
-            ? 'Project内のファイルを開いて編集'
-            : '先にフォルダを含むProjectを選択してください'
-        }
-        onClick={() => void pick()}
-      >
-        ファイルを開く
-      </button>
+      {/* A button that can never be pressed is noise beside the Project picker: without a folder
+          (or without the files API) there is nothing to open, so the trigger is not rendered.
+          An already opened file keeps its editor below; only the entry point disappears. */}
+      {supported && hasWorkspace && (
+        <button
+          type="button"
+          className="ctx-chip chip-btn"
+          data-testid="open-file-button"
+          disabled={busy || opened?.editable === true}
+          title="Project内のファイルを開いて編集"
+          onClick={() => void pick()}
+        >
+          ファイルを開く
+        </button>
+      )}
       {message && opened?.editable !== true && (
         <span className="file-editor-inline-status" role="status">
           {message}
