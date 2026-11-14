@@ -142,8 +142,13 @@ observation, actions and capture there fail or return nothing.
   (a command that opens a dialog returns at once), and ahead of anything a
   later click sends, so the next menu click cannot change the menu before
   this command runs; while that command shows a modal dialog, the next click
-  stops with `window_disabled`. After the command nothing more goes to the
-  app; the check mark is read from the menu itself, so an app that updates
+  stops with `window_disabled`. When the app has not finished the command
+  half a second later, the result says `details.command_returned: false` (it
+  may show a message box or wait for something): look at the app's windows
+  before running another of its menu items. In the same batch, the next menu
+  item of that app then stops with `APP_UNRESPONSIVE`,
+  `details.kind: "menu_command_running"`, nothing sent. After the command
+  nothing more goes to the app; the check mark is read from the menu itself, so an app that updates
   it only when the menu opens reports `delivered_unverified`. Only `click` (without `--headed`) takes such a ref:
   every other command refuses it with `ACTION_NOT_SUPPORTED`,
   `details.kind: "menu_item_ref"`. An item the app draws itself has no name
