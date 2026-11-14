@@ -19,6 +19,7 @@ import { AppTitlebar } from './components/AppTitlebar';
 import { SidebarResizer } from './components/SidebarResizer';
 import { List, Plus } from './components/icons';
 import { useMediaQuery } from './lib/useMediaQuery';
+import type { CreateTaskOptions } from './lib/reusable-task';
 import {
   NARROW_VIEWPORT_QUERY,
   clampSidebarWidth,
@@ -170,7 +171,7 @@ export default function App() {
     [selectTask, selectedTaskId],
   );
   const createTaskFromUi = useCallback(
-    async (projectId?: string) => createTask(projectId),
+    async (projectId?: string, options?: CreateTaskOptions) => createTask(projectId, options),
     [createTask],
   );
 

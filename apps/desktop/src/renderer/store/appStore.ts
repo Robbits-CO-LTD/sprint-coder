@@ -53,6 +53,7 @@ import {
   type CommandTailProjection,
 } from './command-projection';
 import { accessPresetForNewTask, rememberAccessPreset } from '../lib/access-preset-preference';
+import { findReusableUnstartedTask, type CreateTaskOptions } from '../lib/reusable-task';
 import { playSoundForEvent } from '../lib/ui-sound';
 import {
   applyTaskTurnEvent,
@@ -298,7 +299,9 @@ type AppState = {
     grantScope?: 'app',
   ): Promise<void>;
   selectTask(taskId: string): Promise<void>;
-  createTask(projectId?: string): Promise<TaskSummary | null>;
+  /** Opens the unstarted Task in the same place when one exists; `reuseUnstarted: false` always
+   * makes a new Task (for callers that write into the Task they get back). */
+  createTask(projectId?: string, options?: CreateTaskOptions): Promise<TaskSummary | null>;
   refreshProjects(): Promise<void>;
   createProject(name: string, folders?: ProjectFolderInput[]): Promise<ProjectSummary | null>;
   pickProjectFolders(): Promise<
@@ -1965,9 +1968,25 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async createTask(projectId?: string) {
+    async createTask(projectId?: string, options?: CreateTaskOptions) {
       if (!window.sprintCoder) return null;
       set({ error: null });
+      if (options?.reuseUnstarted !== false) {
+        // Pressing "新規タスク" again must not pile up empty Tasks in the DB: an unstarted Task in
+        // the same place is opened as it is. Its draft, title, workspace and access preset stay.
+        const state = get();
+        const reusable = findReusableUnstartedTask(
+          state.tasks,
+          projectId ?? null,
+          state.selectedTaskId,
+          (id) =>
+            state.sendingByTask[id] === true || state.pendingOptimisticIdByTask[id] !== undefined,
+        );
+        if (reusable !== null) {
+          if (state.selectedTaskId !== reusable.id) await get().selectTask(reusable.id);
+          return reusable;
+        }
+      }
       try {
         const task = await window.sprintCoder.tasks.create(
           projectId === undefined ? {} : { projectId },

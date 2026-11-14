@@ -1,10 +1,11 @@
 import { createContext, useContext } from 'react';
 import type { ReactNode } from 'react';
 import type { TaskSummary } from '../types/sprint-coder';
+import type { CreateTaskOptions } from '../lib/reusable-task';
 
 export type TaskBoundaryActions = {
   selectTask: (taskId: string) => Promise<boolean>;
-  createTask: (projectId?: string) => Promise<TaskSummary | null>;
+  createTask: (projectId?: string, options?: CreateTaskOptions) => Promise<TaskSummary | null>;
 };
 
 const unavailableTaskBoundary: TaskBoundaryActions = {
