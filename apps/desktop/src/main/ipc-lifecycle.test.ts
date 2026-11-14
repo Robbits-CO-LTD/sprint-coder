@@ -49,6 +49,7 @@ it('broadcasts terminal activity to the window even without a Task event port', 
     graphSourceMonitor: { invalidate },
     sentRunningWork: new Map(),
     quarantinedRuntimeTasks: new Set(),
+    cliTeamWorkerRuntime: { unsettledWorkerCount: () => 0 },
     managedCodingHarness: { activeTaskCommandCount: () => 0 },
     persistence: {
       getActiveTurnId: () => null,

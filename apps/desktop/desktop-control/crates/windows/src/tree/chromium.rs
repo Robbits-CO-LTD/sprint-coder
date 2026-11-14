@@ -106,24 +106,41 @@ fn holds_chromium_content(root: &UIAElement) -> bool {
 /// `EnumChildWindows`, which send the window no message.
 #[cfg(target_os = "windows")]
 pub(crate) fn window_has_chromium_provenance(handle: isize) -> bool {
+    let Some(class) = window_class_name(handle) else {
+        return false;
+    };
+    chromium_provenance_of(&class, || window_holds_chromium_content(handle))
+}
+
+/// A window's class, read with `GetClassNameW` (which sends the window no
+/// message); `None` for a null handle or one whose class could not be read
+/// (a destroyed window).
+#[cfg(target_os = "windows")]
+pub(crate) fn window_class_name(handle: isize) -> Option<String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
     let window = handle as *mut std::ffi::c_void;
     if window.is_null() {
-        return false;
+        return None;
     }
     let mut buffer = [0u16; 256];
     // SAFETY: `buffer` is writable for the length passed.
     let length = unsafe { GetClassNameW(window, buffer.as_mut_ptr(), buffer.len() as i32) };
-    let class = String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or(0)]);
-    chromium_provenance_of(&class, || {
-        has_child_window_of_class(window, CHROMIUM_CONTENT_CLASS)
-    })
+    let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
+    Some(String::from_utf16_lossy(&buffer[..length]))
+}
+
+/// Whether a window below `handle` is the one Chromium draws web content into,
+/// listed with `EnumChildWindows` (no message is sent to the target).
+#[cfg(target_os = "windows")]
+pub(crate) fn window_holds_chromium_content(handle: isize) -> bool {
+    let window = handle as *mut std::ffi::c_void;
+    !window.is_null() && has_child_window_of_class(window, CHROMIUM_CONTENT_CLASS)
 }
 
 /// [`window_has_chromium_provenance`]'s verdict from the window's class and,
 /// only when the class is not Chromium's, whether it holds Chromium content.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn chromium_provenance_of(class: &str, holds_content: impl FnOnce() -> bool) -> bool {
+pub(crate) fn chromium_provenance_of(class: &str, holds_content: impl FnOnce() -> bool) -> bool {
     is_chromium_class(class) || holds_content()
 }
 

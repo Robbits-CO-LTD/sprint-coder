@@ -217,10 +217,10 @@ fn visible_share(deadline: crate::Deadline, whole_read_left_a_tree: bool) -> cra
 /// for a slower listing).
 ///
 /// The read itself can get less than that share where the adapter asks for a
-/// floor: a WPF window (`reads_visible_elements` answers 0.75 s for it) left
-/// 2.0 to 2.25 s after the listing gives its whole read 1.25 to 1.5 s. Such a
+/// floor: a WPF window (`reads_visible_elements` answers 1 s for it) left
+/// 2.0 to 2.25 s after the listing gives its whole read 1.0 to 1.25 s. Such a
 /// window is judged on its share all the same: a WPF window that a whole read
-/// would prove in 1.5 s but not in 1.25 s holds a few hundred elements at most
+/// would prove in 1.5 s but not in 1.0 s holds a few hundred elements at most
 /// (about 4 ms each, measured), while the WPF windows this switch is for (a
 /// list of 200 rows or more of a button and a text) cannot be read whole in a
 /// default deadline at all (measured: 200, 2,000 and 20,000 rows).

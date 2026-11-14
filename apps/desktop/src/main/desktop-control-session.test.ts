@@ -25,6 +25,7 @@ import {
   desktopControlTeamCursors,
   desktopControlWorker,
   desktopControlWorkerLabel,
+  desktopControlWorkerToolOffer,
   endDesktopControlSession,
   endDesktopControlSessions,
   ensureDesktopControlSession,
@@ -565,5 +566,25 @@ describe('the cursor of a Worker no longer at work', () => {
     // Main's own run is judged on the table alone, which accepts it.
     expect(desktopControlArgvRefusal(['cursor-overlay', 'retire'], [], lookup)).toBeNull();
     expect(desktopControlMainOnlyOptionRefusal(['cursor-overlay', 'disable'])).toBeNull();
+  });
+});
+
+describe('whether a Worker can be given desktop control in this Main', () => {
+  it('needs both the command tool and the shipped executable, read afresh each time', () => {
+    let tool = true;
+    let executable: string | null = 'C:\\app\\sprint-coder-desktop-control.exe';
+    const offered = desktopControlWorkerToolOffer(
+      () => tool,
+      () => executable,
+    );
+    expect(offered()).toBe(true);
+    // A development run that has not built the executable: no Worker is marked.
+    executable = null;
+    expect(offered()).toBe(false);
+    executable = 'C:\\app\\sprint-coder-desktop-control.exe';
+    expect(offered()).toBe(true);
+    // Without the command sandbox, as before.
+    tool = false;
+    expect(offered()).toBe(false);
   });
 });

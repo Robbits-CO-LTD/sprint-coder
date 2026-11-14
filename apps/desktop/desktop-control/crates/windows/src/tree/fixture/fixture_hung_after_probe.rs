@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Mutex, MutexGuard};
@@ -61,13 +62,18 @@ pub(crate) struct HungAfterProbeFixture {
 
 impl HungAfterProbeFixture {
     pub(crate) fn create() -> Result<Self, String> {
+        Self::create_with_class(fixture_window::unique_class_name())
+    }
+
+    /// The same fixture with a window of class `class_name` (which must be
+    /// unique to this fixture), for a check that answers by a window's class.
+    pub(crate) fn create_with_class(class_name: String) -> Result<Self, String> {
         let guard = FIXTURE_LOCK.lock().map_err(|_| "fixture lock poisoned")?;
         PROBE_COUNT.store(0, Ordering::SeqCst);
         HANG_ON_PROBE.store(0, Ordering::SeqCst);
         HANG_ENTERED.store(false, Ordering::SeqCst);
         RELEASE_HANG.store(false, Ordering::SeqCst);
         RESUME_AFTER_MS.store(0, Ordering::SeqCst);
-        let class_name = fixture_window::unique_class_name();
         let host_name = class_name.clone();
         let (sender, receiver) = channel();
         let host = thread::spawn(move || host_window(&host_name, sender));

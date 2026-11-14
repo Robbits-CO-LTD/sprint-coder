@@ -254,6 +254,30 @@ mod imp {
     /// an already-hung target into a clearer error, sooner, than waiting the
     /// connection timeout out.
     pub fn root_from_hwnd(hwnd: isize, deadline: Deadline) -> Result<UIAElement, AdapterError> {
+        resolve_root(hwnd, deadline, false)
+    }
+
+    /// [`root_from_hwnd`] with the call that reaches the target's provider
+    /// (`ElementFromHandle`) also bounded by what is left of `deadline`: the
+    /// client's connection timeout is lowered to it for that one call and put
+    /// back after. Without it the call is bounded by the client's own
+    /// [`super::CONNECTION_TIMEOUT_MS`] (2 s) alone, so a target that answers
+    /// the pump probe and then is slow to answer `WM_GETOBJECT` holds a short
+    /// check for up to that long. A call that the lowered bound cuts short is
+    /// an unread root (`TIMEOUT`, or the resolution error the client
+    /// reported), never a missing window.
+    pub fn root_from_hwnd_within(
+        hwnd: isize,
+        deadline: Deadline,
+    ) -> Result<UIAElement, AdapterError> {
+        resolve_root(hwnd, deadline, true)
+    }
+
+    fn resolve_root(
+        hwnd: isize,
+        deadline: Deadline,
+        bounded: bool,
+    ) -> Result<UIAElement, AdapterError> {
         deadline.ensure_remaining()?;
         let client = automation_client()?;
         if !window_exists(hwnd) {
@@ -265,11 +289,62 @@ mod imp {
         if !window_is_pumping(hwnd, probe_ms) {
             return Err(super::unresponsive_window_error());
         }
-        let element = client
-            .element_from_handle(Handle::from(hwnd))
-            .map_err(|error| root_resolution_error(failure_of(&error)))?;
+        let resolve = || client.element_from_handle(Handle::from(hwnd));
+        let answer = if bounded {
+            with_connection_timeout(&client, deadline, resolve)
+                .ok_or_else(|| deadline.timeout_error())?
+        } else {
+            resolve()
+        };
+        let element = answer.map_err(|error| root_resolution_error(failure_of(&error)))?;
         deadline.ensure_remaining()?;
         Ok(UIAElement::from(element))
+    }
+
+    /// Runs one call with the client's connection timeout lowered to what is
+    /// left of `deadline` (never above [`super::CONNECTION_TIMEOUT_MS`]), and
+    /// puts the bound the client had back after, also when the call panics.
+    /// `None` when there is no time left or the bound cannot be set, so the
+    /// call never runs longer than the deadline allows.
+    fn with_connection_timeout<T>(
+        client: &UIAutomation,
+        deadline: Deadline,
+        call: impl FnOnce() -> T,
+    ) -> Option<T> {
+        use windows::core::Interface;
+
+        /// Puts the client's previous bound back when dropped.
+        struct Restore {
+            client: IUIAutomation2,
+            previous: u32,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: the same live client on the same thread.
+                if unsafe { self.client.SetConnectionTimeout(self.previous) }.is_err() {
+                    tracing::warn!("could not restore the UI Automation connection timeout");
+                }
+            }
+        }
+
+        let bounded: IUIAutomation2 = AsRef::<IUIAutomation>::as_ref(client).cast().ok()?;
+        // SAFETY: `bounded` is this thread's live client (COM is initialised for it).
+        let previous =
+            unsafe { bounded.ConnectionTimeout() }.unwrap_or(super::CONNECTION_TIMEOUT_MS);
+        let remaining = u32::try_from(deadline.remaining().as_millis())
+            .unwrap_or(u32::MAX)
+            .min(super::CONNECTION_TIMEOUT_MS)
+            .min(if previous > 0 { previous } else { u32::MAX });
+        if remaining == 0 {
+            return None;
+        }
+        // SAFETY: the same live client on the same thread.
+        unsafe { bounded.SetConnectionTimeout(remaining) }.ok()?;
+        let _restore = Restore {
+            client: bounded,
+            previous,
+        };
+        Some(call())
     }
 
     /// Reports whether a handle still addresses a live window.
@@ -328,6 +403,13 @@ mod imp {
         Ok(UIAElement::from(CannedElement))
     }
 
+    pub fn root_from_hwnd_within(
+        hwnd: isize,
+        deadline: Deadline,
+    ) -> Result<UIAElement, AdapterError> {
+        root_from_hwnd(hwnd, deadline)
+    }
+
     /// No windows exist on the non-Windows lane, so no handle is a live window -
     /// the liveness re-verification consistently reports the window gone.
     pub fn window_exists(hwnd: isize) -> bool {
@@ -335,7 +417,7 @@ mod imp {
     }
 }
 
-pub use imp::root_from_hwnd;
+pub use imp::{root_from_hwnd, root_from_hwnd_within};
 
 #[cfg(target_os = "windows")]
 pub use imp::{automation_client, failure_of, uia_error, window_exists, window_is_pumping};

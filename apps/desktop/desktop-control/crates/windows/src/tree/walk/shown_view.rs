@@ -64,7 +64,13 @@ const WPF_FRAMEWORK: &str = "WPF";
 /// read, against the 0.52 to 0.58 s a default snapshot leaves after its whole
 /// read, so the switch failed about half the time without it. The onscreen
 /// view (Chromium) asks for none: what is left has been enough for it.
-pub(crate) const SHOWN_READ_FLOOR: std::time::Duration = std::time::Duration::from_millis(750);
+///
+/// Changed by Sprint Coder (750 ms -> 1 s): measured again right after a
+/// whole read ran out, the same read took 0.60 to 0.76 s on 2,000 and 20,000
+/// rows (the target is still busy with the cut-short read), so a 750 ms floor
+/// left the switch failing in 5 of 8 default snapshots on 2,000 rows and 2 of
+/// 3 on 20,000.
+pub(crate) const SHOWN_READ_FLOOR: std::time::Duration = std::time::Duration::from_millis(1_000);
 
 impl VisibleView {
     /// The least time this view's read needs after a whole read ran out.
@@ -93,6 +99,68 @@ pub(crate) fn visible_view_for(
     } else {
         None
     }
+}
+
+/// The start of the class of every window WPF creates for a top level
+/// (`HwndWrapper[<domain>;;<guid>]`, from `HwndSource`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const WPF_WINDOW_CLASS_PREFIX: &str = "HwndWrapper[";
+
+/// What a top-level window's handle alone says about the view its visible
+/// elements are read in, before anything asks the target: read from the
+/// window's class and its child windows, neither of which sends it a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowViewHint {
+    /// Of Chromium provenance: read in [`VisibleView::Onscreen`], the same
+    /// answer [`checked_view_of`] gives its root (that check reads the same
+    /// class and child windows, through the root).
+    Onscreen,
+    /// A WPF window by its class: whether it is read in the shown view still
+    /// depends on the framework its root reports, which only the target's
+    /// provider can answer.
+    WpfCandidate,
+    /// Neither: not read by its visible elements.
+    NotRead,
+}
+
+/// [`WindowViewHint`] of a window whose class is `class`, Chromium provenance
+/// first as in [`visible_view_for`] (`holds_chromium_content` is asked only
+/// when the class is not Chromium's).
+///
+/// A window whose class is neither Chromium's nor WPF's is not read by its
+/// visible elements even if its root were to report the WPF framework: no
+/// such window was seen (every WPF top level is an `HwndWrapper[` window), and
+/// this is the narrow side - the window keeps the read it had before
+/// [`VisibleView::Shown`] existed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn window_view_hint_of(
+    class: &str,
+    holds_chromium_content: impl FnOnce() -> bool,
+) -> WindowViewHint {
+    if crate::tree::chromium::chromium_provenance_of(class, holds_chromium_content) {
+        WindowViewHint::Onscreen
+    } else if class.starts_with(WPF_WINDOW_CLASS_PREFIX) {
+        WindowViewHint::WpfCandidate
+    } else {
+        WindowViewHint::NotRead
+    }
+}
+
+/// [`window_view_hint_of`] of a live top-level window, `NotRead` when its class
+/// cannot be read (a destroyed window).
+#[cfg(target_os = "windows")]
+pub(crate) fn window_view_hint(handle: isize) -> WindowViewHint {
+    match crate::tree::chromium::window_class_name(handle) {
+        Some(class) => window_view_hint_of(&class, || {
+            crate::tree::chromium::window_holds_chromium_content(handle)
+        }),
+        None => WindowViewHint::NotRead,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn window_view_hint(_handle: isize) -> WindowViewHint {
+    WindowViewHint::NotRead
 }
 
 /// What the check of a window's view found.

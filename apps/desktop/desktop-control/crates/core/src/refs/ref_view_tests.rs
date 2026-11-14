@@ -294,6 +294,8 @@ struct ViewAdapter {
     /// Runtime identifiers a test pins on nodes (by their index in the
     /// observation), for an element that keeps its identifier as it moves.
     pinned: Mutex<Vec<(usize, Vec<i32>)>>,
+    /// Whether the listed window reads as minimized.
+    minimized: AtomicBool,
 }
 
 impl ViewAdapter {
@@ -307,6 +309,7 @@ impl ViewAdapter {
             whole_reads: AtomicU32::new(0),
             landed_y: Mutex::new(None),
             pinned: Mutex::new(Vec::new()),
+            minimized: AtomicBool::new(false),
         }
     }
 
@@ -338,7 +341,9 @@ impl ObservationOps for ViewAdapter {
         _filter: &crate::adapter::WindowFilter,
         _deadline: Deadline,
     ) -> Result<Vec<WindowInfo>, AdapterError> {
-        Ok(vec![window()])
+        let mut listed = window();
+        listed.state.minimized = Some(self.minimized.load(Ordering::SeqCst));
+        Ok(vec![listed])
     }
 
     fn observe_tree(
@@ -667,4 +672,99 @@ fn a_find_rooted_at_a_view_proven_entry_is_refused() {
     // Refused before anything is read.
     assert_eq!(adapter.view_reads.load(Ordering::SeqCst), 0);
     assert_eq!(adapter.whole_reads.load(Ordering::SeqCst), 0);
+}
+
+/// A view proof whose window is minimized is refused for the window (as a ref
+/// proven in the whole window is before anything is sent), not reported stale:
+/// the view is not read at all, and restoring the window is the way on.
+#[test]
+fn a_view_proof_in_a_minimized_window_is_refused_for_the_window() {
+    let adapter = ViewAdapter::new(rows(&["Mail 0", "Mail 1"]));
+    let entry = captured(&adapter, "Mail 1");
+    adapter.minimized.store(true, Ordering::SeqCst);
+    let error = refused(&adapter, &entry);
+    assert_eq!(error.code, ErrorCode::ActionFailed);
+    assert_eq!(kind(&error), Some("window_minimized"));
+    assert!(!error.is_explicitly_retryable());
+    assert_eq!(adapter.view_reads.load(Ordering::SeqCst), 0);
+    assert!(adapter.anchored.lock().unwrap().is_none());
+
+    adapter.minimized.store(false, Ordering::SeqCst);
+    resolve(&adapter, &entry).expect("restored, the recorded element resolves");
+}
+
+/// A view proof records the runtime identifiers of the element's nearest
+/// ancestors (here its row; the view's root is left out).
+#[test]
+fn a_view_proof_records_its_ancestors_runtime_identifiers() {
+    let adapter = ViewAdapter::new(rows(&["Mail 0", "Mail 1", "Mail 2"]));
+    let entry = captured(&adapter, "Mail 1");
+    let view = entry.identity.in_view.as_ref().expect("a view proof");
+    // Nodes in order: the root 0, row 1, its button 2, row 3, its button 4.
+    assert_eq!(view.runtime_id, vec![42, 1, 4]);
+    assert_eq!(view.ancestor_runtime_ids, vec![vec![42, 1, 3]]);
+}
+
+/// A list that reuses its row containers: the button keeps its runtime
+/// identifier and its place, but the row it sits in is another element now.
+/// The proof stops rather than act on the row shown now.
+#[test]
+fn a_reused_row_whose_own_identifier_changed_stops_the_ref() {
+    let adapter = ViewAdapter::new(rows(&["Mail 0", "Mail 1", "Mail 2"]));
+    let entry = captured(&adapter, "Mail 1");
+    adapter.generation.store(2, Ordering::SeqCst);
+    adapter.pinned.lock().unwrap().push((4, vec![42, 1, 4]));
+    let error = refused(&adapter, &entry);
+    assert_eq!(error.code, ErrorCode::StaleRef);
+    assert_eq!(kind(&error), Some("saved_ref_view_changed"));
+
+    // The same row, unchanged, still resolves.
+    adapter.pinned.lock().unwrap().push((3, vec![42, 1, 3]));
+    resolve(&adapter, &entry).expect("the unchanged row resolves");
+}
+
+/// An ancestor whose identifier cannot be read now is a failed read, not a
+/// changed view; a proof recorded without ancestor identifiers (before they
+/// were kept) is judged as before.
+#[test]
+fn an_unread_ancestor_identifier_is_unknown_and_an_older_proof_is_judged_as_before() {
+    let adapter = ViewAdapter::new(rows(&["Mail 0", "Mail 1", "Mail 2"]));
+    let entry = captured(&adapter, "Mail 1");
+    let current = adapter.current();
+    let mut unread = current.clone();
+    unread.nodes[3].evidence.ref_evidence.runtime_id = None;
+    let error = crate::refs::ref_view::confirm_matched_ancestors(&entry, &unread, 4)
+        .expect_err("an unread ancestor is not confirmed");
+    assert_ne!(kind(&error), Some("saved_ref_view_changed"));
+    crate::refs::ref_view::confirm_matched_ancestors(&entry, &current, 4)
+        .expect("the recorded ancestors match");
+
+    let mut older = entry.clone();
+    older
+        .identity
+        .in_view
+        .as_mut()
+        .unwrap()
+        .ancestor_runtime_ids
+        .clear();
+    crate::refs::ref_view::confirm_matched_ancestors(&older, &unread, 4)
+        .expect("a proof without ancestor identifiers is not held to them");
+}
+
+/// The recorded ancestor identifiers are bounded on load like the element's
+/// own: at most four, none empty or oversized.
+#[test]
+fn malformed_ancestor_identifiers_are_rejected_on_load() {
+    let adapter = ViewAdapter::new(rows(&["Mail 0", "Mail 1"]));
+    let entry = captured(&adapter, "Mail 1");
+    crate::refs::refs_validate::validate_ref_entry(&entry).expect("a captured entry loads");
+    for bad_ids in [
+        vec![vec![1]; crate::refs::ref_view::VIEW_ANCESTOR_IDS + 1],
+        vec![Vec::new()],
+        vec![vec![7; 33]],
+    ] {
+        let mut bad = entry.clone();
+        bad.identity.in_view.as_mut().unwrap().ancestor_runtime_ids = bad_ids;
+        assert!(crate::refs::refs_validate::validate_ref_entry(&bad).is_err());
+    }
 }

@@ -1,11 +1,37 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{ReadOptions, read_merged};
 use std::fs;
 use std::io::Write;
 
-fn directory() -> std::path::PathBuf {
+/// A test's trace folder under the temporary directory, removed with what it
+/// holds when the test ends (pass or fail), so runs do not pile the large
+/// segments these tests write up there. A removal that fails (on Windows a
+/// file just written can be held for a moment, by a scanner for one) is tried
+/// a few more times, then left: a leftover folder never fails a test.
+struct TraceDir(std::path::PathBuf);
+
+impl std::ops::Deref for TraceDir {
+    type Target = std::path::PathBuf;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for TraceDir {
+    fn drop(&mut self) {
+        for _ in 0..5 {
+            if fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+fn directory() -> TraceDir {
     let path = std::env::temp_dir().join(format!("trace-input-{}", crate::refs::new_snapshot_id()));
     crate::storage::private_file_parent::ensure_private(&path).unwrap();
-    path
+    TraceDir(path)
 }
 
 #[test]
@@ -195,7 +221,7 @@ fn concurrent_session_writers_share_the_remaining_event_budget() {
     for _ in 0..2 {
         children.push(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "trace::trace_read::input_tests::concurrent_session_writers_share_the_remaining_event_budget"])
-            .env(CHILD, &dir).stdout(std::process::Stdio::piped()).spawn().unwrap());
+            .env(CHILD, &*dir).stdout(std::process::Stdio::piped()).spawn().unwrap());
     }
     for child in children {
         let output = child.wait_with_output().unwrap();

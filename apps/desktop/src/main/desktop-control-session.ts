@@ -10,6 +10,7 @@ import {
 import {
   desktopControlArgvIsInert,
   desktopControlStateFolder,
+  resolveDesktopControlCommand,
   type DesktopControlSessionVariables,
 } from './desktop-control';
 import {
@@ -148,6 +149,20 @@ export function configureDesktopControlWorkerTool(offered: () => boolean): void 
 
 export function desktopControlWorkerToolOffered(): boolean {
   return workerToolOffered();
+}
+
+/**
+ * What Main gives `configureDesktopControlWorkerTool`: the harness offers its Turns the command
+ * tool, and the shipped desktop-control executable is there to run (a development run that has
+ * not built it has none, and every run of a marked Worker would be refused). Without either, no
+ * Worker is marked and the Leader is not told about desktop Workers. Asked afresh each time, so a
+ * build made while Main runs is seen.
+ */
+export function desktopControlWorkerToolOffer(
+  commandToolsOffered: () => boolean,
+  executable: () => string | null = () => resolveDesktopControlCommand(),
+): () => boolean {
+  return () => commandToolsOffered() && executable() !== null;
 }
 
 /**

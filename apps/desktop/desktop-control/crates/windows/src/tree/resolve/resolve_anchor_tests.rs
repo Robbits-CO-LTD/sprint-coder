@@ -291,6 +291,7 @@ fn a_view_proven_path_lands_only_on_the_recorded_runtime_id() {
             bounds: entry.geometry.bounds.expect("recorded bounds"),
             runtime_id,
             ancestors: Vec::new(),
+            ancestor_runtime_ids: Vec::new(),
         });
         in_view
     };

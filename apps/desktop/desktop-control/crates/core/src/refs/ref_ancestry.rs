@@ -159,7 +159,7 @@ pub(crate) fn parents(observed: &ObservedTree) -> Vec<Option<usize>> {
 }
 
 /// The node's ancestors, nearest first, without the root.
-fn chain(parents: &[Option<usize>], index: usize) -> Vec<usize> {
+pub(crate) fn chain(parents: &[Option<usize>], index: usize) -> Vec<usize> {
     let mut chain = Vec::new();
     let mut current = parents.get(index).copied().flatten();
     while let Some(ancestor) = current {
