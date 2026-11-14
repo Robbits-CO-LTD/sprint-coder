@@ -98,13 +98,31 @@ function memoryStore(): GraphDocumentStore {
 /**
  * The pinned Archify renderer and checker run for real once; later runs replay that output, since
  * every Task here draws the same diagram. `renders` counts renderer runs so a spec can tell a cache
- * hit from a rebuild out of the saved document, and `pause` holds the next render open.
+ * hit from a rebuild out of the saved document, and `hold` keeps one Task's next render open.
+ *
+ * A hold names its Task and reports when that render has really reached the renderer. Renders of
+ * different Tasks run concurrently and race through their file setup, so a hold that the first
+ * arriving render took (or a spec that only waited for the generation to be marked running) could
+ * stop the wrong Task — the spec then awaited a render that waits for the spec, and timed out.
  */
 async function harness() {
   const root = await mkdtemp(join(tmpdir(), 'sc-graph-cache-test-'));
   roots.push(root);
   const replay: { html?: string; check?: string } = {};
-  const state = { renders: 0, pause: null as Promise<void> | null };
+  type Hold = { taskId: string; arrive: () => void; released: Promise<void> };
+  const state = { renders: 0, hold: null as Hold | null };
+  const hold = (index: number) => {
+    let arrive!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.hold = { taskId: task(index), arrive, released };
+    return { reached, release };
+  };
   const service = new GraphRenderService({
     store: memoryStore(),
     vendorRoot,
@@ -114,9 +132,12 @@ async function harness() {
     run: async (mode, input, directory) => {
       if (mode === 'render') {
         state.renders += 1;
-        const pause = state.pause;
-        state.pause = null;
-        if (pause) await pause;
+        const held = state.hold;
+        if (held?.taskId === input.taskId) {
+          state.hold = null;
+          held.arrive();
+          await held.released;
+        }
         if (replay.html === undefined) {
           await execute(
             process.execPath,
@@ -144,7 +165,7 @@ async function harness() {
   const render = (index: number) => service.render({ taskId: task(index), diagram });
   /** Whether the artifact URL a panel would load for this view answers. */
   const served = (view: GraphView) => service.response(new URL(view.artifactUrl)).status === 200;
-  return { service, state, render, served };
+  return { service, state, hold, render, served };
 }
 
 describe('Graph session cache (issue #1162)', () => {
@@ -212,17 +233,15 @@ describe('Graph session cache (issue #1162)', () => {
   });
 
   it('does not keep a regenerated graph on screen when its panel closed during the generation', async () => {
-    const { service, state, render, served } = await harness();
+    const { service, hold, render, served } = await harness();
     await render(1);
     const shown = (await service.get(task(1)))!;
-    let finish!: () => void;
-    state.pause = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
+    const held = hold(1);
     const regenerating = render(1);
-    await expect.poll(() => service.generation(task(1))?.state).toBe('running');
+    await held.reached;
+    expect(service.generation(task(1))?.state).toBe('running');
     service.release(task(1), shown.instanceId);
-    finish();
+    held.release();
     expect(served(await regenerating)).toBe(false);
     await service.dispose();
   });
@@ -240,18 +259,17 @@ describe('Graph session cache (issue #1162)', () => {
   });
 
   it('does not evict a cached graph whose next version is being generated', async () => {
-    const { service, state, render } = await harness();
+    const { service, hold, render } = await harness();
     // Task 1 is the oldest cache entry, so it would be the first one evicted.
     const first = await render(1);
     for (let index = 2; index <= 32; index++) await render(index);
-    let finish!: () => void;
-    state.pause = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
+    const held = hold(1);
     const regenerating = render(1);
-    await expect.poll(() => service.generation(task(1))?.state).toBe('running');
+    // Task 33 arrives while Task 1's next version is inside the renderer.
+    await held.reached;
+    expect(service.generation(task(1))?.state).toBe('running');
     await render(33);
-    finish();
+    held.release();
     // Its cache entry survived, so the new view continues the panel ordering instead of restarting.
     expect((await regenerating).viewRevision).toBe(first.viewRevision + 1);
     await service.dispose();
