@@ -160,7 +160,9 @@ export function SettingsDialog({
   async function beginSkillCreation(request?: SkillCreationRequest): Promise<void> {
     let state = useAppStore.getState();
     if (request === undefined || state.selectedTaskId === null) {
-      const created = await createTask();
+      // Always a new Task: the skill selection and the prompt below are written into it, and an
+      // unstarted Task may already hold the user's own draft.
+      const created = await createTask(undefined, { reuseUnstarted: false });
       if (created === null) return;
       state = useAppStore.getState();
     }
