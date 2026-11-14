@@ -233,6 +233,39 @@ describe('stopping a Task’s desktop-control runs (when the Task is archived)',
   );
 });
 
+describe('counting a Task’s running commands (an archive is refused while one runs, issue #1225)', () => {
+  it.skipIf(process.platform === 'darwin')(
+    'counts every run of the Task, a background one after its Turn included, until it ends',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-count-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: process.execPath,
+        argv: ['-e', 'setInterval(() => undefined, 1000)'],
+      });
+      const sessions = new ManagedCommandSessions(new CommandRunner());
+      try {
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(0);
+        // A dev server the first Turn left in the background, and a build of the next Turn.
+        const server = await sessions.start(spec, { taskId: 'task-1', turnId: 'turn-1' });
+        await sessions.start(spec, { taskId: 'task-1', turnId: 'turn-2' });
+        await sessions.start(spec, { taskId: 'task-2', turnId: 'turn-3' });
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(2);
+        expect(sessions.activeTaskSessionCount('task-2')).toBe(1);
+        await sessions.terminateTurn({ taskId: 'task-1', turnId: 'turn-2' });
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(1);
+        sessions.terminate(server.sessionId, { taskId: 'task-1', turnId: 'turn-1' });
+        await sessions.wait(server.sessionId, { taskId: 'task-1', turnId: 'turn-1' });
+        expect(sessions.activeTaskSessionCount('task-1')).toBe(0);
+        expect(sessions.activeTaskSessionCount('task-2')).toBe(1);
+      } finally {
+        await sessions.dispose();
+      }
+    },
+  );
+});
+
 describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
   'ManagedCommandSessions',
   () => {

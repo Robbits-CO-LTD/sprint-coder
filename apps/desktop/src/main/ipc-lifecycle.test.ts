@@ -47,8 +47,11 @@ it('broadcasts terminal activity to the window even without a Task event port', 
     ports: new Set(),
     recordTurnDiagnosticEvent: vi.fn(),
     graphSourceMonitor: { invalidate },
+    sentRunningWork: new Map(),
+    managedCodingHarness: { activeTaskCommandCount: () => 0 },
     persistence: {
       getActiveTurnId: () => null,
+      getTaskRecordedWork: () => ({ turn: false, team: false, workers: 0 }),
       getTask: () => ({
         id: 'task-1',
         title: 'Task',
@@ -72,7 +75,7 @@ it('broadcasts terminal activity to the window even without a Task event port', 
   });
   expect(send).toHaveBeenCalledWith(
     IPC_CHANNELS.tasksUpdated,
-    expect.objectContaining({ id: 'task-1', activeTurnId: null }),
+    expect.objectContaining({ id: 'task-1', activeTurnId: null, runningWork: null }),
   );
   expect(invalidate).toHaveBeenCalledWith('task-1');
 });

@@ -158,6 +158,7 @@ import {
   IMAGE_ATTACHMENT_MAX_COUNT,
   IMAGE_ATTACHMENT_MAX_TOTAL_BYTES,
   type TaskSummary,
+  type TaskRunningWork,
   type ImageAttachmentMetadata,
   type ImageAttachmentMimeType,
   type TeamBudgetStatus,
@@ -5812,7 +5813,17 @@ export interface PersistenceClient {
   /** Replaces an automatic fallback title, but never a user-owned manual title. */
   applyGeneratedTaskTitle(taskId: string, title: string): TaskSummary | null;
   setPinned(taskId: string, pinned: boolean): TaskSummary;
+  /**
+   * Archives (or restores) the Task. An archive is refused with `TaskStillRunningError` while the
+   * Task's recorded work still moves (`getTaskRecordedWork`); a restore is never refused.
+   */
   setArchived(taskId: string, archived: boolean): TaskSummary;
+  /**
+   * What the database records as still moving in the Task: its Turn (one waiting for an approval
+   * included) and its Team while the Team is not ended (Workers not stopped, done or failed, or
+   * Team work not ended). Commands are counted by Main from their live processes.
+   */
+  getTaskRecordedWork(taskId: string): Pick<TaskRunningWork, 'turn' | 'team' | 'workers'>;
   setGoal(taskId: string, goal: string): TaskSummary;
   startGoal(taskId: string, objective: string): TaskSummary;
   pauseGoal(taskId: string): TaskSummary;
@@ -14200,6 +14211,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
   setArchived(taskId: string, archived: boolean): TaskSummary {
     if (!archived) return this.updateTask(taskId, 'archived', 0);
     return this.db.transaction(() => {
+      // Checked in the archive's own transaction (a Turn's start commits in one too), so no Turn
+      // starts between the check and the archive (issue #1225).
+      const work = this.getTaskRecordedWork(taskId);
+      if (work.turn || work.team) throw new TaskStillRunningError({ ...work, commands: 0 });
       const result = this.db
         .prepare(
           `UPDATE tasks SET archived = 1, branch_epoch = branch_epoch + 1,
@@ -14207,9 +14222,36 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(new Date().toISOString(), taskId);
       if (result.changes !== 1) throw new NotFoundError('Task not found');
+      // Nothing of the Task runs by now (Main refuses the archive while one of its commands runs),
+      // so this changes only records: a background run's end not yet delivered to a Turn is
+      // quarantined, and a run still recorded as running whose process is gone is recorded canceled.
       this.quarantineStaleBackgroundInTransaction(taskId);
       return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
     })();
+  }
+  getTaskRecordedWork(taskId: string): Pick<TaskRunningWork, 'turn' | 'team' | 'workers'> {
+    this.assertTask(taskId);
+    const turn = this.getActiveTurnId(taskId) !== null;
+    // Only a Team not yet ended: an ended Team has nothing left to run (and offers no Stop).
+    const team = this.db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM agents a
+             WHERE a.team_id = t.id AND a.kind = 'worker'
+               AND a.state IN ('invited', 'spawning', 'ready', 'busy', 'waiting')) AS workers,
+           (EXISTS (
+             SELECT 1 FROM team_executions e
+              WHERE e.team_id = t.id AND e.state NOT IN ('completed', 'failed', 'canceled')
+           ) OR EXISTS (
+             SELECT 1 FROM team_missions m
+              WHERE m.team_id = t.id AND m.state NOT IN ('completed', 'failed', 'canceled')
+           )) AS unfinished
+         FROM teams t
+         WHERE t.task_id = ? AND t.state NOT IN ('completed', 'failed')`,
+      )
+      .get(taskId) as { workers: number; unfinished: number } | undefined;
+    const workers = team?.workers ?? 0;
+    return { turn, team: workers > 0 || team?.unfinished === 1, workers };
   }
   setGoal(taskId: string, goal: string): TaskSummary {
     if (goal.trim() === '') return this.clearGoal(taskId);
@@ -22791,6 +22833,12 @@ export class ImageAttachmentAcceptanceError extends Error {
   }
 }
 export class TurnActiveError extends Error {}
+/** An archive refused while the Task still moves (issue #1225); `work` says what moves. */
+export class TaskStillRunningError extends Error {
+  constructor(readonly work: TaskRunningWork) {
+    super('Task still has running work');
+  }
+}
 export class SteerStaleError extends Error {}
 export class OperationConflictError extends Error {}
 export class OperationInProgressError extends Error {}

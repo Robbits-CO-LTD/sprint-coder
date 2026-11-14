@@ -146,6 +146,36 @@ export const goalSummarySchema = z
   .strict();
 export type GoalSummary = z.infer<typeof goalSummarySchema>;
 
+/**
+ * What is still moving in a Task (issue #1225): its Turn (the Leader's AI, a Turn waiting for an
+ * approval included), its Team (Workers not yet stopped, or Team work not yet ended), and the
+ * commands still running in it (those gone on in the background after their Turn included). A Task
+ * is not archived while any of these moves, so nothing goes on unseen behind an archived Task.
+ */
+export const taskRunningWorkSchema = z
+  .object({
+    turn: z.boolean(),
+    team: z.boolean(),
+    workers: z.number().int().nonnegative(),
+    commands: z.number().int().nonnegative(),
+  })
+  .strict();
+export type TaskRunningWork = z.infer<typeof taskRunningWorkSchema>;
+
+export function taskHasRunningWork(work: TaskRunningWork | null | undefined): boolean {
+  return work != null && (work.turn || work.team || work.workers > 0 || work.commands > 0);
+}
+
+/** The refusal of an archive while the Task still moves, naming what moves. */
+export function taskRunningWorkArchiveRefusal(work: TaskRunningWork): string {
+  const parts: string[] = [];
+  if (work.turn) parts.push('AIの作業');
+  if (work.workers > 0) parts.push(`TeamのWorker ${work.workers}人`);
+  else if (work.team) parts.push('Teamの作業');
+  if (work.commands > 0) parts.push(`実行中のコマンド ${work.commands}件`);
+  return `このTaskは、まだ動いています（${parts.join('／')}）。先に停止してから、アーカイブしてください。`;
+}
+
 export const taskSummarySchema = z
   .object({
     id: idSchema,
@@ -162,6 +192,8 @@ export const taskSummarySchema = z
     hasConversation: z.boolean().optional(),
     /** Window-wide activity snapshot; independent of the selected Task's event port. */
     activeTurnId: idSchema.nullable().optional(),
+    /** Window-wide snapshot of what still moves in the Task (null: nothing). Older backends omit it. */
+    runningWork: taskRunningWorkSchema.nullable().optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })
@@ -2655,6 +2687,7 @@ export type WorkspaceSelection = z.infer<typeof workspaceSelectionSchema>;
 export const publicErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'TURN_ACTIVE',
+  'TASK_STILL_RUNNING',
   'TASK_RECOVERY_REQUIRED',
   'REFERENCE_IN_USE',
   'STEER_STALE',

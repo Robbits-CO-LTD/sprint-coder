@@ -254,6 +254,20 @@ export class ManagedCommandSessions {
     return this.activeTurnSessions(owner).length > 0;
   }
 
+  /**
+   * How many of the Task's commands still run, those gone on in the background after their Turn
+   * included (a run whose stop could not be confirmed counts, as it may still run). Does not abort.
+   */
+  activeTaskSessionCount(taskId: string): number {
+    return [...this.sessions.values()].filter(
+      (session) =>
+        session.taskId === taskId &&
+        (session.state === 'starting' ||
+          session.state === 'running' ||
+          session.terminationUnconfirmed),
+    ).length;
+  }
+
   /** Observe writers across Turn/Task ownership without taking control of their processes. */
   hasActiveWorkspaceSessions(
     roots: readonly Readonly<{ path: string; rootIdentityDigest: string | undefined }>[],

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { taskHasRunningWork, taskRunningWorkArchiveRefusal } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import {
   projectSidebarProjection,
@@ -17,7 +18,7 @@ import {
   Settings,
 } from './icons';
 import { useTaskBoundary } from './TaskBoundary';
-import type { ProjectSummary, TaskSummary } from '../types/sprint-coder';
+import type { ProjectSummary, TaskRunningWork, TaskSummary } from '../types/sprint-coder';
 import type { TurnStatus } from '../store/appStore';
 import { ProjectEditorDialog } from './ProjectEditorDialog';
 
@@ -87,6 +88,7 @@ export function Sidebar({
   const [dialogValue, setDialogValue] = useState('');
   const [moveTarget, setMoveTarget] = useState('');
   const [pending, setPending] = useState(false);
+  const [archiveNotice, setArchiveNotice] = useState<ArchiveNotice | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const pendingFocusRef = useRef<PendingFocus | null>(null);
 
@@ -273,7 +275,15 @@ export function Sidebar({
     activeProjects: projects.filter((project) => !project.archived),
     onMove: (task: TaskSummary) => openDialog({ kind: 'move-task', task }),
     onTogglePin: (task: TaskSummary) => void setPinned(task.id, !task.pinned),
-    onToggleArchive: (task: TaskSummary) => void setArchived(task.id, !task.archived),
+    onToggleArchive: (task: TaskSummary) => {
+      setArchiveNotice(null);
+      void setArchived(task.id, !task.archived).then((refusal) => {
+        // Main still refuses when the row thought the Task idle (it started moving meanwhile).
+        if (refusal !== null) setArchiveNotice({ taskId: task.id, message: refusal });
+      });
+    },
+    archiveNotice,
+    onDismissArchiveNotice: () => setArchiveNotice(null),
   };
 
   return (
@@ -572,7 +582,26 @@ type RowProps = {
   onMove: (task: TaskSummary) => void;
   onTogglePin: (task: TaskSummary) => void;
   onToggleArchive: (task: TaskSummary) => void;
+  /** Main's refusal of the last archive, shown on that Task's row. */
+  archiveNotice?: ArchiveNotice | null;
+  onDismissArchiveNotice?: () => void;
 };
+
+type ArchiveNotice = { taskId: string; message: string };
+
+/**
+ * What moves in the Task as the row knows it: Main's snapshot, and the selected Task's live Turn
+ * (which can be newer). Null: nothing moves, the Task can be archived.
+ */
+export function taskArchiveBlockingWork(
+  task: TaskSummary,
+  turnStatus: TurnStatus | undefined,
+): TaskRunningWork | null {
+  const known = task.runningWork ?? null;
+  const turnRunning = turnStatus === 'running' || turnStatus === 'canceling';
+  if (!turnRunning) return taskHasRunningWork(known) ? known : null;
+  return { team: false, workers: 0, commands: 0, ...known, turn: true };
+}
 
 function ProjectGroup({
   group,
@@ -681,12 +710,20 @@ export function TaskRow({
   onMove,
   onTogglePin,
   onToggleArchive,
+  archiveNotice = null,
+  onDismissArchiveNotice,
 }: { task: TaskSummary } & RowProps) {
   const isActive = task.id === selectedTaskId;
   const turnStatus = useAppStore((state) =>
     isActive ? state.turnByTask[task.id]?.status : task.activeTurnId ? 'running' : undefined,
   );
   const activity = taskActivityState(turnStatus);
+  // Only an archive is held back while the Task moves; a restore never is.
+  const blockingWork = task.archived ? null : taskArchiveBlockingWork(task, turnStatus);
+  const archiveBlockedReason =
+    blockingWork === null ? null : taskRunningWorkArchiveRefusal(blockingWork);
+  const archiveNoteId = `sb-archive-note-${task.id}`;
+  const notice = archiveNotice?.taskId === task.id ? archiveNotice.message : null;
   return (
     <div className={`sb-row${isActive ? ' active' : ''}`} data-task-id={task.id} tabIndex={-1}>
       <button
@@ -711,15 +748,41 @@ export function TaskRow({
               {task.pinned ? <PinOff size={13} /> : <Pin size={13} />}
               {task.pinned ? 'ピンを解除' : 'ピン留め'}
             </button>
-            <button onClick={() => onToggleArchive(task)}>
+            {/* aria-disabled, not disabled: the item stays focusable so its reason is read. */}
+            <button
+              aria-disabled={archiveBlockedReason !== null || undefined}
+              aria-describedby={archiveBlockedReason === null ? undefined : archiveNoteId}
+              title={archiveBlockedReason ?? undefined}
+              onClick={() => {
+                if (archiveBlockedReason === null) onToggleArchive(task);
+              }}
+            >
               {task.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
               {task.archived ? '復元' : 'アーカイブ'}
             </button>
+            {archiveBlockedReason !== null && (
+              <p id={archiveNoteId} className="sb-menu-note">
+                {archiveBlockedReason}
+              </p>
+            )}
             {canMove && (task.projectId !== null || activeProjects.length > 0) && (
               <button onClick={() => onMove(task)}>Projectを移動</button>
             )}
           </div>
         </details>
+      )}
+      {notice !== null && (
+        <div className="sb-task-notice" role="alert">
+          <span>{notice}</span>
+          <button
+            type="button"
+            aria-label="お知らせを閉じる"
+            title="閉じる"
+            onClick={() => onDismissArchiveNotice?.()}
+          >
+            ×
+          </button>
+        </div>
       )}
     </div>
   );

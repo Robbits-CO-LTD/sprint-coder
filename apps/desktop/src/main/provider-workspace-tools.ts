@@ -796,6 +796,11 @@ export class ManagedCodingHarness {
     await this.commandSessions?.terminateTaskDesktopControl(taskId);
   }
 
+  /** How many of the Task's commands still run, in the foreground or gone on in the background. */
+  activeTaskCommandCount(taskId: string): number {
+    return this.commandSessions?.activeTaskSessionCount(taskId) ?? 0;
+  }
+
   /**
    * Background commands survive finishTurn. Observe every session whose sealed Workspace root
    * overlaps this Turn's snapshot, including previous Turns and other Tasks sharing a root.
