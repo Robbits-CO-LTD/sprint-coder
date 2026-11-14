@@ -93,9 +93,12 @@ pub(crate) fn visible_view_of(_root: &crate::tree::element::UIAElement) -> Optio
 
 /// What the shown view needs from the source it filters.
 pub(crate) trait OffscreenReport: TreeSource {
-    /// Whether the provider reports `node` offscreen. An unreadable value is
-    /// not a report: the element stays in the view.
-    fn reported_offscreen(&self, node: &Self::Node) -> bool;
+    /// Whether the provider reports `node` offscreen: `Ok(true)` when it
+    /// answered so, `Ok(false)` when it answered otherwise or answered no
+    /// value (a provider without the property reports nothing offscreen, the
+    /// same on every read). `Err` is a read that failed: what it would have
+    /// answered is not known, so the element is neither kept nor skipped.
+    fn reported_offscreen(&self, node: &Self::Node) -> Result<bool, UiaFailure>;
 }
 
 /// One element of the shown view, with its position in its parent's raw
@@ -160,7 +163,10 @@ impl<'a, S: OffscreenReport> ShownView<'a, S> {
                 self.cut.set(true);
                 return Err(END_OF_LIST);
             }
-            if !self.inner.reported_offscreen(&element) {
+            // A read that failed ends the step as a failure: the element is
+            // neither put in the view nor stepped over, so no position after
+            // it is counted from a guess.
+            if !self.inner.reported_offscreen(&element)? {
                 return Ok(ShownNode { element, raw_index });
             }
             if self.deadline.is_expired() {

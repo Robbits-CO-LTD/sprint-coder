@@ -13,6 +13,8 @@ use agent_desktop_core::{AccessibilityNode, Deadline, LocatorEvidence, Observati
 struct Reported {
     tree: FakeTree,
     steps: std::cell::Cell<usize>,
+    /// Nodes whose offscreen report cannot be read (the read fails).
+    unreadable: std::collections::HashSet<i32>,
 }
 
 impl Reported {
@@ -20,6 +22,7 @@ impl Reported {
         Self {
             tree,
             steps: std::cell::Cell::new(0),
+            unreadable: std::collections::HashSet::new(),
         }
     }
 }
@@ -54,13 +57,17 @@ impl TreeSource for Reported {
 }
 
 impl OffscreenReport for Reported {
-    fn reported_offscreen(&self, node: &i32) -> bool {
-        self.tree
+    fn reported_offscreen(&self, node: &i32) -> Result<bool, UiaFailure> {
+        if self.unreadable.contains(node) {
+            return Err(crate::tree::walk::walker_fake::REAL_FAILURE);
+        }
+        Ok(self
+            .tree
             .evidence(node)
             .0
             .get(TreeProperty::IsOffscreen)
             .flag()
-            == Some(true)
+            == Some(true))
     }
 }
 
@@ -257,4 +264,50 @@ fn a_step_cut_by_the_deadline_is_a_timeout_not_the_end_of_the_list() {
         .err()
         .expect("no row is reached in time");
     assert!(!failure.is_exhaustion());
+}
+
+/// A row whose offscreen report cannot be read is neither put in the view nor
+/// stepped over: the list stops there as a failed step, so neither that row nor
+/// any after it is in the walk, and the walk is not whole (no proof rests on
+/// it). Guessing either way would shift every later position between the
+/// capture and a later read.
+#[test]
+fn a_row_whose_report_cannot_be_read_stops_the_walk_as_not_whole() {
+    let mut source = Reported::new(wpf_list(6, &[0, 1, 3]));
+    source.unreadable.insert(102);
+    let window = window();
+    let view = ShownView::new(&source, deadline());
+    let outcome = walk_from_root(
+        &view,
+        &ShownNode::root(1),
+        &ObservationRoot::Window(&window),
+        WalkBudget::new(50, deadline()),
+    )
+    .expect("the walk assembles what it read");
+
+    assert!(!outcome.tree.is_complete());
+    assert_eq!(outcome.failures.len(), 1, "the failed step is recorded");
+    // Window, button, list, rows 0 and 1 with their buttons: never row 2 or 3.
+    assert_eq!(outcome.stats.traversal.nodes_visited, 7);
+}
+
+/// A descent in the shown view lands before an unreadable row as before, and a
+/// path that would count past it answers the failure, never a landing.
+#[test]
+fn a_descent_past_a_row_whose_report_cannot_be_read_fails() {
+    let mut source = Reported::new(wpf_list(6, &[0, 1, 3]));
+    source.unreadable.insert(102);
+    let view = ShownView::new(&source, deadline());
+    let budget = WalkBudget::new(50, deadline());
+    let surfaced = DescentPolicy {
+        classify: |_| DescentVerdict::Surfaced,
+        descend_context: "test",
+        sibling_context: "test",
+    };
+
+    let landed = descend_path(&view, &ShownNode::root(1), &[1, 1], &budget, &surfaced)
+        .expect("the row before reads")
+        .map(|node| node.element);
+    assert_eq!(landed, Some(101));
+    assert!(descend_path(&view, &ShownNode::root(1), &[1, 2], &budget, &surfaced).is_err());
 }

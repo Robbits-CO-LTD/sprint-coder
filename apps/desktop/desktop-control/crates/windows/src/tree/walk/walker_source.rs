@@ -877,16 +877,12 @@ mod imp {
 
     impl crate::tree::walk::shown_view::OffscreenReport for UiaTreeSource {
         /// From the step's cache when the navigation fetched it, otherwise
-        /// one live read.
-        fn reported_offscreen(&self, node: &UIAElement) -> bool {
-            let outcome = if self.navigation.is_some() || self.reads_cache() {
-                read_cached_set(node, &OFFSCREEN_SET)
-                    .0
-                    .get(TreeProperty::IsOffscreen)
-            } else {
-                read_one(node, TreeProperty::IsOffscreen)
-            };
-            outcome.flag() == Some(true)
+        /// one live read, with a failed read kept apart from an answer that
+        /// carries no value (`read_flag`).
+        fn reported_offscreen(&self, node: &UIAElement) -> Result<bool, UiaFailure> {
+            let cached = self.navigation.is_some() || self.reads_cache();
+            crate::tree::properties::read_flag(node, TreeProperty::IsOffscreen, cached)
+                .map(|offscreen| offscreen == Some(true))
         }
     }
 }
@@ -1007,8 +1003,8 @@ mod imp {
     }
 
     impl crate::tree::walk::shown_view::OffscreenReport for UiaTreeSource {
-        fn reported_offscreen(&self, _node: &UIAElement) -> bool {
-            false
+        fn reported_offscreen(&self, _node: &UIAElement) -> Result<bool, UiaFailure> {
+            Ok(false)
         }
     }
 }
