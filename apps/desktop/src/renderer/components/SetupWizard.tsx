@@ -520,8 +520,11 @@ export function SetupWizard({
   const [introState, setIntro] = useState<'playing' | 'arrive' | 'done'>(() =>
     introVariant ? 'playing' : 'done',
   );
-  // Switching motion on or off part-way ends the film at once.
+  // Switching motion on or off part-way ends the film at once, and for good: the state is settled
+  // here (render-time sync), so switching back later, on some other step, cannot bring the film
+  // up again over the Setup.
   const [motionAtStart] = useState(animate);
+  if (animate !== motionAtStart && introState !== 'done') setIntro('done');
   const intro = animate === motionAtStart ? introState : 'done';
   const endIntro = useCallback(() => setIntro('done'), []);
   const onIntroHandoff = useCallback(() => {

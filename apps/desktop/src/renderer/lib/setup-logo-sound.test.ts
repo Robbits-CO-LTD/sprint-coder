@@ -42,22 +42,31 @@ function bedLevel(bed: LogoPad, ms: number): number {
 // ---------- a stand-in audio context ----------
 
 type Call = readonly [string, ...number[]];
+/** As WebAudio does: a time before the context's zero is refused. */
+function notBeforeZero(t: number): void {
+  if (!(t >= 0))
+    throw new RangeError(`The time provided (${t}) is less than the minimum bound (0).`);
+}
 function param(value = 0) {
   const calls: Call[] = [];
   return {
     value,
     calls,
     setValueAtTime(v: number, t: number) {
+      notBeforeZero(t);
       calls.push(['set', v, t]);
       this.value = v;
     },
     linearRampToValueAtTime(v: number, t: number) {
+      notBeforeZero(t);
       calls.push(['ramp', v, t]);
     },
     exponentialRampToValueAtTime(v: number, t: number) {
+      notBeforeZero(t);
       calls.push(['exp', v, t]);
     },
     setTargetAtTime(v: number, t: number, c: number) {
+      notBeforeZero(t);
       calls.push(['target', v, t, c]);
     },
     cancelScheduledValues(t: number) {
@@ -87,6 +96,7 @@ class FakeContext {
     this.sources.push(record);
     return {
       start: (t = 0) => {
+        notBeforeZero(t);
         record.started = t;
       },
       stop: (t = this.currentTime) => {
@@ -414,6 +424,21 @@ describe('from the score to audio nodes', () => {
     expect(
       fake.sources.filter((source) => source.kind === 'osc' && source.started === 10),
     ).toHaveLength(9);
+  });
+
+  it('a sound due just before a new context’s first moment starts at zero, never before it', () => {
+    // The film ran a frame before the context was made: its first moment is 10 ms before the
+    // context's zero. The short film has a sound at that first moment, within the 20 ms allowed
+    // late; WebAudio refuses a negative time (as this stand-in does), which silenced the film.
+    for (const variant of ['short', 'full'] as const) {
+      const fake = new FakeContext();
+      const bus = createLogoSoundBus(asContext(fake), 0.5);
+      expect(() =>
+        scheduleLogoSound(asContext(fake), bus, logoSoundScore(variant), -0.01),
+      ).not.toThrow();
+      expect(fake.sources.length).toBeGreaterThan(0);
+      for (const source of fake.sources) expect(source.started!).toBeGreaterThanOrEqual(0);
+    }
   });
 });
 

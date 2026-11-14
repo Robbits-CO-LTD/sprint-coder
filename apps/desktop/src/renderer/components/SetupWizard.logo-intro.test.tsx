@@ -318,4 +318,48 @@ describe('the logo film in the Setup', () => {
     expect(vi.getTimerCount()).toBe(0);
     root = createRoot(container);
   });
+
+  it('motion switched off part-way ends the film for good: switched on again on a later step, it does not come back', async () => {
+    // A `prefers-reduced-motion` that can change while the Setup is up.
+    let reduced = false;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        get matches() {
+          return reduced && query.includes('prefers-reduced-motion');
+        },
+        media: query,
+        addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+        removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+      })),
+    );
+    const turn = async (to: boolean) => {
+      reduced = to;
+      await act(async () => {
+        for (const listener of [...listeners]) listener();
+      });
+      await flush();
+    };
+
+    await render();
+    await advance(3000);
+    expect(film()?.dataset.variant).toBe('full');
+    expect(wizard().dataset.intro).toBe('playing');
+
+    await turn(true);
+    expect(film()).toBeNull();
+    expect(wizard().dataset.intro).toBe('done');
+    // On past the welcome, as someone would be by the time the setting is switched back.
+    const start = container.querySelector<HTMLButtonElement>('[data-testid="setup-start"]');
+    await act(async () => start?.click());
+    await flush();
+    expect(wizard().dataset.step).not.toBe('welcome');
+
+    await turn(false);
+    await advance(500);
+    expect(film()).toBeNull();
+    expect(wizard().dataset.intro).toBe('done');
+    expect(wizard().dataset.step).not.toBe('welcome');
+  });
 });

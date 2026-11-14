@@ -583,7 +583,7 @@ export function scheduleLogoSound(
   const now = ctx.currentTime;
   let noise: AudioBuffer | null = null;
   for (const event of score) {
-    const at = origin + event.at / 1000;
+    const due = origin + event.at / 1000;
     if (event.kind === 'pad') {
       const last = event.points[event.points.length - 1]!;
       const end = origin + last[0] / 1000;
@@ -641,7 +641,11 @@ export function scheduleLogoSound(
       continue;
     }
     // A short sound that has already begun is left out rather than cut in half-way.
-    if (at < now - 0.02) continue;
+    if (due < now - 0.02) continue;
+    // One that is only just late starts now. WebAudio refuses a time before zero (a RangeError,
+    // which would silence the whole film), and a new context's clock starts at zero: a sound due
+    // at the film's first moment is due before that once the film has run a frame.
+    const at = Math.max(due, now, 0);
     const gain = ctx.createGain();
     const end = shape(gain.gain, at, event);
     const glide = (event.glide ?? 0) / 1000;
