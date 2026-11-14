@@ -37,7 +37,7 @@ import type { TeamViewPreference } from './lib/team-view-preference';
 import {
   SETUP_REPLAY_EVENT,
   launchSetupFor,
-  readSetupComplete,
+  readSetupMark,
   setSetupShowing,
   writeSetupComplete,
 } from './lib/setup-preference';
@@ -148,8 +148,8 @@ export default function App() {
   // its replay form. The workspace underneath stays mounted (and inert) so closing returns to it.
   const [setupReplayOpen, setSetupReplayOpen] = useState(false);
   const closeSetupReplay = useCallback(() => {
-    writeSetupComplete();
     setSetupReplayOpen(false);
+    writeSetupComplete();
     // Back to the button that led here; if it is gone or hidden (inert), to the next sensible place.
     requestAnimationFrame(() => focusAfterSetupReplay());
   }, []);
@@ -289,7 +289,14 @@ export default function App() {
   // The launch's Setup, decided the first time the Tasks are known (render-time sync, as above).
   if (launchSetup === null && initialized) {
     setLaunchSetup(
-      launchSetupFor({ initialized, taskCount: tasks.length, setupComplete: readSetupComplete() }),
+      launchSetupFor({
+        initialized,
+        taskCount: tasks.length,
+        setupMark: readSetupMark(),
+        // The store reports a failed read of the Tasks as "initialized, no Task, an error" (set
+        // together). Read once, here, rather than subscribed to: only this decision uses it.
+        tasksLoadFailed: tasks.length === 0 && useAppStore.getState().error !== null,
+      }),
     );
   }
   // The first run's Setup holds the whole window until its "最初の Task を始める" makes a Task.
@@ -300,8 +307,9 @@ export default function App() {
   // gone through: it is not shown at the next launch. Nothing else is written here — the Setup
   // itself stores only the steps changed and continued from.
   const closeLaunchReplay = useCallback(() => {
-    writeSetupComplete();
+    // The dialog goes first: closing never waits on, or depends on, the mark being written.
     setLaunchSetup('none');
+    writeSetupComplete();
     // Into the Task that was open before, as after the first run.
     requestAnimationFrame(() => focusAfterFirstSetup());
   }, []);

@@ -34,11 +34,20 @@ let container: HTMLDivElement;
 let root: Root;
 const createTask = vi.fn();
 
+/** What is stored before the Setup opens. It differs from the defaults (and `emoji` and `callName`
+ * are on a step these tests never change), so a save that wrote the defaults, or the whole draft,
+ * over it would show. */
+const STORED_PREFERENCES = {
+  ...DEFAULT_ASSISTANT_PREFERENCES,
+  emoji: true,
+  callName: 'ゆうせい',
+};
+
 function bridge() {
   const settings = {
     getAssistantPreferences: vi
       .fn()
-      .mockResolvedValue({ configured: true, preferences: DEFAULT_ASSISTANT_PREFERENCES }),
+      .mockResolvedValue({ configured: true, preferences: STORED_PREFERENCES }),
     setAssistantPreferences: vi.fn(async (input: unknown) => ({
       configured: true,
       preferences: input,
@@ -54,13 +63,18 @@ function task(id: string) {
   return { id, title: id, archived: false, createdAt: 0, updatedAt: 0 };
 }
 
-function launchWith(state: { initialized: boolean; tasks: ReturnType<typeof task>[] }) {
+function launchWith(state: {
+  initialized: boolean;
+  tasks: ReturnType<typeof task>[];
+  error?: string | null;
+}) {
   useAppStore.setState({
     init: vi.fn(),
     createTask,
     sprintCoderAvailable: true,
     selectedTaskId: null,
     teamViewOpen: false,
+    error: null,
     ...state,
   } as unknown as Partial<ReturnType<typeof useAppStore.getState>>);
 }
@@ -219,14 +233,87 @@ describe('the Setup at launch', () => {
     for (let n = 0; n < 6 && q('[data-testid="setup-next"]'); n++) await press('setup-next');
     await press('setup-finish');
     expect(settings.setAssistantPreferences).toHaveBeenCalledTimes(1);
+    // The one item changed, laid over what was stored: the stored items that are not defaults
+    // (emoji, callName) are kept, not put back to the defaults.
     expect(settings.setAssistantPreferences).toHaveBeenCalledWith({
-      ...DEFAULT_ASSISTANT_PREFERENCES,
+      ...STORED_PREFERENCES,
       tone: 'casual',
     });
     expect(settings.setTeamUsageMode).not.toHaveBeenCalled();
     expect(localStorage.getItem(SETUP_COMPLETE_KEY)).toBe('1');
+    // This computer's own settings were not on a step that changed: the only key written is the mark.
+    expect(Object.keys(localStorage)).toEqual([SETUP_COMPLETE_KEY, OLD_MARK].sort());
     await relaunch();
     expect(q('[data-testid="setup-replay-dialog"]')).toBeNull();
+  });
+
+  it('Escape closes the launch’s Setup like ×: marked, nothing stored', async () => {
+    const settings = bridge();
+    launchWith({ initialized: true, tasks: [task('a')] });
+    await mount();
+    const dialog = q<HTMLDialogElement>('[data-testid="setup-replay-dialog"]');
+    expect(dialog).not.toBeNull();
+    await act(async () => {
+      dialog?.dispatchEvent(new Event('cancel', { cancelable: true }));
+    });
+    await flush();
+    expect(q('[data-testid="setup-replay-dialog"]')).toBeNull();
+    expect(localStorage.getItem(SETUP_COMPLETE_KEY)).toBe('1');
+    expect(Object.keys(localStorage)).toEqual([SETUP_COMPLETE_KEY]);
+    expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+    expect(settings.setTeamUsageMode).not.toHaveBeenCalled();
+  });
+
+  it('when the Tasks could not be read, no Setup is shown and nothing is marked; the next launch decides again', async () => {
+    bridge();
+    // What the store holds after a failed `tasks.list()`: initialized, no Task, an error.
+    launchWith({ initialized: true, tasks: [], error: 'Tasks could not be read' });
+    await mount();
+    expect(q('[data-testid="setup-wizard"]')).toBeNull();
+    expect(q('[data-testid="setup-replay-dialog"]')).toBeNull();
+    expect(q('[data-testid="stub-sidebar"]')).not.toBeNull();
+    expect(localStorage.getItem(SETUP_COMPLETE_KEY)).toBeNull();
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    launchWith({ initialized: true, tasks: [task('a')] });
+    await mount();
+    expect(q('[data-testid="setup-replay-dialog"]')).not.toBeNull();
+  });
+
+  it('closes even when the mark cannot be written', async () => {
+    bridge();
+    launchWith({ initialized: true, tasks: [task('a')] });
+    await mount();
+    expect(q('[data-testid="setup-replay-dialog"]')).not.toBeNull();
+    const refuse = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    });
+    await press('setup-close');
+    expect(refuse).toHaveBeenCalled();
+    expect(q('[data-testid="setup-replay-dialog"]')).toBeNull();
+    expect(isSetupShowing()).toBe(false);
+  });
+
+  it('when the mark cannot be read, people with Tasks are not shown a Setup at every launch; a new installation still gets its first run', async () => {
+    bridge();
+    // Only the mark is unreadable here; the Setup reads this computer's own settings by itself.
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation((key: string) => {
+      if (key === SETUP_COMPLETE_KEY)
+        throw new DOMException('The operation is insecure.', 'SecurityError');
+      return null;
+    });
+    launchWith({ initialized: true, tasks: [task('a')] });
+    await mount();
+    expect(q('[data-testid="setup-replay-dialog"]')).toBeNull();
+    expect(q('[data-testid="setup-wizard"]')).toBeNull();
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    launchWith({ initialized: true, tasks: [] });
+    await mount();
+    expect(q('[data-testid="setup-wizard"]')).not.toBeNull();
+    expect(progress()).toMatch(/^1 \/ 7/);
   });
 
   it('with this Setup’s mark, nothing is shown, with or without Tasks', async () => {

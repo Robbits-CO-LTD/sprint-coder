@@ -16,12 +16,29 @@ function storage(): Storage | null {
   }
 }
 
-export function readSetupComplete(): boolean {
-  return storage()?.getItem(SETUP_COMPLETE_KEY) === '1';
+/** Whether this Setup was gone through, or `null` when the mark cannot be read at all (no storage,
+ * or a storage that throws): then the app cannot remember a Setup it shows. */
+export function readSetupMark(): boolean | null {
+  try {
+    const store = storage();
+    return store === null ? null : store.getItem(SETUP_COMPLETE_KEY) === '1';
+  } catch {
+    return null;
+  }
 }
 
+export function readSetupComplete(): boolean {
+  return readSetupMark() === true;
+}
+
+/** Marks this Setup as gone through. Never throws: a storage that refuses the write (full, or
+ * blocked) only means the Setup is offered again, and closing a Setup must not depend on it. */
 export function writeSetupComplete(): void {
-  storage()?.setItem(SETUP_COMPLETE_KEY, '1');
+  try {
+    storage()?.setItem(SETUP_COMPLETE_KEY, '1');
+  } catch {
+    // Nothing to do: the mark is a convenience, not a condition for anything.
+  }
 }
 
 /** Settings' "セットアップをもう一度" asks the app shell, which owns both Settings and the Setup,
@@ -58,12 +75,27 @@ export function subscribeSetupShowing(listener: () => void): () => void {
  * gone through). `null` until the app has read its Tasks, so nothing is decided on a guess. */
 export type LaunchSetup = 'first-run' | 'returning' | 'none';
 
+/**
+ * `setupMark` is `readSetupMark()`: `null` when the mark cannot be read. `tasksLoadFailed` is
+ * whether the launch could not read the Tasks (they then look like none).
+ *
+ * Two cases show nothing rather than guess:
+ * - The Tasks could not be read. "No Task" is then not known to be true, and the first run's
+ *   Setup holds the whole window with no way out but making a Task, which the same failure would
+ *   likely refuse too. Nothing is marked, so the next launch decides again.
+ * - The mark cannot be read and Tasks exist. A Setup shown then could never be remembered, so it
+ *   would come back over the app at every launch. A new installation (no Task) still gets its
+ *   first run, as it always did.
+ */
 export function launchSetupFor(input: {
   initialized: boolean;
   taskCount: number;
-  setupComplete: boolean;
+  setupMark: boolean | null;
+  tasksLoadFailed?: boolean;
 }): LaunchSetup | null {
   if (!input.initialized) return null;
-  if (input.setupComplete) return 'none';
-  return input.taskCount === 0 ? 'first-run' : 'returning';
+  if (input.setupMark === true) return 'none';
+  if (input.tasksLoadFailed === true) return 'none';
+  if (input.taskCount === 0) return 'first-run';
+  return input.setupMark === null ? 'none' : 'returning';
 }
