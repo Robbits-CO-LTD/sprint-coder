@@ -118,6 +118,8 @@ type CachedAnswer = Readonly<{ workspaceKey: string; ready: boolean; checkedAtMs
  */
 export class TeamOfferWorkspaceGate {
   private readonly answers = new Map<string, CachedAnswer>();
+  /** Task ごとの、確かめを始めた回数。いちばん新しく始まった確かめだけが答えを覚える。 */
+  private readonly started = new Map<string, number>();
 
   constructor(
     private readonly options: Readonly<{
@@ -132,8 +134,18 @@ export class TeamOfferWorkspaceGate {
     }>,
   ) {}
 
-  /** 確かめ直して覚える。決して投げない（Turn の開始を失敗させない）。 */
+  /**
+   * 確かめ直して覚える。決して投げない（Turn の開始を失敗させない）。
+   *
+   * 同じ Task の確かめは重なって走る（Turn が始まった時の先取りと、次の発言の入口）。後から
+   * 始まった確かめの答えを、先に始まって遅れて終わった確かめが上書きしないように、Task ごとの
+   * 番号で「いちばん新しく始まった確かめ」だけが覚える。答えの時刻は、確かめを**始めた**時刻
+   * （終わった時刻にすると、古い状態を見た答えが、実際より新しく見える）。
+   */
   async refresh(taskId: string): Promise<boolean> {
+    const turn = (this.started.get(taskId) ?? 0) + 1;
+    this.started.set(taskId, turn);
+    const startedAtMs = this.now();
     let workspaceKey: string | null;
     try {
       workspaceKey = this.options.workspaceKey(taskId);
@@ -161,10 +173,12 @@ export class TeamOfferWorkspaceGate {
         if (timer !== undefined) clearTimeout(timer);
       }
     }
+    // 待っている間に、もっと新しい確かめが始まっていた（または忘れられた）: この答えは覚えない。
+    if (this.started.get(taskId) !== turn) return ready;
     this.answers.set(taskId, {
       workspaceKey: workspaceKey ?? '',
       ready,
-      checkedAtMs: this.now(),
+      checkedAtMs: startedAtMs,
     });
     return ready;
   }
@@ -184,6 +198,8 @@ export class TeamOfferWorkspaceGate {
 
   forget(taskId: string): void {
     this.answers.delete(taskId);
+    // 走っている途中の確かめが、忘れた後に答えを書き戻さないようにする。
+    this.started.set(taskId, (this.started.get(taskId) ?? 0) + 1);
   }
 
   private now(): number {

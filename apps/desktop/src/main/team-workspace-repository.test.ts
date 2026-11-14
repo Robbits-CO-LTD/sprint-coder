@@ -106,6 +106,47 @@ describe('TeamOfferWorkspaceGate (issue #1241)', () => {
     await g.instance.refresh('task-1');
     expect(g.instance.isReady('task-1')).toBe(false);
   });
+
+  it('keeps the answer of the check that started last, whichever finishes last', async () => {
+    // Check A starts while the folder is clean and is slow; check B starts later, sees an
+    // uncommitted change, and finishes first. A's late "ready" must not replace B's refusal.
+    const finish: (() => void)[] = [];
+    let call = 0;
+    const g = gate({
+      check: () => {
+        call += 1;
+        if (call === 1) return new Promise<void>((resolve) => finish.push(resolve));
+        return Promise.reject(new TeamWorkspaceRepositoryError('workspace_dirty'));
+      },
+    });
+    const first = g.instance.refresh('task-1');
+    await expect(g.instance.refresh('task-1')).resolves.toBe(false);
+    finish[0]!();
+    await expect(first).resolves.toBe(true); // the caller still hears what its own check saw
+    expect(g.instance.isReady('task-1')).toBe(false);
+  });
+
+  it('dates an answer from when its check started, not from when it finished', async () => {
+    let finish: () => void = () => {};
+    const g = gate({ check: () => new Promise<void>((resolve) => (finish = resolve)) });
+    const pending = g.instance.refresh('task-1');
+    g.advance(TEAM_OFFER_WORKSPACE_CACHE_TTL_MS); // the check took as long as an answer lasts
+    finish();
+    await pending;
+    expect(g.instance.isReady('task-1')).toBe(true);
+    g.advance(1);
+    expect(g.instance.isReady('task-1')).toBe(false);
+  });
+
+  it('does not let a check still running write its answer back after the Task was forgotten', async () => {
+    let finish: () => void = () => {};
+    const g = gate({ check: () => new Promise<void>((resolve) => (finish = resolve)) });
+    const pending = g.instance.refresh('task-1');
+    g.instance.forget('task-1');
+    finish();
+    await pending;
+    expect(g.instance.isReady('task-1')).toBe(false);
+  });
 });
 
 describe('workspaceRepositoryProblemOf', () => {
