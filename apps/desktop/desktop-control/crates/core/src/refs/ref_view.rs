@@ -40,6 +40,64 @@ pub(crate) fn view_runtime_id(evidence: &LocatorEvidence) -> Option<Vec<i32>> {
         .filter(|id| !id.is_empty() && id.len() <= 32)
 }
 
+/// How many of an element's nearest ancestors a view proof holds to their
+/// runtime identifiers (`RefViewProof::ancestor_runtime_ids`). A list's row
+/// container sits within the first few levels above an element of the row
+/// (a WPF list item is the button's parent).
+pub(crate) const VIEW_ANCESTOR_IDS: usize = 4;
+
+/// The runtime identifiers of the node's nearest ancestors in `observed`,
+/// nearest first and the root left out, up to [`VIEW_ANCESTOR_IDS`] and up to
+/// the first ancestor that has none (what is recorded is compared in order, so
+/// a gap would shift it).
+pub(crate) fn ancestor_runtime_ids(
+    observed: &crate::locator::live_locator::ObservedTree,
+    index: usize,
+) -> Vec<Vec<i32>> {
+    let parents = crate::refs::ref_ancestry::parents(observed);
+    crate::refs::ref_ancestry::chain(&parents, index)
+        .into_iter()
+        .take(VIEW_ANCESTOR_IDS)
+        .map_while(|ancestor| {
+            observed
+                .nodes
+                .get(ancestor)
+                .and_then(|node| view_runtime_id(&node.evidence))
+        })
+        .collect()
+}
+
+/// Holds the matched element's nearest ancestors in the fresh read of the view
+/// to the runtime identifiers the proof recorded: each recorded one must be
+/// read, at the same place in the chain, with the same identifier. An ancestor
+/// whose identifier is not read now is unknown (a failed read, not a change);
+/// one missing or different is a changed view.
+pub(crate) fn confirm_matched_ancestors(
+    entry: &RefEntry,
+    observed: &crate::locator::live_locator::ObservedTree,
+    index: usize,
+) -> Result<(), AdapterError> {
+    let Some(view) = &entry.identity.in_view else {
+        return Ok(());
+    };
+    if view.ancestor_runtime_ids.is_empty() {
+        return Ok(());
+    }
+    let parents = crate::refs::ref_ancestry::parents(observed);
+    let chain = crate::refs::ref_ancestry::chain(&parents, index);
+    for (position, recorded) in view.ancestor_runtime_ids.iter().enumerate() {
+        let Some(node) = chain.get(position).and_then(|at| observed.nodes.get(*at)) else {
+            return Err(view_changed(entry));
+        };
+        match &node.evidence.ref_evidence.runtime_id {
+            Some(live) if live == recorded => {}
+            Some(_) => return Err(view_changed(entry)),
+            None => return Err(crate::refs::resolve_errors::identity_unknown_error(entry)),
+        }
+    }
+    Ok(())
+}
+
 /// Holds the element a view-proven entry matched in a fresh read of the view to
 /// the place the entry was recorded at: the same path in the view, the same
 /// bounds. An unreadable rectangle is unknown, not a change.
@@ -112,6 +170,29 @@ pub(crate) fn view_changed(entry: &RefEntry) -> AdapterError {
 /// in, so it is refused instead of judged by another rule.
 pub(crate) fn view_unavailable(entry: &RefEntry) -> AdapterError {
     crate::refs::resolve_errors::identity_not_unique(entry)
+}
+
+/// A view-proven entry whose window is minimized: such a window shows nothing,
+/// so its view is empty and the entry cannot be found there, but the reason is
+/// the window, which restoring fixes - not a ref gone stale. The same answer a
+/// ref proven in the whole window gets for a minimized window before anything
+/// is sent (`kind: "window_minimized"`, not retryable).
+pub(crate) fn view_window_minimized(window_id: &str) -> AdapterError {
+    AdapterError::new(
+        crate::ErrorCode::ActionFailed,
+        "The target's window is minimized, so the action was not sent",
+    )
+    .with_details(json!({
+        "kind": "window_minimized",
+        "window_id": window_id,
+        "retryable": false,
+    }))
+    .with_suggestion(format!(
+        "Nothing reached the app. A minimized window cannot be operated: restore it first \
+         (restore --window-id {window_id}), take a fresh snapshot, then act on the new refs. \
+         Repeating this action while the window stays minimized is refused the same way."
+    ))
+    .with_disposition(crate::DeliverySemantics::not_delivered())
 }
 
 /// A find rooted at a view-proven entry would search the visible elements only

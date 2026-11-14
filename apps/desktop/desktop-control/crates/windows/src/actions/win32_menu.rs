@@ -27,8 +27,9 @@
 //! down must still be the ones matched (`confirm_unchanged`, read only),
 //! or nothing is sent (`menu_replaced`).
 //!
-//! The command is handed over with `SendNotifyMessageW`: it reaches the
-//! window's thread as a sent message, without waiting for the answer. Not a
+//! The command is handed over with `SendMessageCallbackW`: it reaches the
+//! window's thread as a sent message, without waiting for the answer, and
+//! this thread is told when the handler returns. Not a
 //! plain send: a command that opens a modal dialog (an About box, a file
 //! dialog) does not return until the dialog closes, so a send would time out
 //! while the command runs (measured on msinfo32). Not a post: a thread handles
@@ -40,14 +41,23 @@
 //! posted, `WM_INITMENU` of the next click arrived first; handed over this way,
 //! the command arrived first). The next click's first send then waits until
 //! this command's handler has returned; while it shows a modal dialog, the
-//! window is disabled, and that click stops before sending anything. A window
+//! window is disabled, and that click stops before sending anything. A handler
+//! may also wait without disabling the window (a message box with no owner,
+//! an outgoing COM call): the thread then handles the messages sent to it
+//! inside that wait, so a next click would be handled inside the handler of
+//! the one before. The run waits a short while for the handler to return
+//! (`command_returned` in the result says whether it did), and while a
+//! command this program handed over has not returned, no further menu item
+//! of that thread is run from this program (a batch): it stops before
+//! sending anything (`menu_command_running`). A window
 //! of this program's own thread is refused: there the handler would run inside
 //! this call. A command handed over cannot be observed, so the result is
 //! `delivered_unverified`, except
 //! for an item that shows a check mark or a radio mark: its state is read
 //! again for a short while - from the menu only, sending the application
-//! nothing more (`read_check_quietly`) - and only a change to the expected
-//! state reports `delivered_verified`. Nothing is sent either when the window
+//! nothing more (`read_check_quietly`) - and only a change from the state the
+//! menu showed right before the command reports `delivered_verified`. Nothing
+//! is sent either when the window
 //! is disabled (a modal dialog it opened), when the closing messages fail, or
 //! when the deadline has passed by the time the command would be handed over.
 
@@ -88,12 +98,16 @@ mod imp {
         MenuMismatch, NativeMenuItem, RefMenuProof, confirm_menu_leaf, match_menu_step,
         menu_mismatch_error,
     };
-    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, GetLastError, SetLastError};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, GetLastError, HWND, LRESULT, SetLastError,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetMenu, GetWindowThreadProcessId, HMENU, IsIconic, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
-        SendNotifyMessageW, WM_COMMAND, WM_INITMENU, WM_INITMENUPOPUP, WM_MENUCOMMAND,
-        WM_UNINITMENUPOPUP,
+        GetMenu, GetWindowThreadProcessId, HMENU, IsIconic, IsWindow, MSG, PM_NOREMOVE,
+        PeekMessageW, SMTO_ABORTIFHUNG, SendMessageCallbackW, SendMessageTimeoutW, WM_COMMAND,
+        WM_INITMENU, WM_INITMENUPOPUP, WM_MENUCOMMAND, WM_UNINITMENUPOPUP,
     };
 
     use crate::system::menu::menu_bar::{bar_of, read_level};
@@ -104,6 +118,96 @@ mod imp {
     /// How long a check or radio item's state is watched after the command.
     const VERIFY_MS: u64 = 1_000;
     const VERIFY_STEP_MS: u64 = 100;
+    /// How long a run waits for the handler of the command it handed over
+    /// to return.
+    const RETURN_WAIT_MS: u64 = 500;
+    const RETURN_STEP_MS: u64 = 10;
+
+    /// A command this program handed over whose handler has not returned:
+    /// the window's thread, the window, and the token its reply carries.
+    struct Running {
+        thread: u32,
+        hwnd: isize,
+        token: usize,
+    }
+
+    static RUNNING: Mutex<Vec<Running>> = Mutex::new(Vec::new());
+    static NEXT_TOKEN: AtomicUsize = AtomicUsize::new(1);
+
+    /// Called on this thread when the handler of a command handed over
+    /// returns (`SendMessageCallbackW`).
+    unsafe extern "system" fn command_returned(
+        _hwnd: HWND,
+        _message: u32,
+        token: usize,
+        _result: LRESULT,
+    ) {
+        if let Ok(mut running) = RUNNING.lock() {
+            running.retain(|command| command.token != token);
+        }
+    }
+
+    /// Lets the replies to the commands this thread handed over arrive: they
+    /// are delivered only while the thread looks at its messages. Nothing is
+    /// taken from the queue.
+    fn take_replies() {
+        // SAFETY: looks at this thread's own message queue; `PM_NOREMOVE`
+        // leaves every message in it.
+        unsafe {
+            let mut message: MSG = std::mem::zeroed();
+            PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+        }
+    }
+
+    /// Whether a command this program handed over to a window of `thread`
+    /// has not returned yet. A command to a window that is gone no longer
+    /// counts. A command whose reply cannot arrive (handed over from another
+    /// thread of this program) keeps counting: the run stops then.
+    fn still_running(thread: u32) -> bool {
+        take_replies();
+        let Ok(mut running) = RUNNING.lock() else {
+            return true;
+        };
+        // SAFETY: a plain check of a window handle.
+        running.retain(|command| unsafe { IsWindow(command.hwnd as HWND) } != 0);
+        running.iter().any(|command| command.thread == thread)
+    }
+
+    fn is_running(token: usize) -> bool {
+        take_replies();
+        RUNNING
+            .lock()
+            .map(|running| running.iter().any(|command| command.token == token))
+            .unwrap_or(true)
+    }
+
+    fn forget(token: usize) {
+        if let Ok(mut running) = RUNNING.lock() {
+            running.retain(|command| command.token != token);
+        }
+    }
+
+    /// The refusal for a window whose thread is still handling a menu command
+    /// this program handed over before: the next one would be handled inside
+    /// that handler, which may still read its own command afterwards.
+    fn command_running(hwnd: isize) -> AdapterError {
+        AdapterError::new(
+            ErrorCode::AppUnresponsive,
+            "The application is still handling the menu command it was given before (it may \
+             show a dialog or wait for something), so the menu item was not run",
+        )
+        .with_suggestion(
+            "Nothing reached the app. Take a screenshot or snapshot of the app's windows (a \
+             dialog may be open), finish what it waits for, then run the menu item again.",
+        )
+        .with_details(serde_json::json!({
+            "kind": "menu_command_running",
+            "window_id": format!("w-{hwnd}"),
+            "command_sent": false,
+            "retryable": true,
+        }))
+        .with_disposition(DeliverySemantics::not_delivered())
+    }
 
     fn unresponsive(message: u32, last_error: u32) -> AdapterError {
         // UIPI refuses a message to a window of a higher integrity level
@@ -373,13 +477,14 @@ mod imp {
     /// the same bar, the same submenus on the way down, and the item enabled
     /// and sending the recorded command - read only, nothing is sent. For a
     /// menu that reports by position, the item must also still sit where it
-    /// was matched: the position is what the window is told.
+    /// was matched: the position is what the window is told. Returns the item
+    /// as read now.
     fn confirm_unchanged(
         hwnd: isize,
         bar: HMENU,
         found: &Found,
         proof: &RefMenuProof,
-    ) -> Result<(), MenuMismatch> {
+    ) -> Result<Found, MenuMismatch> {
         if bar_now(hwnd) != bar {
             return Err(MenuMismatch::Replaced);
         }
@@ -387,7 +492,7 @@ mod imp {
         if again.chain != found.chain || (proof.by_position && again.position != found.position) {
             return Err(MenuMismatch::Replaced);
         }
-        Ok(())
+        Ok(again)
     }
 
     /// The message that runs the item, as the menu itself would send it: the
@@ -453,6 +558,9 @@ mod imp {
         if thread == unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() } {
             return Err(same_thread());
         }
+        if still_running(thread) {
+            return Err(command_running(hwnd));
+        }
         if !enabled(hwnd) {
             return Err(window_disabled(hwnd));
         }
@@ -465,11 +573,14 @@ mod imp {
         // The closing messages are handled by the application too.
         confirm_unchanged(hwnd, bar, &found, proof)
             .map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
-        let expected = super::expected_check(found.item.checked, found.item.radio);
         let (message, wparam, lparam) = command_message(bar, &found, proof);
-        // The menu, once more, right before the command.
-        confirm_unchanged(hwnd, bar, &found, proof)
+        // The menu, once more, right before the command. The check mark the
+        // command is expected to change is the one read here: the closing
+        // messages may have changed it, and a change they made must never be
+        // taken for the command's.
+        let last = confirm_unchanged(hwnd, bar, &found, proof)
             .map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
+        let expected = super::expected_check(last.item.checked, last.item.radio);
         // The last checks before the command, after every read: the messages
         // and the re-reads may have taken the time left, or the application
         // may have opened a dialog that disabled the window meanwhile.
@@ -479,14 +590,30 @@ mod imp {
         if !enabled(hwnd) {
             return Err(window_disabled(hwnd));
         }
+        let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut running) = RUNNING.lock() {
+            running.push(Running {
+                thread,
+                hwnd,
+                token,
+            });
+        }
         // SAFETY: hands a message to the window's thread and returns at once;
         // no pointer is passed (a menu handle is a value, not a pointer into
-        // this process).
+        // this process). The reply reaches `command_returned` on this thread.
         let handed = unsafe {
             SetLastError(0);
-            SendNotifyMessageW(hwnd as *mut std::ffi::c_void, message, wparam, lparam)
+            SendMessageCallbackW(
+                hwnd as *mut std::ffi::c_void,
+                message,
+                wparam,
+                lparam,
+                Some(command_returned),
+                token,
+            )
         };
         if handed == 0 {
+            forget(token);
             // SAFETY: reads this thread's last error.
             let code = unsafe { GetLastError() };
             if code == ERROR_ACCESS_DENIED {
@@ -497,12 +624,27 @@ mod imp {
                 "The menu item's command could not be handed to the window",
             )
             .with_platform_detail(format!(
-                "SendNotifyMessageW(0x{message:04X}) failed: {code}"
+                "SendMessageCallbackW(0x{message:04X}) failed: {code}"
             ))
             .with_details(serde_json::json!({ "kind": "menu_command_not_handed" }))
             .with_disposition(DeliverySemantics::not_delivered()));
         }
         // Read only from here on: nothing more is sent to the application.
+        // A short wait for the handler to return; it ends early when the
+        // window is disabled (the command opened a modal dialog).
+        let returned = {
+            let wait = RETURN_WAIT_MS.min(deadline.remaining_ms());
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+            loop {
+                if !is_running(token) {
+                    break true;
+                }
+                if std::time::Instant::now() >= until || !enabled(hwnd) {
+                    break false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(RETURN_STEP_MS));
+            }
+        };
         let verified = expected.is_some_and(|expected| {
             let until = std::time::Instant::now() + std::time::Duration::from_millis(VERIFY_MS);
             while std::time::Instant::now() < until && !deadline.is_expired() {
@@ -521,7 +663,15 @@ mod imp {
         let mut details = serde_json::json!({
             "menu_command": proof.command_id,
             "verification_scope": if verified { "menu_check_state" } else { "unavailable" },
+            "command_returned": returned,
         });
+        if !returned {
+            details["command_running_hint"] = serde_json::json!(
+                "The app has not finished handling the command yet: it may show a dialog or \
+                 wait for something. Look at the app's windows before running another of its \
+                 menu items."
+            );
+        }
         if proof.by_position {
             details["menu_message"] = serde_json::json!("WM_MENUCOMMAND");
             details["menu_position"] = serde_json::json!(found.position);

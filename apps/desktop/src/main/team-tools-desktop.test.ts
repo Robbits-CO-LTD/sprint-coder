@@ -18,10 +18,12 @@ import {
   configureDesktopControlTeamCursors,
   configureDesktopControlWorkerTool,
   desktopControlWorker,
+  desktopControlWorkerToolOffer,
   resetDesktopControlSessions,
 } from './desktop-control-session';
 import {
   LEADER_DESKTOP_CONTROL_GUIDANCE,
+  leaderDesktopControlGuidance,
   WORKER_DESKTOP_CONTROL_PROMPT,
   WORKER_MCP_SYSTEM_PROMPT,
   executeTeamTool,
@@ -239,6 +241,26 @@ describe('the Leader’s desktop mark on a hire', () => {
     });
   });
 
+  it('marks no Worker, and tells the Leader nothing of desktop Workers, without the executable', async () => {
+    // As a development run that has not built the desktop-control executable.
+    configureDesktopControlTeamCursors(true);
+    configureDesktopControlWorkerTool(
+      desktopControlWorkerToolOffer(
+        () => true,
+        () => null,
+      ),
+    );
+    const coordinator = team();
+    const refused = await hire(coordinator, { desktopControl: true });
+    expect(refused).toMatchObject({
+      ok: true,
+      desktopControl: false,
+      desktopControlNote: expect.stringContaining('デスクトップ操作の実行ファイルが使えない'),
+    });
+    expect(desktopControlWorker('task-1', refused['workerId'] as string)).toBeUndefined();
+    expect(leaderDesktopControlGuidance(true)).toBeNull();
+  });
+
   it('marks only a Worker that runs on a CLI', async () => {
     cursorsOn();
     const coordinator = team();
@@ -368,6 +390,21 @@ describe('the Leader’s desktop mark on a hire', () => {
       desktopControlNote: expect.stringContaining('同時に 3 人まで'),
     });
     for (const id of apiWorkers) expect(desktopControlWorker('task-1', id)).toBeUndefined();
+  });
+
+  it('gives the Leader the desktop guidance only on a Team Turn, with the cursors on and a Worker markable', () => {
+    configureDesktopControlTeamCursors(true);
+    let offered = true;
+    configureDesktopControlWorkerTool(() => offered);
+    expect(leaderDesktopControlGuidance(true)).toBe(LEADER_DESKTOP_CONTROL_GUIDANCE);
+    expect(leaderDesktopControlGuidance(false)).toBeNull();
+    // Without the command sandbox (or the executable), no Worker can be marked: nothing is said.
+    offered = false;
+    expect(leaderDesktopControlGuidance(true)).toBeNull();
+    // With the cursors off (`=0`), as before the cursors existed.
+    offered = true;
+    configureDesktopControlTeamCursors(false);
+    expect(leaderDesktopControlGuidance(true)).toBeNull();
   });
 
   it('tells only a marked Worker, and the Leader with the cursors on, how to share the desktop', () => {

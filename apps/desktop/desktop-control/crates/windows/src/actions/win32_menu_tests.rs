@@ -52,6 +52,16 @@ mod live {
         SubmenuOnOpen(Variant),
         /// Replaces the bar on `WM_UNINITMENUPOPUP`.
         BarOnClose(Variant),
+        /// Replaces the File submenu on `WM_UNINITMENUPOPUP`.
+        SubmenuOnClose(Variant),
+        /// Replaces the 入れ子 submenu, under the File menu, on the
+        /// `WM_INITMENUPOPUP` of 入れ子 (for 子 A, 1201).
+        NestOnOpen(Variant),
+        /// Replaces the whole File submenu, on the `WM_INITMENUPOPUP` of
+        /// 入れ子 below it (for 子 A, 1201).
+        FileOnNestOpen(Variant),
+        /// Unchecks 上書き保存 on `WM_UNINITMENUPOPUP`.
+        UncheckOnClose,
         /// Disables the window on `WM_UNINITMENUPOPUP`, as a dialog it opens would.
         DisableOnClose,
         /// Inserts 新規 at the top of the File menu on `WM_UNINITMENUPOPUP`,
@@ -62,14 +72,22 @@ mod live {
     /// The `lParam` (the menu) of every `WM_MENUCOMMAND` a test window handled.
     static MENU_COMMAND_MENUS: Mutex<Vec<(usize, isize)>> = Mutex::new(Vec::new());
 
-    /// How 上書き保存 (1002) reads in the replacement File menu.
+    /// How 上書き保存 (1002) - or 子 A (1201) in a replacement 入れ子 menu -
+    /// reads in the replacement menu.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum Variant {
         Missing,
         Disabled,
-        /// 1002 is another item, 全部削除.
+        /// 1002 (1201) is another item, 全部削除.
         OtherItem,
+        /// The replacement reads exactly as the menu it replaces: only its
+        /// handle tells it apart.
+        Same,
     }
+
+    /// The window whose command 1002 unchecks 上書き保存, as a check item's
+    /// command does.
+    static UNCHECK_ON_COMMAND: AtomicUsize = AtomicUsize::new(0);
 
     static CHANGES: Mutex<Vec<(usize, Change)>> = Mutex::new(Vec::new());
 
@@ -101,8 +119,91 @@ mod live {
                 Variant::OtherItem => {
                     AppendMenuW(file, MF_STRING, 1002, wide("全部削除(&D)").as_ptr());
                 }
+                Variant::Same => {
+                    AppendMenuW(
+                        file,
+                        MF_STRING,
+                        1002,
+                        wide("上書き保存(&S)\tCtrl+S").as_ptr(),
+                    );
+                }
             }
+            AppendMenuW(
+                file,
+                MF_POPUP,
+                replacement_nest(Variant::Same) as usize,
+                wide("入れ子(&N)").as_ptr(),
+            );
             file
+        }
+    }
+
+    /// A 入れ子 menu where 子 A (1201) reads as `variant` says.
+    unsafe fn replacement_nest(
+        variant: Variant,
+    ) -> windows_sys::Win32::UI::WindowsAndMessaging::HMENU {
+        // SAFETY: plain menu creation.
+        unsafe {
+            let nest = CreatePopupMenu();
+            match variant {
+                Variant::Missing => {}
+                Variant::Disabled => {
+                    AppendMenuW(nest, MF_STRING | MF_GRAYED, 1201, wide("子 A(&A)").as_ptr());
+                }
+                Variant::OtherItem => {
+                    AppendMenuW(nest, MF_STRING, 1201, wide("全部削除(&D)").as_ptr());
+                }
+                Variant::Same => {
+                    AppendMenuW(nest, MF_STRING, 1201, wide("子 A(&A)").as_ptr());
+                }
+            }
+            nest
+        }
+    }
+
+    /// A File menu that reads as the original, except that 子 A under 入れ子
+    /// reads as `variant` says.
+    unsafe fn replacement_file_for_nest(
+        variant: Variant,
+    ) -> windows_sys::Win32::UI::WindowsAndMessaging::HMENU {
+        // SAFETY: plain menu creation.
+        unsafe {
+            let file = CreatePopupMenu();
+            AppendMenuW(file, MF_STRING, 1001, wide("開く(&O)...\tCtrl+O").as_ptr());
+            AppendMenuW(
+                file,
+                MF_STRING,
+                1002,
+                wide("上書き保存(&S)\tCtrl+S").as_ptr(),
+            );
+            AppendMenuW(
+                file,
+                MF_POPUP,
+                replacement_nest(variant) as usize,
+                wide("入れ子(&N)").as_ptr(),
+            );
+            file
+        }
+    }
+
+    /// Puts `submenu` in place of the item at `position` of `menu`, named
+    /// `name`; `RemoveMenu` keeps the old submenu alive, detached.
+    unsafe fn swap_submenu(
+        menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
+        position: u32,
+        submenu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
+        name: &str,
+    ) {
+        // SAFETY: changes this test's own menu.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::RemoveMenu(menu, position, MF_BYPOSITION);
+            InsertMenuW(
+                menu,
+                position,
+                MF_BYPOSITION | MF_POPUP | MF_STRING,
+                submenu as usize,
+                wide(name).as_ptr(),
+            );
         }
     }
 
@@ -164,6 +265,27 @@ mod live {
                     }
                 }
                 WM_INITMENUPOPUP => {
+                    let file = GetSubMenu(GetMenu(hwnd), 0);
+                    let nest = GetSubMenu(file, 2);
+                    let nested = Some(()).filter(|_| wparam == nest as usize).and_then(|_| {
+                        take_change(window, |change| {
+                            matches!(change, Change::NestOnOpen(_) | Change::FileOnNestOpen(_))
+                        })
+                    });
+                    match nested {
+                        Some(Change::NestOnOpen(variant)) => {
+                            swap_submenu(file, 2, replacement_nest(variant), "入れ子(&N)");
+                        }
+                        Some(Change::FileOnNestOpen(variant)) => {
+                            swap_submenu(
+                                GetMenu(hwnd),
+                                0,
+                                replacement_file_for_nest(variant),
+                                "ファイル(&F)",
+                            );
+                        }
+                        _ => {}
+                    }
                     if let Some(Change::SubmenuOnOpen(variant)) =
                         take_change(window, |change| matches!(change, Change::SubmenuOnOpen(_)))
                     {
@@ -187,9 +309,24 @@ mod live {
                     match take_change(window, |change| {
                         matches!(
                             change,
-                            Change::BarOnClose(_) | Change::DisableOnClose | Change::InsertOnClose
+                            Change::BarOnClose(_)
+                                | Change::SubmenuOnClose(_)
+                                | Change::UncheckOnClose
+                                | Change::DisableOnClose
+                                | Change::InsertOnClose
                         )
                     }) {
+                        Some(Change::SubmenuOnClose(variant)) => {
+                            swap_submenu(
+                                GetMenu(hwnd),
+                                0,
+                                replacement_file(variant),
+                                "ファイル(&F)",
+                            );
+                        }
+                        Some(Change::UncheckOnClose) => {
+                            CheckMenuItem(GetSubMenu(GetMenu(hwnd), 0), 1002, MF_BYCOMMAND);
+                        }
                         Some(Change::InsertOnClose) => {
                             InsertMenuW(
                                 GetSubMenu(GetMenu(hwnd), 0),
@@ -215,6 +352,46 @@ mod live {
             }
         }
         match message {
+            WM_COMMAND
+                if wparam == 1002
+                    && UNCHECK_ON_COMMAND
+                        .compare_exchange(hwnd as usize, 0, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok() =>
+            {
+                // SAFETY: changes this test's own menu.
+                unsafe { CheckMenuItem(GetSubMenu(GetMenu(hwnd), 0), 1002, MF_BYCOMMAND) };
+                0
+            }
+            // 3002 waits without disabling the window, handling what reaches
+            // the thread meanwhile, as a message box with no owner or an
+            // outgoing COM call does.
+            WM_COMMAND if wparam == 3002 => {
+                // SAFETY: this test's own thread's messages.
+                unsafe {
+                    let until = std::time::Instant::now() + std::time::Duration::from_millis(800);
+                    let mut message: MSG = std::mem::zeroed();
+                    while std::time::Instant::now() < until {
+                        while windows_sys::Win32::UI::WindowsAndMessaging::PeekMessageW(
+                            &mut message,
+                            std::ptr::null_mut(),
+                            0,
+                            0,
+                            windows_sys::Win32::UI::WindowsAndMessaging::PM_REMOVE,
+                        ) != 0
+                        {
+                            if message.message
+                                == windows_sys::Win32::UI::WindowsAndMessaging::WM_QUIT
+                            {
+                                PostQuitMessage(0);
+                                return 0;
+                            }
+                            DispatchMessageW(&message);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+                0
+            }
             // 3001 opens a modal dialog after a moment: the window is disabled
             // while a nested message loop runs, as a dialog's would.
             WM_COMMAND if wparam == 3001 => {
@@ -280,7 +457,8 @@ mod live {
     static CLASS: std::sync::Once = std::sync::Once::new();
     const CLASS_NAME: &str = "ScgMenuRunTestWindow";
 
-    /// File > 開く (1001), 上書き保存 (1002), 入れ子 > 子 A (1201); Help > About (3001).
+    /// File > 開く (1001), 上書き保存 (1002), 入れ子 > 子 A (1201); Help > About (3001),
+    /// 待つ (3002).
     unsafe fn test_menu() -> windows_sys::Win32::UI::WindowsAndMessaging::HMENU {
         // SAFETY: plain menu creation.
         unsafe {
@@ -299,6 +477,7 @@ mod live {
             AppendMenuW(bar, MF_POPUP, file as usize, wide("ファイル(&F)").as_ptr());
             let help = CreatePopupMenu();
             AppendMenuW(help, MF_STRING, 3001, wide("バージョン情報(&A)").as_ptr());
+            AppendMenuW(help, MF_STRING, 3002, wide("待つ(&T)").as_ptr());
             AppendMenuW(bar, MF_POPUP, help as usize, wide("ヘルプ(&H)").as_ptr());
             bar
         }
@@ -775,7 +954,14 @@ mod live {
             Change::SubmenuOnOpen(Variant::Missing),
             Change::SubmenuOnOpen(Variant::Disabled),
             Change::SubmenuOnOpen(Variant::OtherItem),
+            Change::BarOnClose(Variant::Missing),
+            Change::BarOnClose(Variant::Disabled),
             Change::BarOnClose(Variant::OtherItem),
+            // A replacement that reads the same is still another menu: what
+            // the window shows was not the menu matched.
+            Change::BarOnOpen(Variant::Same),
+            Change::SubmenuOnOpen(Variant::Same),
+            Change::BarOnClose(Variant::Same),
         ] {
             let remote = Remote::new(true);
             let window = remote.info();
@@ -790,6 +976,143 @@ mod live {
             );
             remote.assert_nothing_sent();
         }
+        // The File submenu swapped under the same bar while the menu closes:
+        // the menu is read again from the bar right before the command, so
+        // what the new menu holds stops the run first, and a new menu that
+        // reads the same stops it by its handle.
+        for (replaced, reason) in [
+            (Change::SubmenuOnClose(Variant::Missing), "missing"),
+            (Change::SubmenuOnClose(Variant::Disabled), "disabled"),
+            (Change::SubmenuOnClose(Variant::OtherItem), "missing"),
+            (Change::SubmenuOnClose(Variant::Same), "menu_replaced"),
+        ] {
+            let remote = Remote::new(true);
+            let window = remote.info();
+            change(&remote, replaced);
+            let error = run(&window, &save(&window)).unwrap_err();
+            assert_eq!(error.code, ErrorCode::StaleRef, "{replaced:?}: {error:?}");
+            assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+            assert_eq!(error.details.unwrap()["reason"], reason, "{replaced:?}");
+            remote.assert_nothing_sent();
+        }
+    }
+
+    /// The same, a level further down: the application swaps the submenu
+    /// 子 A is in, or the File menu above it, while it is told 入れ子 opens.
+    /// Swapping the File menu leaves the old one - still holding the old
+    /// 入れ子 - alive, so it is seen only when the whole way down is read
+    /// again from the bar; then the item 1201 is gone, disabled, another
+    /// item, or the same in another menu. Nothing is sent in any case.
+    #[test]
+    fn a_submenu_replaced_further_down_while_told_is_never_run() {
+        let child_a = |window: &WindowInfo| {
+            entry(
+                window,
+                &[("ファイル(F)", 0), ("入れ子(N)", 2), ("子 A(A)", 0)],
+                1201,
+            )
+        };
+        for (replaced, reason) in [
+            (Change::NestOnOpen(Variant::Missing), "menu_replaced"),
+            (Change::NestOnOpen(Variant::Disabled), "menu_replaced"),
+            (Change::NestOnOpen(Variant::OtherItem), "menu_replaced"),
+            (Change::NestOnOpen(Variant::Same), "menu_replaced"),
+            (Change::FileOnNestOpen(Variant::Missing), "missing"),
+            (Change::FileOnNestOpen(Variant::Disabled), "disabled"),
+            (Change::FileOnNestOpen(Variant::OtherItem), "missing"),
+            (Change::FileOnNestOpen(Variant::Same), "menu_replaced"),
+        ] {
+            let remote = Remote::new(true);
+            let window = remote.info();
+            change(&remote, replaced);
+            let error = run(&window, &child_a(&window)).unwrap_err();
+            assert_eq!(error.code, ErrorCode::StaleRef, "{replaced:?}: {error:?}");
+            assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+            assert_eq!(error.details.unwrap()["reason"], reason, "{replaced:?}");
+            remote.assert_nothing_sent();
+            assert!(
+                CHANGES
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(hwnd, _)| *hwnd != remote.hwnd),
+                "{replaced:?} was made"
+            );
+        }
+        // Without a change, the same ref runs.
+        let remote = Remote::new(true);
+        let window = remote.info();
+        run(&window, &child_a(&window)).unwrap();
+        assert_eq!(remote.commands(1), vec![1201]);
+    }
+
+    /// A check mark is expected to change from what the menu shows right
+    /// before the command: a mark the closing messages changed is never
+    /// taken for the command's doing. A command that does change it is
+    /// verified.
+    #[test]
+    fn a_check_mark_changed_by_the_closing_messages_is_never_taken_for_the_command() {
+        let remote = Remote::new(true);
+        let window = remote.info();
+        unsafe { CheckMenuItem(remote.file_menu(), 1002, MF_BYCOMMAND | MF_CHECKED) };
+        change(&remote, Change::UncheckOnClose);
+        let result = run(&window, &save(&window)).unwrap();
+        assert_eq!(
+            result.disposition(),
+            DeliverySemantics::delivered_unverified()
+        );
+        assert_eq!(remote.commands(1), vec![1002]);
+
+        let toggles = Remote::new(true);
+        let window = toggles.info();
+        unsafe { CheckMenuItem(toggles.file_menu(), 1002, MF_BYCOMMAND | MF_CHECKED) };
+        UNCHECK_ON_COMMAND.store(toggles.hwnd, Ordering::SeqCst);
+        let result = run(&window, &save(&window)).unwrap();
+        assert_eq!(
+            result.disposition(),
+            DeliverySemantics::delivered_verified()
+        );
+        assert_eq!(result.details.as_ref().unwrap()["command_returned"], true);
+    }
+
+    /// A command whose handler waits without disabling the window (a message
+    /// box with no owner): the thread handles what is sent to it inside that
+    /// wait, so a next menu item from this program would run inside the
+    /// handler. The run says the command has not returned, and the next menu
+    /// item of that thread stops before anything is sent, until it returns.
+    #[test]
+    fn a_command_still_waiting_in_its_handler_stops_the_next_menu_item() {
+        let remote = Remote::new(true);
+        let window = remote.info();
+        let wait = entry(&window, &[("ヘルプ(H)", 1), ("待つ(T)", 1)], 3002);
+        let result = run(&window, &wait).unwrap();
+        assert_eq!(
+            result.disposition(),
+            DeliverySemantics::delivered_unverified()
+        );
+        let details = result.details.as_ref().unwrap();
+        assert_eq!(details["command_returned"], false);
+        assert!(details["command_running_hint"].is_string());
+        let error = run(&window, &save(&window)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::AppUnresponsive, "{error:?}");
+        assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+        let details = error.details.unwrap();
+        assert_eq!(details["kind"], "menu_command_running");
+        assert_eq!(details["retryable"], true);
+        let openings = |remote: &Remote| {
+            remote
+                .handled()
+                .iter()
+                .filter(|(message, _)| *message == WM_INITMENU)
+                .count()
+        };
+        assert_eq!(openings(&remote), 1, "nothing of the next click was sent");
+        assert_eq!(remote.commands(1), vec![3002]);
+        // Once the handler has returned, the next menu item runs.
+        std::thread::sleep(std::time::Duration::from_millis(1_000));
+        let result = run(&window, &save(&window)).unwrap();
+        assert_eq!(result.details.as_ref().unwrap()["command_returned"], true);
+        assert_eq!(remote.commands(2), vec![3002, 1002]);
     }
 
     /// The window is checked once more right before the command: one disabled

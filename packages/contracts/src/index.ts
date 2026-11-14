@@ -163,6 +163,13 @@ export const taskRunningWorkSchema = z
      * canceled, yet its process may go on. Only a restart of the app clears it.
      */
     stopUnconfirmed: z.boolean().optional(),
+    /**
+     * Team Workers with a Turn whose process exit is still awaited or could not be confirmed
+     * (issue #1263): the Worker is recorded as stopped or failed, yet its process may go on. The
+     * Runtime Host is asked again in the background, which clears it once the exit is confirmed;
+     * a restart of the app clears it too.
+     */
+    unconfirmedWorkers: z.number().int().positive().optional(),
   })
   .strict();
 export type TaskRunningWork = z.infer<typeof taskRunningWorkSchema>;
@@ -174,7 +181,8 @@ export function taskHasRunningWork(work: TaskRunningWork | null | undefined): bo
       work.team ||
       work.workers > 0 ||
       work.commands > 0 ||
-      work.stopUnconfirmed === true)
+      work.stopUnconfirmed === true ||
+      (work.unconfirmedWorkers ?? 0) > 0)
   );
 }
 
@@ -182,7 +190,9 @@ export function taskHasRunningWork(work: TaskRunningWork | null | undefined): bo
  * The refusal of an archive while the Task still moves: what moves, and where each is stopped
  * (the input box's 「実行を停止」, the Team's 「すべて停止」, and 「実行中のコマンドを停止」 shown with
  * this refusal, which stops the commands earlier Turns left running too). AI work whose stop could
- * not be confirmed has no stop left to offer; a restart of the app clears it.
+ * not be confirmed has no stop left to offer; a restart of the app clears it. A Worker whose exit
+ * is still being confirmed needs no stop either: it clears itself once confirmed, so the person is
+ * asked to wait, and to restart the app only if it goes on.
  */
 export function taskRunningWorkArchiveRefusal(work: TaskRunningWork): string {
   const parts: string[] = [];
@@ -201,12 +211,19 @@ export function taskRunningWorkArchiveRefusal(work: TaskRunningWork): string {
     parts.push(`実行中のコマンド ${work.commands}件`);
     stops.push('コマンドは「実行中のコマンドを停止」');
   }
+  const unconfirmedWorkers = work.unconfirmedWorkers ?? 0;
+  if (unconfirmedWorkers > 0) parts.push(`終了を確かめているWorker ${unconfirmedWorkers}人`);
+  const first = stops.length > 0 ? `${stops.join('、')}で止め、` : '';
   if (work.stopUnconfirmed === true) {
-    // No stop is left to offer: the stop was asked for, and its end was not confirmed.
+    // No stop is left to offer: the stop was asked for, and its end was not confirmed. A restart
+    // clears a Worker whose exit is still being confirmed as well.
     parts.push('停止を確認できなかったAIの作業');
-    const first = stops.length > 0 ? `${stops.join('、')}で止め、` : '';
-    return `このTaskは、まだ動いています（${parts.join('／')}）。${first}停止を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。`;
+    const unconfirmed = unconfirmedWorkers > 0 ? '停止や終了' : '停止';
+    return `このTaskは、まだ動いています（${parts.join('／')}）。${first}${unconfirmed}を確認できなかった作業はアプリを再起動して片付けてから、アーカイブしてください。`;
   }
+  if (unconfirmedWorkers > 0)
+    // Nothing to stop: the background check clears it once the Worker's exit is confirmed.
+    return `このTaskは、まだ動いています（${parts.join('／')}）。${first}Workerの終了を確かめ終わるまで少し待ってから、アーカイブしてください。待っても続く時は、アプリを再起動してください。`;
   return `このTaskは、まだ動いています（${parts.join('／')}）。${stops.join('、')}で止めてから、アーカイブしてください。`;
 }
 

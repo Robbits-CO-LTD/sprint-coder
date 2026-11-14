@@ -329,8 +329,8 @@ import {
   DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
   configureDesktopControlTeamCursors,
   configureDesktopControlWorkerTool,
-  desktopControlTeamCursors,
   desktopControlWorker,
+  desktopControlWorkerToolOffer,
   endDesktopControlSession,
 } from './desktop-control-session';
 import { configureStartMenuShortcutReader } from './desktop-control-start-menu';
@@ -652,7 +652,7 @@ import {
 import {
   isTeamScenarioInput,
   requiresTeamWorkersInput,
-  LEADER_DESKTOP_CONTROL_GUIDANCE,
+  leaderDesktopControlGuidance,
   LEADER_MCP_SYSTEM_PROMPT,
   MANAGER_PROVIDER_TOOLS,
   MANAGER_MCP_SYSTEM_PROMPT,
@@ -844,8 +844,8 @@ export function teamGuidance(
  * 「Team の使い方」 setting. Only a real CLI Leader (codex・claude・grok) qualifies, and only when
  * everything an offered Turn needs is in place: the Leader MCP, its bridge, and the verified
  * built-in Team Skill. Anything missing leaves the Turn an ordinary one instead of failing it.
- * The API Leader is never offered: it has no Team tools (even a requested Team Turn gets none), so
- * handing it the Skill would only make it talk about Team it cannot run.
+ * The API Leader is never offered: its Team tools come from its own tool loop, not the Leader MCP
+ * checked here, and only on a Team Turn it was given otherwise (`leaderTurnTeamTools`).
  */
 export function teamUsageOfferAvailable(
   input: Readonly<{
@@ -1504,6 +1504,9 @@ export class IpcRouter {
         this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
+      // A Worker whose exit is confirmed only later no longer holds the Task's archive back
+      // (issue #1263).
+      onUnsettledTurnsChanged: (taskId) => this.refreshTaskRunningWork(taskId),
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
       fallback: this.cliTeamWorkerRuntime,
@@ -1772,7 +1775,9 @@ export class IpcRouter {
     this.managedCodingHarness.onTaskCommandSettled((taskId) => this.refreshTaskRunningWork(taskId));
     // A Worker marked for desktop control gets the command tool only from this harness's catalog,
     // so the hire marks one only when the harness offers that tool (not without the sandbox).
-    configureDesktopControlWorkerTool(() => this.managedCodingHarness.commandToolsOffered());
+    configureDesktopControlWorkerTool(
+      desktopControlWorkerToolOffer(() => this.managedCodingHarness.commandToolsOffered()),
+    );
     this.mockRuntime = new MockRuntimeAdapter(
       persistence,
       (event) => this.publish(event),
@@ -6420,7 +6425,7 @@ export class IpcRouter {
           )
         : null,
       // Only with the Team's desktop cursors on, so with them off the guidance is as it was.
-      options.teamTurn && desktopControlTeamCursors() ? LEADER_DESKTOP_CONTROL_GUIDANCE : null,
+      leaderDesktopControlGuidance(options.teamTurn),
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
         : null,
@@ -7513,16 +7518,21 @@ export class IpcRouter {
 
   /**
    * What still moves in the Task (null: nothing): its recorded Turn and Team, its commands whose
-   * processes still run, and AI work whose stop could not be confirmed (its Turn is recorded as
-   * canceled, yet its process may go on; issue #1225). The window's sidebar shows it, and an
-   * archive is refused while it is not null.
+   * processes still run, and the processes that may go on although their record says they ended.
+   * Those are the Leader's AI work whose stop could not be confirmed (its Turn is recorded as
+   * canceled; issue #1225), which only a restart clears, and the Team's Workers whose Turn exit is
+   * still awaited or could not be confirmed (the Worker is recorded as stopped or failed; issue
+   * #1263), which clear once the Runtime Host confirms the exit. The window's sidebar shows it,
+   * and an archive is refused while it is not null.
    */
   private taskRunningWork(taskId: string): TaskRunningWork | null {
     const recorded = this.persistence.getTaskRecordedWork(taskId);
+    const unconfirmedWorkers = this.cliTeamWorkerRuntime.unsettledWorkerCount(taskId);
     const work: TaskRunningWork = {
       ...recorded,
       commands: this.managedCodingHarness.activeTaskCommandCount(taskId),
       ...(this.quarantinedRuntimeTasks.has(taskId) ? { stopUnconfirmed: true } : {}),
+      ...(unconfirmedWorkers > 0 ? { unconfirmedWorkers } : {}),
     };
     return taskHasRunningWork(work) ? work : null;
   }

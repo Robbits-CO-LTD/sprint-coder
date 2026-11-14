@@ -7,9 +7,10 @@ use agent_desktop_core::{
 };
 use serde_json::json;
 
+use super::automation::root_from_hwnd_within;
 use super::chromium;
 use super::surfaces::surface_root;
-use super::walk::shown_view::{VisibleView, checked_view_of};
+use super::walk::shown_view::{VisibleView, WindowViewHint, checked_view_of, window_view_hint};
 use super::walk::walker::{DEFAULT_MAX_RAW_DEPTH, WalkBudget, WalkOutcome};
 use super::walk::walker_source::{
     walk_uia_shown_subtree, walk_uia_subtree_for, walk_uia_visible_subtree,
@@ -102,15 +103,48 @@ pub(crate) fn observe_tree(
 /// view chosen as [`observe_tree`] does, without walking, within `deadline`.
 /// Anything that fails or does not answer in time answers `None`, which keeps
 /// the caller's split and its reads as they were.
+///
+/// For the window itself, its handle answers first ([`window_view_hint`]),
+/// without asking the target: a Chromium-hosted window is read in the
+/// onscreen view and a window of another class than WPF's is not read that
+/// way, so neither has its root resolved here. Only a WPF window by its class
+/// has its root resolved, and that resolution is bounded by `deadline` too
+/// ([`root_from_hwnd_within`]), so the check never takes longer than the
+/// caller allowed it (core's `VISIBLE_CHECK_CAP`) - which the client's own
+/// bound (2 s) did not ensure.
 pub(crate) fn reads_visible_elements(
     window: &agent_desktop_core::WindowInfo,
     surface: agent_desktop_core::SnapshotSurface,
     deadline: Deadline,
 ) -> Option<std::time::Duration> {
+    if surface == agent_desktop_core::SnapshotSurface::Window {
+        return reads_visible_elements_of_window(window, deadline);
+    }
     let element = surface_root(ObservationRoot::Window(window), surface, deadline).ok()?;
     checked_view_of(&element, deadline)
         .or_none()
         .map(VisibleView::read_floor)
+}
+
+/// [`reads_visible_elements`] of the window itself.
+fn reads_visible_elements_of_window(
+    window: &agent_desktop_core::WindowInfo,
+    deadline: Deadline,
+) -> Option<std::time::Duration> {
+    if window.is_process_owner() || deadline.is_expired() {
+        return None;
+    }
+    let handle = crate::system::window::window_ops::parse_window_id(&window.id).ok()?;
+    match window_view_hint(handle) {
+        WindowViewHint::Onscreen => Some(VisibleView::Onscreen.read_floor()),
+        WindowViewHint::NotRead => None,
+        WindowViewHint::WpfCandidate => {
+            let element = root_from_hwnd_within(handle, deadline).ok()?;
+            checked_view_of(&element, deadline)
+                .or_none()
+                .map(VisibleView::read_floor)
+        }
+    }
 }
 
 /// The view a read of the visible elements alone walks, `None` for any other
@@ -404,3 +438,7 @@ fn walk_fault_error(failures: &[AdapterError]) -> AdapterError {
 #[cfg(test)]
 #[path = "observe_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "observe_view_check_tests.rs"]
+mod view_check_tests;

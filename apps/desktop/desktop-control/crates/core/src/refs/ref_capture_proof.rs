@@ -158,6 +158,10 @@ impl<'a> CaptureProof<'a> {
                 bounds,
                 runtime_id,
                 ancestors,
+                ancestor_runtime_ids: crate::refs::ref_view::ancestor_runtime_ids(
+                    self.observed,
+                    index,
+                ),
             });
         }
     }
