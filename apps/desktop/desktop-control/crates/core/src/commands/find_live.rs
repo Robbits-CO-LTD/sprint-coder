@@ -87,7 +87,7 @@ enum WindowSearch {
     /// The whole window, as every find did before.
     Whole(Box<LocatorResolution>),
     /// The elements the window shows (see [`view`]).
-    View(Box<snapshot::SnapshotResult>),
+    View(Box<view::View>),
 }
 
 /// Searches one window whole, and when that search runs out of time or reaches
@@ -101,15 +101,17 @@ fn search_window(
     window: &crate::WindowInfo,
     deadline: crate::Deadline,
 ) -> Result<WindowSearch, AppError> {
-    let attempt = view::plan(args, adapter, window, deadline);
-    let request = resolve_request(args, attempt.deadline);
-    let whole = resolve_query(adapter, query, ObservationRoot::Window(window), &request)
-        .and_then(|resolution| require_complete(&resolution).map(|()| resolution));
+    let in_view = view::plan(args, adapter, window, deadline);
+    let request = resolve_request(args, deadline);
+    let whole = if in_view {
+        view::search_whole(adapter, query, window, &request)
+    } else {
+        resolve_query(adapter, query, ObservationRoot::Window(window), &request)
+    }
+    .and_then(|resolution| require_complete(&resolution).map(|()| resolution));
     match whole {
-        Err(AppError::Adapter(error))
-            if attempt.view && error.code == crate::ErrorCode::Timeout =>
-        {
-            match view::read_view(adapter, window, deadline)? {
+        Err(AppError::Adapter(error)) if in_view && error.code == crate::ErrorCode::Timeout => {
+            match view::read_view(args, query, adapter, window, deadline)? {
                 Some(found) => Ok(WindowSearch::View(Box::new(found))),
                 None => Err(AppError::Adapter(error)),
             }

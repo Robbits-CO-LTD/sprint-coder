@@ -3,15 +3,20 @@
 //! elements the window shows, as a snapshot of such a window does.
 //!
 //! The answer is a snapshot of the visible elements (the same read, the same
-//! allocation and the same proof, `proven_in_view`), searched with the query:
-//! its refs act only while the view stays as it is, exactly like the refs of
-//! that snapshot, and nothing here proves a ref any other way.
+//! allocation and the same proof, `proven_in_view`), with the query evaluated
+//! over that read as a whole-window find evaluates it: its refs act only while
+//! the view stays as it is, exactly like the refs of that snapshot, and nothing
+//! here proves a ref any other way.
 use super::{FindArgs, LOCATOR_TIMEOUT};
 use crate::{
     AccessibilityNode, AppError, Deadline, LocatorQuery, WindowInfo,
     adapter::{PlatformAdapter, TreeOptions},
     context::CommandContext,
-    locator::live_locator::{LocatorMatchData, ObservationRequest, ObservationRoot},
+    locator::live_locator::{
+        LocatorMaterialization, LocatorResolution, LocatorResolveRequest, ObservationRequest,
+        ObservationRoot, ObservedObservation, ObservedTree, evaluate_locator_tree,
+        observation_deadline, resolve_query_from,
+    },
     refs::refs_store::RefStore,
     snapshot::{self, SnapshotResult},
     trace::trace_artifacts,
@@ -25,47 +30,22 @@ use std::time::Duration;
 /// search its full deadline, as before.
 const PROBE_CAP: Duration = Duration::from_millis(500);
 
-/// How the whole-window search of one find runs.
-pub(super) struct WholeAttempt {
-    /// The deadline the whole-window search gets.
-    pub(super) deadline: Deadline,
-    /// Whether the find answers from the visible elements when that search
-    /// runs out of time or reaches its read limit.
-    pub(super) view: bool,
-}
-
-/// Plans the whole-window search: with the find's full deadline, unless this
-/// find may answer from the visible elements ([`view_allowed`]) and the window
-/// is read that way. Then the search gets [`whole_search_budget`] and the rest
-/// stays for the read of the visible elements.
+/// Whether this find answers from the visible elements of `window` when its
+/// whole-window search does not finish: a find of that shape
+/// ([`answers_in_view`]), under at least the default deadline
+/// ([`view_allowed`]), of a window the adapter reads that way.
 ///
-/// The window is asked first because a window not read that way (anything not
-/// Chromium-hosted, as the adapter decides) must keep the whole deadline: a
-/// search cut short there would end in a timeout with nothing to answer from.
+/// The window is asked first, by a read of its root alone, so that a window not
+/// read that way (anything not Chromium-hosted, as the adapter decides) keeps
+/// its whole-window search exactly as before ([`search_whole`] is only used
+/// for a window that is).
 pub(super) fn plan(
     args: &FindArgs,
     adapter: &dyn PlatformAdapter,
     window: &WindowInfo,
     deadline: Deadline,
-) -> WholeAttempt {
-    let whole = WholeAttempt {
-        deadline,
-        view: false,
-    };
-    if !answers_in_view(args) || deadline.span() < LOCATOR_TIMEOUT {
-        return whole;
-    }
-    if !reads_view(adapter, window, deadline) {
-        return whole;
-    }
-    let budget = whole_search_budget(deadline.remaining());
-    if !view_allowed(deadline, budget) {
-        return whole;
-    }
-    WholeAttempt {
-        deadline: deadline.capped(budget),
-        view: true,
-    }
+) -> bool {
+    answers_in_view(args) && view_allowed(deadline) && reads_view(adapter, window, deadline)
 }
 
 /// Whether a find of this shape may answer from the visible elements: a search
@@ -81,26 +61,43 @@ pub(super) fn answers_in_view(args: &FindArgs) -> bool {
         && args.selection.nth.is_none()
 }
 
-/// The time the whole-window search is given out of `remaining`: three
-/// quarters of it, leaving the rest for the read of the visible elements
-/// (about 0.4 s on a Chromium page of 5,000 rows). Under the default 5 s that
-/// is 3.75 s.
-///
-/// Unlike a snapshot's whole read (`WHOLE_READ_CAP`), this is not capped: a
-/// find records only its matches, so a whole search that finishes late still
-/// answers with refs it can keep, and a caller who raised `--timeout-ms` gets
-/// the whole-window answer it asked for whenever it comes in time.
-pub(super) fn whole_search_budget(remaining: Duration) -> Duration {
-    remaining * 3 / 4
+/// Whether the find may fall back to the visible elements: only when its
+/// deadline is at least the default one. A caller that shortens the deadline
+/// cannot push a window that a default find searches whole onto the narrower
+/// proof; it gets the timeout instead, as before.
+pub(super) fn view_allowed(deadline: Deadline) -> bool {
+    deadline.span() >= LOCATOR_TIMEOUT
 }
 
-/// Whether the find may fall back to the visible elements: only when its
-/// deadline is at least the default one and the whole-window search was given
-/// at least half of that. A caller that shortens the deadline cannot push a
-/// window that a default find searches whole onto the narrower proof; it gets
-/// the timeout instead, as before.
-pub(super) fn view_allowed(deadline: Deadline, whole_budget: Duration) -> bool {
-    deadline.span() >= LOCATOR_TIMEOUT && whole_budget >= LOCATOR_TIMEOUT / 2
+/// The whole-window search of a find that may answer from the view.
+///
+/// It runs as every whole-window search does, under the find's full deadline,
+/// and its observation gets the time it always got: the deadline less what a
+/// search keeps for reading its selected matches (`observation_deadline`, 1 s
+/// of the default 5 s). The one difference is what happens once that time has
+/// passed without an answer: this search starts no further observation, so
+/// that time is left for the read of the visible elements rather than spent on
+/// another observation of a window that could not be read whole in time. A
+/// search that finishes within that time answers exactly as before, so a window
+/// that a find searched whole before is still searched whole.
+pub(super) fn search_whole(
+    adapter: &dyn PlatformAdapter,
+    query: &LocatorQuery,
+    window: &WindowInfo,
+    request: &LocatorResolveRequest,
+) -> Result<LocatorResolution, AppError> {
+    let observe_until = observation_deadline(request);
+    let root = ObservationRoot::Window(window);
+    resolve_query_from(adapter, query, request, |deadline| {
+        if observe_until.is_expired() {
+            return Err(AppError::Adapter(observe_until.timeout_error()));
+        }
+        let deadline = deadline.capped(observe_until.remaining());
+        let observation =
+            ObservationRequest::locator_for_root(query, request, root, deadline).validate()?;
+        crate::tree::renderer_accessibility::observe_tree(adapter, root, &observation, None)
+            .map(ObservedObservation::whole)
+    })
 }
 
 /// Whether the adapter reads this window by its visible elements, asked with a
@@ -135,82 +132,114 @@ fn view_options() -> TreeOptions {
     }
 }
 
+/// A find answered from the window's visible elements: the snapshot of them
+/// (its refs and their proof), and the query evaluated over the observation that
+/// snapshot was allocated from.
+pub(super) struct View {
+    snapshot: SnapshotResult,
+    /// The observation, as read: the query was evaluated over it, and it maps
+    /// each matched node to the ref the snapshot allocated for that node.
+    observed: ObservedTree,
+    resolution: LocatorResolution,
+}
+
 /// The snapshot of the window's visible elements, read in what is left of
-/// `deadline`, or `None` when the window is not read that way, the read does
-/// not complete in time, or its record would be too large to keep. The caller
-/// then reports the whole-window search's own failure.
+/// `deadline`, with the query evaluated over the same observation, or `None`
+/// when the window is not read that way, the read does not complete in time,
+/// the query cannot be answered over it, or its record would be too large to
+/// keep. The caller then reports the whole-window search's own failure.
+///
+/// The query is evaluated by the evaluator a whole-window find runs, over the
+/// observed evidence (an empty value that was read stays apart from one not
+/// reported, and every identifier counts), never over the tree a snapshot
+/// presents. The record of refs is that of a default snapshot of the view, so
+/// its size, its matching and its proof are those of such a snapshot.
 pub(super) fn read_view(
+    args: &FindArgs,
+    query: &LocatorQuery,
     adapter: &dyn PlatformAdapter,
     window: &WindowInfo,
     deadline: Deadline,
-) -> Result<Option<SnapshotResult>, AppError> {
+) -> Result<Option<View>, AppError> {
     let options = view_options();
     let Some(capture) =
         snapshot::window_capture::capture_visible(adapter, &options, window, deadline)
     else {
         return Ok(None);
     };
-    let result = snapshot::allocate_capture(&options, window.clone(), capture)?;
-    if !result.visible_scope || result.refmap.exceeds_size_limit() {
+    // Taken before the snapshot is allocated, which moves fields out of it.
+    let observed = capture.observed.clone();
+    let request = LocatorResolveRequest {
+        materialization: LocatorMaterialization::None,
+        ..super::resolve_request(args, deadline)
+    };
+    let resolution = evaluate_locator_tree(observed.clone(), query, &request)?;
+    if !resolution.meta.selection_complete {
         return Ok(None);
     }
-    Ok(Some(result))
+    let snapshot = snapshot::allocate_capture(&options, window.clone(), capture)?;
+    if !snapshot.visible_scope || snapshot.refmap.exceeds_size_limit() {
+        return Ok(None);
+    }
+    Ok(Some(View {
+        snapshot,
+        observed,
+        resolution,
+    }))
 }
 
 /// Saves the snapshot of the visible elements as a snapshot of them is saved,
-/// and answers the find from it, marked as covering those elements only.
+/// and answers the find from it in the shape a whole-window find answers,
+/// marked as covering those elements only.
 pub(super) fn respond(
     args: &FindArgs,
     query: &LocatorQuery,
     context: &CommandContext,
-    mut view: SnapshotResult,
+    view: View,
 ) -> Result<Value, AppError> {
+    let View {
+        snapshot: mut view,
+        observed,
+        resolution,
+    } = view;
     let store = RefStore::for_session(context.session_id())?;
     let snapshot_id = view.save_refmap(&store)?;
     trace_artifacts::copy_refmap_if_full(context, &store, &snapshot_id, &view.refmap)?;
     view.bind_snapshot_id(snapshot_id.clone());
 
-    let mut found = Vec::new();
-    collect_matches(&view.tree, query, &mut Vec::new(), &mut found);
-    let total_matches = found.len();
+    let refs = refs_by_node(&observed, &view.tree);
+    let meta = resolution.meta;
     context.trace_lazy("locator.resolve", || {
         json!({
             "complete": false,
             "scope": "visible",
-            "match_count": total_matches,
+            "match_count": meta.total_matches,
             "ref_count": view.refmap.len(),
             "snapshot_id": snapshot_id,
         })
     })?;
-    let roles_present = if found.is_empty() {
-        roles_in(&view.tree)
-    } else {
-        Vec::new()
-    };
-    let matches = found
+    // As a whole-window find: a match with a ref carries it, one without
+    // carries its rectangle on screen instead (`format_match`).
+    let matches = resolution
+        .matches
         .into_iter()
-        .map(|(data, bounds)| super::format_match(data, bounds))
+        .map(|found| {
+            let mut data = found.data;
+            data.ref_id = refs.get(found.document_order as usize).cloned().flatten();
+            data.interactive = data.ref_id.is_some();
+            super::format_match(data, found.screen_bounds)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut response = if args.selection.first {
-        super::single_match_response(matches.into_iter().next(), query, roles_present)
+        super::single_match_response(matches.into_iter().next(), query, meta.roles_present)
     } else {
-        let limit = match args.selection.limit {
-            None => Some(super::DEFAULT_LIMIT),
-            Some(0) => None,
-            Some(limit) => Some(limit),
-        };
-        let truncated = limit.is_some_and(|limit| total_matches > limit);
-        let listed = matches
-            .into_iter()
-            .take(limit.unwrap_or(usize::MAX))
-            .collect::<Vec<_>>();
-        let is_empty = listed.is_empty();
+        let is_empty = matches.is_empty();
         let mut response = json!({
-            "matches": listed,
-            "total_matches": total_matches,
-            "truncated": truncated,
+            "matches": matches,
+            "total_matches": meta.total_matches,
+            "truncated": meta.truncated,
         });
-        super::attach_roles_present(&mut response, is_empty, query, roles_present);
+        super::attach_roles_present(&mut response, is_empty, query, meta.roles_present);
         response
     };
     super::attach_snapshot_id(&mut response, Some(&snapshot_id));
@@ -235,58 +264,41 @@ pub(super) const VISIBLE_MATCHES_HINT: &str = "The window has too many elements 
 /// nothing shown matched. It must not read as "the window has no such element".
 pub(super) const VISIBLE_NO_MATCH_HINT: &str = "No element shown on screen matches. The window has too many elements to search whole in time, so only the elements it shows on screen were searched: this does not mean the window has no such element. Scroll the part of the window that may hold it into view, then run find again. If almost nothing is shown, the window is probably covered by another window, which makes it report its elements as off screen: bring it forward, then run find again.";
 
-/// Collects every node of the presented view that the query matches, in
-/// document order, each with the path of its ancestors' labels (the labels a
-/// whole-window find reports).
-fn collect_matches(
-    node: &AccessibilityNode,
-    query: &LocatorQuery,
-    path: &mut Vec<String>,
-    found: &mut Vec<(LocatorMatchData, Option<crate::Rect>)>,
-) {
-    if crate::accessibility_node_matches(node, query) {
-        found.push((
-            LocatorMatchData {
-                ref_id: node.ref_id.clone(),
-                role: node.role.clone(),
-                name: node.identity.name.clone().unwrap_or_default(),
-                value: node.identity.value.clone(),
-                states: node.presentation.states.clone(),
-                interactive: node.ref_id.is_some(),
-                path: path.clone(),
-            },
-            node.presentation.bounds,
-        ));
-    }
-    path.push(node_label(node));
-    for child in &node.children {
-        collect_matches(child, query, path, found);
-    }
-    path.pop();
-}
-
-fn node_label(node: &AccessibilityNode) -> String {
-    node.identity
-        .name
-        .as_deref()
-        .or(node.identity.value.as_deref())
-        .filter(|label| !label.trim().is_empty())
-        .map(|label| format!("{}:{label}", node.role))
-        .unwrap_or_else(|| node.role.clone())
-}
-
-/// The roles of the presented view, sorted and once each, for an empty answer
-/// to a query that names a role.
-fn roles_in(tree: &AccessibilityNode) -> Vec<String> {
-    fn walk(node: &AccessibilityNode, roles: &mut std::collections::BTreeSet<String>) {
-        roles.insert(node.role.clone());
-        for child in &node.children {
-            walk(child, roles);
+/// The ref the snapshot allocated for each observed node, by node index.
+///
+/// The snapshot presents one node for each observed node, with the observed
+/// children in their order (a node cut at the depth limit keeps none), which is
+/// also how its capture proof found the node behind each ref (`node_at`). The
+/// two trees are walked together on that rule; where they do not line up (a
+/// role or a child count differs), nothing below is paired, so a match there
+/// carries no ref rather than another node's.
+fn refs_by_node(observed: &ObservedTree, presented: &AccessibilityNode) -> Vec<Option<String>> {
+    fn pair(
+        observed: &ObservedTree,
+        index: usize,
+        presented: &AccessibilityNode,
+        refs: &mut [Option<String>],
+    ) {
+        let Some(node) = observed.nodes.get(index) else {
+            return;
+        };
+        let role = node.evidence.role.known().map_or("unknown", String::as_str);
+        if role != presented.role {
+            return;
+        }
+        refs[index].clone_from(&presented.ref_id);
+        if presented.children.len() != node.children.len() {
+            return;
+        }
+        for (child, presented_child) in node.children.iter().zip(&presented.children) {
+            pair(observed, *child as usize, presented_child, refs);
         }
     }
-    let mut roles = std::collections::BTreeSet::new();
-    walk(tree, &mut roles);
-    roles.into_iter().collect()
+    let mut refs = vec![None; observed.nodes.len()];
+    if let [root] = observed.roots.as_slice() {
+        pair(observed, *root as usize, presented, &mut refs);
+    }
+    refs
 }
 
 #[cfg(test)]

@@ -21,6 +21,9 @@ enum WholeRead {
     /// Stops at once at a fixed read limit, as a list of tens of thousands of
     /// rows does.
     ReadLimit,
+    /// Takes this long, then returns the whole tree, complete, when its
+    /// deadline allows that long; otherwise uses up the deadline and times out.
+    Slow(Duration, Box<AccessibilityNode>),
 }
 
 struct ViewAdapter {
@@ -167,6 +170,7 @@ impl ObservationOps for ViewAdapter {
                 let index = i32::try_from(index).unwrap_or(i32::MAX);
                 node.evidence.ref_evidence.runtime_id = Some(vec![42, index]);
             }
+            with_two_identifiers(&mut observed);
             observed.mark_visible_scope();
             return Ok(observed);
         }
@@ -176,10 +180,22 @@ impl ObservationOps for ViewAdapter {
             .unwrap()
             .push(crate::wait::deadline::now() + request.deadline.remaining());
         match &self.whole {
-            WholeRead::Complete(tree) => crate::adapter::observed_tree(&root, (**tree).clone()),
+            WholeRead::Complete(tree) => {
+                let mut observed = crate::adapter::observed_tree(&root, (**tree).clone())?;
+                with_two_identifiers(&mut observed);
+                Ok(observed)
+            }
             WholeRead::RunsOut => {
                 crate::wait::deadline::sleep(request.deadline.remaining());
                 Err(request.deadline.timeout_error())
+            }
+            WholeRead::Slow(takes, tree) => {
+                if request.deadline.remaining() < *takes {
+                    crate::wait::deadline::sleep(request.deadline.remaining());
+                    return Err(request.deadline.timeout_error());
+                }
+                crate::wait::deadline::sleep(*takes);
+                crate::adapter::observed_tree(&root, (**tree).clone())
             }
             WholeRead::ReadLimit => Err(AdapterError::timeout(
                 "Locator traversal reached a deterministic observation budget",
@@ -393,8 +409,14 @@ fn first_and_limit_shape_the_matches_shown() {
     assert_eq!(response["scope_hint"], VISIBLE_MATCHES_HINT);
 }
 
-/// The whole search gets three quarters of the default deadline, and the read
-/// of the visible elements answers within the rest.
+/// The time the observation of a whole-window search always gets under the
+/// default deadline: the deadline less the 1 s a search keeps for reading the
+/// matches it selects.
+const OBSERVATION_TIME: Duration = Duration::from_secs(4);
+
+/// The whole search's observation gets the time it always got, and the read
+/// of the visible elements answers within the time the search keeps for
+/// reading its matches; nothing reads the whole window after that.
 #[test]
 fn the_whole_search_and_the_view_share_the_default_deadline() {
     let _guard = HomeGuard::new();
@@ -403,17 +425,38 @@ fn the_whole_search_and_the_view_share_the_default_deadline() {
 
     run(&adapter, find(Some("Row 3"), listing())).expect("the view answers");
 
-    // The read itself ends earlier still: a find keeps part of its search's
-    // deadline for reading the selected matches.
-    let span = adapter.whole_span(clock.start);
-    assert!(
-        span > LOCATOR_TIMEOUT / 2 && span <= LOCATOR_TIMEOUT * 3 / 4,
-        "{span:?}"
-    );
+    assert_eq!(adapter.whole_span(clock.start), OBSERVATION_TIME);
     assert!(
         clock.clock.elapsed() <= LOCATOR_TIMEOUT,
         "{:?}",
         clock.clock.elapsed()
+    );
+}
+
+/// A whole search whose observation finishes late, but within the time an
+/// observation always gets, answers whole as before: the fallback never takes
+/// time from it.
+#[test]
+fn a_slow_whole_search_that_finishes_in_time_still_answers_whole() {
+    let _guard = HomeGuard::new();
+    let clock = Started::now();
+    let adapter = ViewAdapter::new(
+        WholeRead::Slow(
+            OBSERVATION_TIME - Duration::from_millis(100),
+            Box::new(shown_rows()),
+        ),
+        Some(shown_rows()),
+    );
+
+    let response = run(&adapter, find(Some("Row 3"), listing())).expect("the whole answers");
+
+    assert!(response.get("scope").is_none(), "{response}");
+    assert_eq!(response["total_matches"], 1);
+    assert_eq!(adapter.whole_span(clock.start), OBSERVATION_TIME);
+    assert_eq!(
+        adapter.view_reads(),
+        1,
+        "only the probe of the window's root"
     );
 }
 
@@ -467,8 +510,8 @@ fn a_window_not_read_by_its_view_keeps_the_whole_deadline_and_the_timeout() {
 
     assert_eq!(error.code(), "TIMEOUT");
     assert!(
-        adapter.whole_span(clock.start) > LOCATOR_TIMEOUT * 3 / 4,
-        "not capped"
+        adapter.whole_span(clock.start) > OBSERVATION_TIME,
+        "it reads on into the time kept for the matches, as before"
     );
 }
 
@@ -512,8 +555,8 @@ fn counts_and_positions_never_answer_from_the_view() {
         assert_eq!(error.code(), "TIMEOUT", "{shape}");
         assert_eq!(adapter.view_reads(), 0, "{shape}: not even the probe");
         assert!(
-            adapter.whole_span(clock.start) > LOCATOR_TIMEOUT * 3 / 4,
-            "{shape}: not capped"
+            adapter.whole_span(clock.start) > OBSERVATION_TIME,
+            "{shape}: searched as before"
         );
     }
 }
@@ -550,22 +593,253 @@ fn only_a_whole_window_listing_or_first_may_answer_from_the_view() {
 }
 
 #[test]
-fn the_whole_search_budget_is_three_quarters_and_uncapped() {
-    assert_eq!(
-        whole_search_budget(Duration::from_secs(5)),
-        Duration::from_millis(3_750)
-    );
-    assert_eq!(
-        whole_search_budget(Duration::from_secs(20)),
-        Duration::from_secs(15),
-        "a raised --timeout-ms reaches the whole search"
-    );
-    let default = Deadline::from_duration(LOCATOR_TIMEOUT).unwrap();
-    assert!(view_allowed(default, LOCATOR_TIMEOUT / 2));
-    assert!(!view_allowed(
-        default,
-        LOCATOR_TIMEOUT / 2 - Duration::from_millis(1)
+fn only_the_default_deadline_or_a_longer_one_may_answer_from_the_view() {
+    assert!(view_allowed(
+        Deadline::from_duration(LOCATOR_TIMEOUT).unwrap()
     ));
-    let short = Deadline::after(4_999).unwrap();
-    assert!(!view_allowed(short, LOCATOR_TIMEOUT));
+    assert!(view_allowed(Deadline::after(20_000).unwrap()));
+    assert!(!view_allowed(Deadline::after(4_999).unwrap()));
+}
+
+/// Gives every element named "Field ..." two identifiers, the first one
+/// preferred, as an element with both an automation id and another
+/// identifier reports them.
+fn with_two_identifiers(observed: &mut ObservedTree) {
+    for node in &mut observed.nodes {
+        let Some(name) = node
+            .evidence
+            .name
+            .known()
+            .filter(|name| name.starts_with("Field"))
+            .cloned()
+        else {
+            continue;
+        };
+        let identifier = |value: String, kind| crate::ElementIdentifier { kind, value };
+        node.evidence.identifiers = crate::locator::live_locator::IdentifierEvidence::typed(
+            [
+                identifier(
+                    format!("{name}-primary"),
+                    crate::IdentifierKind::AutomationId,
+                ),
+                identifier(
+                    format!("{name}-alt"),
+                    crate::IdentifierKind::AxDomIdentifier,
+                ),
+            ],
+            Some(0),
+            true,
+        );
+    }
+}
+
+/// A form above the rows: a label without a ref, an empty field and a filled
+/// one.
+fn form() -> AccessibilityNode {
+    let mut empty = node("textfield", "Field A");
+    empty.identity.value = Some(String::new());
+    let mut filled = node("textfield", "Field B");
+    filled.identity.value = Some("typed".into());
+    let mut root = shown_rows();
+    root.children
+        .splice(0..0, [node("statictext", "Name label"), empty, filled]);
+    root
+}
+
+fn filter() -> FindFilterArgs {
+    FindFilterArgs {
+        role: None,
+        name: None,
+        description: None,
+        native_id: None,
+        value: None,
+        text: None,
+        exact: false,
+    }
+}
+
+fn query(filter: FindFilterArgs) -> FindArgs {
+    FindArgs {
+        filter,
+        ..find(None, listing())
+    }
+}
+
+fn clone_filter(filter: &FindFilterArgs) -> FindFilterArgs {
+    FindFilterArgs {
+        role: filter.role.clone(),
+        name: filter.name.clone(),
+        description: filter.description.clone(),
+        native_id: filter.native_id.clone(),
+        value: filter.value.clone(),
+        text: filter.text.clone(),
+        exact: filter.exact,
+    }
+}
+
+/// A match without a ref (static text) carries its rectangle on screen, as in
+/// a whole-window find, while the record of refs stays the one a default
+/// snapshot of the same view saves: the rectangle is read from the
+/// observation, never written into the refs.
+#[test]
+fn a_match_without_a_ref_shows_its_bounds_and_the_record_stays_a_snapshots() {
+    let _guard = HomeGuard::new();
+    let _clock = VirtualClock::freeze();
+    let adapter = ViewAdapter::new(WholeRead::RunsOut, Some(form()));
+
+    let response = run(
+        &adapter,
+        query(FindFilterArgs {
+            role: Some("statictext".into()),
+            ..filter()
+        }),
+    )
+    .expect("the view answers");
+
+    assert_eq!(response["scope"], "visible");
+    let label = &response["matches"][0];
+    assert_eq!(label["name"], "Name label");
+    assert!(label.get("ref_id").is_none_or(Value::is_null), "{label}");
+    assert_eq!(label["interactive"], false);
+    // The label is the second node the view read (the window is the first).
+    assert_eq!(
+        label["bounds"],
+        json!({ "x": 0.0, "y": 20.0, "width": 200.0, "height": 20.0 })
+    );
+
+    // A match with a ref carries no rectangle, as in a whole-window find.
+    let rows = run(&adapter, find(Some("Row 3"), listing())).expect("the view answers");
+    assert!(rows["matches"][0].get("bounds").is_none());
+    assert!(rows["matches"][0]["ref_id"].is_string());
+
+    let snapshot_id = response["snapshot_id"].as_str().unwrap();
+    let saved = RefStore::new().unwrap().load_snapshot(snapshot_id).unwrap();
+    // A snapshot of the same view (its whole read stops at once here).
+    let snapshotted = ViewAdapter::new(WholeRead::ReadLimit, Some(form()));
+    let snapshot = crate::snapshot::build(
+        &snapshotted,
+        // A default snapshot's options; the fixture is shallower than its depth.
+        &TreeOptions {
+            max_depth: 10,
+            ..TreeOptions::default()
+        },
+        None,
+        Some("w-1"),
+        Deadline::after(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS).unwrap(),
+    )
+    .expect("the snapshot reads the view");
+    assert!(snapshot.visible_scope);
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap(),
+        serde_json::to_value(&snapshot.refmap).unwrap(),
+        "the find saves the record a snapshot of the view saves"
+    );
+}
+
+/// The view is searched by the predicate a whole-window find applies to the
+/// observed elements: an empty value that was read is a value
+/// (`--value "" --exact`), and an identifier that is not the preferred one
+/// still matches.
+#[test]
+fn the_view_is_searched_by_the_whole_window_predicate() {
+    let _guard = HomeGuard::new();
+    let _clock = VirtualClock::freeze();
+    let viewed = ViewAdapter::new(WholeRead::RunsOut, Some(form()));
+    let whole = ViewAdapter::new(WholeRead::Complete(Box::new(form())), None);
+
+    let queries = [
+        FindFilterArgs {
+            role: Some("textfield".into()),
+            value: Some(String::new()),
+            exact: true,
+            ..filter()
+        },
+        FindFilterArgs {
+            native_id: Some("Field B-alt".into()),
+            ..filter()
+        },
+        FindFilterArgs {
+            native_id: Some("Field A-primary".into()),
+            ..filter()
+        },
+        FindFilterArgs {
+            role: Some("list".into()),
+            text: Some("Row 3".into()),
+            ..filter()
+        },
+        FindFilterArgs {
+            role: Some("textfield".into()),
+            name: Some("field".into()),
+            ..filter()
+        },
+    ];
+    for filter in &queries {
+        let label = format!(
+            "value={:?} native_id={:?} text={:?} name={:?}",
+            filter.value, filter.native_id, filter.text, filter.name
+        );
+        let in_view = run(&viewed, query(clone_filter(filter))).expect("the view answers");
+        let whole_answer =
+            run(&whole, query(clone_filter(filter))).expect("the whole window answers");
+        assert_eq!(in_view["scope"], "visible", "{label}");
+        assert!(whole_answer.get("scope").is_none(), "{label}");
+        assert_eq!(
+            in_view["total_matches"], whole_answer["total_matches"],
+            "{label}"
+        );
+        assert!(in_view["total_matches"].as_u64() > Some(0), "{label}");
+        let shape = |answer: &Value| {
+            answer["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|found| {
+                    (
+                        found["role"].clone(),
+                        found["name"].clone(),
+                        found["value"].clone(),
+                        found["path"].clone(),
+                        found["interactive"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape(&in_view), shape(&whole_answer), "{label}");
+    }
+}
+
+/// A ref is paired with its node only where the presented tree lines up with
+/// the observation; a node the presentation does not show the same way gets
+/// none, and nor does anything below it, rather than another node's ref.
+#[test]
+fn refs_pair_with_nodes_only_where_the_trees_line_up() {
+    let window = fixture_window();
+    let root = ObservationRoot::Window(&window);
+    let observed = crate::adapter::observed_tree(&root, form()).unwrap();
+    let mut presented = form();
+    presented.children[1].ref_id = Some("@s:e1".into());
+    presented.children[3].role = "group".into();
+    presented.children[4].children[0].ref_id = Some("@s:e2".into());
+    presented.children[4].children.pop();
+
+    let refs = refs_by_node(&observed, &presented);
+
+    let index_of = |name: &str| {
+        observed
+            .nodes
+            .iter()
+            .position(|node| node.evidence.name.known().map(String::as_str) == Some(name))
+            .unwrap()
+    };
+    assert_eq!(refs[index_of("Field A")].as_deref(), Some("@s:e1"));
+    assert_eq!(
+        refs[index_of("Go")],
+        None,
+        "a role that differs is not paired"
+    );
+    assert_eq!(
+        refs[index_of("Row 0")],
+        None,
+        "children that do not line up are not paired"
+    );
 }
