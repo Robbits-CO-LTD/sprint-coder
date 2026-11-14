@@ -1058,6 +1058,230 @@ describe('SetupWizard', () => {
     expect(current.tone).toBe('crisp');
   });
 
+  describe('a save that fails after a fresh read (#1245)', () => {
+    const row = (label: string) =>
+      [...container.querySelectorAll('[data-testid="setup-summary"] li')]
+        .find((li) => li.querySelector('span')?.textContent === label)
+        ?.querySelector('.setup-summary-value')?.textContent ?? '';
+    const toDone = async () => {
+      for (let i = 0; i < 6 && step() !== 'done'; i += 1) await press('setup-next');
+      expect(step()).toBe('done');
+    };
+    const goBackTo = async (target: string) => {
+      for (let i = 0; i < 6 && step() !== target; i += 1) await press('setup-back');
+      expect(step()).toBe(target);
+    };
+
+    /** A Team mode stored in Main, changed elsewhere (Settings) while the Setup is open. */
+    function teamStore(first: string) {
+      const settings = fullBridge(undefined, first);
+      const store = { mode: first, readable: true, failSave: 0, writeThenFail: false };
+      settings.getTeamUsageMode.mockImplementation(async () => {
+        if (!store.readable) throw new Error('busy');
+        return { mode: store.mode };
+      });
+      settings.setTeamUsageMode.mockImplementation(async (input: { mode: string }) => {
+        if (store.writeThenFail) {
+          // Written, but the answer is lost on the way back.
+          store.writeThenFail = false;
+          store.mode = input.mode;
+          throw new Error('lost');
+        }
+        if (store.failSave > 0) {
+          store.failSave -= 1;
+          throw new Error('disk');
+        }
+        store.mode = input.mode;
+        return { mode: store.mode };
+      });
+      return { settings, store };
+    }
+
+    it('Team: the summary shows the mode just read with the failure, not the older one; the choice stays and is stored on the next try', async () => {
+      const { settings, store } = teamStore('explicit');
+      await render();
+      await press('setup-start');
+      for (let i = 0; i < 4 && step() !== 'team'; i += 1) await press('setup-next');
+      expect(q<HTMLInputElement>('[data-testid="setup-team-explicit"]')?.checked).toBe(true);
+      store.mode = 'auto'; // stored elsewhere; the Setup has not read it yet
+      await choose('setup-team-proactive');
+      store.failSave = 1;
+      await press('setup-next'); // read: auto; the save fails
+      expect(settings.setTeamUsageMode).toHaveBeenCalledTimes(1);
+      await toDone();
+      expect(row('Team')).toBe('おまかせ保存できませんでした');
+      expect(q('[data-testid="setup-save-warning"]')).not.toBeNull();
+      // The choice is still on screen, and leaving the step again stores it.
+      await goBackTo('team');
+      expect(q<HTMLInputElement>('[data-testid="setup-team-proactive"]')?.checked).toBe(true);
+      await press('setup-next');
+      expect(settings.setTeamUsageMode).toHaveBeenLastCalledWith({ mode: 'proactive' });
+      await toDone();
+      expect(row('Team')).toBe('積極的に変更しました');
+      expect(q('[data-testid="setup-save-warning"]')).toBeNull();
+    });
+
+    it('Team: once what is stored is the choice, nothing more is saved and the failure mark goes', async () => {
+      const { settings, store } = teamStore('explicit');
+      await render();
+      await press('setup-start');
+      for (let i = 0; i < 4 && step() !== 'team'; i += 1) await press('setup-next');
+      store.mode = 'auto';
+      await choose('setup-team-proactive');
+      store.failSave = 1;
+      await press('setup-next');
+      await toDone();
+      expect(row('Team')).toBe('おまかせ保存できませんでした');
+      // In Settings, the same choice is stored; the Team step reads it on the way back.
+      store.mode = 'proactive';
+      await goBackTo('team');
+      expect(q<HTMLInputElement>('[data-testid="setup-team-proactive"]')?.checked).toBe(true);
+      await press('setup-next');
+      expect(settings.setTeamUsageMode).toHaveBeenCalledTimes(1);
+      await toDone();
+      expect(row('Team')).toBe('積極的に変更しました');
+      expect(q('[data-testid="setup-save-warning"]')).toBeNull();
+    });
+
+    it('Team: a save whose answer is lost after it was written is shown as stored, once read back', async () => {
+      const { store } = teamStore('explicit');
+      await render();
+      await press('setup-start');
+      for (let i = 0; i < 4 && step() !== 'team'; i += 1) await press('setup-next');
+      await choose('setup-team-proactive');
+      store.writeThenFail = true;
+      await press('setup-next');
+      await toDone();
+      expect(row('Team')).toBe('積極的に変更しました');
+      expect(q('[data-testid="setup-save-warning"]')).toBeNull();
+    });
+
+    it('Team: when what is stored cannot be read after the failed save, the value read before it is not passed off as certain', async () => {
+      const { settings, store } = teamStore('explicit');
+      settings.setTeamUsageMode.mockImplementationOnce(async () => {
+        store.readable = false; // Main stops answering while the save is under way
+        throw new Error('disk');
+      });
+      await render();
+      await press('setup-start');
+      for (let i = 0; i < 4 && step() !== 'team'; i += 1) await press('setup-next');
+      store.mode = 'auto';
+      await choose('setup-team-proactive');
+      await press('setup-next');
+      await toDone();
+      expect(row('Team')).toBe('おまかせ（今もこのままか、確かめられません）保存できませんでした');
+      expect(row('Team')).not.toContain('言った時だけ');
+      expect(q('[data-testid="setup-save-warning"]')?.textContent).toBe(
+        '保存できなかった設定があります。確かめられなかった値は、保存の前のものです。設定の画面から確かめて変えられます。',
+      );
+      // Readable again: the next read settles it.
+      store.readable = true;
+      await goBackTo('team');
+      expect(q<HTMLInputElement>('[data-testid="setup-team-proactive"]')?.checked).toBe(true);
+      await toDone();
+      expect(row('Team')).toBe('積極的に変更しました');
+      expect(q('[data-testid="setup-save-warning"]')).toBeNull();
+    });
+
+    /** Reply preferences stored in Main, changed elsewhere while the Setup is open. */
+    function replyStore() {
+      const settings = fullBridge({});
+      const store = {
+        preferences: { ...DEFAULT_ASSISTANT_PREFERENCES } as AssistantPreferences,
+        readable: true,
+        failSave: 0,
+      };
+      settings.getAssistantPreferences.mockImplementation(async () => {
+        if (!store.readable) throw new Error('busy');
+        return { configured: true, preferences: { ...store.preferences } };
+      });
+      settings.setAssistantPreferences.mockImplementation(async (input: AssistantPreferences) => {
+        if (store.failSave > 0) {
+          store.failSave -= 1;
+          throw new Error('disk');
+        }
+        store.preferences = { ...input };
+        return { configured: true, preferences: { ...store.preferences } };
+      });
+      return { settings, store };
+    }
+
+    it('reply style: the summary shows the style just read with the failure, not the older one; the choice stays and is stored on the next try', async () => {
+      const { settings, store } = replyStore();
+      await render();
+      await press('setup-start');
+      await press('setup-next'); // ai -> reply
+      expect(q<HTMLInputElement>('[data-testid="setup-tone-polite"]')?.checked).toBe(true);
+      store.preferences = { ...store.preferences, tone: 'casual' }; // stored elsewhere
+      await choose('setup-length-short');
+      store.failSave = 1;
+      await press('setup-next'); // read: casual; the save fails
+      expect(settings.setAssistantPreferences).toHaveBeenCalledTimes(1);
+      await toDone();
+      expect(row('返事の仕方')).toBe('フランク・ふつう・理由も保存できませんでした');
+      await goBackTo('reply');
+      // The choice made here stays; the item not touched here follows what is stored.
+      expect(q<HTMLInputElement>('[data-testid="setup-length-short"]')?.checked).toBe(true);
+      expect(q<HTMLInputElement>('[data-testid="setup-tone-casual"]')?.checked).toBe(true);
+      await press('setup-next');
+      expect(settings.setAssistantPreferences).toHaveBeenLastCalledWith({
+        ...DEFAULT_ASSISTANT_PREFERENCES,
+        tone: 'casual',
+        length: 'short',
+      });
+      await toDone();
+      expect(row('返事の仕方')).toBe('フランク・短く・理由も変更しました');
+      expect(q('[data-testid="setup-save-warning"]')).toBeNull();
+    });
+
+    it('details: after the reply items fail to save, the summary shows the reply settings just read, not the older ones', async () => {
+      const { settings, store } = replyStore();
+      await render();
+      await press('setup-start');
+      for (let i = 0; i < 5 && step() !== 'details'; i += 1) await press('setup-next');
+      // Stored elsewhere after the Team step's read: the Setup has not seen it.
+      store.preferences = { ...store.preferences, tone: 'casual' };
+      await choose('setup-emoji');
+      store.failSave = 1;
+      await press('setup-next'); // read: casual; the save fails
+      expect(settings.setAssistantPreferences).toHaveBeenCalledTimes(1);
+      await toDone();
+      expect(row('返事の仕方')).toBe('フランク・ふつう・理由も変更なし');
+      expect(row('細かい好み')).toContain('絵文字を使う: オフ');
+      expect(row('細かい好み')).toMatch(/保存できませんでした$/);
+      await goBackTo('details');
+      expect(q<HTMLInputElement>('[data-testid="setup-emoji"]')?.checked).toBe(true);
+      await press('setup-next');
+      expect(settings.setAssistantPreferences).toHaveBeenLastCalledWith({
+        ...DEFAULT_ASSISTANT_PREFERENCES,
+        tone: 'casual',
+        emoji: true,
+      });
+      await toDone();
+      expect(row('細かい好み')).toContain('絵文字を使う: オン');
+      expect(q('[data-testid="setup-save-warning"]')).toBeNull();
+    });
+
+    it('reply style: when what is stored cannot be read after the failed save, the style read before it is not passed off as certain', async () => {
+      const { settings, store } = replyStore();
+      settings.setAssistantPreferences.mockImplementationOnce(async () => {
+        store.readable = false;
+        throw new Error('disk');
+      });
+      await render();
+      await press('setup-start');
+      await press('setup-next');
+      store.preferences = { ...store.preferences, tone: 'casual' };
+      await choose('setup-length-short');
+      await press('setup-next');
+      await toDone();
+      expect(row('返事の仕方')).toBe(
+        'フランク・ふつう・理由も（今もこのままか、確かめられません）保存できませんでした',
+      );
+      expect(row('返事の仕方')).not.toContain('ていねい');
+    });
+  });
+
   it('replay: opens on the stored choices, has no Workspace or first Task, and closes', async () => {
     fullBridge({ tone: 'casual', length: 'detailed' }, 'auto');
     const onClose = vi.fn();

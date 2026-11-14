@@ -204,6 +204,16 @@ type SummaryItem =
   | 'depth'
   | 'teamMode';
 
+/** What the baseline holds for an item, in the form it is sent to be stored; `undefined` while it
+ * has not been read. */
+function storedValue(base: Baseline, item: SummaryItem): unknown {
+  if (item === 'teamMode') return base.team === 'ready' ? base.teamMode : undefined;
+  if (item === 'soundEnabled') return base.soundEnabled;
+  if (item === 'accessDefault') return base.accessDefault;
+  if (base.assistant !== 'ready') return undefined;
+  return item === 'callName' ? base.preferences.callName.trim() : base.preferences[item];
+}
+
 const REPLY_KEYS: readonly (keyof AssistantPreferences)[] = ['tone', 'length', 'depth'];
 const DETAIL_KEYS: readonly (keyof AssistantPreferences)[] = [
   'language',
@@ -276,21 +286,53 @@ export function SetupWizard({
   const stored = useRef<Baseline>(initial);
   // The same values, for drawing: the summary shows what is stored, never the drafts.
   const [confirmed, setConfirmed] = useState<Baseline>(initial);
-  const remember = useCallback((patch: Partial<Baseline>) => {
-    stored.current = { ...stored.current, ...patch };
-    setConfirmed(stored.current);
-  }, []);
-  // For the summary: items this Setup changed and stored, and items whose save failed.
+  // For the summary: items this Setup changed and stored, and items whose save failed — each with
+  // the value it could not store, so that once that value is read back as stored, it counts as
+  // stored (the write went through, or the same choice was stored elsewhere).
   const [savedChanges, setSavedChanges] = useState<ReadonlySet<SummaryItem>>(() => new Set());
   const [failedItems, setFailedItems] = useState<ReadonlySet<SummaryItem>>(() => new Set());
+  const failedValues = useRef(new Map<SummaryItem, unknown>());
+  // Items whose save failed and whose stored value could not be read afterwards: the baseline is
+  // the value read just before the save, which may no longer be what is stored.
+  const [unsure, setUnsure] = useState<ReadonlySet<SummaryItem>>(() => new Set());
   const noteSaved = useCallback((items: readonly SummaryItem[]) => {
     if (items.length === 0) return;
+    for (const item of items) failedValues.current.delete(item);
     setSavedChanges((current) => new Set([...current, ...items]));
     setFailedItems((current) => new Set([...current].filter((item) => !items.includes(item))));
   }, []);
-  const noteFailed = useCallback((items: readonly SummaryItem[]) => {
+  const noteFailed = useCallback(
+    (items: readonly SummaryItem[], wanted: (item: SummaryItem) => unknown) => {
+      if (items.length === 0) return;
+      for (const item of items) failedValues.current.set(item, wanted(item));
+      setFailedItems((current) => new Set([...current, ...items]));
+    },
+    [],
+  );
+  const remember = useCallback(
+    (patch: Partial<Baseline>) => {
+      stored.current = { ...stored.current, ...patch };
+      setConfirmed(stored.current);
+      // A new baseline is a value known to be stored: whatever was unsure about it is settled.
+      const settled: SummaryItem[] = [];
+      if ('preferences' in patch) settled.push(...PREFERENCE_KEYS);
+      if ('teamMode' in patch) settled.push('teamMode');
+      if (settled.length > 0) {
+        setUnsure((current) => {
+          const next = [...current].filter((item) => !settled.includes(item));
+          return next.length === current.size ? current : new Set(next);
+        });
+      }
+      const nowStored = [...failedValues.current]
+        .filter(([item, value]) => storedValue(stored.current, item) === value)
+        .map(([item]) => item);
+      noteSaved(nowStored);
+    },
+    [noteSaved],
+  );
+  const noteUnsure = useCallback((items: readonly SummaryItem[]) => {
     if (items.length === 0) return;
-    setFailedItems((current) => new Set([...current, ...items]));
+    setUnsure((current) => new Set([...current, ...items]));
   }, []);
 
   const [folder, setFolder] = useState<PickedFolder | null>(null);
@@ -598,9 +640,13 @@ export function SetupWizard({
         // Lay only the changed items over what is stored right now. Main replaces the whole set,
         // so if that cannot be read (as with the Team mode), nothing is written: an older value
         // standing in would put back items changed elsewhere since (in Settings, say).
+        const wanted = (key: SummaryItem): unknown =>
+          key === 'callName'
+            ? clampCallName(preferences.callName.trim())
+            : preferences[key as keyof AssistantPreferences];
         const latest = await loadAssistantPreferences();
         if (latest === null) {
-          noteFailed(assistant);
+          noteFailed(assistant, wanted);
         } else {
           const snapshot: AssistantPreferences = { ...latest.preferences };
           for (const key of assistant)
@@ -627,7 +673,20 @@ export function SetupWizard({
             }
             noteSaved(assistant);
           } else if (result.outcome === 'failed') {
-            noteFailed(assistant);
+            // What was read just before is what was stored then, so the summary shows it rather
+            // than the older baseline. Main writes in one transaction, but its answer can still
+            // be lost after the write went through, so read once more: if that cannot be read,
+            // the value read before is shown as not confirmed. Drafts changed here stay.
+            const after = await loadAssistantPreferences();
+            if (!live.current) return;
+            const known = after ?? latest;
+            adoptPreferences(known.preferences, known.configured);
+            const notStored = changedKeys(snapshot, known.preferences).filter((key) =>
+              assistant.includes(key),
+            );
+            noteSaved(assistant.filter((key) => !notStored.includes(key)));
+            noteFailed(notStored, wanted);
+            if (after === null) noteUnsure(notStored);
           }
         }
       }
@@ -635,7 +694,7 @@ export function SetupWizard({
         // Compare with what is stored right now; if that cannot be read, do not guess.
         const latest = await loadTeamUsageMode();
         if (latest === null) {
-          noteFailed(['teamMode']);
+          noteFailed(['teamMode'], () => teamMode);
           return;
         }
         if (latest === teamMode) {
@@ -648,16 +707,27 @@ export function SetupWizard({
           if (live.current) setTeamMode(result.mode);
           noteSaved(['teamMode']);
         } else if (result.outcome === 'failed') {
-          noteFailed(['teamMode']);
+          // As with the reply settings: show what was read, and read once more to be sure.
+          const after = await loadTeamUsageMode();
+          if (!live.current) return;
+          adoptTeam(after ?? latest);
+          if (after === teamMode) {
+            noteSaved(['teamMode']);
+          } else {
+            noteFailed(['teamMode'], () => teamMode);
+            if (after === null) noteUnsure(['teamMode']);
+          }
         }
       }
     },
     [
       accessDefault,
+      adoptPreferences,
       adoptTeam,
       changesOn,
       noteFailed,
       noteSaved,
+      noteUnsure,
       preferences,
       remember,
       soundEnabled,
@@ -891,27 +961,37 @@ export function SetupWizard({
   const detailRowMixed =
     DETAIL_ROW.some((item) => failedItems.has(item)) &&
     DETAIL_ROW.some((item) => savedChanges.has(item) && !failedItems.has(item));
-  const mark = (item: SummaryItem, text: string) =>
-    !detailRowMixed
-      ? text
-      : failedItems.has(item)
-        ? `${text}（保存できませんでした）`
-        : savedChanges.has(item)
-          ? `${text}（変更しました）`
-          : text;
+  // After a failed save that could not be read back, the value shown is the one read just before
+  // the save: said so, rather than passed off as what is stored now.
+  const UNSURE = '今もこのままか、確かめられません';
+  const anyUnsure = (items: readonly SummaryItem[]) => items.some((item) => unsure.has(item));
+  const mark = (item: SummaryItem, text: string) => {
+    const notes: string[] = [];
+    if (detailRowMixed && failedItems.has(item)) notes.push('保存できませんでした');
+    else if (detailRowMixed && savedChanges.has(item)) notes.push('変更しました');
+    if (unsure.has(item)) notes.push(UNSURE);
+    return notes.length > 0 ? `${text}（${notes.join('・')}）` : text;
+  };
   const replySummary =
     saved.assistant !== 'ready'
       ? NOT_READ
       : !saved.configured
-        ? NOT_YET
-        : `${optionLabel(TONE_OPTIONS, saved.preferences.tone)}・${optionLabel(LENGTH_OPTIONS, saved.preferences.length)}・${optionLabel(DEPTH_OPTIONS, saved.preferences.depth)}`;
+        ? anyUnsure(REPLY_KEYS)
+          ? `まだ決めていません（${UNSURE}）`
+          : NOT_YET
+        : `${optionLabel(TONE_OPTIONS, saved.preferences.tone)}・${optionLabel(LENGTH_OPTIONS, saved.preferences.length)}・${optionLabel(DEPTH_OPTIONS, saved.preferences.depth)}${anyUnsure(REPLY_KEYS) ? `（${UNSURE}）` : ''}`;
   const teamSummary =
-    saved.team === 'ready' ? optionLabel(TEAM_USAGE_OPTIONS, saved.teamMode) : NOT_READ;
+    saved.team === 'ready'
+      ? `${optionLabel(TEAM_USAGE_OPTIONS, saved.teamMode)}${unsure.has('teamMode') ? `（${UNSURE}）` : ''}`
+      : NOT_READ;
   const onOff = (title: string, on: boolean) => `${title}: ${on ? 'オン' : 'オフ'}`;
   const detailSummary: string[] = [];
   if (support.assistant) {
     if (saved.assistant !== 'ready') detailSummary.push(`返事の項目: ${NOT_READ}`);
-    else if (!saved.configured) detailSummary.push(`返事の項目: ${NOT_YET}`);
+    else if (!saved.configured)
+      detailSummary.push(
+        `返事の項目: ${anyUnsure(DETAIL_KEYS) ? `まだ決めていません（${UNSURE}）` : NOT_YET}`,
+      );
     else {
       const p = saved.preferences;
       detailSummary.push(
@@ -1406,7 +1486,9 @@ export function SetupWizard({
                 </ul>{' '}
                 {failedItems.size > 0 && (
                   <p className="setup-warning" role="status" data-testid="setup-save-warning">
-                    保存できなかった設定があります。設定の画面から変えられます。
+                    {unsure.size > 0
+                      ? '保存できなかった設定があります。確かめられなかった値は、保存の前のものです。設定の画面から確かめて変えられます。'
+                      : '保存できなかった設定があります。設定の画面から変えられます。'}
                   </p>
                 )}
               </>
