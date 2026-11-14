@@ -86,6 +86,11 @@ describe('CI change boundaries', () => {
     'apps/desktop/src/main/desktop-control-build.ts',
     'apps/desktop/vendor/archify/index.js',
     'docs/licenses/unicode-license.txt',
+    'docs/licenses/geist-ofl.txt',
+    'docs/licenses/ibm-plex-sans-jp-ofl.txt',
+    'docs/licenses/plemoljp-ofl.txt',
+    'apps/desktop/assets/fonts/IBMPlexSansJP-Regular.woff2',
+    'apps/desktop/assets/fonts/SOURCES.txt',
     'apps/desktop/src/main/auto-update.ts',
     'apps/desktop/scripts/ensure-inno-setup.ps1',
   ])('checks packages on both PR and main changes to %s, including deletion', (path) => {

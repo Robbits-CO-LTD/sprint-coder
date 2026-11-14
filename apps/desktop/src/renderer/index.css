@@ -128,15 +128,10 @@
   --t-spatial: 420ms;
   --t-cinematic: 560ms;
 
-  --font-ui:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable Text', 'Segoe UI',
-    'Hiragino Sans', 'Yu Gothic UI', 'Noto Sans JP', Meiryo, sans-serif;
-  --font-display:
-    'Avenir Next', 'SF Pro Display', 'Segoe UI Variable Display', 'Segoe UI', 'Hiragino Sans',
-    'Yu Gothic UI', 'Noto Sans JP', Meiryo, sans-serif;
-  --font-mono:
-    'SFMono-Regular', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas,
-    'Liberation Mono', monospace;
+  /* The two type families (issue #1253), both bundled — see fonts.css. Everything that names a
+     font uses one of these two tokens; code, logs and command output use --font-mono. */
+  --font-sans: 'SC Sans', system-ui, sans-serif;
+  --font-mono: 'SC Mono', ui-monospace, monospace;
 }
 
 /* Inline SVG icon set (see components/icons.tsx). Nudged down 1px so the stroke's optical
@@ -162,7 +157,7 @@ body {
   margin: 0;
   background: var(--bg-app);
   color: var(--text-primary);
-  font-family: var(--font-ui);
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   letter-spacing: -0.006em;
@@ -175,6 +170,52 @@ body {
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
   line-break: strict;
+}
+
+/* Windows draws text thinner than macOS, so running text there is set a little heavier: 450 is
+   Geist's variable weight and IBM Plex Sans JP's Text face. main.tsx puts `is-win` on <html> from
+   the preload's platform. Only the default weight moves — anything with its own font-weight
+   (headings, labels, emphasis) keeps it, which is why the controls rule has no specificity; it
+   only replaces the browser's own `normal` on buttons and fields. */
+.is-win body,
+:where(.is-win) :where(button, input, textarea, select) {
+  font-weight: 450;
+}
+
+/* Code, logs and command output keep whole cells. The body's slight negative tracking is added
+   after every character, so across a line it pulls full-width text and box-drawing out of the
+   columns that --font-mono lays them in (one Japanese character = two Latin ones). */
+pre,
+code,
+kbd,
+samp,
+.command-card__output,
+.file-editor-textarea {
+  letter-spacing: 0;
+}
+
+/* Counts that change in place: every digit takes the same width, so the chip does not twitch as
+   the number ticks. (Clocks, usage and the other counters set this where they are defined.) */
+.ctx-chip,
+.team-badge,
+.team-status-chip,
+.settings-count-badge,
+.settings-skill-counts {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Large headings (20px and up) set their kana proportionally ('palt'), as Japanese display type
+   is; at running-text sizes the even full-width rhythm reads better and is left alone. Each of
+   these already has its own tight letter-spacing, which is kept. */
+.setup-step h1,
+.timeline-welcome h2,
+.empty-state h2,
+.md-body h1 {
+  font-feature-settings:
+    'kern' 1,
+    'liga' 1,
+    'calt' 1,
+    'palt' 1;
 }
 
 /* ---------- Setup (first run, and "セットアップをもう一度") ----------
@@ -1668,7 +1709,7 @@ body {
 
 .setup-progress-count small {
   color: var(--text-muted);
-  font-family: var(--font-ui);
+  font-family: var(--font-sans);
   font-size: 11px;
 }
 
@@ -1766,7 +1807,7 @@ body {
   margin: 0;
   outline: none;
   color: #fff;
-  font-family: var(--font-display);
+  font-family: var(--font-sans);
   font-size: clamp(26px, 2.6vw, 38px);
   font-weight: 650;
   line-height: 1.18;
@@ -4568,6 +4609,7 @@ body.is-resizing-sidebar iframe {
   overflow-wrap: anywhere;
   margin: 4px 0 0;
   font: inherit;
+  font-family: var(--font-mono);
 }
 @media (max-width: 900px) {
   .graph-panel {
@@ -5058,7 +5100,7 @@ body.is-resizing-sidebar iframe {
    greeting was the loudest object in the app on every empty Task; the presence now comes from the
    space around it rather than from the point size. */
 .timeline-welcome h2 {
-  font-family: var(--font-display);
+  font-family: var(--font-sans);
   margin: 0;
   font-size: clamp(23px, 2.6cqw, 29px);
   font-weight: 600;
@@ -7477,7 +7519,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .turn-diff-partial {
   color: var(--text-secondary);
-  font-family: var(--font-ui);
+  font-family: var(--font-sans);
   font-size: 11px;
 }
 
@@ -7804,7 +7846,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .team-empty-hint-copy strong {
   color: var(--text-primary);
-  font-family: var(--font-display);
+  font-family: var(--font-sans);
   font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.02em;
@@ -10138,14 +10180,24 @@ button.composer-permission-chip[aria-expanded='true'] {
   border-radius: var(--r-sm);
   background: var(--bg-app);
   color: var(--text-secondary);
-  font:
-    11px/1.55 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Monaco,
-    Consolas,
-    monospace;
+  font: 11px/1.55 var(--font-mono);
   white-space: pre-wrap;
+}
+.settings-font-credits {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.settings-font-credits li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+.settings-font-credits strong {
+  font-size: 12.5px;
 }
 .settings-ok {
   color: var(--success);

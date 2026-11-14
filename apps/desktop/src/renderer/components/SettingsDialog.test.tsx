@@ -199,6 +199,24 @@ describe('which body the flag selects', () => {
     }
   });
 
+  it('credits the three bundled fonts under their own SIL Open Font License', () => {
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('data-testid="settings-font-licenses"');
+      expect(html).toContain('同梱フォント（SIL Open Font License 1.1）');
+      expect(html).toContain('PolyForm Perimeter ではなく');
+      for (const notice of [
+        'Copyright (c) 2023 Vercel, in collaboration with basement.studio',
+        'Copyright © 2017 IBM Corp. with Reserved Font Name &quot;Plex&quot;',
+        'Copyright (c) 2021, Yuko OTAWARA. with Reserved Font Name &quot;PlemolJP&quot;',
+      ])
+        expect(html.split(notice).length - 1).toBeGreaterThanOrEqual(2); // the list and the full text
+      expect(html).toContain('data-testid="settings-font-license-details"');
+      expect(html).toContain('――― PlemolJP Console ―――');
+      expect(html.split('SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007').length - 1).toBe(3);
+    }
+  });
+
   it('offers a manual update check in both settings layouts', () => {
     stubBridge();
     for (const html of [workspace(), legacy()]) {

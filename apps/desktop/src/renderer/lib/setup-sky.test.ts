@@ -86,6 +86,51 @@ describe('SetupSky', () => {
     sky.destroy();
   });
 
+  it('takes the opening word from the bundled font, only once that font has loaded', async () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+    const contexts: CanvasRenderingContext2D[] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => {
+      const context = fakeContext();
+      contexts.push(context);
+      return context;
+    });
+    const wordFonts = () =>
+      contexts.map((context) => String(context.font)).filter((font) => font.startsWith('800 '));
+    let release: () => void = () => {};
+    const fonts = {
+      check: vi.fn(() => false),
+      load: vi.fn(() => new Promise<FontFace[]>((resolve) => (release = () => resolve([])))),
+    };
+    Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+    try {
+      const sky = new SetupSky(document.createElement('canvas'), { animate: true });
+      sky.playIntro('SPRINT CODER');
+      expect(fonts.load).toHaveBeenCalledWith(expect.stringContaining('"SC Sans"'), 'SPRINT CODER');
+      expect(wordFonts()).toEqual([]);
+      release();
+      await vi.waitFor(() => expect(wordFonts()).toHaveLength(1));
+      expect(wordFonts()[0]).toContain('"SC Sans"');
+
+      // An opening ended (or the sky gone) while its font loads never starts afterwards.
+      sky.playIntro('SPRINT CODER');
+      sky.finishIntro();
+      release();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(wordFonts()).toHaveLength(1);
+      sky.destroy();
+
+      // Already loaded: no wait at all.
+      fonts.check.mockReturnValue(true);
+      const loaded = new SetupSky(document.createElement('canvas'), { animate: true });
+      loaded.playIntro('SPRINT CODER');
+      expect(wordFonts()).toHaveLength(2);
+      loaded.destroy();
+    } finally {
+      Reflect.deleteProperty(document, 'fonts');
+    }
+  });
+
   it('does nothing harmful where there is no 2D context', () => {
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
     const sky = new SetupSky(document.createElement('canvas'), { animate: true });

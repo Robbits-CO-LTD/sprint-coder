@@ -81,11 +81,13 @@ function distributionPath(path) {
     /^\.github\/(?:workflows\/release[^/]*\.ya?ml|actions\/(?:install-deps|install-electron|prepare-sandbox|prepare-desktop-control)\/)/u.test(
       path,
     ) ||
-    /^apps\/desktop\/(?:package\.json|forge\.config\.ts|vite\..+\.config\.ts|entitlements\..+\.plist|windows-(?:wizard-installer|sandbox-artifacts)\.ts|src\/main\/desktop-control-build\.ts|vendor\/archify\/|installer\/|assets\/(?:sprint-coder-icon|dmg-background)|scripts\/(?:ensure-inno-setup|verify-unsigned-windows-release|create-macos-update-manifest|generate-dmg-background)|src\/main\/(?:auto-update|update-install-mutation-gate)\.)/u.test(
+    /^apps\/desktop\/(?:package\.json|forge\.config\.ts|vite\..+\.config\.ts|entitlements\..+\.plist|windows-(?:wizard-installer|sandbox-artifacts)\.ts|src\/main\/desktop-control-build\.ts|vendor\/archify\/|installer\/|assets\/(?:sprint-coder-icon|dmg-background|fonts\/)|scripts\/(?:ensure-inno-setup|verify-unsigned-windows-release|create-macos-update-manifest|generate-dmg-background)|src\/main\/(?:auto-update|update-install-mutation-gate)\.)/u.test(
       path,
     ) ||
     /^packages\/(?:contracts|domain)\/package\.json$/u.test(path) ||
-    path === 'docs/licenses/unicode-license.txt'
+    /^docs\/licenses\/(?:unicode-license|geist-ofl|ibm-plex-sans-jp-ofl|plemoljp-ofl)\.txt$/u.test(
+      path,
+    )
   );
 }
 

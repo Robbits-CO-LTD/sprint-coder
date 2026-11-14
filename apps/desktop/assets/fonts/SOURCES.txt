@@ -1,0 +1,75 @@
+Bundled fonts (issue #1253)
+===========================
+
+The renderer bundles these eight files (declared in apps/desktop/src/renderer/fonts.css). They are
+copied from the sources below; nothing here is an npm dependency of the app. All three fonts are
+licensed under the SIL Open Font License, Version 1.1; their licence files are in docs/licenses
+(geist-ofl.txt, ibm-plex-sans-jp-ofl.txt, plemoljp-ofl.txt), packaged beside the app as extra
+resources and shown in Settings.
+
+SHA-256                                                           bytes     file
+3626eba547294501c8a4d662c7d9ea3b49734409a4c5a1ccf12fa86429b1687e     69488  Geist-Variable.woff2
+ec27e9b75cd90a6f7abe96ede49d00b151eb5b1c2c886bfe9b4fc845f40be1ff   2282284  IBMPlexSansJP-Regular.woff2
+0ae11e567d66ea8a1e39f8afc492130ae66b7f114bc1fdd1449e7fe3a29d289a   2397536  IBMPlexSansJP-Text.woff2
+48bcbdb2bca0ddea63b86ec6aaa96baf49861955b2b9498299d5c0808d023b37   2417812  IBMPlexSansJP-Medium.woff2
+88c41ab69fd76c6211b47332d855d58ed20359b01b24e8bd2697c2c87e181f2c   2439764  IBMPlexSansJP-SemiBold.woff2
+38336fbb169ae1b7b6ca2539332e1d59c9be222227659d23f8eb70ecda60337d   2352756  IBMPlexSansJP-Bold.woff2
+98b9176eb0631c12842fb85c06d38250974f228e2b13d6d7975cccde5eb7318a   2233816  PlemolJPConsole-Regular.woff2
+973db280cc2f7b15d1811ded4d54090a1f4a3acaf460508cc8365e963cb21905   2295140  PlemolJPConsole-Bold.woff2
+                                                       total    16488596
+
+
+Geist 1.9.2 (Vercel, in collaboration with basement.studio)
+-----------------------------------------------------------
+Source:   npm package geist@1.9.2, file dist/fonts/geist-sans/Geist-Variable.woff2 (unchanged).
+Tarball:  `npm pack geist@1.9.2` -> geist-1.9.2.tgz
+          SHA-256 febc71ab4c9c06b9085f5e8be83847d91510dbef89b57fe8d45fce911a6ac271
+Licence:  package/LICENSE.txt -> docs/licenses/geist-ofl.txt (unchanged).
+Why not an npm dependency: the package declares `next` as a required peer dependency.
+
+
+IBM Plex Sans JP 3.0.0 (IBM Corp.)
+----------------------------------
+Source:   npm package @ibm/plex-sans-jp@3.0.0, files
+          fonts/complete/woff2/hinted/IBMPlexSansJP-{Regular,Text,Medium,SemiBold,Bold}.woff2
+          (unchanged; the hinted build, for Windows).
+Tarball:  `npm pack @ibm/plex-sans-jp@3.0.0` -> ibm-plex-sans-jp-3.0.0.tgz
+          SHA-256 051484321fcffecc69c3d608b739c5fe0f558b0fd1de7958d96ca360d161de7f
+Licence:  fonts/complete/woff2/hinted/license.txt -> docs/licenses/ibm-plex-sans-jp-ofl.txt
+          (unchanged).
+Why not an npm dependency: the package runs a telemetry script on postinstall.
+Reserved Font Name "Plex": the files are shipped exactly as IBM publishes them.
+
+
+PlemolJP Console 3.0.0 (Yuko OTAWARA)
+-------------------------------------
+Source:   https://github.com/yuru7/PlemolJP/releases/tag/v3.0.0, asset PlemolJP_v3.0.0.zip
+          SHA-256 757de5ab50fe4f44bb3a3bffcbffec24f18af33dca9bd4e5d7949158fa84533e
+          (matches the digest GitHub lists for the asset), entries
+          PlemolJP_v3.0.0/PlemolJPConsole/PlemolJPConsole-Regular.ttf
+            SHA-256 27e9bd90e664fb5bc4e22bf5186e0721a00a96a000e7df53b2eb60ae557d4fbc, 5619232 bytes
+          PlemolJP_v3.0.0/PlemolJPConsole/PlemolJPConsole-Bold.ttf
+            SHA-256 c2db6504b1488a417dd42b5bc4627f5dfa0947be65f8513bcdeb3e45d969b101, 5608400 bytes
+Converted to WOFF2 with fontTools 4.61.1 (Python 3.14, brotli module installed):
+          py -m fontTools.ttLib.woff2 compress PlemolJPConsole-Regular.ttf
+          py -m fontTools.ttLib.woff2 compress PlemolJPConsole-Bold.ttf
+          The output is deterministic: running it again gives the same SHA-256 as above.
+Licence:  LICENSE at tag v3.0.0 (commit 55e5011603231f0fa9326c4fb1099e6d6a26337f)
+          -> docs/licenses/plemoljp-ofl.txt (unchanged).
+The font's own copyright notice (name ID 0) is kept in the file and reads:
+          [IBM Plex] Copyright (c) 2017 IBM Corp. https://github.com/IBM/plex
+          [Hack] Copyright 2018 Source Foundry Authors https://github.com/source-foundry/Hack
+          [Nerd Fonts] Copyright (c) 2014, Ryan L McIntyre https://ryanlmcintyre.com
+          [PlemolJP] Copyright (c) 2021, Yuko Otawara
+
+Reserved Font Name "PlemolJP" and the WOFF2 conversion. The OFL FAQ (openfontlicense.org/ofl-faq,
+2.2-2.2.2) says a WOFF/WOFF2 version may keep the font's name, and is not a Modified Version, "only
+if the original font data remains unchanged except for WOFF compression" and WOFF metadata is
+either omitted or carries the original metadata unaltered. Checked on both files by decoding the
+WOFF2 back with fontTools and comparing with the TTF:
+  - the same 19 tables; every table other than glyf/loca/head is byte-identical;
+  - all glyphs (24136 Regular, 24172 Bold) compile to identical bytes;
+  - head differs only in flags bit 11, which the WOFF2 specification sets on fonts whose glyf
+    table went through its lossless transform, and in checkSumAdjustment;
+  - no WOFF metadata block and no private data block.
+So the conversion is WOFF compression only, and the name is kept as the FAQ allows.

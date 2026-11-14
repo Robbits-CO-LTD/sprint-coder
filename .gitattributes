@@ -17,4 +17,5 @@
 *.icns binary
 *.ico binary
 *.sqlite3 binary
+*.woff2 binary
 apps/desktop/vendor/archify/** -text
