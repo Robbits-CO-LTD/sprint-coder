@@ -32,6 +32,9 @@ pub(super) struct CaptureAdapter {
     /// What a read of the visible elements returns, when it is not the window
     /// tree itself.
     view_tree: Mutex<Option<AccessibilityNode>>,
+    /// How long the check of whether the window is read by its visible
+    /// elements takes to answer (a busy window answers it slowly).
+    view_check_ms: std::sync::atomic::AtomicU64,
 }
 
 impl CaptureAdapter {
@@ -46,7 +49,14 @@ impl CaptureAdapter {
             whole_read: Mutex::new(None),
             view: std::sync::atomic::AtomicBool::new(false),
             view_tree: Mutex::new(None),
+            view_check_ms: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Makes the check of whether the window is read by its visible elements
+    /// take `millis` to answer.
+    pub(super) fn slow_view_check(&self, millis: u64) {
+        self.view_check_ms.store(millis, Ordering::SeqCst);
     }
 
     pub(super) fn fault_whole_read(&self, fault: WholeReadFault) {
@@ -165,6 +175,10 @@ impl ObservationOps for CaptureAdapter {
         _surface: crate::SnapshotSurface,
         _deadline: Deadline,
     ) -> bool {
+        let wait = self.view_check_ms.load(Ordering::SeqCst);
+        if wait > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+        }
         self.view.load(Ordering::SeqCst)
     }
 

@@ -62,7 +62,12 @@ pub(crate) fn capture_window(
         // runs out, judged before that read so it can leave the time for it.
         let visible_follows = view_fallback_allowed(deadline, whole_read_share(remaining))
             && adapter.reads_visible_elements(window, opts.surface, deadline);
-        let budget = whole_read_budget(remaining, visible_follows);
+        // That check reads the window itself, and a busy one answers it
+        // slowly: the whole read is given its time out of what is left after
+        // the check, so the time the check took never comes out of what is
+        // kept for the read of the visible elements. Whether the capture may
+        // fall back is still judged on the time before the check, as before.
+        let budget = whole_read_budget(deadline.remaining(), visible_follows);
         let attempt = deadline.capped(budget);
         match whole_window(adapter, opts, window, attempt) {
             Ok(observed) => {

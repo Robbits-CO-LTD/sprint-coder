@@ -272,16 +272,19 @@ fn cut_short_noting_floor(
 
 /// A default snapshot that starts its whole read with 2.5 s left leaves the
 /// read of the visible elements at least the floor when the window has one,
-/// and keeps three quarters for the whole read of a window that has none.
+/// and keeps three quarters for the whole read of a window that has none. The
+/// time the window takes to say whether it has one comes out of the whole
+/// read, never out of the floor.
 #[test]
 fn a_window_with_a_view_leaves_its_visible_read_the_floor() {
     let _guard = HomeGuard::new();
-    let given_for = |view: bool| {
+    let given = |view: bool, check_ms: u64| {
         let adapter = CaptureAdapter::new(anchored_window());
         adapter.fault_whole_read(cut_short_noting_floor);
         if view {
             adapter.serve_view();
         }
+        adapter.slow_view_check(check_ms);
         let started = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_millis(500))
             .expect("the clock is past its first seconds");
@@ -293,7 +296,20 @@ fn a_window_with_a_view_leaves_its_visible_read_the_floor() {
         assert_eq!(captured.visible_scope, view);
         FLOOR_READ_GIVEN_MS.load(Ordering::SeqCst)
     };
+    let given_for = |view: bool| given(view, 0);
     let floor = u64::try_from(super::window_capture::ANSWER_READ_FLOOR.as_millis()).unwrap();
+    // The window takes 400 ms to say it has a view, so 2.1 s are left when the
+    // whole read starts: it gets what is left less the floor, not what was
+    // left before the check (which would leave the visible read 350 ms).
+    let after_slow_check = given(true, 400);
+    assert!(
+        after_slow_check <= 2_100 - floor,
+        "the whole read was given {after_slow_check} ms"
+    );
+    assert!(
+        after_slow_check >= 2_100 - floor - 100,
+        "the whole read was given {after_slow_check} ms"
+    );
     let with_view = given_for(true);
     assert!(
         with_view <= 2_500 - floor,
