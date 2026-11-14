@@ -86,6 +86,7 @@ import type {
   TeamSnapshot,
   TeamV2ActivityRecord,
 } from './persistence';
+import { TeamRehireBlockedError } from './persistence';
 import {
   WorktreeError,
   WorktreeIntegrationConflictError,
@@ -364,6 +365,12 @@ export interface TeamWorkerRuntime {
    * is not. The answer is this process's knowledge only; a runtime without Turns omits it.
    */
   hasUnsettledTurn?(agentId: string, executionId: string): boolean;
+  /**
+   * Whether any Turn this Worker ran, for whatever it ran, may still be running (issue #1269): a
+   * failed Team is not re-formed while one of its Workers' processes may still go on. The same
+   * process-local knowledge as `hasUnsettledTurn`; a runtime without Turns omits it.
+   */
+  hasUnsettledWorker?(agentId: string): boolean;
 }
 
 const E2E_HOLD_TEAM_WORKER_FLAG = 'SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT';
@@ -666,7 +673,9 @@ export class TeamCoordinator {
         (agent) =>
           agent.blueprintRoleKey === roleKey &&
           agent.state !== 'stopped' &&
-          (snapshot.team.state !== 'completed' || !['done', 'failed'].includes(agent.state)),
+          // An ended Team's done and failed Workers become history once a hire re-forms it.
+          (!['completed', 'failed'].includes(snapshot.team.state) ||
+            !['done', 'failed'].includes(agent.state)),
       )
     )
       throw new Error(`Blueprint Roleはすでに採用済みです: ${roleKey}`);
@@ -1285,8 +1294,9 @@ export class TeamCoordinator {
       if (input.modelSelection !== undefined)
         await this.validateModelSelection?.(input.modelSelection, input.taskId);
       if (team.state === 'draft') team = this.persistence.transitionTeamState(team.id, 'forming');
-      if (!['forming', 'active', 'paused', 'completed'].includes(team.state))
+      if (!['forming', 'active', 'paused', 'completed', 'failed'].includes(team.state))
         throw new Error('Team does not accept new workers');
+      if (team.state === 'failed') this.assertFailedTeamRehireable(team.id, null);
 
       const childDepth = requester.depth + 1;
       let persistedManagerPolicy: ManagerPolicy | null = null;
@@ -1376,9 +1386,19 @@ export class TeamCoordinator {
         // Do not reopen the completed run until the replacement runtime is known to be usable.
         // Re-forming atomically archives old terminal Workers so UI counts, Blueprint roles, and
         // required-Worker checks only see this new run.
+        // A failed Team re-forms the same way, once its failed run left nothing unsettled (issue
+        // #1269); a refusal here stops the runtime just started and leaves the Team failed.
         const latestBeforeReady = this.persistence.getTeam(team.id);
         if (latestBeforeReady.state === 'completed')
-          team = this.persistence.reformCompletedTeam(team.id);
+          team = this.persistence.reformEndedTeam(team.id, worker.id);
+        else if (latestBeforeReady.state === 'failed')
+          try {
+            this.assertFailedTeamRehireable(team.id, worker.id);
+            team = this.persistence.reformEndedTeam(team.id, worker.id);
+          } catch (error) {
+            await this.runtime.stop(worker.id).catch(() => undefined);
+            throw error;
+          }
         current = this.persistence.transitionWorkerState(worker.id, 'ready');
         this.diagnostic?.({
           event: 'team.worker.ready',
@@ -5865,6 +5885,26 @@ export class TeamCoordinator {
         this.persistence.transitionWorkerState(agent.id, 'done');
     }
     if (missionState === 'completed') this.finalizeTeamIfWorkersTerminal(teamId, true);
+  }
+
+  /**
+   * Refuses to hire into a failed Team while its failed run left something unsettled (issue
+   * #1269): the records `listFailedTeamRehireBlockers` reads, and a Worker whose process may still
+   * run although it is recorded as ended. The refusal names each of them, for the Leader and the
+   * user to settle; the Team stays failed.
+   */
+  private assertFailedTeamRehireable(teamId: string, hiringAgentId: string | null): void {
+    const blockers = [...this.persistence.listFailedTeamRehireBlockers(teamId, hiringAgentId)];
+    const unsettled = this.persistence
+      .getTeamSnapshot(teamId)
+      .agents.filter(
+        ({ id, kind }) =>
+          kind === 'worker' &&
+          id !== hiringAgentId &&
+          this.runtime.hasUnsettledWorker?.(id) === true,
+      ).length;
+    if (unsettled > 0) blockers.push({ kind: 'unsettled_workers', count: unsettled });
+    if (blockers.length > 0) throw new TeamRehireBlockedError(blockers);
   }
 
   private finalizeTeamIfWorkersTerminal(teamId: string, resumeWindingDown = false): void {

@@ -508,6 +508,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     return this.deps.fallback.hasUnsettledTurn?.(agentId, executionId) === true;
   }
 
+  hasUnsettledWorker(agentId: string): boolean {
+    return this.deps.fallback.hasUnsettledWorker?.(agentId) === true;
+  }
+
   dispose(): void {
     for (const execution of this.executions.values()) execution.controller.abort();
     for (const active of this.active.values()) active.controller.abort();

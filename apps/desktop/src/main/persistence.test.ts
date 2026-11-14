@@ -80,6 +80,7 @@ import {
   SqlitePersistenceClient,
   SteerStaleError,
   TaskStillRunningError,
+  TeamRehireBlockedError,
   TurnActiveError,
   toApprovalSummary,
   validateCanvasCamera,
@@ -2529,7 +2530,7 @@ if (runsWithElectronAbi)
       },
     );
 
-    it('keeps Team capability out of Tasks without a hired Team, and out of a failed Team', () => {
+    it('keeps Team capability out of Tasks without a hired Team, and in a failed Team', () => {
       const { persistence } = createPersistence();
       try {
         // An ordinary Task never gains the Team Skill from the follow-up wording alone.
@@ -2547,15 +2548,15 @@ if (runsWithElectronAbi)
         expect(draftTurn.teamTurn).toBe(false);
         expect(sealedTeamSkillCount(persistence, draft.id, draftTurn.turnId)).toBe(0);
 
-        // A failed Team accepts no new Worker; its Task falls back to the wording of each Turn.
+        // A failed Team is hired into again like a completed one (issue #1269), so its Leader keeps
+        // the Team tools and Skill whatever the wording: the hire re-forms the Team, or says what
+        // the failed run left to settle first.
         const failed = persistence.createTask('failed team');
         const failedTeam = hireFollowupWorker(persistence, failed.id);
         persistence.transitionTeamState(failedTeam.id, 'failed');
-        const failedTurn = persistence.startTurn(failed.id, '通常の依頼です');
-        expect(failedTurn.teamTurn).toBe(false);
-        expect(sealedTeamSkillCount(persistence, failed.id, failedTurn.turnId)).toBe(0);
-        finishTurn(persistence, failed.id, failedTurn.turnId);
-        expect(persistence.startTurn(failed.id, 'チームで進めて').teamTurn).toBe(true);
+        const failedTurn = persistence.startTurn(failed.id, FOLLOWUP_HIRE_WITHOUT_TEAM_WORD);
+        expect(failedTurn.teamTurn).toBe(true);
+        expect(sealedTeamSkillCount(persistence, failed.id, failedTurn.turnId)).toBe(1);
 
         // Another Task's Team never leaks into an unrelated Task.
         const hired = persistence.createTask('hired team');
@@ -12423,7 +12424,7 @@ if (runsWithElectronAbi)
         workers: 0,
       });
       // The Leader hires again: the Worker starts while the Team is re-formed only afterwards
-      // (`TeamCoordinator.hireWorker`: `spawning`, `runtime.start`, then `reformCompletedTeam`).
+      // (`TeamCoordinator.hireWorker`: `spawning`, `runtime.start`, then `reformEndedTeam`).
       const again = hire('tester');
       persistence.transitionWorkerState(again.id, 'spawning');
       expect(persistence.getTeam(team.id).state).toBe('completed');
@@ -12435,6 +12436,141 @@ if (runsWithElectronAbi)
       });
       expect(persistence.getTask(task.id).archived).toBe(false);
       persistence.close();
+    });
+
+    it('counts a Worker hired again into a failed Team while it starts (the Team still reads failed)', () => {
+      const { persistence } = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const task = persistence.createTask('Team hired again after a failure');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const hire = (role: string) =>
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          role,
+          objective: `${role} の作業`,
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'summary',
+        });
+      const first = hire('reviewer');
+      persistence.transitionWorkerState(first.id, 'spawning');
+      persistence.transitionWorkerState(first.id, 'failed');
+      persistence.transitionTeamState(team.id, 'failed');
+      expect(persistence.getTaskRecordedWork(task.id)).toEqual({
+        turn: false,
+        team: false,
+        workers: 0,
+      });
+      // Issue #1269: the hire starts while the Team still reads failed (#1259 counts the Worker).
+      const again = hire('tester');
+      persistence.transitionWorkerState(again.id, 'spawning');
+      expect(persistence.getTeam(team.id).state).toBe('failed');
+      expect(refusedWork(() => persistence.setArchived(task.id, true))).toEqual({
+        turn: false,
+        team: true,
+        workers: 1,
+        commands: 0,
+      });
+      expect(persistence.getTask(task.id).archived).toBe(false);
+      // Re-forming keeps the failed Worker as stopped history, and the new Worker still counts.
+      expect(persistence.reformEndedTeam(team.id, again.id).state).toBe('forming');
+      const agents = persistence.getTeamSnapshot(team.id).agents;
+      expect(agents.find(({ id }) => id === first.id)?.state).toBe('stopped');
+      expect(agents.find(({ id }) => id === again.id)?.state).toBe('spawning');
+      expect(
+        persistence
+          .listTeamV2Activity(team.id)
+          .filter(({ type }) => type === 'worker_stopped')
+          .map(({ subjectAgentId, payload }) => [subjectAgentId, payload]),
+      ).toEqual([[first.id, { from: 'failed', to: 'stopped', reason: 'team_reformed' }]]);
+      expect(refusedWork(() => persistence.setArchived(task.id, true))).toMatchObject({
+        team: true,
+        workers: 1,
+      });
+      persistence.close();
+    });
+
+    it('re-forms a failed Team only through a hire, and only while its run left nothing unsettled (issue #1269)', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('failed Team with a Worker still at work');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const input = (role: string) => ({
+        teamId: team.id,
+        role,
+        objective: `${role} の作業`,
+        parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        contextInheritancePolicy: 'summary' as const,
+      });
+      const lingering = persistence.registerTeamWorker(input('lingering'));
+      persistence.transitionTeamState(team.id, 'failed');
+      // A plain state change never reopens it.
+      expect(() => persistence.transitionTeamState(team.id, 'forming')).toThrow(
+        'A failed Team is re-formed only by hiring a Worker',
+      );
+      expect(persistence.listFailedTeamRehireBlockers(team.id)).toEqual([
+        { kind: 'workers', count: 1 },
+      ]);
+      // The hiring Worker itself is not a leftover.
+      expect(persistence.listFailedTeamRehireBlockers(team.id, lingering.id)).toEqual([]);
+      let refusal: unknown;
+      try {
+        persistence.registerTeamWorker(input('new'));
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(TeamRehireBlockedError);
+      expect((refusal as Error).message).toBe(
+        'この Task の Team は失敗で終わりましたが、失敗した Team の残りが片付いていないため、新しい Worker を雇えません（Team は失敗のままです）。残っているもの: 止まっていない Worker 1 人。Team の画面で、再開待ちの作業を再開して終わらせるか、「すべて停止」で止めてください。片付いてから、もう一度 Worker を雇ってください。',
+      );
+      expect(persistence.getTeamSnapshot(team.id).agents.map(({ role }) => role)).not.toContain(
+        'new',
+      );
+      expect(() => persistence.reformEndedTeam(team.id, 'another-agent')).toThrow(
+        TeamRehireBlockedError,
+      );
+      expect(persistence.getTeam(team.id).state).toBe('failed');
+      expect(
+        persistence.getTeamSnapshot(team.id).agents.find(({ id }) => id === lingering.id)?.state,
+      ).toBe('invited');
+
+      persistence.transitionWorkerState(lingering.id, 'stopped');
+      const fresh = persistence.registerTeamWorker(input('fresh'));
+      persistence.transitionWorkerState(fresh.id, 'spawning');
+      expect(persistence.reformEndedTeam(team.id, fresh.id).state).toBe('forming');
+      persistence.close();
+    });
+
+    it('lets a Team the startup recovery failed be hired into again', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Team failed by the startup recovery');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const input = (role: string) => ({
+        teamId: team.id,
+        role,
+        objective: `${role} の作業`,
+        parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        contextInheritancePolicy: 'summary' as const,
+      });
+      const interrupted = persistence.registerTeamWorker(input('interrupted'));
+      persistence.transitionWorkerState(interrupted.id, 'spawning');
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      try {
+        reopened.recoverTeamsOnStartup(new Date().toISOString());
+        expect(reopened.getTeam(team.id).state).toBe('failed');
+        expect(
+          reopened.getTeamSnapshot(team.id).agents.find(({ id }) => id === interrupted.id)?.state,
+        ).toBe('stopped');
+        expect(reopened.listFailedTeamRehireBlockers(team.id)).toEqual([]);
+        const fresh = reopened.registerTeamWorker(input('fresh'));
+        reopened.transitionWorkerState(fresh.id, 'spawning');
+        expect(reopened.reformEndedTeam(team.id, fresh.id).state).toBe('forming');
+      } finally {
+        reopened.close();
+      }
     });
 
     it('archives a Task with nothing moving, canceling only the record of a run already gone', () => {

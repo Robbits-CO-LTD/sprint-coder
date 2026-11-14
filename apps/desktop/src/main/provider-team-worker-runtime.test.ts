@@ -312,6 +312,21 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     expect(runtime.cancel).toHaveBeenCalledTimes(1);
   });
 
+  it('asks the CLI fallback whether any Turn of a Worker may still run (issue #1269)', () => {
+    const hasUnsettledWorker = vi.fn((agentId: string) => agentId === 'worker-1');
+    const providers = { verify: vi.fn(), listModels: vi.fn(), cancel: vi.fn(), execute: vi.fn() };
+    const adapter = controlledProviderAdapter(providers, {
+      fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn(), hasUnsettledWorker },
+    });
+    expect(adapter.hasUnsettledWorker('worker-1')).toBe(true);
+    expect(adapter.hasUnsettledWorker('worker-2')).toBe(false);
+    expect(
+      controlledProviderAdapter(providers, {
+        fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
+      }).hasUnsettledWorker('worker-1'),
+    ).toBe(false);
+  });
+
   it('asks the CLI fallback whether a Turn may still be writing for an execution (issue #544)', () => {
     const hasUnsettledTurn = vi.fn((agentId: string) => agentId === 'worker-1');
     const adapter = controlledProviderAdapter(
