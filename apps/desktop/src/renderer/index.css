@@ -1861,26 +1861,124 @@ samp,
   line-height: 1.8;
 }
 
-/* The opening: the name gathers on the canvas first, then the board and the words arrive. */
-.setup-wizard[data-intro='playing'] .setup-content {
-  animation: setup-board-in 800ms var(--ease-spatial) 1.85s both;
+/* The logo film plays over the Setup first. Meanwhile the Setup waits unseen with its own
+   entrances held back; when the film hands over ('arrive') the board slides in and everything in
+   it starts its entrance from the beginning, under the film's last scene. */
+.setup-logo-intro {
+  position: absolute;
+  z-index: 6;
+  inset: 0;
+  overflow: hidden;
+  /* Dark from the very first paint, before the film has drawn anything. */
+  background: var(--setup-bg);
 }
 
-.setup-wizard[data-intro='playing'] .setup-scene {
-  animation-delay: 1.9s;
+.setup-logo-intro[data-handoff='true'] {
+  background: transparent;
+  pointer-events: none;
 }
 
-.setup-wizard[data-intro='playing'] .setup-words > span,
-.setup-wizard.is-animated[data-intro='playing'] .setup-shine > span {
-  animation-delay: calc(2.1s + var(--w) * 110ms), 3.4s;
+.setup-logo-intro-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 50%;
 }
 
-.setup-wizard[data-intro='playing'] .setup-step > * {
-  animation-delay: 2s;
+.setup-logo-intro-hints {
+  position: absolute;
+  right: 22px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  opacity: 0;
+  pointer-events: none;
+  animation: setup-logo-skip-in 700ms var(--ease-ui) 1.5s both;
 }
 
-.setup-wizard[data-intro='playing'] .setup-visual-caption {
-  animation: setup-fade-in 600ms linear 2s both;
+.setup-logo-intro-skip,
+.setup-logo-intro-mute {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.setup-logo-intro-mute {
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.setup-logo-intro-mute:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.setup-logo-intro-mute:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.setup-logo-intro-hints kbd {
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 45%, transparent);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.setup-logo-intro[data-handoff='true'] .setup-logo-intro-hints {
+  animation: none;
+  opacity: 0;
+}
+
+.setup-logo-intro[data-handoff='true'] .setup-logo-intro-mute {
+  pointer-events: none;
+}
+
+@keyframes setup-logo-skip-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 0.58;
+    transform: none;
+  }
+}
+
+.setup-wizard[data-intro='playing'] .setup-content,
+.setup-wizard[data-intro='playing'] .setup-visual {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.setup-wizard[data-intro='playing'] .setup-content *,
+.setup-wizard[data-intro='playing'] .setup-content *::before,
+.setup-wizard[data-intro='playing'] .setup-content *::after {
+  animation-name: none !important;
+}
+
+.setup-wizard[data-intro='arrive'] .setup-content {
+  animation: setup-board-in 800ms var(--ease-spatial) both;
+}
+
+.setup-wizard[data-intro='arrive'] .setup-visual {
+  animation: setup-fade-in 700ms linear both;
 }
 
 .setup-primary,
@@ -1929,10 +2027,6 @@ samp,
 
 .setup-wizard.is-animated .setup-primary::before {
   animation: setup-call 1.8s var(--ease-ui) 1s infinite;
-}
-
-.setup-wizard.is-animated[data-intro='playing'] .setup-primary::before {
-  animation-delay: 3.4s;
 }
 
 .setup-primary::after {
@@ -2987,13 +3081,13 @@ samp,
 }
 
 .setup-wizard.is-still.is-leaving .setup-content,
-.setup-wizard.is-still.is-leaving .setup-visual,
-.setup-wizard.is-still[data-intro='playing'] .setup-content {
+.setup-wizard.is-still.is-leaving .setup-visual {
   animation: none;
 }
 
 .setup-wizard.is-still .setup-step > *,
-.setup-wizard.is-still .setup-scene {
+.setup-wizard.is-still .setup-scene,
+.setup-wizard.is-still[data-intro='arrive'] .setup-content {
   animation: setup-fade-in 160ms linear both;
 }
 
