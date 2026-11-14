@@ -790,6 +790,178 @@ describe('SetupWizard', () => {
         '返事の仕方今の設定を読み込めませんでした',
       );
     });
+
+    // Issue #1242: a value chosen here could come to equal what is stored without being stored
+    // from here (the same value stored from outside); a second change from outside then replaced
+    // it on screen, unseen.
+    describe('a choice on the step on screen is not replaced from outside', () => {
+      const comeBack = async () => {
+        await act(async () => window.dispatchEvent(new Event('focus')));
+        await flush();
+      };
+      const checked = (testId: string) => q<HTMLInputElement>(`[data-testid="${testId}"]`)?.checked;
+
+      it('the reply style: stored outside as chosen, then as another — the choice stays and is what "続ける" stores', async () => {
+        const settings = fullBridge();
+        let current: AssistantPreferences = { ...DEFAULT_ASSISTANT_PREFERENCES };
+        settings.getAssistantPreferences.mockImplementation(async () => ({
+          configured: true,
+          preferences: { ...current },
+        }));
+        await render();
+        await goTo('reply');
+        await choose('setup-tone-crisp');
+        current = { ...current, tone: 'crisp' };
+        await comeBack();
+        expect(checked('setup-tone-crisp')).toBe(true);
+        // Outside, the tone changes again — and so does an item not touched here.
+        current = { ...current, tone: 'casual', length: 'short' };
+        await comeBack();
+        expect(checked('setup-tone-crisp')).toBe(true);
+        expect(checked('setup-length-short')).toBe(true);
+        await press('setup-next');
+        // Only the item chosen here is written, over what is stored at that moment.
+        expect(settings.setAssistantPreferences).toHaveBeenCalledExactlyOnceWith({
+          ...DEFAULT_ASSISTANT_PREFERENCES,
+          tone: 'crisp',
+          length: 'short',
+        });
+      });
+
+      it('the Team mode and the safety default likewise', async () => {
+        const settings = fullBridge();
+        let mode = 'explicit';
+        settings.getTeamUsageMode.mockImplementation(async () => ({ mode }));
+        await render();
+        await goTo('team');
+        await choose('setup-team-auto');
+        mode = 'auto';
+        await comeBack();
+        mode = 'proactive';
+        await comeBack();
+        expect(checked('setup-team-auto')).toBe(true);
+        await press('setup-next');
+        expect(settings.setTeamUsageMode).toHaveBeenCalledExactlyOnceWith({ mode: 'auto' });
+
+        expect(step()).toBe('details');
+        await choose('setup-access-ask');
+        localStorage.setItem('sprint-coder:default-access-preset', 'ask');
+        await comeBack();
+        localStorage.setItem('sprint-coder:default-access-preset', 'full');
+        await comeBack();
+        expect(checked('setup-access-ask')).toBe(true);
+        await press('setup-next');
+        expect(localStorage.getItem('sprint-coder:default-access-preset')).toBe('ask');
+      });
+
+      it('a choice put back is held no longer: the outside value is followed, and nothing is stored', async () => {
+        const settings = fullBridge();
+        let current: AssistantPreferences = { ...DEFAULT_ASSISTANT_PREFERENCES };
+        settings.getAssistantPreferences.mockImplementation(async () => ({
+          configured: true,
+          preferences: { ...current },
+        }));
+        await render();
+        await goTo('reply');
+        await choose('setup-tone-crisp');
+        current = { ...current, tone: 'crisp' };
+        await comeBack();
+        // Stored outside as "casual"; here, the choice is put back to that very value.
+        current = { ...current, tone: 'casual' };
+        await comeBack();
+        await choose('setup-tone-casual');
+        current = { ...current, tone: 'polite' };
+        await comeBack();
+        expect(checked('setup-tone-polite')).toBe(true);
+        await press('setup-next');
+        expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+      });
+
+      it('nothing is held once the step is left: coming back shows what is stored then', async () => {
+        const settings = fullBridge();
+        let current: AssistantPreferences = { ...DEFAULT_ASSISTANT_PREFERENCES };
+        settings.getAssistantPreferences.mockImplementation(async () => ({
+          configured: true,
+          preferences: { ...current },
+        }));
+        await render();
+        await goTo('reply');
+        await choose('setup-tone-crisp');
+        current = { ...current, tone: 'crisp' };
+        await comeBack();
+        await press('setup-next'); // nothing to store: it is stored already
+        expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+        // Settings changes it afterwards: that is the newer choice, and it is followed.
+        current = { ...current, tone: 'casual' };
+        await comeBack();
+        await press('setup-back');
+        expect(step()).toBe('reply');
+        expect(checked('setup-tone-casual')).toBe(true);
+        await press('setup-next');
+        expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+
+        // "あとで決める" lets go of the choice as well.
+        await press('setup-back');
+        await choose('setup-tone-crisp');
+        await press('setup-skip');
+        current = { ...current, tone: 'polite' };
+        await comeBack();
+        await press('setup-back');
+        expect(checked('setup-tone-polite')).toBe(true);
+      });
+    });
+
+    it('the Team step does not wait for the reply settings to be read (issue #1242)', async () => {
+      const settings = fullBridge(undefined, 'proactive');
+      // The reply settings never answer.
+      settings.getAssistantPreferences.mockImplementation(() => new Promise(() => {}));
+      await render();
+      await press('setup-start');
+      await press('setup-next'); // reply: still being read, nothing to choose
+      expect(q('[data-testid="setup-reading"]')).not.toBeNull();
+      await press('setup-next'); // team
+      expect(step()).toBe('team');
+      expect(q('[data-testid="setup-reading"]')).toBeNull();
+      expect(q<HTMLInputElement>('[data-testid="setup-team-proactive"]')?.checked).toBe(true);
+      await choose('setup-team-auto');
+      await press('setup-next');
+      expect(settings.setTeamUsageMode).toHaveBeenCalledExactlyOnceWith({ mode: 'auto' });
+      // What was never read is neither shown as a default nor stored.
+      expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+      for (let i = 0; i < 3 && step() !== 'done'; i += 1) await press('setup-next');
+      const summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
+      expect(summary).toContain('Teamおまかせ変更しました');
+      expect(summary).toContain('返事の仕方今の設定を読み込めませんでした');
+    });
+
+    it('a Team read that a save overtook is made again, even while the reply settings never answer', async () => {
+      const settings = fullBridge(undefined, 'explicit');
+      settings.getAssistantPreferences.mockImplementation(() => new Promise(() => {}));
+      let mode = 'explicit';
+      const held: (() => void)[] = [];
+      let hold = false;
+      settings.getTeamUsageMode.mockImplementation(() => {
+        const answer = { mode };
+        if (!hold) return Promise.resolve(answer);
+        hold = false;
+        return new Promise((resolve) => held.push(() => resolve(answer)));
+      });
+      await render();
+      await goTo('details');
+      // A read of the Team mode starts and will answer with what was stored before the save below.
+      hold = true;
+      await act(async () => window.dispatchEvent(new Event('focus')));
+      await choose('setup-sound');
+      await press('setup-next'); // a save (this PC's part): the read still waiting is out of date
+      mode = 'proactive'; // stored outside meanwhile
+      const reads = settings.getTeamUsageMode.mock.calls.length;
+      for (const answer of held) await act(async () => answer());
+      await flush();
+      await flush();
+      expect(settings.getTeamUsageMode.mock.calls.length).toBe(reads + 1);
+      await press('setup-next');
+      expect(q('[data-testid="setup-summary"]')?.textContent).toContain('Team積極的に');
+    });
   });
 
   describe('motion, sound and the drawing surface', () => {

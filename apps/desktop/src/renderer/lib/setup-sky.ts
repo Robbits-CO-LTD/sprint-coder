@@ -1,19 +1,17 @@
 // The Setup's living background: one full-window canvas where the logo film's race goes quietly
 // on — streaks of light running left to right (the logo's colours, top to bottom), a light that
 // follows the pointer, ripples that cross the whole window when something is chosen, the Team's
-// lights racing with trails, confetti from both sides, and the opening where the specks gather
-// into the product's name.
+// lights racing with trails, and confetti from both sides. (What opens the Setup is the logo film,
+// lib/setup-logo-intro.ts, on a canvas of its own.)
 //
 // One requestAnimationFrame loop, owned here. It stops while the page is hidden and for good on
 // `destroy()`, which also removes every listener this object added. Without motion (`animate`
 // false) nothing loops: one still frame is drawn, and again after a resize. Only cheap drawing is
 // used — arcs, lines and a pre-rendered glow sprite with additive blending; no canvas shadows or
-// filters.
+// filters. A frame in the steady run makes no new arrays or objects: the lists are thinned in
+// place, and a trail's points are used again once it is full.
 
-import { FONT_SANS, waitForFonts } from './fonts';
-
-/** How long the opening may wait for its font before it gathers into whatever font there is. */
-const INTRO_FONT_WAIT_MS = 800;
+import { watchPixelRatio } from './pixel-ratio';
 
 export type SkyTheme = Readonly<{
   /** Two colours the specks and glows take, as hex. */
@@ -34,10 +32,9 @@ type Speck = {
   alpha: number;
   /** How fast it runs to the right when nothing disturbs it. */
   cruise: number;
-  /** Opening: where this speck settles inside the word. */
-  hx?: number | undefined;
-  hy?: number | undefined;
 };
+
+type Point = { x: number; y: number };
 
 type Ripple = { x: number; y: number; born: number; color: string };
 
@@ -48,7 +45,7 @@ type Comet = {
   speed: number;
   x: number;
   phase: number;
-  trail: { x: number; y: number }[];
+  trail: Point[];
   /** 0..1, how present it is (fades in when it joins, out when it leaves). */
   life: number;
   leaving: boolean;
@@ -82,10 +79,17 @@ export type SkyTeamPalette = Readonly<{ leader: string; workers: readonly string
 
 const TAU = Math.PI * 2;
 const MAX_SPECKS = 170;
+/** How many points of its path a Team light keeps behind it. */
+const TRAIL_POINTS = 44;
 /** Matches the Team board's loop (SetupAnimation's TEAM_CYCLE), so the big job lands on both. */
 const AUTO_CYCLE_MS = 5200;
 /** At most this many pixels behind the canvas (about 2560×1600). */
 const MAX_CANVAS_PIXELS = 4_200_000;
+
+/** Runs round the window: from just past the right edge back to just before the left one. */
+function wrapRound(x: number, span: number): number {
+  return ((((x + 80) % span) + span) % span) - 80;
+}
 
 function contextOf(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
   try {
@@ -102,6 +106,10 @@ export class SetupSky {
   private width = 0;
   private height = 0;
   private dpr = 1;
+  // The screen's pixel ratio the canvas was last sized for. The box keeps its size when only the
+  // ratio changes (the window moved to a screen of another density), so no resize is reported: the
+  // ratio is watched (lib/pixel-ratio.ts), and looked at on each frame while the loop runs.
+  private ratio = 1;
   private frame = 0;
   private last = 0;
   private running = false;
@@ -123,12 +131,13 @@ export class SetupSky {
   private confetti: Confetto[] = [];
   private warpUntil = 0;
   private warpDir = 1;
-  private intro: { start: number; word: string } | null = null;
-  /** Counts openings asked for, so one that waited for its font starts only if still current. */
-  private introRequest = 0;
   private implodeAt = 0;
   private observer: ResizeObserver | null = null;
+  private unwatchPixelRatio: () => void = () => {};
   private readonly onResize = () => this.resize();
+  private readonly onPixelRatio = () => {
+    if ((window.devicePixelRatio || 1) !== this.ratio) this.resize();
+  };
   private readonly onVisibility = () => {
     if (document.hidden) this.stop();
     else this.start();
@@ -146,6 +155,7 @@ export class SetupSky {
     } else {
       window.addEventListener('resize', this.onResize);
     }
+    this.unwatchPixelRatio = watchPixelRatio(this.onPixelRatio);
     if (this.animate) document.addEventListener('visibilitychange', this.onVisibility);
     this.resize();
     this.seed();
@@ -163,6 +173,7 @@ export class SetupSky {
     this.stop();
     this.observer?.disconnect();
     this.observer = null;
+    this.unwatchPixelRatio();
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.specks = [];
@@ -172,13 +183,22 @@ export class SetupSky {
     this.sprites.clear();
   }
 
+  // The Setup sets the look again whenever anything on screen changes (each letter of the call
+  // name, say). The same look again is nothing to do — and without motion it must not be: the still
+  // picture would be shuffled and drawn afresh for a change that is not one.
   setTheme(theme: SkyTheme): void {
+    const same =
+      theme.speed === this.theme.speed &&
+      theme.colors[0] === this.theme.colors[0] &&
+      theme.colors[1] === this.theme.colors[1];
     this.theme = theme;
-    if (!this.animate) this.drawStill();
+    if (!this.animate && !same) this.drawStill();
   }
 
   setDensity(count: number): void {
-    this.targetCount = Math.max(20, Math.min(MAX_SPECKS, Math.round(count)));
+    const target = Math.max(20, Math.min(MAX_SPECKS, Math.round(count)));
+    if (target === this.targetCount) return;
+    this.targetCount = target;
     if (!this.animate) {
       this.seed();
       this.drawStill();
@@ -290,56 +310,6 @@ export class SetupSky {
     }
   }
 
-  /** The opening: specks gather into `word`, a light runs across it, and it dissolves. */
-  playIntro(word: string): void {
-    if (!this.animate || this.ctx === null) return;
-    // The word's shape is taken once, from the bundled font. Taken before that font has loaded, it
-    // would be another font's shape for the whole opening — so wait for it (briefly) first.
-    const fonts = typeof document === 'undefined' ? undefined : document.fonts;
-    const spec = `800 100px ${FONT_SANS}`;
-    if (fonts === undefined || fonts.check(spec, word)) {
-      this.gatherInto(word);
-      return;
-    }
-    const request = ++this.introRequest;
-    void waitForFonts(fonts, [spec], INTRO_FONT_WAIT_MS, word).then(() => {
-      if (request === this.introRequest && !this.destroyed) this.gatherInto(word);
-    });
-  }
-
-  private gatherInto(word: string): void {
-    const points = this.sampleWord(word);
-    if (points.length === 0) return;
-    this.intro = { start: performance.now(), word };
-    while (this.specks.length < points.length) this.specks.push(this.makeSpeck(true));
-    this.specks.forEach((speck, index) => {
-      const point = points[index % points.length]!;
-      speck.hx = point.x;
-      speck.hy = point.y;
-    });
-  }
-
-  /** Ends the opening at once (a click or key during it). */
-  finishIntro(): void {
-    // An opening still waiting for its font is called off too.
-    this.introRequest += 1;
-    if (this.intro === null) return;
-    this.intro = null;
-    // The word bursts: every speck flies outwards from the middle and then drifts on.
-    const cx = this.width / 2;
-    const cy = this.height * 0.42;
-    for (const speck of this.specks) {
-      speck.hx = undefined;
-      speck.hy = undefined;
-      const dx = speck.x - cx;
-      const dy = speck.y - cy;
-      const d = Math.hypot(dx, dy) || 1;
-      const power = 6 + Math.random() * 10;
-      speck.vx = (dx / d) * power;
-      speck.vy = (dy / d) * power - 1;
-    }
-  }
-
   /** Leaving for the app: everything rushes to the middle and fades. */
   implode(): void {
     if (!this.animate) return;
@@ -373,6 +343,7 @@ export class SetupSky {
   private readonly tick = (now: number) => {
     if (!this.running) return;
     try {
+      this.onPixelRatio();
       const dt = Math.min(48, now - this.last) / 16.67;
       this.last = now;
       this.step(now, dt);
@@ -386,6 +357,8 @@ export class SetupSky {
   };
 
   private resize(): void {
+    // Noted first, whether or not there is a box to size: one look per change, not one a frame.
+    this.ratio = window.devicePixelRatio || 1;
     const box = (this.canvas.parentElement ?? this.canvas).getBoundingClientRect();
     const width = box.width;
     const height = box.height;
@@ -407,7 +380,7 @@ export class SetupSky {
     this.height = height;
     // Cap the pixels behind the canvas: a huge window gets a lower resolution, not hundreds of MB.
     const cap = Math.sqrt(MAX_CANVAS_PIXELS / (width * height));
-    this.dpr = Math.max(0.25, Math.min(2, window.devicePixelRatio || 1, cap));
+    this.dpr = Math.max(0.25, Math.min(2, this.ratio, cap));
     this.canvas.width = Math.max(1, Math.round(width * this.dpr));
     this.canvas.height = Math.max(1, Math.round(height * this.dpr));
     const firstSize = !this.sized;
@@ -480,22 +453,13 @@ export class SetupSky {
   }
 
   private step(now: number, dt: number): void {
-    // Specks: drift, follow the theme's speed, settle into the word during the opening.
+    // Specks: drift, and follow the theme's speed.
     const warping = now < this.warpUntil;
     const warpForce = warping ? ((this.warpUntil - now) / 760) * 9 : 0;
     const imploding = this.implodeAt > 0;
-    const introAge = this.intro ? now - this.intro.start : 0;
-    if (this.intro && introAge > 1850) this.finishIntro();
-    const gathering = this.intro !== null && introAge < 1850;
-    while (!this.intro && this.specks.length > this.targetCount) this.specks.pop();
+    while (this.specks.length > this.targetCount) this.specks.pop();
     while (this.specks.length < this.targetCount) this.specks.push(this.makeSpeck(true));
     for (const speck of this.specks) {
-      if (gathering && speck.hx !== undefined && speck.hy !== undefined) {
-        const pull = Math.min(1, introAge / 1100);
-        speck.x += (speck.hx - speck.x) * (0.06 + pull * 0.14) * dt;
-        speck.y += (speck.hy - speck.y) * (0.06 + pull * 0.14) * dt;
-        continue;
-      }
       if (imploding) {
         speck.x += (this.width / 2 - speck.x) * 0.12 * dt;
         speck.y += (this.height / 2 - speck.y) * 0.12 * dt;
@@ -529,10 +493,15 @@ export class SetupSky {
     // Every cursor runs left to right and wraps round from just past the right edge to just
     // before the left one.
     const span = this.width + 160;
-    const wrap = (x: number) => ((((x + 80) % span) + span) % span) - 80;
-    const leader = this.comets.find((comet) => comet.lane === 0 && !comet.leaving);
+    let leader: Comet | undefined;
+    for (const comet of this.comets) {
+      if (comet.lane === 0 && !comet.leaving) {
+        leader = comet;
+        break;
+      }
+    }
     const leaderFrom = leader?.x ?? 0;
-    if (leader) leader.x = wrap(leader.x + leader.speed * dt);
+    if (leader) leader.x = wrapRound(leader.x + leader.speed * dt, span);
     for (const comet of this.comets) {
       const present = !comet.leaving && (!comet.helper || bigJob);
       if (present && !comet.present && comet.lane !== 0) {
@@ -560,45 +529,58 @@ export class SetupSky {
             comet.catching = false;
           }
         }
-        comet.x = wrap(leader.x + comet.offset);
+        comet.x = wrapRound(leader.x + comet.offset, span);
       } else {
         // On its own (no leader, or on its way out): keeps running at its own pace.
         comet.catching = false;
         comet.offset = undefined;
-        comet.x = wrap(comet.x + comet.speed * dt);
+        comet.x = wrapRound(comet.x + comet.speed * dt, span);
       }
       // Wrapped round: the trail starts again rather than streaking across the window.
       if (comet.x < before - span / 2) comet.trail = [];
       comet.phase += 0.03 * dt;
-      const pos = this.cometPosition(comet);
-      comet.trail.push(pos);
-      if (comet.trail.length > 44) comet.trail.shift();
+      // The newest point of its path; once the trail is full, the oldest point is used again.
+      const trail = comet.trail;
+      const point = trail.length >= TRAIL_POINTS ? trail.shift()! : { x: 0, y: 0 };
+      trail.push(this.cometPosition(comet, comet.x, point));
     }
-    this.comets = this.comets.filter((comet) => !(comet.leaving && comet.life < 0.02));
+    // Those that have left are dropped; the lists are thinned where they are, with no new array.
+    let kept = 0;
+    for (const comet of this.comets) {
+      if (!(comet.leaving && comet.life < 0.02)) this.comets[kept++] = comet;
+    }
+    this.comets.length = kept;
 
     // Confetti.
+    kept = 0;
     for (const piece of this.confetti) {
-      if (now < piece.born) continue;
-      piece.vy += 0.32 * dt;
-      piece.vx *= 0.99;
-      piece.vy *= 0.99;
-      piece.x += piece.vx * dt;
-      piece.y += piece.vy * dt;
-      piece.rot += piece.vr * dt;
+      if (now >= piece.born) {
+        piece.vy += 0.32 * dt;
+        piece.vx *= 0.99;
+        piece.vy *= 0.99;
+        piece.x += piece.vx * dt;
+        piece.y += piece.vy * dt;
+        piece.rot += piece.vr * dt;
+      }
+      if (piece.y < this.height + 40 && now - piece.born < 4200) this.confetti[kept++] = piece;
     }
-    this.confetti = this.confetti.filter(
-      (piece) => piece.y < this.height + 40 && now - piece.born < 4200,
-    );
-    this.ripples = this.ripples.filter((ripple) => now - ripple.born < 1500);
+    this.confetti.length = kept;
+    kept = 0;
+    for (const ripple of this.ripples) {
+      if (now - ripple.born < 1500) this.ripples[kept++] = ripple;
+    }
+    this.ripples.length = kept;
   }
 
-  private cometPosition(comet: Comet): { x: number; y: number } {
+  /** Where `comet` is when it is at `x`, written into `out` (which is returned). */
+  private cometPosition(comet: Comet, x: number, out: Point): Point {
     const mid = this.height * this.laneCenter;
     const laneGap = this.height * this.laneSpread;
     // Helpers swoop in from above or below the leader's line.
     const offset = comet.lane * laneGap * (comet.helper ? comet.life : 1);
-    const y = mid + offset + Math.sin(comet.phase + comet.x * 0.004) * Math.min(28, laneGap * 0.4);
-    return { x: comet.x, y };
+    out.x = x;
+    out.y = mid + offset + Math.sin(comet.phase + x * 0.004) * Math.min(28, laneGap * 0.4);
+    return out;
   }
 
   // ---------- drawing ----------
@@ -627,10 +609,9 @@ export class SetupSky {
     for (const comet of this.comets) {
       comet.life = comet.leaving ? 0 : 1;
       comet.x = this.width * (0.3 + Math.abs(comet.lane) * 0.12);
-      comet.trail = Array.from({ length: 24 }, (_, index) => {
-        const ghost = { ...comet, x: comet.x - (23 - index) * 14 };
-        return this.cometPosition(ghost);
-      });
+      comet.trail = Array.from({ length: 24 }, (_, index) =>
+        this.cometPosition(comet, comet.x - (23 - index) * 14, { x: 0, y: 0 }),
+      );
     }
     this.comets = this.comets.filter((comet) => !comet.leaving);
     this.draw(performance.now());
@@ -664,17 +645,9 @@ export class SetupSky {
 
     // Specks (streaks while warping or imploding).
     const warping = now < this.warpUntil;
-    const introAge = this.intro ? now - this.intro.start : -1;
     for (const speck of this.specks) {
       const color = this.theme.colors[speck.tone];
-      let alpha = speck.alpha;
-      if (introAge >= 0 && speck.hx !== undefined) {
-        alpha = Math.min(1, 0.4 + introAge / 900);
-        // The light running across the word.
-        const sweep = ((introAge - 1150) / 600) * (this.width * 0.7) + this.width * 0.15;
-        if (introAge > 1150 && Math.abs(speck.x - sweep) < 50) alpha = 1;
-      }
-      ctx.globalAlpha = fade * alpha;
+      ctx.globalAlpha = fade * speck.alpha;
       if (warping) {
         ctx.strokeStyle = color;
         ctx.lineWidth = speck.r;
@@ -682,7 +655,7 @@ export class SetupSky {
         ctx.moveTo(speck.x, speck.y);
         ctx.lineTo(speck.x + this.warpDir * 26 * speck.r, speck.y);
         ctx.stroke();
-      } else if (speck.hx === undefined) {
+      } else {
         // Running: a streak as long as it is fast, its head a point of light.
         const length = 3 + Math.abs(speck.vx) * this.theme.speed * 11;
         ctx.strokeStyle = color;
@@ -694,18 +667,7 @@ export class SetupSky {
         ctx.stroke();
         const size = speck.r * 4.5;
         ctx.drawImage(this.sprite(color), speck.x - size / 2, speck.y - size / 2, size, size);
-      } else {
-        const size = speck.r * 7;
-        ctx.drawImage(this.sprite(color), speck.x - size / 2, speck.y - size / 2, size, size);
       }
-    }
-
-    // Intro light sweep.
-    if (introAge > 1100 && introAge < 1800) {
-      const t = (introAge - 1100) / 700;
-      const x = this.width * (0.1 + t * 0.8);
-      ctx.globalAlpha = 0.5 * Math.sin(t * Math.PI);
-      ctx.drawImage(this.sprite('#ffffff'), x - 160, this.height * 0.42 - 160, 320, 320);
     }
 
     // Ripples across the window.
@@ -766,32 +728,5 @@ export class SetupSky {
     ctx.lineCap = 'butt';
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
-  }
-
-  private sampleWord(word: string): { x: number; y: number }[] {
-    const scratch = document.createElement('canvas');
-    const w = Math.max(1, Math.round(this.width));
-    const h = Math.max(1, Math.round(this.height));
-    scratch.width = w;
-    scratch.height = h;
-    const g = scratch.getContext('2d');
-    if (g === null) return [];
-    const size = Math.min(w * 0.085, 120);
-    g.fillStyle = '#fff';
-    g.font = `800 ${size}px ${FONT_SANS}`;
-    g.textAlign = 'center';
-    g.textBaseline = 'middle';
-    g.fillText(word, w / 2, h * 0.42);
-    const data = g.getImageData(0, 0, w, h).data;
-    const points: { x: number; y: number }[] = [];
-    const gap = Math.max(4, Math.round(size / 15));
-    for (let y = 0; y < h; y += gap) {
-      for (let x = 0; x < w; x += gap) {
-        if (data[(y * w + x) * 4 + 3]! > 128) points.push({ x, y });
-      }
-    }
-    // Keep the count bounded however large the window is.
-    const step = Math.max(1, Math.ceil(points.length / 900));
-    return points.filter((_, index) => index % step === 0);
   }
 }

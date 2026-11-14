@@ -16,6 +16,7 @@
 // `destroy()` cancels the frame and removes every listener and timer this object added.
 
 import { FONT_SANS, waitForFonts } from './fonts';
+import { watchPixelRatio } from './pixel-ratio';
 import type { LogoIntroSound } from './setup-logo-sound';
 import {
   clamp01,
@@ -301,6 +302,10 @@ export class SetupLogoIntro {
   private width = 0;
   private height = 0;
   private dpr = 1;
+  // The screen's pixel ratio the canvas was last sized for. The box keeps its size when only the
+  // ratio changes (the window moved to a screen of another density), so no resize is reported: the
+  // ratio is watched (lib/pixel-ratio.ts), and looked at on each frame while the loop runs.
+  private ratio = 1;
   private sized = false;
   private frame = 0;
   private last = 0;
@@ -312,6 +317,7 @@ export class SetupLogoIntro {
   private skipAt: number | null = null;
   private loadTimer = 0;
   private observer: ResizeObserver | null = null;
+  private unwatchPixelRatio: () => void = () => {};
   private shownOpacity = 1;
   private shownScale = 1;
 
@@ -407,6 +413,9 @@ export class SetupLogoIntro {
   private readonly farPhase = new Float32Array(FAR + NEAR);
 
   private readonly onResize = () => this.resize();
+  private readonly onPixelRatio = () => {
+    if ((window.devicePixelRatio || 1) !== this.ratio) this.resize();
+  };
   private readonly onVisibility = () => {
     if (document.hidden) this.stop();
     else this.start();
@@ -431,6 +440,8 @@ export class SetupLogoIntro {
     } else {
       window.addEventListener('resize', this.onResize);
     }
+    // (After it, the letters and digits are drawn again for the new ratio, as after any resize.)
+    this.unwatchPixelRatio = watchPixelRatio(this.onPixelRatio);
     document.addEventListener('visibilitychange', this.onVisibility);
     this.resize();
     this.loadTimer = window.setTimeout(() => {
@@ -470,6 +481,7 @@ export class SetupLogoIntro {
     window.clearTimeout(this.loadTimer);
     this.observer?.disconnect();
     this.observer = null;
+    this.unwatchPixelRatio();
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.sprites.clear();
@@ -516,6 +528,7 @@ export class SetupLogoIntro {
   private readonly tick = (now: number) => {
     if (!this.running) return;
     try {
+      this.onPixelRatio();
       // A long stall (a busy machine) moves the film on by at most a tenth of a second.
       const dt = Math.max(0, Math.min(100, now - this.last));
       this.last = now;
@@ -756,6 +769,8 @@ export class SetupLogoIntro {
   // ---------- size ----------
 
   private resize(): void {
+    // Noted first, whether or not there is a box to size: one look per change, not one a frame.
+    this.ratio = window.devicePixelRatio || 1;
     const box = (this.canvas.parentElement ?? this.canvas).getBoundingClientRect();
     const width = box.width;
     const height = box.height;
@@ -767,7 +782,7 @@ export class SetupLogoIntro {
     this.height = height;
     // Cap the pixels behind the canvas: a huge window gets a lower resolution, not hundreds of MB.
     const cap = Math.sqrt(MAX_CANVAS_PIXELS / (width * height));
-    this.dpr = Math.max(0.25, Math.min(2, window.devicePixelRatio || 1, cap));
+    this.dpr = Math.max(0.25, Math.min(2, this.ratio, cap));
     this.canvas.width = Math.max(1, Math.round(width * this.dpr));
     this.canvas.height = Math.max(1, Math.round(height * this.dpr));
     this.sized = true;
