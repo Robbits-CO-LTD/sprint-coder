@@ -37,6 +37,7 @@ import {
   markDesktopControlWorker,
 } from './desktop-control-session';
 import { maskTeamHiringMarkdown } from './team-hiring-markdown';
+import { TeamHireRevokedError, TeamWorkspaceRepositoryError } from './team-workspace-repository';
 import { leaderWriteLimitNote } from './workspace-write-limits';
 import { writeScopeNote } from './write-scope';
 import {
@@ -425,6 +426,10 @@ export function teamToolError(error: unknown): {
     error: error instanceof Error ? error.name : 'Error',
     message: error instanceof Error ? error.message : String(error),
     ...(error instanceof TeamDelegationError ? { code: error.code, details: error.details } : {}),
+    // A fixed, user-facing reason (issue #1241): the Leader can pass the message on as it is.
+    ...(error instanceof TeamWorkspaceRepositoryError || error instanceof TeamHireRevokedError
+      ? { code: error.code }
+      : {}),
   };
 }
 

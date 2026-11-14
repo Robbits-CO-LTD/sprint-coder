@@ -21180,7 +21180,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const teamUsageOffer =
       teamRequested || skillCreatorTurn
         ? null
-        : this.teamUsageOfferFor({ runtimeKind, modelSelection });
+        : this.teamUsageOfferFor({ taskId, runtimeKind, modelSelection });
     const shouldSealBuiltinTeamSkill = teamRequested || teamUsageOffer !== null;
     const skillCatalogContent = this.skillCatalogContextProvider?.(
       parsedSkills.map(({ selection }) => selection),

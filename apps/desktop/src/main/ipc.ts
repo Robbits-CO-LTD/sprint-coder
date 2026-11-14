@@ -661,6 +661,10 @@ import {
   type ExecuteTeamToolOptions,
 } from './team-tools';
 import {
+  TEAM_OFFER_WORKSPACE_CHECK_TIMEOUT_MS,
+  TeamOfferWorkspaceGate,
+} from './team-workspace-repository';
+import {
   BUILTIN_TEAM_SKILL_AUDIT,
   BUILTIN_TEAM_SKILL_CONTENT,
   BUILTIN_TEAM_SKILL_DIGEST,
@@ -844,9 +848,21 @@ export function teamUsageOfferAvailable(
     leaderMcpEnabled: boolean;
     teamSkillReady: boolean;
     teamMcpBridgeReady: boolean;
+    /**
+     * The Workspace can ever run a writing Worker (a Git repository with a commit), as checked
+     * before the Turn started (issue #1241). Without it, hiring would leave idle Workers whose
+     * every assignment fails, so the Turn stays an ordinary one.
+     */
+    workspaceRepositoryReady: boolean;
   }>,
 ): boolean {
-  if (!input.leaderMcpEnabled || !input.teamSkillReady || !input.teamMcpBridgeReady) return false;
+  if (
+    !input.leaderMcpEnabled ||
+    !input.teamSkillReady ||
+    !input.teamMcpBridgeReady ||
+    !input.workspaceRepositoryReady
+  )
+    return false;
   // Mirrors startSelectedRuntime: a non-built-in Connection runs as the API Leader. Asked inside the
   // Turn's start transaction, so a selection this cannot read is answered "no", never thrown.
   let builtin: ReturnType<typeof builtinRuntimeForModelSelection>;
@@ -1001,6 +1017,20 @@ export class IpcRouter {
   private disposed = false;
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  /**
+   * Whether a Turn the user did not ask Team for may be offered Team in this Task's Workspace
+   * (issue #1241): Git is asked here, before a Turn starts, never inside the start transaction.
+   */
+  private readonly teamOfferWorkspace = new TeamOfferWorkspaceGate({
+    check: (taskId) =>
+      this.teamCoordinator.requireWorkspaceWriteReady(taskId, {
+        timeoutMs: TEAM_OFFER_WORKSPACE_CHECK_TIMEOUT_MS,
+      }),
+    workspaceKey: (taskId) => {
+      const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
+      return workspace.roots.length === 0 ? null : workspace.digest;
+    },
+  });
   /** The assistant message each Provider-runtime Turn streams into, registered before its first
    * delta so a tool that succeeds mid-reply (a rendered graph) can anchor itself in that message. */
   private readonly turnMessageIds = new Map<string, string>();
@@ -1325,6 +1355,7 @@ export class IpcRouter {
         leaderMcpEnabled: process.env['SPRINT_CODER_LEADER_MCP'] !== '0',
         teamSkillReady: this.teamSkillReady,
         teamMcpBridgeReady: this.teamMcpBridge.socketPath !== null,
+        workspaceRepositoryReady: this.teamOfferWorkspace.isReady(runtime.taskId),
       }),
     );
     const genericManagedRuntimeTools = this.createGenericManagedRuntimeToolHandlers();
@@ -3212,7 +3243,11 @@ export class IpcRouter {
           IPC_CHANNELS.tasksSetArchived,
           () => this.persistence.setArchived(input.taskId, input.archived),
         ).value;
-        if (input.archived) void this.endArchivedTaskDesktopControl(input.taskId);
+        if (input.archived) {
+          // A hire still checking the Workspace must not create a Worker in an archived Task.
+          this.teamCoordinator.revokePendingHires(input.taskId);
+          void this.endArchivedTaskDesktopControl(input.taskId);
+        }
         return result;
       },
     );
@@ -3235,6 +3270,7 @@ export class IpcRouter {
           input.objective,
           input.skills,
         ).catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        await this.refreshTeamOfferWorkspace(input.taskId);
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -3264,6 +3300,7 @@ export class IpcRouter {
         const skills = await this.skillSettings
           .resolveSelections(input.skills)
           .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        await this.refreshTeamOfferWorkspace(input.taskId);
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -3924,6 +3961,7 @@ export class IpcRouter {
             });
           }
         }
+        await this.refreshTeamOfferWorkspace(input.taskId);
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -3976,6 +4014,8 @@ export class IpcRouter {
         const skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
           (error) => Promise.reject(skillSettingsPublicError(error)),
         );
+        // A queued message starts later, from the queue, and reads this answer while it lasts.
+        await this.refreshTeamOfferWorkspace(input.taskId);
         let queueEvent: TurnEvent | undefined;
         const result = this.runMutation(
           event,
@@ -4082,6 +4122,7 @@ export class IpcRouter {
             );
           }
         }
+        await this.refreshTeamOfferWorkspace(input.taskId);
         let transition: StopAndSendTransition | undefined;
         const result = this.runMutation(
           event,
@@ -5302,7 +5343,26 @@ export class IpcRouter {
       );
   }
 
+  /**
+   * Asks Git, before a Turn's start transaction, whether this Task's Workspace may be offered Team
+   * (issue #1241). Every entry that starts a Turn from a user's action awaits it, so a folder that
+   * just became a repository is offered on the very next message. Only the offered levels pay for
+   * the Git call; it never throws, and anything it cannot confirm leaves the Turn an ordinary one.
+   */
+  private async refreshTeamOfferWorkspace(taskId: string): Promise<void> {
+    try {
+      if (this.persistence.getTeamUsageMode() === 'explicit') return;
+      await this.teamOfferWorkspace.refresh(taskId);
+    } catch {
+      // Offering is optional: an unreadable setting or check leaves the cached answer as it was,
+      // and an absent answer means "not offered".
+    }
+  }
+
   private dispatchStarted(started: StartedTurn): void {
+    // Keeps the answer fresh for Turns that start without a user's action (a queued message, the
+    // next Goal Turn), which read it from the cache while it lasts.
+    void this.refreshTeamOfferWorkspace(started.event.taskId);
     this.turnLogCategoryByTurn.set(started.turnId, turnLogCategory(started));
     this.turnLogStartedAtByTurn.set(started.turnId, Date.now());
     this.turnLogRuntimeByTurn.set(started.turnId, {
@@ -7348,6 +7408,9 @@ export class IpcRouter {
   }
 
   private async cancelRuntime(taskId: string, turnId: string): Promise<boolean> {
+    // Stopping the Leader also cancels a hire it started that is still checking the Workspace
+    // outside the Team's queue; otherwise that hire would create a Worker after the stop.
+    this.teamCoordinator.revokePendingHires(taskId);
     this.canceledRuntimeTurns.add(turnId);
     const kind = this.turnRuntimes.get(turnId);
     const stopped = await runBestEffortCancellation(
@@ -8342,13 +8405,14 @@ export class IpcRouter {
     finalText: string | undefined,
   ): Promise<'completed' | 'failed'> {
     const teamRequired = this.teamRequiredTurns.has(turnId);
+    const turnCreatedAt = teamRequired ? this.persistence.getTurnCreatedAt(taskId, turnId) : '';
     return runRequiredTeamCompletion(
       teamRequired,
       teamRequired
         ? countRequiredTeamWorkers(
             this.teamCoordinator.get(taskId),
             this.teamCoordinator.listWorkerStops(taskId),
-            this.persistence.getTurnCreatedAt(taskId, turnId),
+            turnCreatedAt,
           )
         : 0,
       {
@@ -8358,6 +8422,9 @@ export class IpcRouter {
         },
         failed: (error) => this.handleRuntimeFailure(kind, taskId, turnId, error),
       },
+      teamRequired
+        ? this.teamCoordinator.workspaceRefusalSince(taskId, turnCreatedAt)?.message
+        : undefined,
     );
   }
 
@@ -8994,8 +9061,15 @@ export function countRequiredTeamWorkers(
 export function requiredTeamWorkerFailure(
   teamRequired: boolean,
   workerCount: number,
+  /**
+   * Why hiring was refused during this Turn, when the Workspace was the reason (issue #1241): the
+   * user is told that, not the generic "no Worker", and retrying as-is would only be refused again.
+   */
+  workspaceRefusal?: string,
 ): PublicError | null {
   if (!shouldFailRequiredTeamTurn(teamRequired, workerCount)) return null;
+  if (workspaceRefusal !== undefined)
+    return { code: 'RUNTIME_FAILED', userMessage: workspaceRefusal, retryable: false };
   return {
     code: 'RUNTIME_FAILED',
     userMessage:
@@ -9011,8 +9085,9 @@ export async function runRequiredTeamCompletion(
     completed: () => void | Promise<void>;
     failed: (error: PublicError) => void | Promise<void>;
   },
+  workspaceRefusal?: string,
 ): Promise<'completed' | 'failed'> {
-  const failure = requiredTeamWorkerFailure(teamRequired, workerCount);
+  const failure = requiredTeamWorkerFailure(teamRequired, workerCount, workspaceRefusal);
   if (failure === null) {
     await handlers.completed();
     return 'completed';

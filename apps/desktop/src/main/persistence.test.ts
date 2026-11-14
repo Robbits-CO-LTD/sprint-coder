@@ -3237,7 +3237,9 @@ if (runsWithElectronAbi)
           const started = persistence.startTurn(task.id, '認証まわりを直してテストも足して');
           expect(started.teamTurn).toBe(true);
           expect(started.teamUsageOffer).toBe(mode);
+          // The Task lets Main read the Workspace answer it checked before the Turn (issue #1241).
           expect(offer).toHaveBeenCalledWith({
+            taskId: task.id,
             runtimeKind: started.runtimeKind,
             modelSelection: started.modelSelection,
           });

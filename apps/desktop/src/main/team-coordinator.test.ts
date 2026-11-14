@@ -59,7 +59,12 @@ import { TEAM_ASSIGNMENT_RATE_LIMIT, type TeamEnvelope } from '@sprint-coder/dom
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
-import { executeTeamTool } from './team-tools';
+import { executeTeamTool, teamToolError } from './team-tools';
+import {
+  TeamHireRevokedError,
+  TeamWorkspaceRepositoryError,
+  teamWorkspaceRepositoryMessage,
+} from './team-workspace-repository';
 import { ConnectionAdmissionController } from './connection-admission';
 import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
@@ -12634,6 +12639,194 @@ if (runsWithElectronAbi)
       expect(detail?.workers.find(({ id }) => id === fresh.id)?.state).toBe('ready');
       expect(coordinator.latestTeamMessageSeq(task.id)).toBe(historicalMessageSeq);
       persistence.close();
+    });
+
+    describe('hiring a writing Worker checks the Workspace first (issue #1241)', () => {
+      const hire = (coordinator: TeamCoordinator, taskId: string, writeCapable: boolean) =>
+        coordinator.hireWorker({
+          taskId,
+          role: writeCapable ? 'Writer' : 'Reader',
+          objective: 'one small file',
+          contextInheritancePolicy: 'none',
+          writeCapable,
+        });
+
+      it('refuses a plain folder with the fixed message, before any Team or Worker exists', async () => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('not a repository');
+        const folder = mkdtempSync(join(tmpdir(), 'sprint-coder-team-plain-'));
+        const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-worktrees-'));
+        cleanup.push(folder, worktreesRoot);
+        writeFileSync(join(folder, 'a.txt'), 'a\n');
+        persistence.setWorkspace(task.id, folder);
+        const coordinator = coordinatorWithWorktrees(
+          persistence,
+          new TestWorkerRuntime(),
+          new WorkerWorktreeManager({ worktreesRoot }),
+        );
+
+        const refused = await hire(coordinator, task.id, true).catch((error: unknown) => error);
+        expect(refused).toBeInstanceOf(TeamWorkspaceRepositoryError);
+        expect(refused).toMatchObject({ code: 'workspace_not_git' });
+        expect((refused as Error).message).toContain('Git の管理下にない');
+        expect(persistence.getTeamByTask(task.id)).toBeNull();
+        // Remembered, so a requested Team Turn that ends with no Worker reports this reason.
+        expect(coordinator.workspaceRefusalSince(task.id, '1970-01-01T00:00:00.000Z')).toBe(
+          refused,
+        );
+        expect(coordinator.workspaceRefusalSince(task.id, '9999-01-01T00:00:00.000Z')).toBeNull();
+        // What the Leader receives from team_hire_worker: the same fixed message and its code.
+        expect(teamToolError(refused)).toMatchObject({
+          ok: false,
+          code: 'workspace_not_git',
+          message: teamWorkspaceRepositoryMessage('workspace_not_git'),
+        });
+
+        // A read-only Worker needs no worktree, so it is hired as before.
+        const reader = await hire(coordinator, task.id, false);
+        expect(reader.writeCapable).toBe(false);
+        persistence.close();
+      });
+
+      it('refuses uncommitted changes without touching them, and hires once they are committed', async () => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('dirty repository');
+        const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+        const coordinator = coordinatorWithWorktrees(persistence, new TestWorkerRuntime(), manager);
+        writeFileSync(join(workspace, 'README.md'), 'the user is editing\n');
+
+        await expect(hire(coordinator, task.id, true)).rejects.toMatchObject({
+          code: 'workspace_dirty',
+        });
+        expect(persistence.getTeamByTask(task.id)).toBeNull();
+        expect(readFileSync(join(workspace, 'README.md'), 'utf8')).toBe('the user is editing\n');
+        expect(
+          spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+        ).toContain('README.md');
+
+        expect(
+          spawnSync('git', [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-am',
+            'save',
+          ]).status,
+        ).toBe(0);
+        const writer = await hire(coordinator, task.id, true);
+        expect(writer.writeCapable).toBe(true);
+        persistence.close();
+      });
+
+      /**
+       * A Workspace check that does not answer until released, so a stop can land while a hire
+       * waits on it outside the Team's queue.
+       */
+      function heldCheck(worktreesRoot: string) {
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const waiting = new Promise<void>((resolve) => (entered = resolve));
+        let holding = false;
+        class HeldCheckManager extends WorkerWorktreeManager {
+          override async requireCleanRepositorySet(
+            ...args: Parameters<WorkerWorktreeManager['requireCleanRepositorySet']>
+          ) {
+            if (holding) {
+              entered();
+              await gate;
+            }
+            return super.requireCleanRepositorySet(...args);
+          }
+        }
+        return {
+          manager: new HeldCheckManager({ worktreesRoot }),
+          hold: () => (holding = true),
+          release,
+          waiting,
+        };
+      }
+
+      it('lets Stop all win over a hire still checking the Workspace: no Worker, no reopened Team', async () => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('stop during the check');
+        const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+        const held = heldCheck(worktreesRoot);
+        const coordinator = coordinatorWithWorktrees(
+          persistence,
+          new TestWorkerRuntime(),
+          held.manager,
+        );
+        await hire(coordinator, task.id, true);
+        const workersBefore = coordinator.get(task.id)!.workers.length;
+
+        held.hold();
+        const pending = hire(coordinator, task.id, true).catch((error: unknown) => error);
+        await held.waiting;
+        const stopped = await coordinator.stopAll(task.id);
+        held.release();
+
+        const refused = await pending;
+        expect(refused).toBeInstanceOf(TeamHireRevokedError);
+        expect(teamToolError(refused)).toMatchObject({ ok: false, code: 'hire_revoked' });
+        const after = coordinator.get(task.id)!;
+        expect(after.workers).toHaveLength(workersBefore);
+        expect(after.team.state).toBe(stopped.team.state);
+        expect(after.team.state).not.toBe('active');
+        persistence.close();
+      });
+
+      it.each(['the Leader Turn stopped', 'the Task archived'])(
+        'cancels a first hire still checking the Workspace when %s',
+        async () => {
+          const persistence = createPersistence();
+          const task = persistence.createTask('first hire, then stop');
+          const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+          const held = heldCheck(worktreesRoot);
+          const coordinator = coordinatorWithWorktrees(
+            persistence,
+            new TestWorkerRuntime(),
+            held.manager,
+          );
+
+          held.hold();
+          const pending = hire(coordinator, task.id, true).catch((error: unknown) => error);
+          await held.waiting;
+          // What Main does on stopping the Leader's Turn and on archiving the Task.
+          coordinator.revokePendingHires(task.id);
+          held.release();
+
+          expect(await pending).toBeInstanceOf(TeamHireRevokedError);
+          expect(persistence.getTeamByTask(task.id)).toBeNull();
+          persistence.close();
+        },
+      );
+
+      it('hires as before when nothing stops while the Workspace is checked', async () => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('no stop');
+        const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+        const held = heldCheck(worktreesRoot);
+        const coordinator = coordinatorWithWorktrees(
+          persistence,
+          new TestWorkerRuntime(),
+          held.manager,
+        );
+
+        held.hold();
+        const pending = hire(coordinator, task.id, true);
+        await held.waiting;
+        held.release();
+        const worker = await pending;
+        expect(worker.writeCapable).toBe(true);
+        expect(coordinator.get(task.id)!.workers.map(({ id }) => id)).toContain(worker.id);
+        persistence.close();
+      });
     });
   });
 else

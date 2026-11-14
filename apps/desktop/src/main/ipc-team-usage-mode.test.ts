@@ -1,6 +1,6 @@
 import { TurnStreamingResources } from './turn-streaming-resources';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { PublicError, RuntimeKind } from '@sprint-coder/contracts';
+import { IPC_CHANNELS, type PublicError, type RuntimeKind } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import { IpcRouter, teamUsageOfferAvailable } from './ipc';
 import { createEmptyToolCatalogSnapshot, MANAGED_EXEC_COMMAND_TOOL } from './default-tools';
@@ -347,6 +347,7 @@ describe('teamUsageOfferAvailable', () => {
     leaderMcpEnabled: true,
     teamSkillReady: true,
     teamMcpBridgeReady: true,
+    workspaceRepositoryReady: true,
   };
   const cli = (runtimeKind: RuntimeKind, connectionId: string, requestedProvider = 'openai') => ({
     runtimeKind,
@@ -398,18 +399,22 @@ describe('teamUsageOfferAvailable', () => {
     ).toBe(false);
   });
 
-  it.each(['leaderMcpEnabled', 'teamSkillReady', 'teamMcpBridgeReady'] as const)(
-    'does not offer Team when %s is false',
-    (missing) => {
-      expect(
-        teamUsageOfferAvailable({
-          ...ready,
-          [missing]: false,
-          ...cli('codex', 'builtin:codex-cli'),
-        }),
-      ).toBe(false);
-    },
-  );
+  // workspaceRepositoryReady: a Workspace where a writing Worker's assignment would fail (not a Git
+  // repository, no commit, uncommitted changes) is never offered Team (issue #1241).
+  it.each([
+    'leaderMcpEnabled',
+    'teamSkillReady',
+    'teamMcpBridgeReady',
+    'workspaceRepositoryReady',
+  ] as const)('does not offer Team when %s is false', (missing) => {
+    expect(
+      teamUsageOfferAvailable({
+        ...ready,
+        [missing]: false,
+        ...cli('codex', 'builtin:codex-cli'),
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('what an offered Leader is given', () => {
@@ -465,9 +470,182 @@ describe('what an offered Leader is given', () => {
       expect(guidance).toContain('あなたが Team を使うと決めた時にだけ当てはまる');
       expect(guidance).toContain('`team_get_status` など）を呼ぶこともしない');
     }
+    // 積極的に: small independent deliverables are still split, and the guidance says it takes
+    // precedence over the Skill's 「# 判断」 for that decision (the Skill itself is not rewritten).
+    const proactive = teamUsageGuidance('proactive');
+    expect(proactive).toContain('2 つ以上なら、1 つずつが小さくても');
+    expect(proactive).toContain('その成果物を自分で作らない');
+    expect(proactive).toContain('質問・相談・説明と、1 つの成果物で済む依頼だけ');
+    expect(proactive).toContain('Team を使わない理由を利用者に 1 文で伝える');
+    expect(proactive).toContain('上限は Team の設定に従う');
+    expect(proactive).toContain('この発言では、この案内を優先する');
+    expect(proactive).not.toContain('ごく小さな修正');
+    // おまかせ: still "when in doubt, don't", with a size-based (not time-based) point where it does
+    // use Team, and the trivial cases spelled out — so it differs from both 言った時だけ and 積極的に.
+    const auto = teamUsageGuidance('auto');
+    expect(auto).toContain('迷ったら使わない');
+    expect(auto).toContain('独立した成果物が 3 つ以上あり');
+    expect(auto).toContain('1 つのファイル全体・1 つの画面・1 つの機能・1 つの調べもの');
+    expect(auto).not.toContain('数分以上');
+    expect(auto).toContain('成果物が 1〜2 つの依頼');
+    expect(auto).toContain('1 つずつが数行で済むごく小さなもの');
+    expect(auto).not.toContain('2 つ以上なら');
+    for (const guidance of [auto, proactive]) {
+      expect(guidance).toContain('この発言の依頼の一部として扱う');
+      expect(guidance).toContain('Team を使わない理由を利用者に 1 文で伝える');
+      expect(guidance).toContain('この発言では、この案内を優先する');
+      // An offered Team must not strand the request when the Workspace refuses a writing Worker
+      // (not Git, no commit, uncommitted changes): the Leader does it itself, and the user's
+      // changes are never committed, stashed, or discarded to make room for Team (issue #1241).
+      expect(guidance).toContain('Workspace の状態のために失敗した時');
+      expect(guidance).toContain('commit していない変更がある');
+      expect(guidance).toContain(
+        '成果物を Worker に任せる、とした上の行より、この戻り方を優先する',
+      );
+      expect(guidance).toContain(
+        '利用者の変更には触らない（Team を使うために commit・stash・破棄をしない）',
+      );
+    }
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('単発実行');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
       '質問・相談: Teamの実状態を調べるためにMCPを使うが、Workerは採用しない。',
     );
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('人数指定を守り、必要以上に採用しない。');
+  });
+});
+
+describe('the Workspace check before a Turn may be offered Team (issue #1241)', () => {
+  type Handler = (
+    input: Record<string, unknown>,
+    event: unknown,
+    envelope: unknown,
+  ) => Promise<unknown>;
+  type EntryProbe = {
+    register(): void;
+    refreshTeamOfferWorkspace(taskId: string): Promise<void>;
+  };
+
+  function entryRouter() {
+    const router = Object.create(IpcRouter.prototype) as EntryProbe;
+    const handlers = new Map<string, Handler>();
+    const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
+      handlers.set(channel, handler);
+    const order: string[] = [];
+    const runMutation = vi.fn(() => {
+      order.push('start-transaction');
+      return { executed: false, value: undefined };
+    });
+    Object.assign(router, {
+      handle: register,
+      handleMutation: register,
+      window: { webContents: { once: vi.fn() } },
+      persistence: {
+        getTaskModelSelection: () => null,
+        getOperationResult: () => ({ found: false }),
+        getActiveTurnId: () => null,
+        getTask: () => ({ goal: 'Finish the page' }),
+      },
+      reconcileTaskBuiltinModel: vi.fn(async () => undefined),
+      resolveTurnSkills: vi.fn(async () => []),
+      skillSettings: { resolveSelections: vi.fn(async () => []) },
+      runMutation,
+      refreshTeamOfferWorkspace: vi.fn(async (taskId: string) => {
+        order.push(`refresh:${taskId}`);
+      }),
+    });
+    router.register();
+    return { handlers, order, runMutation };
+  }
+
+  it.each([
+    [IPC_CHANNELS.turnsStart, { taskId: 'task-1', text: 'Write three pages', attachmentIds: [] }],
+    [IPC_CHANNELS.turnsQueue, { taskId: 'task-1', text: 'Write three pages' }],
+    [IPC_CHANNELS.turnsStopAndSend, { taskId: 'task-1', text: 'Write three pages' }],
+    [IPC_CHANNELS.goalsStart, { taskId: 'task-1', objective: 'Write three pages' }],
+    [IPC_CHANNELS.goalsResume, { taskId: 'task-1' }],
+  ] as const)('asks Git on %s before the Turn start transaction', async (channel, input) => {
+    const { handlers, order, runMutation } = entryRouter();
+    await handlers.get(channel)!(input, {}, { operationId: 'op-1', payload: input });
+    expect(runMutation).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['refresh:task-1', 'start-transaction']);
+  });
+
+  function offerRouter(mode: 'explicit' | 'auto' | 'proactive', ready: boolean) {
+    const router = Object.create(IpcRouter.prototype) as EntryProbe;
+    const refresh = vi.fn(async () => ready);
+    Object.assign(router, {
+      persistence: { getTeamUsageMode: () => mode },
+      teamOfferWorkspace: { refresh },
+    });
+    return { router, refresh };
+  }
+
+  it('asks Git only at the levels that offer Team, and never fails the start', async () => {
+    const explicit = offerRouter('explicit', true);
+    await explicit.router.refreshTeamOfferWorkspace('task-1');
+    expect(explicit.refresh).not.toHaveBeenCalled();
+    for (const mode of ['auto', 'proactive'] as const) {
+      const offered = offerRouter(mode, false);
+      await offered.router.refreshTeamOfferWorkspace('task-1');
+      expect(offered.refresh).toHaveBeenCalledWith('task-1');
+    }
+    const broken = Object.create(IpcRouter.prototype) as EntryProbe;
+    Object.assign(broken, {
+      persistence: {
+        getTeamUsageMode: () => {
+          throw new Error('settings unreadable');
+        },
+      },
+    });
+    await expect(broken.refreshTeamOfferWorkspace('task-1')).resolves.toBeUndefined();
+  });
+});
+
+describe('stops cancel a hire still checking the Workspace (issue #1241)', () => {
+  type Handler = (input: Record<string, unknown>, event: unknown, envelope: unknown) => unknown;
+  type StopProbe = {
+    register(): void;
+    cancelRuntime(taskId: string, turnId: string): Promise<boolean>;
+  };
+
+  it('revokes pending hires when the Task is archived, not when it is restored', () => {
+    const router = Object.create(IpcRouter.prototype) as StopProbe;
+    const handlers = new Map<string, Handler>();
+    const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
+      handlers.set(channel, handler);
+    const revokePendingHires = vi.fn();
+    Object.assign(router, {
+      handle: register,
+      handleMutation: register,
+      window: { webContents: { once: vi.fn() } },
+      runMutation: vi.fn(() => ({ executed: true, value: { id: 'task-1' } })),
+      teamCoordinator: { revokePendingHires },
+      endArchivedTaskDesktopControl: vi.fn(async () => undefined),
+    });
+    router.register();
+    const setArchived = handlers.get(IPC_CHANNELS.tasksSetArchived)!;
+    setArchived({ taskId: 'task-1', archived: false }, {}, { operationId: 'op-1' });
+    expect(revokePendingHires).not.toHaveBeenCalled();
+    setArchived({ taskId: 'task-1', archived: true }, {}, { operationId: 'op-2' });
+    expect(revokePendingHires).toHaveBeenCalledWith('task-1');
+  });
+
+  it('revokes pending hires first when the Leader Turn is stopped', async () => {
+    const router = Object.create(IpcRouter.prototype) as StopProbe;
+    const order: string[] = [];
+    Object.assign(router, {
+      teamCoordinator: {
+        revokePendingHires: vi.fn((taskId: string) => order.push(`revoke:${taskId}`)),
+      },
+      canceledRuntimeTurns: {
+        add: (turnId: string) => {
+          order.push(`cancel:${turnId}`);
+          // The rest of the stop is not under test here.
+          throw new Error('stop here');
+        },
+      },
+    });
+    await expect(router.cancelRuntime('task-1', 'turn-1')).rejects.toThrow('stop here');
+    expect(order).toEqual(['revoke:task-1', 'cancel:turn-1']);
   });
 });
