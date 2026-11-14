@@ -91,6 +91,15 @@ pub trait TreeSource {
         None
     }
 
+    /// Whether `sibling`, which `next_sibling` just answered while `parent`'s
+    /// child list was enumerated, still belongs to that list. A list that
+    /// meets one that does not is cut there: the sibling is not kept, and the
+    /// list does not count as whole. Only a view that can step outside the
+    /// element it lists (the view of visible elements) answers false.
+    fn sibling_in_view(&self, _parent: &Self::Node, _sibling: &Self::Node) -> bool {
+        true
+    }
+
     fn identity(&self, node: &Self::Node) -> NodeKey;
 
     /// Compares two elements when neither carries a runtime id.

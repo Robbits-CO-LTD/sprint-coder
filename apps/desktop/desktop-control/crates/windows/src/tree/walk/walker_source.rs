@@ -365,6 +365,24 @@ mod imp {
         /// Whether this source walks the visible elements only; its evidence
         /// then carries each node's runtime identifier for the view proof.
         visible: bool,
+        /// For a source of the visible elements: whether its root itself is
+        /// in that view (reported onscreen). A root that is not leaves the
+        /// view empty (see [`root_in_view`]).
+        root_in_view: bool,
+    }
+
+    /// Whether `root` is itself in the view of visible elements: its provider
+    /// reports it onscreen, read live. Only such a root bounds the view to
+    /// what is below it. The onscreen-condition walker shows an element under
+    /// its nearest onscreen ancestor, so below a root that is not onscreen the
+    /// view's top level belongs to whatever onscreen ancestor is above the
+    /// root (the desktop), and stepping to a sibling there leaves the root:
+    /// measured on a minimized WinForms host, whose root reports offscreen
+    /// while its children do not, the walk reached the next top-level window,
+    /// of another process, after the host's last child. An unreadable answer
+    /// is not onscreen.
+    pub(crate) fn root_in_view(root: &UIAElement) -> bool {
+        read_one(root, TreeProperty::IsOffscreen).flag() == Some(false)
     }
 
     /// A walker over the elements the window shows: the raw view without every
@@ -402,11 +420,15 @@ mod imp {
         /// A source that walks only the elements the window shows (see
         /// [`visible_view_walker`]), node by node with the walk set: no
         /// subtree prefetch, so no single call has to build a large answer.
-        /// Child indices count positions in that view.
+        /// Child indices count positions in that view. A root that is not
+        /// itself in the view ([`root_in_view`]) has nothing below it here:
+        /// the view is empty, as for a window that reports all it holds
+        /// offscreen, and no step can leave the root.
         pub fn for_visible_root(root: &UIAElement) -> Result<Self, AdapterError> {
             let mut source = Self::for_root(root)?;
             source.walker = visible_view_walker(&source.client)?;
             source.visible = true;
+            source.root_in_view = root_in_view(root);
             Ok(source)
         }
 
@@ -550,6 +572,7 @@ mod imp {
                 properties: &TreeProperty::WALK_SET,
                 plain_navigation: false,
                 visible: false,
+                root_in_view: true,
             })
         }
 
@@ -597,6 +620,10 @@ mod imp {
         type Node = UIAElement;
 
         fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
+            // A view whose root is not in it is empty (`for_visible_root`).
+            if !self.root_in_view {
+                return Err(UiaFailure::Sentinel(crate::tree::automation::ERR_NONE));
+            }
             match &self.cache {
                 Some(request) if !self.plain_navigation => {
                     self.walker.get_first_child_build_cache(&node.0, request)
@@ -605,6 +632,25 @@ mod imp {
             }
             .map(UIAElement::from)
             .map_err(|error| failure_of(&error))
+        }
+
+        /// In the view of visible elements, a sibling belongs to `parent`'s
+        /// list only when the view's own parent of it is `parent`: one call
+        /// (`GetParentElement` in that view) and a client-side comparison per
+        /// sibling. A first child needs no check, since a walker's first child
+        /// of an element is always below that element; a sibling is where the
+        /// view can step past an element that left it while it was walked (a
+        /// root that turned offscreen), into another window. Any other source
+        /// walks the raw view, where siblings share their parent.
+        fn sibling_in_view(&self, parent: &UIAElement, sibling: &UIAElement) -> bool {
+            if !self.visible {
+                return true;
+            }
+            self.walker.get_parent(&sibling.0).is_ok_and(|view_parent| {
+                self.client
+                    .compare_elements(&view_parent, &parent.0)
+                    .unwrap_or(false)
+            })
         }
 
         fn next_sibling(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
@@ -797,7 +843,7 @@ pub(crate) use imp::{count_within, prefetch_shares};
 pub(crate) use imp::with_transaction_timeout;
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::{runtime_id_of, visible_view_walker};
+pub(crate) use imp::{root_in_view, runtime_id_of, visible_view_walker};
 
 /// The depth from which a walk covers the whole tree below its root: the
 /// deepest a walk descends (`DEFAULT_MAX_RAW_DEPTH`), which is also the depth
@@ -868,3 +914,7 @@ mod identity_set_tests;
 #[cfg(all(test, target_os = "windows"))]
 #[path = "walker_prefetch_tests.rs"]
 mod prefetch_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "visible_root_tests.rs"]
+mod visible_root_tests;

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The bounded sibling enumeration and child-index path descent the locator
 //! anchor drives.
 //!
@@ -86,6 +87,9 @@ pub(crate) fn read_children<S: TreeSource>(
             break;
         }
         match source.next_sibling(&current) {
+            // A sibling outside `element`'s list ends the list here: what was
+            // read is still a prefix of it, so an index past it lands nowhere.
+            Ok(sibling) if !source.sibling_in_view(element, &sibling) => break,
             Ok(sibling) => current = sibling,
             Err(failure) if failure.is_exhaustion() => break,
             Err(failure) => return classified(failure, elements, policy, policy.sibling_context),
