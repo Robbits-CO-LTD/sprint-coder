@@ -266,12 +266,17 @@ pub(super) const VISIBLE_NO_MATCH_HINT: &str = "No element shown on screen match
 
 /// The ref the snapshot allocated for each observed node, by node index.
 ///
-/// The snapshot presents one node for each observed node, with the observed
-/// children in their order (a node cut at the depth limit keeps none), which is
-/// also how its capture proof found the node behind each ref (`node_at`). The
-/// two trees are walked together on that rule; where they do not line up (a
-/// role or a child count differs), nothing below is paired, so a match there
-/// carries no ref rather than another node's.
+/// That a ref lands on its own node rests on how the presented tree is built,
+/// not on the proof of a view (`proven_in_view` only says a ref names the node
+/// it was allocated for). `ObservedTree::project_window` (through
+/// `project_shallow`) presents one node per observed node, with the observed
+/// children in their order (a node cut at the depth limit keeps none), and
+/// `ref_alloc::allocate_refs` keeps every child in place because
+/// [`view_options`] leaves `compact` and `interactive_only` off. The two trees
+/// are walked together on that rule. A mismatch it can see (a role or a child
+/// count differs) leaves everything below unpaired, so a match there carries
+/// no ref; a swap between nodes of one shape would not be seen, which is why
+/// the presentation must keep that order.
 fn refs_by_node(observed: &ObservedTree, presented: &AccessibilityNode) -> Vec<Option<String>> {
     fn pair(
         observed: &ObservedTree,

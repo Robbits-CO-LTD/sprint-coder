@@ -843,3 +843,75 @@ fn refs_pair_with_nodes_only_where_the_trees_line_up() {
         "children that do not line up are not paired"
     );
 }
+
+/// Siblings of one shape (same role, same number of children, only the names
+/// differ) are where a ref could land on the wrong match without any check
+/// noticing: the proof of a view only says a ref names the node it was
+/// allocated for. Every match - first, middle and last - must carry the ref of
+/// its own node: the saved entry names it, records the runtime id the view
+/// read for it, and resolves through the same view.
+#[test]
+fn each_match_among_siblings_of_one_shape_carries_its_own_ref() {
+    let _guard = HomeGuard::new();
+    let _clock = VirtualClock::freeze();
+    let names = ["Row 0", "Row 1", "Row 2", "Row 3"];
+    let shown = || {
+        let mut shown = rows(&names);
+        for row in &mut shown.children[1].children {
+            let label = format!("label of {}", row.identity.name.as_deref().unwrap());
+            row.children = vec![node("statictext", &label)];
+        }
+        shown
+    };
+    let adapter = ViewAdapter::new(WholeRead::RunsOut, Some(shown()));
+    // The runtime id the fixture's view gives each node: its place in the read.
+    let window = fixture_window();
+    let read = crate::adapter::observed_tree(&ObservationRoot::Window(&window), shown()).unwrap();
+    let runtime_id_of = |name: &str| {
+        let index = read
+            .nodes
+            .iter()
+            .position(|node| node.evidence.name.known().map(String::as_str) == Some(name))
+            .unwrap();
+        vec![42, i32::try_from(index).unwrap()]
+    };
+
+    let response = run(
+        &adapter,
+        query(FindFilterArgs {
+            role: Some("button".into()),
+            name: Some("Row".into()),
+            ..filter()
+        }),
+    )
+    .expect("the view answers");
+
+    let matches = response["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), names.len(), "{response}");
+    for (found, name) in matches.iter().zip(names) {
+        assert_eq!(found["name"], name);
+        let entry = saved_entry(found["ref_id"].as_str().expect("each row has a ref"));
+        assert_eq!(entry.identity.name.as_deref(), Some(name));
+        let proof = entry.identity.in_view.as_ref().expect("proven in the view");
+        assert_eq!(proof.runtime_id, runtime_id_of(name), "{name}");
+        resolve(&adapter, &entry).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    }
+}
+
+/// Under a raised `--timeout-ms`, too, the observation stops where it always
+/// stopped (`observation_deadline`: the deadline less 1 s), and the view is read
+/// in the rest.
+#[test]
+fn a_raised_deadline_keeps_the_observation_time_and_reads_the_view_in_the_rest() {
+    let _guard = HomeGuard::new();
+    let clock = Started::now();
+    let adapter = ViewAdapter::new(WholeRead::RunsOut, Some(shown_rows()));
+
+    let mut args = find(Some("Row 3"), listing());
+    args.timeout_ms = Some(20_000);
+    let response = run(&adapter, args).expect("the view answers");
+
+    assert_eq!(response["scope"], "visible");
+    assert_eq!(adapter.whole_span(clock.start), Duration::from_secs(19));
+    assert!(clock.clock.elapsed() <= Duration::from_secs(20));
+}
