@@ -331,18 +331,37 @@ export function SetupWizard({
     };
   }, []);
 
+  // What was chosen on the step now on screen and differs from what was stored at that moment. A
+  // draft is "changed" only while it differs from the baseline — but a choice made here can come
+  // to equal the baseline without being stored from here (the same value is stored from outside),
+  // and a second change from outside would then replace it on screen, unseen. So while the step is
+  // on screen, what was chosen on it stays whatever is read. This is not a history of clicks: a
+  // choice put back takes its item out, and leaving the step (stored, "あとで決める", or passed
+  // through) empties it — a later visit starts from what is stored then.
+  const chosen = useRef(new Set<SummaryItem>());
+  const noteChoice = useCallback((item: SummaryItem, value: unknown) => {
+    const wanted = item === 'callName' && typeof value === 'string' ? value.trim() : value;
+    if (storedValue(stored.current, item) === wanted) chosen.current.delete(item);
+    else chosen.current.add(item);
+  }, []);
+
   /** Takes in a newly read stored value: a draft still equal to the old baseline follows it; a
-   * draft that differs (changed here, not saved) stays. The new value becomes the baseline. */
+   * draft that differs (changed here, not saved), or that was chosen on the step on screen, stays.
+   * The new value becomes the baseline. */
   const adoptPreferences = useCallback(
     (latest: AssistantPreferences, configured: boolean) => {
       const base = stored.current.preferences;
       const wasKnown = stored.current.assistant === 'ready';
+      const held = new Set(chosen.current);
       remember({ preferences: latest, assistant: 'ready', configured });
       setPreferences((current) => {
         if (!wasKnown) return { ...latest }; // nothing could be chosen before it was known
         const next = { ...latest };
-        for (const key of changedKeys(current, base)) {
-          (next as Record<string, unknown>)[key] = current[key];
+        const changed = changedKeys(current, base);
+        for (const key of PREFERENCE_KEYS) {
+          if (changed.includes(key) || held.has(key)) {
+            (next as Record<string, unknown>)[key] = current[key];
+          }
         }
         return next;
       });
@@ -353,8 +372,9 @@ export function SetupWizard({
     (mode: TeamUsageMode) => {
       const base = stored.current.teamMode;
       const wasKnown = stored.current.team === 'ready';
+      const held = chosen.current.has('teamMode');
       remember({ teamMode: mode, team: 'ready' });
-      setTeamMode((current) => (!wasKnown || current === base ? mode : current));
+      setTeamMode((current) => (!wasKnown || (current === base && !held) ? mode : current));
     },
     [remember],
   );
@@ -363,9 +383,13 @@ export function SetupWizard({
     const sound = readSoundEffectPreferences().enabled;
     const access = readAccessPresetDefault();
     const base = stored.current;
+    const heldSound = chosen.current.has('soundEnabled');
+    const heldAccess = chosen.current.has('accessDefault');
     remember({ soundEnabled: sound, accessDefault: access });
-    setSoundEnabled((current) => (current === base.soundEnabled ? sound : current));
-    setAccessDefault((current) => (current === base.accessDefault ? access : current));
+    setSoundEnabled((current) => (current === base.soundEnabled && !heldSound ? sound : current));
+    setAccessDefault((current) =>
+      current === base.accessDefault && !heldAccess ? access : current,
+    );
   }, [remember]);
 
   // Reads and saves are numbered: a save bumps the number when it starts and when it ends, and a
@@ -387,40 +411,54 @@ export function SetupWizard({
 
   /** Reads what is stored now: at the start, on the Team step, back from Settings, and when the
    * window comes back to the front. A read that fails leaves a known baseline as it was, and marks
-   * an unknown one "failed". */
+   * an unknown one "failed". Main's two settings are read side by side, each on its own: one that
+   * is slow to answer (or never does) does not keep the other from being shown. */
   const refreshStored = useCallback(async (): Promise<void> => {
-    // A read that a save overtook is made again: at once if the save is over, else after it.
-    for (;;) {
-      if (!live.current) return;
-      if (saving.current > 0) {
-        readAfterSave.current = true;
-        return;
-      }
-      const started = generation.current;
-      const overtaken = () => generation.current !== started;
-      adoptLocal();
-      if (support.assistant) {
-        const serial = (readSerial.current.assistant += 1);
-        const latest = await loadAssistantPreferences();
-        if (!live.current) return;
-        if (overtaken()) continue;
-        if (isLatestAnswer('assistant', serial)) {
-          if (latest) adoptPreferences(latest.preferences, latest.configured);
-          else if (stored.current.assistant !== 'ready') remember({ assistant: 'failed' });
-        }
-      }
-      if (support.team) {
-        const serial = (readSerial.current.team += 1);
-        const mode = await loadTeamUsageMode();
-        if (!live.current) return;
-        if (overtaken()) continue;
-        if (isLatestAnswer('team', serial)) {
-          if (mode !== null) adoptTeam(mode);
-          else if (stored.current.team !== 'ready') remember({ team: 'failed' });
-        }
-      }
+    if (!live.current) return;
+    if (saving.current > 0) {
+      readAfterSave.current = true;
       return;
     }
+    adoptLocal();
+    /** Reads one setting until an answer comes that no save overtook. `read` says whether its
+     * answer was overtaken; if so it is read again: at once if the save is over, else after it. */
+    const settle = async (read: (overtaken: () => boolean) => Promise<boolean>): Promise<void> => {
+      for (;;) {
+        if (!live.current) return;
+        if (saving.current > 0) {
+          readAfterSave.current = true;
+          return;
+        }
+        const started = generation.current;
+        if (!(await read(() => generation.current !== started))) return;
+      }
+    };
+    await Promise.all([
+      support.assistant &&
+        settle(async (overtaken) => {
+          const serial = (readSerial.current.assistant += 1);
+          const latest = await loadAssistantPreferences();
+          if (!live.current) return false;
+          if (overtaken()) return true;
+          if (isLatestAnswer('assistant', serial)) {
+            if (latest) adoptPreferences(latest.preferences, latest.configured);
+            else if (stored.current.assistant !== 'ready') remember({ assistant: 'failed' });
+          }
+          return false;
+        }),
+      support.team &&
+        settle(async (overtaken) => {
+          const serial = (readSerial.current.team += 1);
+          const mode = await loadTeamUsageMode();
+          if (!live.current) return false;
+          if (overtaken()) return true;
+          if (isLatestAnswer('team', serial)) {
+            if (mode !== null) adoptTeam(mode);
+            else if (stored.current.team !== 'ready') remember({ team: 'failed' });
+          }
+          return false;
+        }),
+    ]);
   }, [adoptLocal, adoptPreferences, adoptTeam, isLatestAnswer, remember, support]);
 
   /** "もう一度読み込む" after a failed read. */
@@ -480,9 +518,13 @@ export function SetupWizard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
-  const updatePreferences = useCallback((patch: Partial<AssistantPreferences>) => {
-    setPreferences((current) => ({ ...current, ...patch }));
-  }, []);
+  const updatePreferences = useCallback(
+    (patch: Partial<AssistantPreferences>) => {
+      for (const key of PREFERENCE_KEYS) if (key in patch) noteChoice(key, patch[key]);
+      setPreferences((current) => ({ ...current, ...patch }));
+    },
+    [noteChoice],
+  );
 
   // ---------- The living background ----------
   const rootRef = useRef<HTMLElement>(null);
@@ -571,10 +613,11 @@ export function SetupWizard({
 
   const chooseTeamMode = useCallback(
     (value: TeamUsageMode) => {
+      noteChoice('teamMode', value);
       setTeamMode(value);
       respond('select');
     },
-    [respond],
+    [noteChoice, respond],
   );
 
   /** The changes on this step, measured against what is known to be stored. Nothing counts as a
@@ -747,6 +790,9 @@ export function SetupWizard({
 
   const moveTo = useCallback(
     (next: number) => {
+      // What was chosen on the step being left is stored, put back, or a draft that differs from
+      // the baseline by now: nothing more is held for it.
+      chosen.current.clear();
       setDirection(next > index ? 'forward' : 'back');
       skyRef.current?.warp(next > index ? 1 : -1);
       setError(null);
@@ -1373,6 +1419,7 @@ export function SetupWizard({
                       checked={soundEnabled}
                       testId="setup-sound"
                       onChange={(enabled) => {
+                        noteChoice('soundEnabled', enabled);
                         setSoundEnabled(enabled);
                         // Heard only when it is switched on, never at the moment it is switched off.
                         respond('check', enabled);
@@ -1385,6 +1432,7 @@ export function SetupWizard({
                       columns={4}
                       testId="setup-access"
                       onChange={(value) => {
+                        noteChoice('accessDefault', value);
                         setAccessDefault(value);
                         respond('select');
                       }}

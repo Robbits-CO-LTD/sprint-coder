@@ -9,6 +9,8 @@
 // a change of mode. Only cheap drawing is used — lines and two small pre-rendered sprites with
 // additive blending; no canvas shadows or filters.
 
+import { watchPixelRatio } from './pixel-ratio';
+
 export type TeamFieldMode = 'explicit' | 'auto' | 'proactive';
 
 /** The logo's colours, top to bottom. */
@@ -67,6 +69,10 @@ export class SetupTeamField {
   private width = 0;
   private height = 0;
   private dpr = 1;
+  // The screen's pixel ratio the canvas was last sized for. The box keeps its size when only the
+  // ratio changes (the window moved to a screen of another density), so no resize is reported: the
+  // ratio is watched (lib/pixel-ratio.ts), and looked at on each frame while the loop runs.
+  private ratio = 1;
   private sized = false;
   private frame = 0;
   private last = 0;
@@ -76,7 +82,11 @@ export class SetupTeamField {
   private readonly streaks = new Map<string, HTMLCanvasElement>();
   private readonly glows = new Map<string, HTMLCanvasElement>();
   private observer: ResizeObserver | null = null;
+  private unwatchPixelRatio: () => void = () => {};
   private readonly onResize = () => this.resize();
+  private readonly onPixelRatio = () => {
+    if ((window.devicePixelRatio || 1) !== this.ratio) this.resize();
+  };
   private readonly onVisibility = () => {
     if (document.hidden) this.stop();
     else this.start();
@@ -94,6 +104,7 @@ export class SetupTeamField {
     } else {
       window.addEventListener('resize', this.onResize);
     }
+    this.unwatchPixelRatio = watchPixelRatio(this.onPixelRatio);
     if (this.animate) document.addEventListener('visibilitychange', this.onVisibility);
     this.since = performance.now();
     // Sizing draws the still picture when there is no motion.
@@ -123,6 +134,7 @@ export class SetupTeamField {
     this.stop();
     this.observer?.disconnect();
     this.observer = null;
+    this.unwatchPixelRatio();
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.streaks.clear();
@@ -185,6 +197,7 @@ export class SetupTeamField {
   private readonly tick = (now: number) => {
     if (!this.running) return;
     try {
+      this.onPixelRatio();
       const dt = Math.min(64, Math.max(0, now - this.last));
       this.last = now;
       this.draw(now, dt);
@@ -197,17 +210,27 @@ export class SetupTeamField {
   };
 
   private resize(): void {
-    const box = (this.canvas.parentElement ?? this.canvas).getBoundingClientRect();
-    if (!(box.width > 0) || !(box.height > 0)) {
+    // Noted first, whether or not there is a box to size: one look per change, not one a frame.
+    this.ratio = window.devicePixelRatio || 1;
+    // The stage's size as laid out, not as it is drawn at this moment: the scene comes in a little
+    // smaller than it is (a scale easing to 1), no resize is reported when that ends, and a size
+    // taken during it would stay — the picture a few percent short of its box, stretched to fit.
+    // (Where nothing is laid out — a test's stand-in — the drawn box is all there is.)
+    const stage = this.canvas.parentElement ?? this.canvas;
+    const drawn =
+      stage.clientWidth > 0 && stage.clientHeight > 0 ? null : stage.getBoundingClientRect();
+    const width = drawn ? drawn.width : stage.clientWidth;
+    const height = drawn ? drawn.height : stage.clientHeight;
+    if (!(width > 0) || !(height > 0)) {
       this.sized = false;
       return;
     }
-    this.width = box.width;
-    this.height = box.height;
-    const cap = Math.sqrt(MAX_CANVAS_PIXELS / (box.width * box.height));
-    this.dpr = Math.max(0.25, Math.min(2, window.devicePixelRatio || 1, cap));
-    this.canvas.width = Math.max(1, Math.round(box.width * this.dpr));
-    this.canvas.height = Math.max(1, Math.round(box.height * this.dpr));
+    this.width = width;
+    this.height = height;
+    const cap = Math.sqrt(MAX_CANVAS_PIXELS / (width * height));
+    this.dpr = Math.max(0.25, Math.min(2, this.ratio, cap));
+    this.canvas.width = Math.max(1, Math.round(width * this.dpr));
+    this.canvas.height = Math.max(1, Math.round(height * this.dpr));
     this.sized = true;
     if (!this.animate) this.drawStill();
   }

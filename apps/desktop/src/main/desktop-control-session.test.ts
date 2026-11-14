@@ -25,6 +25,7 @@ import {
   desktopControlTeamCursors,
   desktopControlWorker,
   desktopControlWorkerLabel,
+  desktopControlWorkerToolOffer,
   endDesktopControlSession,
   endDesktopControlSessions,
   ensureDesktopControlSession,
@@ -486,5 +487,25 @@ describe('the desktop Workers of a Task at once', () => {
     expect(markDesktopControlWorker('task-1', 'e', 'e')).toMatchObject({
       refusal: expect.any(String),
     });
+  });
+});
+
+describe('whether a Worker can be given desktop control in this Main', () => {
+  it('needs both the command tool and the shipped executable, read afresh each time', () => {
+    let tool = true;
+    let executable: string | null = 'C:\\app\\sprint-coder-desktop-control.exe';
+    const offered = desktopControlWorkerToolOffer(
+      () => tool,
+      () => executable,
+    );
+    expect(offered()).toBe(true);
+    // A development run that has not built the executable: no Worker is marked.
+    executable = null;
+    expect(offered()).toBe(false);
+    executable = 'C:\\app\\sprint-coder-desktop-control.exe';
+    expect(offered()).toBe(true);
+    // Without the command sandbox, as before.
+    tool = false;
+    expect(offered()).toBe(false);
   });
 });

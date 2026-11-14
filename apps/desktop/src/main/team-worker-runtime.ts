@@ -143,6 +143,12 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   codexIsolationRoot?: string;
   /** Explicit development/test opt-in. Production callers leave this false. */
   allowSimulation?: boolean;
+  /**
+   * Told when a Task's count of Workers whose Turn exit is not yet confirmed
+   * (`unsettledWorkerCount`) may have changed, so Main can send what moves in the Task again
+   * (issue #1263).
+   */
+  onUnsettledTurnsChanged?: (taskId: string) => void;
 }>;
 
 // Managed tools that change the Workspace. Only their policy denials count against a write
@@ -225,7 +231,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
    */
   private readonly unconfirmedExits = new Map<
     string,
-    TurnOwner & { kind: 'claude' | 'codex' | 'grok'; cleared: Promise<void> }
+    TurnOwner & { taskId: string; kind: 'claude' | 'codex' | 'grok'; cleared: Promise<void> }
   >();
   private readonly unconfirmedExitRechecks = new Set<NodeJS.Timeout>();
   /**
@@ -233,7 +239,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
    * execution returns before that wait ends, so its Worker can be dispatched again meanwhile;
    * `settled` resolves once the wait has ended and any unconfirmed exit has been recorded.
    */
-  private readonly exitWaits = new Map<string, TurnOwner & { settled: Promise<void> }>();
+  private readonly exitWaits = new Map<
+    string,
+    TurnOwner & { taskId: string; settled: Promise<void> }
+  >();
   private disposed = false;
 
   constructor(private readonly deps: TeamWorkerRuntimeDeps) {}
@@ -637,7 +646,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     } finally {
       try {
         if (runtimeStarted) {
-          const owner: TurnOwner = { agentId: input.worker.id, executionId: input.executionId };
+          const owner = {
+            agentId: input.worker.id,
+            executionId: input.executionId,
+            taskId: input.worker.taskId,
+          };
           // Starting inside a promise turns a synchronous throw from the exit wait into a rejection,
           // which is just as unconfirmed.
           const exited = Promise.resolve()
@@ -759,8 +772,32 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     ].filter(({ owner }) => owner.agentId === agentId);
   }
 
+  /**
+   * How many of the Task's Workers have a Turn whose exit is still awaited or unconfirmed (issue
+   * #1263): their CLI may still run although the Worker is recorded as stopped or failed. Held in
+   * memory only, so an app restart clears it; a confirmed exit clears it sooner.
+   */
+  unsettledWorkerCount(taskId: string): number {
+    const agents = new Set<string>();
+    for (const turn of [...this.exitWaits.values(), ...this.unconfirmedExits.values()])
+      if (turn.taskId === taskId) agents.add(turn.agentId);
+    return agents.size;
+  }
+
+  private unsettledTurnsChanged(taskId: string): void {
+    try {
+      this.deps.onUnsettledTurnsChanged?.(taskId);
+    } catch {
+      // Only a notice; the count is read afresh where it decides anything.
+    }
+  }
+
   /** Records a Turn's exit wait until it ends; see `exitWaits`. */
-  private trackExitWait(owner: TurnOwner, turnId: string, exited: Promise<void>): void {
+  private trackExitWait(
+    owner: TurnOwner & { taskId: string },
+    turnId: string,
+    exited: Promise<void>,
+  ): void {
     const wait = { ...owner, settled: Promise.resolve() };
     wait.settled = exited
       .then(
@@ -768,9 +805,14 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         () => undefined,
       )
       .then(() => {
-        if (this.exitWaits.get(turnId) === wait) this.exitWaits.delete(turnId);
+        if (this.exitWaits.get(turnId) !== wait) return;
+        this.exitWaits.delete(turnId);
+        // A failed wait recorded its unconfirmed exit before this, so the count falls only when
+        // the Turn exited.
+        this.unsettledTurnsChanged(owner.taskId);
       });
     this.exitWaits.set(turnId, wait);
+    this.unsettledTurnsChanged(owner.taskId);
   }
 
   /**
@@ -780,7 +822,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
    * never counts as an exit; only the Host's exit report does.
    */
   private watchUnconfirmedExit(
-    owner: TurnOwner,
+    owner: TurnOwner & { taskId: string },
     kind: 'claude' | 'codex' | 'grok',
     turnId: string,
   ): void {
@@ -789,6 +831,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       clear = resolve;
     });
     const record = { ...owner, kind, cleared };
+    // Recorded while the Turn's exit wait still is, so its Worker stays counted throughout.
     this.unconfirmedExits.set(turnId, record);
     const watching = (): boolean => !this.disposed && this.unconfirmedExits.get(turnId) === record;
     const wait = (): void => {
@@ -800,6 +843,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             if (!watching()) return;
             this.unconfirmedExits.delete(turnId);
             clear();
+            this.unsettledTurnsChanged(owner.taskId);
           },
           () => {
             if (!watching()) return;
