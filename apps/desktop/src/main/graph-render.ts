@@ -36,8 +36,18 @@ type StoredGraph = {
   view: GraphView;
   rawHtml: string;
   response: { html: string; csp: string };
-  live: boolean;
+  /**
+   * The instance ids whose release ends this graph's display (issue #1162). Only `get` — the call a
+   * Graph panel makes when it mounts — starts a display. A regenerated version carries over the
+   * display of the version it replaces, because the panel showing that one adopts the pushed view
+   * and later releases either id. Finishing a generation never starts a display on its own: empty
+   * means no panel shows this graph, so the record is only a cache entry and may be evicted (`get`
+   * rebuilds it from the saved document).
+   */
+  viewers: Set<string>;
 };
+const shown = (record: StoredGraph | undefined): record is StoredGraph =>
+  record !== undefined && record.viewers.size > 0;
 type Run = (
   mode: 'render' | 'check',
   input: PreparedGraphInput,
@@ -113,7 +123,10 @@ export class GraphRenderService {
     if (this.running.has(taskId) || this.running.size >= 2)
       throw new Error('Graph renderer is busy');
     if (!this.documents.has(taskId) && this.documents.size >= 32) {
-      const expired = [...this.documents].find(([, record]) => !record.live);
+      // Least recently generated first; never a graph on screen or one being regenerated.
+      const expired = [...this.documents].find(
+        ([id, record]) => !shown(record) && !this.running.has(id),
+      );
       if (expired) this.documents.delete(expired[0]);
     }
     if (!this.documents.has(taskId) && this.documents.size >= 32)
@@ -231,12 +244,14 @@ export class GraphRenderService {
         document.renderRevision
       )
         throw new Error('Graph changed while restoring its viewer');
+      // Re-inserting keeps the Map in generation order, so eviction takes the oldest cache entry.
+      this.documents.delete(input.taskId);
       this.documents.set(input.taskId, {
         document,
         view: finalized,
         rawHtml,
         response,
-        live: true,
+        viewers: shown(prior) ? new Set([...prior.viewers, instanceId]) : new Set(),
       });
       if (save) this.notifyGeneration(this.options.store.getGraphGeneration(taskId)!);
       return finalized;
@@ -305,17 +320,19 @@ export class GraphRenderService {
       instanceId,
       parentOrigin: this.options.parentOrigin,
     });
-    record.live = true;
+    // A new instance supersedes every earlier one (the artifact URL and `liveDocument` only answer
+    // the current id), so this panel's id alone ends the display.
+    record.viewers = new Set([instanceId]);
     return view;
   }
   release(taskId: string, instanceId: string): void {
     const record = this.documents.get(taskId);
-    if (record?.view.instanceId === instanceId) record.live = false;
+    if (record?.viewers.has(instanceId)) record.viewers.clear();
   }
   liveDocument(taskId: string, instanceId: string, renderRevision: number): GraphDocument {
     const record = this.documents.get(taskId);
     if (
-      !record?.live ||
+      !shown(record) ||
       record.view.instanceId !== instanceId ||
       record.document.renderRevision !== renderRevision
     )
@@ -417,7 +434,7 @@ export class GraphRenderService {
     const record = [...this.documents.values()].find(
       ({ view }) => view.instanceId === url.pathname.slice(1),
     );
-    if (!record?.live) return new Response('Not found', { status: 404 });
+    if (!shown(record)) return new Response('Not found', { status: 404 });
     return new Response(record.response.html, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',

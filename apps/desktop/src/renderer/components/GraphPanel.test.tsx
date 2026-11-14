@@ -344,6 +344,30 @@ it('ignores corrupt preferences and continues accepting selections when storage 
   blocked.mockRestore();
 });
 
+// Issue #1162: Main keeps a pushed graph displayable only for the panel that already showed the
+// Task's graph. A panel that holds nothing yet must take its own lease instead of loading the
+// pushed artifact, which nobody holds and which would answer 404.
+it('takes its own lease for a pushed graph when it is not showing one yet', async () => {
+  const graphs = window.sprintCoder!.graphs;
+  vi.mocked(graphs.get).mockRejectedValueOnce(new Error('Graph session capacity reached'));
+  await mount(false);
+  expect(container.querySelector('iframe')).toBeNull();
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    'グラフを取得できませんでした。',
+  );
+  const push = vi.mocked(graphs.subscribe).mock.calls[0]![0];
+  const nobodyHolds = { ...service.get(), viewRevision: 99 };
+  service.live = false;
+  await act(async () => push(nobodyHolds));
+  expect(graphs.get).toHaveBeenCalledTimes(2);
+  expect(container.querySelector('iframe')?.getAttribute('src')).not.toBe(nobodyHolds.artifactUrl);
+  expect(servedInstance()).toBe(service.minted.at(-1));
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  await announceReady();
+  await clickNodeInFrame('api');
+  expect(container.querySelector('[data-testid="graph-evidence-kind"]')?.textContent).toBe('推定');
+});
+
 it('isolates selection and generation subscriptions on Task switching even with lower view sequence', async () => {
   await mount(false);
   await clickNodeInFrame('api');
