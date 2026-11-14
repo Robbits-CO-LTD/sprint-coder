@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Toggle / Check / Uncheck via TogglePattern with Invoke fallback (A19-2).
 
 use agent_desktop_core::{ActionStep, AdapterError, Deadline, ErrorCode, InteractionPolicy};
@@ -257,6 +258,11 @@ mod imp {
     }
 
     fn pattern_toggle(element: &UIAElement) -> Result<bool, AdapterError> {
+        // Desktop control (desktop-control) change: a background toggle of a
+        // Win32 button is sent as BM_CLICK instead (`win32_button`).
+        if let Some(sent) = crate::actions::win32_button::sent_click() {
+            return sent;
+        }
         match element.0.get_pattern::<UITogglePattern>() {
             Ok(pattern) => match pattern.toggle() {
                 Ok(()) => classify_success(),
