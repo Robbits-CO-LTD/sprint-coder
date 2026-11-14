@@ -408,14 +408,37 @@ describe.each(['canvas', 'list'] as const)('%s desktop-control mark', (view) => 
     expect(swatch.getAttribute('aria-hidden')).toBe('true');
   });
 
-  it('leaves every other Worker exactly as it was', () => {
+  it('draws the Worker’s face in the same color as its cursor, beside its name', () => {
+    const team = detail(execution('running'));
+    team.workers = [{ ...worker, desktopControl: { label: '担当', colorIndex: 1 } }];
+    const card = renderWith(team);
+    const avatar = card.querySelector<HTMLElement>(`${heading} > .w-avatar`)!;
+    // The face, the mark's dot and the cursor on the desktop are one color of Main's palette.
+    expect(avatar.getAttribute('data-worker-color')).toBe(desktopControlWorkerAccent(1));
+    expect(avatar.getAttribute('data-worker-color')).toBe(
+      card.querySelector('.desktop-cursor-swatch')!.getAttribute('data-cursor-color'),
+    );
+    expect(avatar.style.backgroundColor).not.toBe('');
+    expect(avatar.getAttribute('data-ink')).toBe('dark');
+    // Decorative: the first character of the role, hidden from assistive tech, the role beside it.
+    expect(avatar.textContent).toBe('担');
+    expect(avatar.getAttribute('aria-hidden')).toBe('true');
+    expect(card.querySelector(`${heading} .role-name`)!.textContent).toBe('担当');
+  });
+
+  it('draws a Worker with no cursor neutral, and otherwise leaves it as it was', () => {
     const card = renderWith(detail(execution('running')));
     expect(card.querySelector('[data-testid="team-worker-desktop"]')).toBeNull();
     expect(card.querySelector('.desktop-cursor-swatch')).toBeNull();
     expect([...card.querySelector(heading)!.children].map((child) => child.className)).toEqual(
       view === 'canvas'
         ? ['w-avatar', 'role-line', 'w-status busy', 'w-stop-btn']
-        : ['role-name', 'w-status team-status busy'],
+        : ['w-avatar', 'role-name', 'w-status team-status busy'],
     );
+    const avatar = card.querySelector<HTMLElement>(`${heading} > .w-avatar`)!;
+    expect(avatar.getAttribute('data-worker-color')).toBe('none');
+    expect(avatar.hasAttribute('data-ink')).toBe(false);
+    expect(avatar.style.backgroundColor).toBe('');
+    expect(avatar.textContent).toBe('担');
   });
 });

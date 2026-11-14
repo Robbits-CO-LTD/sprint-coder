@@ -2323,6 +2323,33 @@ body.is-resizing-sidebar iframe {
   align-items: center;
   gap: 6px;
 }
+/* A Team Worker's call is raised in the Leader's Task, so its card opens with whose it is: a band
+   across the top with the Worker's face as the Team view draws it and its name in words. The color
+   is only on the face (its desktop cursor's), so a red or yellow Worker never tints the card like
+   a danger or a warning; the name never depends on it. */
+.approval-card__requester-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: -14px -16px 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline-strong);
+  border-radius: 11px 11px 0 0;
+  background: var(--neutral-wash);
+  font-size: 12px;
+}
+.approval-card__requester-label {
+  flex: none;
+  color: var(--text-secondary);
+}
+.approval-card__requester-strip strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
 /* The color of an agent's desktop cursor (team cursors), drawn with Main's palette as is. It always
    sits beside the words naming the same agent; the ring keeps the darker colors visible on the
    dark surfaces. */
@@ -2483,6 +2510,11 @@ body.is-resizing-sidebar iframe {
 .approval-audit--deny {
   color: var(--danger);
   background: var(--danger-wash);
+}
+.approval-audit__requester {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
 }
 .approval-audit__scope {
   margin-left: auto;
@@ -5101,13 +5133,31 @@ button.composer-permission-chip[aria-expanded='true'] {
   place-items: center;
   font-size: 12px;
   font-weight: 700;
-  color: var(--bg-app);
+  line-height: 1;
   flex: none;
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--info) 90%, transparent),
-    color-mix(in srgb, var(--success) 75%, transparent)
-  );
+  /* A Worker with no desktop cursor has no color of its own: drawn neutral, so that a color on a
+     face always means the cursor of that color on the desktop. */
+  color: var(--text-primary);
+  background: var(--neutral-wash-strong);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+}
+/* A Worker holding desktop control wears its cursor's color (set inline, from the palette Main
+   draws the cursor with). The ink is whichever of the two reads on that color. */
+.w-avatar[data-ink] {
+  box-shadow: none;
+}
+.w-avatar[data-ink='dark'] {
+  color: var(--bg-app);
+}
+.w-avatar[data-ink='light'] {
+  color: #fff;
+}
+/* On an approval card's requester band. (Forced colours: see the block after `.run-title.sheen`.) */
+.w-avatar[data-size='small'] {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-xs);
+  font-size: 11px;
 }
 .w-status {
   margin-left: auto;
@@ -5938,6 +5988,15 @@ button.composer-permission-chip[aria-expanded='true'] {
     background: none;
     -webkit-text-fill-color: CanvasText;
     color: CanvasText;
+  }
+  /* A Worker's face (`.w-avatar`): forced colours would repaint every face alike. The color is
+     the point, and its ink is chosen to read on it, so it is kept; the neutral face gets an edge. */
+  .w-avatar {
+    border: 1px solid CanvasText;
+  }
+  .w-avatar[data-ink] {
+    forced-color-adjust: none;
+    border-color: transparent;
   }
 }
 .sf-dot {

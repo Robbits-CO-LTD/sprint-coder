@@ -318,6 +318,7 @@ import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permissi
 import {
   ApprovalCoordinator,
   approvalFactsForTool,
+  approvalWorkerRequester,
   isDesktopControlCall,
   isInertDesktopControlCall,
   sandboxProfileForToolAuthorization,
@@ -1676,6 +1677,8 @@ export class IpcRouter {
         const caller = this.managedWorkerOf(turnId, callId);
         return caller === undefined ? 'leader' : desktopControlWorker(taskId, caller.workerId);
       },
+      workerRequesterFor: (taskId, turnId, callId) =>
+        this.approvalWorkerRequesterOf(taskId, turnId, callId),
     });
     this.permissionBroker = new PermissionBroker(persistence, {
       policyEpochChanged: (taskId, policyEpoch) => this.policyEpochChanged(taskId, policyEpoch),
@@ -4733,6 +4736,33 @@ export class IpcRouter {
       workerId: call.workerId ?? '',
       roots: call.workspace.roots.map(({ path }) => path),
     };
+  }
+
+  /**
+   * Whose call an approval card is for, when it is a Team Worker's (display only): named by Main's
+   * own binding of the call (`managedWorkerOf`) and, for the name, the Worker's desktop-control
+   * mark or the Team's own record of its role, never by anything the call itself carries.
+   * `undefined` for the Leader's own calls. A Worker Main cannot name is still named as a Worker.
+   */
+  private approvalWorkerRequesterOf(
+    taskId: string,
+    turnId: string,
+    callId: string,
+  ): ReturnType<typeof approvalWorkerRequester> | undefined {
+    const caller = this.managedWorkerOf(turnId, callId);
+    if (caller === undefined) return undefined;
+    const mark = desktopControlWorker(taskId, caller.workerId);
+    let role: string | undefined;
+    try {
+      role =
+        mark !== undefined || caller.workerId === ''
+          ? undefined
+          : this.teamCoordinator.get(taskId)?.workers.find(({ id }) => id === caller.workerId)
+              ?.role;
+    } catch {
+      // The record could not be read: the card only goes without the role.
+    }
+    return approvalWorkerRequester(mark, role);
   }
 
   /**

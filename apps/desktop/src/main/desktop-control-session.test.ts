@@ -472,13 +472,15 @@ describe('a Worker marked again, and the marks of an archived Task', () => {
 });
 
 describe('the desktop Workers of a Task at once', () => {
-  it('drops the marks of Workers no longer at work, and gives the freed accent to the next', () => {
+  it('drops the marks of Workers no longer at work, and gives the next Worker an accent not just freed', () => {
     for (const id of ['a', 'b', 'c']) markDesktopControlWorker('task-1', id, id);
     expect(markDesktopControlWorker('task-1', 'd', 'd', new Set(['a', 'b', 'c', 'd']))).toEqual({
       refusal: expect.stringContaining('同時に 3 人まで'),
     });
+    // The finished Worker's cursor may still be drawn (it lingers after its last action), so the
+    // next Worker does not take its accent: it takes the one after the last accent given.
     expect(markDesktopControlWorker('task-1', 'd', 'd', new Set(['a', 'c', 'd']))).toMatchObject({
-      worker: { workerId: 'd', colorIndex: 1 },
+      worker: { workerId: 'd', colorIndex: 3 },
     });
     configureDesktopControlTeamCursors(true);
     expect(desktopControlWorker('task-1', 'b')).toBeUndefined();
@@ -486,6 +488,28 @@ describe('the desktop Workers of a Task at once', () => {
     // Without knowing who is at work, nothing is dropped (only refusing more).
     expect(markDesktopControlWorker('task-1', 'e', 'e')).toMatchObject({
       refusal: expect.any(String),
+    });
+  });
+
+  it('comes back to a freed accent only after every other accent, and never to one in use', () => {
+    const count = DESKTOP_CONTROL_WORKER_ACCENTS.length;
+    const given: number[] = [];
+    // One Worker stays at work throughout; the others finish as soon as the next is hired.
+    const stays = markDesktopControlWorker('task-1', 'stays', 'stays');
+    expect(stays).toMatchObject({ worker: { colorIndex: 0 } });
+    for (let index = 0; index < count * 2; index += 1) {
+      const id = `w${index}`;
+      const marked = markDesktopControlWorker('task-1', id, id, new Set(['stays', id]));
+      given.push((marked as { worker: DesktopControlWorker }).worker.colorIndex);
+    }
+    // Every accent but the one in use, in order, then the same again: the accent a Worker just
+    // freed is the last one to be given out again.
+    const others = Array.from({ length: count - 1 }, (_, index) => index + 1);
+    expect(given.slice(0, others.length * 2)).toEqual([...others, ...others]);
+    expect(given).not.toContain(0);
+    // Each Task keeps its own order.
+    expect(markDesktopControlWorker('task-2', 'a', 'a')).toMatchObject({
+      worker: { colorIndex: 0 },
     });
   });
 });
