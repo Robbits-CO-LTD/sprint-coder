@@ -109,6 +109,7 @@ fn a_view_proof_reads_its_ancestors_in_the_view_of_visible_elements() {
         },
         runtime_id: Vec::new(),
         ancestors: Vec::new(),
+        ancestor_runtime_ids: Vec::new(),
     });
     let visible =
         read_ancestor_evidence(&in_view, &handle, 64, deadline()).expect("the visible chain");

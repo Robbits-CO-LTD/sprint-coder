@@ -116,6 +116,15 @@ pub struct RefViewProof {
     pub runtime_id: Vec<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestors: Vec<RefAncestorIdentity>,
+    /// The runtime identifiers of the element's nearest ancestors in the view
+    /// (nearest first, the view's root left out, at most
+    /// [`crate::refs::ref_view::VIEW_ANCESTOR_IDS`]), so that a list that
+    /// reuses its row containers - which can keep the identifier of an element
+    /// inside a row while the row it shows, and its own identifier, change -
+    /// is not taken for the row recorded. Empty in a proof recorded before
+    /// this was kept, which is then judged as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestor_runtime_ids: Vec<Vec<i32>>,
 }
 
 /// One ancestor's identity fields, compared under the same rule as the

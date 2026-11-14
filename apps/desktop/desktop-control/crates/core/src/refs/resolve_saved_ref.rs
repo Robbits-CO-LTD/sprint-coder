@@ -124,6 +124,12 @@ pub(crate) fn observe_saved_ref(
         return Err(crate::refs::ref_view::view_unavailable(entry));
     }
     let window = recorded_window(adapter, entry, deadline)?;
+    // A minimized window's view is empty (it shows nothing), so a view proof
+    // could only be reported stale there; it is refused for the window
+    // instead, before anything is read.
+    if in_view && window.state.minimized == Some(true) {
+        return Err(crate::refs::ref_view::view_window_minimized(&window.id));
+    }
     let base = TreeOptions {
         surface: entry.source.source_surface,
         force_renderer_accessibility: entry.source.renderer_accessibility_forced,
@@ -146,6 +152,7 @@ pub(crate) fn observe_saved_ref(
         .ok_or_else(|| AdapterError::internal("saved ref match is missing from the observation"))?;
     if in_view {
         crate::refs::ref_view::confirm_matched(entry, &node.path, &node.evidence)?;
+        crate::refs::ref_view::confirm_matched_ancestors(entry, &observed, index)?;
     }
     adapter.validate_saved_ref_context(entry, node.evidence.identifiers.retained_object())?;
     Ok((window, observed, index))

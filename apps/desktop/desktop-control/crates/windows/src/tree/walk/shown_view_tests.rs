@@ -345,5 +345,57 @@ fn only_the_shown_view_asks_for_a_floor() {
         std::time::Duration::ZERO
     );
     assert_eq!(VisibleView::Shown.read_floor(), SHOWN_READ_FLOOR);
-    assert_eq!(SHOWN_READ_FLOOR, std::time::Duration::from_millis(750));
+    assert_eq!(SHOWN_READ_FLOOR, std::time::Duration::from_millis(1_000));
+}
+
+/// A window's handle alone sorts it before its root is asked anything:
+/// Chromium provenance (by class, or else by content below it) is the onscreen
+/// view, a WPF class is a candidate whose root still decides, and every other
+/// class - including near misses of WPF's - is not read by its visible
+/// elements. The search below a window runs only when its class is not
+/// Chromium's.
+#[test]
+fn a_window_is_sorted_by_its_class_before_its_root_is_asked() {
+    let looked = std::cell::Cell::new(false);
+    assert_eq!(
+        window_view_hint_of("Chrome_WidgetWin_1", || {
+            looked.set(true);
+            false
+        }),
+        WindowViewHint::Onscreen
+    );
+    assert!(!looked.get());
+    assert_eq!(
+        window_view_hint_of("HwndWrapper[App;;1f2e]", || true),
+        WindowViewHint::Onscreen,
+        "a WPF window holding WebView2 keeps the view it had"
+    );
+    assert_eq!(
+        window_view_hint_of("Tauri Window", || true),
+        WindowViewHint::Onscreen
+    );
+    for wpf in ["HwndWrapper[App;;1f2e]", "HwndWrapper[DefaultDomain;;]"] {
+        assert_eq!(
+            window_view_hint_of(wpf, || false),
+            WindowViewHint::WpfCandidate,
+            "{wpf:?}"
+        );
+    }
+    for other in [
+        "",
+        "HwndWrapper",
+        "hwndwrapper[App;;]",
+        " HwndWrapper[App;;]",
+        "XHwndWrapper[App;;]",
+        "WindowsForms10.Window.8.app.0.141b42a_r6_ad1",
+        "#32770",
+        "Chrome_RenderWidgetHostHWND",
+        "AgentDesktopFixture-1-1",
+    ] {
+        assert_eq!(
+            window_view_hint_of(other, || false),
+            WindowViewHint::NotRead,
+            "{other:?}"
+        );
+    }
 }

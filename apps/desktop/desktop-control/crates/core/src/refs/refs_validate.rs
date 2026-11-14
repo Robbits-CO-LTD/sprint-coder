@@ -61,6 +61,11 @@ pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
             || view.bounds.height <= 0.0
             || view.runtime_id.is_empty()
             || view.runtime_id.len() > MAX_RUNTIME_ID_PARTS
+            || view.ancestor_runtime_ids.len() > crate::refs::ref_view::VIEW_ANCESTOR_IDS
+            || view
+                .ancestor_runtime_ids
+                .iter()
+                .any(|id| id.is_empty() || id.len() > MAX_RUNTIME_ID_PARTS)
     }) {
         return Err(AppError::invalid_input(
             "RefEntry view proof exceeds its limit",
