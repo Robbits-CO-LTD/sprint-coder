@@ -336,7 +336,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          fetch-depth: ${{ matrix.shard == 'related' && '0' || '1' }}
+          fetch-depth: ${{ startsWith(matrix.shard, 'related') && '0' || '1' }}
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -365,7 +365,7 @@ jobs:
         uses: ./.github/actions/prepare-desktop-control
 
       - name: Test Windows sandbox working directory and access boundary
-        if: runner.os == 'Windows' && (matrix.shard == '1/5' || needs.classify.outputs.windows_rust_required == 'true' && matrix.shard == 'related')
+        if: runner.os == 'Windows' && (matrix.shard == '1/5' || needs.classify.outputs.windows_rust_required == 'true' && (matrix.shard == 'related' || startsWith(matrix.shard, 'related 1/')))
         shell: pwsh
         run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
 
@@ -406,20 +406,21 @@ jobs:
           }
 
       - name: Test desktop shard ${{ matrix.shard }} on Linux
-        if: runner.os == 'Linux' && matrix.shard != 'related'
+        if: runner.os == 'Linux' && !startsWith(matrix.shard, 'related')
         working-directory: apps/desktop
         run: npx vitest run --shard=${{ matrix.shard }}
 
       - name: Test desktop shard ${{ matrix.shard }} on Windows
-        if: runner.os == 'Windows' && matrix.shard != 'related'
+        if: runner.os == 'Windows' && !startsWith(matrix.shard, 'related')
         working-directory: apps/desktop
         run: npx vitest run --shard=${{ matrix.shard }} --maxWorkers=1 --exclude src/main/team-coordinator.test.ts --exclude src/main/graph-mission-persistence.test.ts
 
       - name: Test related desktop specs
-        if: matrix.shard == 'related'
+        if: startsWith(matrix.shard, 'related')
         env:
           CI_COMPARISON_BASE: ${{ needs.classify.outputs.comparison_base }}
           CI_BOUNDARY_SPECS: ${{ needs.classify.outputs.boundary_specs }}
+          CI_RELATED_SHARD: ${{ matrix.shard }}
         run: node ci-scope.mjs related
 
   electron-bridges:

@@ -675,9 +675,19 @@ describe('full CI partition contract', () => {
     expect(cargoSteps).toHaveLength(1);
     expect(cargoSteps[0].job).toBe('platform-tests');
     expect(cargoSteps[0].step.if).toContain("matrix.shard == '1/5'");
+    // A split related run executes the Windows sandbox boundary once, in its first shard.
     expect(cargoSteps[0].step.if).toContain(
-      "needs.classify.outputs.windows_rust_required == 'true' && matrix.shard == 'related'",
+      "needs.classify.outputs.windows_rust_required == 'true' && (matrix.shard == 'related' || startsWith(matrix.shard, 'related 1/'))",
     );
+    const relatedStep = workflow.jobs['platform-tests'].steps.find(
+      (step) => step.run === 'node ci-scope.mjs related',
+    );
+    expect(relatedStep.if).toBe("startsWith(matrix.shard, 'related')");
+    expect(relatedStep.env.CI_RELATED_SHARD).toBe('${{ matrix.shard }}');
+    for (const name of ['on Linux', 'on Windows'])
+      expect(
+        workflow.jobs['platform-tests'].steps.find((step) => step.name.endsWith(name)).if,
+      ).toContain("!startsWith(matrix.shard, 'related')");
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const rust = workflow.jobs['sandbox-rust-windows'];
     expect(rust.if).toBe("needs.classify.outputs.windows_rust_required == 'true'");

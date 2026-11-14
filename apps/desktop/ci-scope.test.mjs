@@ -1,15 +1,18 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   classifyChanges,
   parseNameStatus,
+  parseRelatedShard,
+  relatedTestRuns,
   scopeOutputs,
   verifyRequiredJobs,
 } from '../../ci-scope.mjs';
+import { partitionWindowsTests } from './vitest.config';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const renderer = 'apps/desktop/src/renderer/';
@@ -105,6 +108,46 @@ describe('CI change boundaries', () => {
     expect(classifyChanges(changes('apps/desktop/src/main/ipc.ts')).distribution).toBe(false);
   });
 
+  it.each([
+    [['apps/desktop/src/main/ipc.ts', 'apps/desktop/src/main/persistence.ts'], true],
+    [['apps/desktop/package.json', 'package-lock.json'], true],
+    [['packages/contracts/src/index.ts'], true],
+    [['apps/desktop/vitest.config.ts'], true],
+    [['.github/workflows/ci.yml', 'apps/desktop/src/main/team-coordinator.ts'], true],
+    [['unclassified/new.ts'], true],
+    [['.github/workflows/ci.yml', 'ci-scope.mjs', 'apps/desktop/ci-scope.test.mjs'], false],
+    [['apps/desktop/sandbox-runner/Cargo.toml'], false],
+    [['apps/desktop/desktop-control/crates/windows/src/lib.rs'], false],
+    [[`${renderer}components/RunCard.tsx`], false],
+    [['apps/desktop/src/main/task-title.ts'], false],
+    [['website/index.html'], false],
+    [[], false],
+  ])('splits the Windows related run only for wide selections: %j', (paths, split) => {
+    const scope = classifyChanges(changes(...paths));
+    expect(scope.splitRelated).toBe(split);
+    const rows = JSON.parse(scopeOutputs(scope).platform_matrix).include;
+    const windows = rows.filter((row) => row.label === 'Windows').map((row) => row.shard);
+    if (split)
+      expect(windows).toEqual(['related 1/4', 'related 2/4', 'related 3/4', 'related 4/4']);
+    else expect(windows.every((shard) => shard === 'related')).toBe(true);
+    // Linux and macOS keep one related job; narrow PRs keep their previous job count.
+    for (const label of ['Linux', 'macOS'])
+      expect(rows.filter((row) => row.label === label).map((row) => row.shard)).toEqual(
+        scope.platforms.includes(label.toLowerCase()) ? ['related'] : [],
+      );
+    if (!split) expect(rows).toHaveLength(scope.platforms.length);
+  });
+
+  it('never splits related runs outside pull requests', () => {
+    for (const eventName of ['push', 'workflow_dispatch'])
+      expect(classifyChanges(changes('apps/desktop/src/main/ipc.ts'), { eventName })).toMatchObject(
+        { mode: 'full', splitRelated: false },
+      );
+    const scope = classifyChanges(changes('README.md'));
+    expect(() => scopeOutputs({ ...scope, splitRelated: true })).toThrow('Invalid CI scope');
+    expect(() => scopeOutputs({ ...scope, splitRelated: undefined })).toThrow('Invalid CI scope');
+  });
+
   it.each(['D', 'R100', 'T', 'U', '?'])('widens coverage for status %s', (status) => {
     expect(classifyChanges([{ path: 'website/index.html', status }])).toMatchObject({
       mode: 'pr',
@@ -149,6 +192,21 @@ describe('required CI result aggregation', () => {
     },
   );
 
+  it.each(['failure', 'cancelled', 'skipped', undefined])(
+    'rejects a split Windows related run when its matrix result is %s',
+    (result) => {
+      const scope = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
+      expect(scope.splitRelated).toBe(true);
+      const results = { classify: 'success', quality: 'success', 'platform-tests': 'success' };
+      expect(() => verifyRequiredJobs(scope, results)).not.toThrow();
+      const broken = { ...results, 'platform-tests': result };
+      if (result === undefined) delete broken['platform-tests'];
+      expect(() => verifyRequiredJobs(scope, broken)).toThrow(
+        `platform-tests: ${result ?? 'missing'}`,
+      );
+    },
+  );
+
   it('rejects an unknown job and failures from jobs that were not selected', () => {
     const scope = classifyChanges(changes('README.md'));
     expect(() =>
@@ -167,6 +225,106 @@ describe('required CI result aggregation', () => {
   ])('rejects an absent or inconsistent scope: %j', (scope) =>
     expect(() => verifyRequiredJobs(scope, {})).toThrow('Invalid CI scope'),
   );
+});
+
+describe('related test shards', () => {
+  const coordinator = 'src/main/team-coordinator.test.ts';
+  const graph = 'src/main/graph-mission-persistence.test.ts';
+  const files = [
+    'src/main/persistence.test.ts',
+    coordinator,
+    ...Array.from({ length: 230 }, (_, i) => `src/main/case-${String(i).padStart(3, '0')}.test.ts`),
+    graph,
+    'src/main/worker-worktree.test.ts',
+  ];
+  const runFiles = (run) =>
+    run.args.filter((arg, i) => arg.endsWith('.test.ts') && run.args[i - 1] !== '--exclude');
+
+  it('keeps the single related job unchanged: input order, batches of 100, all bridge groups', () => {
+    const runs = relatedTestRuns(files, 'related');
+    expect(runs.map((run) => run.args.slice(0, 2))).toEqual(
+      Array.from({ length: 3 }, () => ['run', '--allowOnly=false']),
+    );
+    expect(runs.flatMap((run) => run.args.slice(2))).toEqual(files);
+    expect(runs.every((run) => Object.keys(run.env).length === 0)).toBe(true);
+  });
+
+  it('runs every selected file and every Electron bridge group exactly once across shards', () => {
+    const root = resolve('/ci/desktop');
+    const executed = [];
+    const groups = [];
+    for (let index = 1; index <= 4; index++) {
+      const runs = relatedTestRuns([...files].reverse(), `related ${index}/4`);
+      // Batches must not depend on discovery order, or a file could fall between shards.
+      expect(runs).toEqual(relatedTestRuns(files, `related ${index}/4`));
+      for (const run of runs) {
+        const selected = runFiles(run);
+        expect(selected.length).toBeLessThanOrEqual(100);
+        if (run.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD !== undefined) {
+          expect(run.args).toEqual(['run', '--allowOnly=false', selected[0]]);
+          groups.push(`${selected[0]}:${run.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD}`);
+          continue;
+        }
+        expect(run.args).toEqual(
+          expect.arrayContaining([
+            `--shard=${index}/4`,
+            '--passWithNoTests',
+            '--exclude',
+            coordinator,
+            graph,
+          ]),
+        );
+        expect(selected).not.toContain(coordinator);
+        expect(selected).not.toContain(graph);
+        // The Windows CI sequencer is what Vitest applies to each batch for --shard.
+        const partition = partitionWindowsTests(
+          selected.map((file) => ({ moduleId: resolve(root, file) })),
+          root,
+          4,
+        );
+        executed.push(
+          ...partition[index - 1].map((spec) =>
+            relative(root, spec.moduleId).replaceAll('\\', '/'),
+          ),
+        );
+      }
+    }
+    expect(executed.sort()).toEqual(
+      files.filter((file) => file !== coordinator && file !== graph).sort(),
+    );
+    expect(groups.sort()).toEqual(
+      [coordinator, graph].flatMap((file) => [0, 1, 2, 3].map((g) => `${file}:${g}`)).sort(),
+    );
+  });
+
+  it('gives each of four Windows shards one group of each bridge suite', () => {
+    for (let index = 1; index <= 4; index++)
+      expect(
+        relatedTestRuns([coordinator, graph], `related ${index}/4`).map(
+          (run) => run.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD,
+        ),
+      ).toEqual([String(index - 1), String(index - 1)]);
+  });
+
+  it.each([
+    'related 0/4',
+    'related 5/4',
+    'related 1/0',
+    'related1/4',
+    'related 1/4 ',
+    'related 1/4;id',
+    '1/5',
+    '',
+    undefined,
+  ])('rejects the malformed shard %j', (shard) => {
+    expect(() => parseRelatedShard(shard)).toThrow('Invalid related test shard');
+    expect(() => relatedTestRuns(files, shard)).toThrow('Invalid related test shard');
+  });
+
+  it('rejects unsafe or duplicated related files', () => {
+    for (const input of [['../outside.test.ts'], ['a.test.ts', 'a.test.ts'], [null]])
+      expect(() => relatedTestRuns(input, 'related 1/4')).toThrow('Invalid related test files');
+  });
 });
 
 describe('GitHub classification entrypoint', () => {

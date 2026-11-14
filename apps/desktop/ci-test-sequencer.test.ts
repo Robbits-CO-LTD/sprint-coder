@@ -96,7 +96,7 @@ describe('CI test partition', () => {
     );
     const groups = partitionWindowsTests([...files, ...unknown], root, 3);
     const weight = (file: (typeof files)[number]) =>
-      file === coordinator ? 273 : file === graph ? 209 : file === persistence ? 93 : 1;
+      file === coordinator ? 273 : file === graph ? 209 : file === persistence ? 102 : 1;
     const loads = groups.map((group) => group.reduce((sum, file) => sum + weight(file), 0));
     expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(1);
   });
