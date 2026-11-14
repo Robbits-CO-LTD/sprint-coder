@@ -442,6 +442,11 @@ export type ManagedHarnessTurnOptions = Readonly<{
   projectMemory?: boolean;
   skillDrafts?: boolean;
   skillActivation?: boolean;
+  /**
+   * The Turn is given Team (a Leader's Team Turn: `StartedTurn.teamTurn` with its Team MCP, or the
+   * mock Team fixture). Without it the catalog has no `team_*` tool, so the broker refuses one.
+   */
+  teamTools?: boolean;
   mockFixture?: 'approval' | 'command';
   mockTeamFixture?: boolean;
 }>;
@@ -728,7 +733,9 @@ export class ManagedCodingHarness {
               ? []
               : [WORKSPACE_CREATE_DIRECTORY_TOOL.toolId]),
           ]),
-      ...(this.deps.team === undefined ? [] : TEAM_TOOLS.map(({ toolId }) => toolId)),
+      ...(this.deps.team === undefined || options.teamTools !== true
+        ? []
+        : TEAM_TOOLS.map(({ toolId }) => toolId)),
       ...(this.deps.auxiliary === undefined || options.projectMemory !== true
         ? []
         : [PROJECT_MEMORY_TOOL.toolId]),

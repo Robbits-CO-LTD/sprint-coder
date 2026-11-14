@@ -262,10 +262,12 @@ describe('TeamMcpBridge', () => {
     bridges.push(bridge);
     const socketPath = await bridge.ensureStarted();
     const token = TeamMcpBridge.generateToken();
+    // A Leader's Team Turn: only it is given the managed Team tools (a Turn without Team is refused).
     bridge.register('turn-wait', {
       taskId: 'task-wait',
       token,
-      allowTeamTools: false,
+      role: 'leader',
+      allowTeamTools: true,
       allowedTools: [],
       managedTools: [
         { name: 'team_wait_reports', description: 'wait', inputSchema: { type: 'object' } },
