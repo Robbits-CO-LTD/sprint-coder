@@ -22,6 +22,7 @@ import config, {
   DMG_BACKGROUND_PATH,
   DMG_ICON_SIZE,
   DMG_WINDOW_SIZE,
+  FONT_LICENSE_RESOURCES,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
   refreshPackagedDesktopControlDigest,
@@ -103,6 +104,22 @@ describe('native package target', () => {
     );
     expect(shouldIgnoreFromPackage('/managed-local/build/legacy-runtime')).toBe(true);
     expect(typeof config.hooks?.postPackage).toBe('function');
+  });
+
+  it('ships the SIL Open Font License text of every bundled font beside the app', () => {
+    // The fonts themselves travel inside the renderer build (.vite), which the package keeps.
+    expect(shouldIgnoreFromPackage('/.vite/renderer/main_window/assets/Geist.woff2')).toBe(false);
+    expect(FONT_LICENSE_RESOURCES.map((path) => path.replace(/\\/g, '/').split('/').pop())).toEqual(
+      ['geist-ofl.txt', 'ibm-plex-sans-jp-ofl.txt', 'plemoljp-ofl.txt'],
+    );
+    expect(config.packagerConfig?.extraResource).toEqual(
+      expect.arrayContaining(FONT_LICENSE_RESOURCES),
+    );
+    for (const path of FONT_LICENSE_RESOURCES) {
+      const text = readFileSync(path, 'utf8');
+      expect(text).toContain('SIL OPEN FONT LICENSE Version 1.1');
+      expect(text).toMatch(/^Copyright /m);
+    }
   });
 
   it.runIf(process.platform === 'win32')(

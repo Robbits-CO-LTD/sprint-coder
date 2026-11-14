@@ -67,6 +67,12 @@ const bundledNodeEntitlements = join(__dirname, 'entitlements.node.plist');
 export const DMG_BACKGROUND_PATH = resolve(__dirname, 'assets', 'dmg-background.png');
 export const DMG_WINDOW_SIZE = { width: 658, height: 498 } as const;
 export const DMG_ICON_SIZE = 112;
+/** The SIL Open Font License texts of the fonts the renderer bundles (issue #1253). */
+export const FONT_LICENSE_RESOURCES = [
+  'geist-ofl.txt',
+  'ibm-plex-sans-jp-ofl.txt',
+  'plemoljp-ofl.txt',
+].map((name) => resolve(__dirname, '..', '..', 'docs', 'licenses', name));
 
 export function createDMGContents(appPath: string) {
   return [
@@ -400,6 +406,7 @@ const config: ForgeConfig = {
     asar: { unpack: NATIVE_ASAR_UNPACK_GLOB },
     extraResource: [
       resolve(__dirname, '..', '..', 'docs', 'licenses', 'unicode-license.txt'),
+      ...FONT_LICENSE_RESOURCES,
       ...bundledNodeResources(),
       ...sandboxRunnerResources(),
       ...desktopControlResources(),

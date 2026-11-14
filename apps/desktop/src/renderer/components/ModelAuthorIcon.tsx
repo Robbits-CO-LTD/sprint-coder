@@ -1,4 +1,5 @@
 import type { SVGProps } from 'react';
+import { FONT_SANS } from '../lib/fonts';
 
 // Monochrome brand paths are adapted from Simple Icons (CC0-1.0); compact monograms are local
 // fallbacks for brands without a bundled path. All marks inherit currentColor and remain decorative.
@@ -171,7 +172,7 @@ function Monogram({ children, ...props }: SVGProps<SVGSVGElement>) {
         textAnchor="middle"
         fontSize="12"
         fontWeight="700"
-        fontFamily="system-ui, sans-serif"
+        fontFamily={FONT_SANS}
       >
         {children}
       </text>

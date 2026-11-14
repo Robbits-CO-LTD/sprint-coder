@@ -45,6 +45,9 @@ import {
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
 import licenseText from '../../../../../LICENSE?raw';
+import geistLicenseText from '../../../../../docs/licenses/geist-ofl.txt?raw';
+import plexSansJpLicenseText from '../../../../../docs/licenses/ibm-plex-sans-jp-ofl.txt?raw';
+import plemolJpLicenseText from '../../../../../docs/licenses/plemoljp-ofl.txt?raw';
 import {
   readSoundEffectPreferences,
   setSoundEffectsEnabled,
@@ -882,9 +885,52 @@ function LicenseGroup() {
         <summary>ライセンス全文を表示</summary>
         <pre data-testid="settings-license-text">{licenseText.trim()}</pre>
       </details>
+      <div className="settings-license-row" data-testid="settings-font-licenses">
+        <div className="settings-license-copy">
+          <strong>同梱フォント（SIL Open Font License 1.1）</strong>
+          <p className="settings-hint">
+            画面の文字に使う 3 つのフォントは、上の PolyForm Perimeter
+            ではなく、それぞれの作者による SIL Open Font License 1.1 で配布されています。
+          </p>
+        </div>
+        <span className="settings-license-badge" aria-hidden="true">
+          OFL
+        </span>
+      </div>
+      <ul className="settings-font-credits">
+        {BUNDLED_FONTS.map((font) => (
+          <li key={font.name}>
+            <strong>{font.name}</strong>
+            <span className="settings-hint">{font.copyright}</span>
+          </li>
+        ))}
+      </ul>
+      <details className="settings-license-details" data-testid="settings-font-license-details">
+        <summary>フォントのライセンス全文を表示</summary>
+        <pre data-testid="settings-font-license-text">{BUNDLED_FONT_LICENSE_TEXT}</pre>
+      </details>
     </div>
   );
 }
+
+/** The fonts shipped in assets/fonts, with their licence files from docs/licenses (issue #1253). */
+const BUNDLED_FONTS = [
+  { name: 'Geist', license: geistLicenseText },
+  { name: 'IBM Plex Sans JP', license: plexSansJpLicenseText },
+  { name: 'PlemolJP Console', license: plemolJpLicenseText },
+].map((font) => ({
+  ...font,
+  // The notice is the licence file's own copyright line, so the two can never disagree.
+  copyright:
+    font.license
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('Copyright')) ?? '',
+}));
+
+const BUNDLED_FONT_LICENSE_TEXT = BUNDLED_FONTS.map(
+  ({ name, license }) => `――― ${name} ―――\n\n${license.trim()}`,
+).join('\n\n\n');
 
 /** Reads what is stored when it mounts; both bodies mount it afresh each time Settings opens. */
 function SoundEffectsGroup() {

@@ -259,6 +259,8 @@ Sprint Coderはソース公開型（source-available）のソフトウェアで�
 
 この変更は、変更前にMITで公開された版・コードに対する既存の許諾を撤回しません。該当するMITの著作権表示・許諾文はLICENSE末尾に保持しています。同梱する第三者コード・フォント・ロゴなどは、それぞれのライセンスと利用条件に従います。デスクトップ操作の実行ファイルは、[agent-desktop](https://github.com/vercel-labs/agent-desktop)（vercel-labs、Apache-2.0）1.2.0 のソースを [apps/desktop/desktop-control](apps/desktop/desktop-control) に取り込んでbuildしたもので、アプリの中では `sprint-coder-desktop-control.exe` という名前で入れています。ライセンス全文は [docs/licenses/agent-desktop-license.txt](docs/licenses/agent-desktop-license.txt) にあり、アプリの resources にも入れています。取り込んだ版と、変えたファイルの一覧は [VENDORED.md](apps/desktop/desktop-control/VENDORED.md) にあります。
 
+画面の文字には、Geist（Vercel）、IBM Plex Sans JP（IBM）、PlemolJP Console（Yuko OTAWARA）の3つのフォントを同梱しています。3つとも [SIL Open Font License 1.1](https://openfontlicense.org/) で、ライセンス全文は [docs/licenses](docs/licenses) の `geist-ofl.txt`・`ibm-plex-sans-jp-ofl.txt`・`plemoljp-ofl.txt` にあり、アプリの resources と設定画面の「ライセンス」にも入れています。入手元・版・SHA-256・変換の手順は [apps/desktop/assets/fonts/SOURCES.txt](apps/desktop/assets/fonts/SOURCES.txt) にあります。
+
 ---
 
 <div align="center">

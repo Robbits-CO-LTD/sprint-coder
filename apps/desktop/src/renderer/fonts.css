@@ -1,0 +1,139 @@
+/* Bundled fonts (issue #1253). Every file is local — apps/desktop/assets/fonts, recorded with its
+   source and SHA-256 in SOURCES.txt — so the app looks the same offline and never asks a CDN.
+   Licences: docs/licenses/*-ofl.txt (SIL Open Font License 1.1), shown in Settings.
+
+   "SC Sans" is one family made of two fonts. Geist draws Latin, digits and punctuation; IBM Plex
+   Sans JP draws only the Japanese ranges, scaled by size-adjust so its kana and kanji sit at the
+   same visual size as Geist's letters. "SC Mono" is PlemolJP Console, whose box-drawing and arrow
+   glyphs are one cell wide and whose Japanese is exactly two cells.
+
+   Why Geist is declared five times: a browser first picks the faces of a family whose
+   font-weight matches best, and only among faces with that *same* weight descriptor does it
+   combine them by unicode-range. A single Geist face at `100 900` beside Plex faces at 400, 450…
+   is never in the same group, so one of the two fonts would silently drop out (Chromium then drew
+   Latin in the system font). Each Plex weight therefore takes a weight band, and the one variable
+   Geist file is declared once per band with the same band. Inside a band Geist still renders the
+   exact weight asked for (550 stays 550); Plex, having fixed weights, draws its nearest one. The
+   bands are the ones CSS font matching would pick between those five weights anyway.
+
+   font-display: block — text waits (briefly; main.tsx waits for these before the first paint)
+   instead of showing a different font and then switching. */
+
+/* Geist (variable), one declaration per weight band. */
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 1 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 401 450;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 451 500;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 501 600;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 601 1000;
+  font-style: normal;
+  font-display: block;
+}
+
+/* IBM Plex Sans JP: Regular (400), Text (450), Medium (500), SemiBold (600), Bold (700). */
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/IBMPlexSansJP-Regular.woff2') format('woff2');
+  font-weight: 1 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range:
+    U+2E80-2FDF, U+3000-303F, U+3040-309F, U+30A0-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FF00-FFEF;
+  size-adjust: 92%;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/IBMPlexSansJP-Text.woff2') format('woff2');
+  font-weight: 401 450;
+  font-style: normal;
+  font-display: block;
+  unicode-range:
+    U+2E80-2FDF, U+3000-303F, U+3040-309F, U+30A0-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FF00-FFEF;
+  size-adjust: 92%;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/IBMPlexSansJP-Medium.woff2') format('woff2');
+  font-weight: 451 500;
+  font-style: normal;
+  font-display: block;
+  unicode-range:
+    U+2E80-2FDF, U+3000-303F, U+3040-309F, U+30A0-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FF00-FFEF;
+  size-adjust: 92%;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/IBMPlexSansJP-SemiBold.woff2') format('woff2');
+  font-weight: 501 600;
+  font-style: normal;
+  font-display: block;
+  unicode-range:
+    U+2E80-2FDF, U+3000-303F, U+3040-309F, U+30A0-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FF00-FFEF;
+  size-adjust: 92%;
+}
+
+@font-face {
+  font-family: 'SC Sans';
+  src: url('../../assets/fonts/IBMPlexSansJP-Bold.woff2') format('woff2');
+  font-weight: 601 1000;
+  font-style: normal;
+  font-display: block;
+  unicode-range:
+    U+2E80-2FDF, U+3000-303F, U+3040-309F, U+30A0-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FF00-FFEF;
+  size-adjust: 92%;
+}
+
+/* PlemolJP Console: Regular and Bold. */
+@font-face {
+  font-family: 'SC Mono';
+  src: url('../../assets/fonts/PlemolJPConsole-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'SC Mono';
+  src: url('../../assets/fonts/PlemolJPConsole-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}

@@ -9,6 +9,11 @@
 // used — arcs, lines and a pre-rendered glow sprite with additive blending; no canvas shadows or
 // filters.
 
+import { FONT_SANS, waitForFonts } from './fonts';
+
+/** How long the opening may wait for its font before it gathers into whatever font there is. */
+const INTRO_FONT_WAIT_MS = 800;
+
 export type SkyTheme = Readonly<{
   /** Two colours the specks and glows take, as hex. */
   colors: readonly [string, string];
@@ -116,6 +121,8 @@ export class SetupSky {
   private warpUntil = 0;
   private warpDir = 1;
   private intro: { start: number; word: string } | null = null;
+  /** Counts openings asked for, so one that waited for its font starts only if still current. */
+  private introRequest = 0;
   private implodeAt = 0;
   private observer: ResizeObserver | null = null;
   private readonly onResize = () => this.resize();
@@ -278,6 +285,21 @@ export class SetupSky {
   /** The opening: specks gather into `word`, a light runs across it, and it dissolves. */
   playIntro(word: string): void {
     if (!this.animate || this.ctx === null) return;
+    // The word's shape is taken once, from the bundled font. Taken before that font has loaded, it
+    // would be another font's shape for the whole opening — so wait for it (briefly) first.
+    const fonts = typeof document === 'undefined' ? undefined : document.fonts;
+    const spec = `800 100px ${FONT_SANS}`;
+    if (fonts === undefined || fonts.check(spec, word)) {
+      this.gatherInto(word);
+      return;
+    }
+    const request = ++this.introRequest;
+    void waitForFonts(fonts, [spec], INTRO_FONT_WAIT_MS, word).then(() => {
+      if (request === this.introRequest && !this.destroyed) this.gatherInto(word);
+    });
+  }
+
+  private gatherInto(word: string): void {
     const points = this.sampleWord(word);
     if (points.length === 0) return;
     this.intro = { start: performance.now(), word };
@@ -291,6 +313,8 @@ export class SetupSky {
 
   /** Ends the opening at once (a click or key during it). */
   finishIntro(): void {
+    // An opening still waiting for its font is called off too.
+    this.introRequest += 1;
     if (this.intro === null) return;
     this.intro = null;
     // The word bursts: every speck flies outwards from the middle and then drifts on.
@@ -740,7 +764,7 @@ export class SetupSky {
     ctx.strokeStyle = '#ffffff';
     ctx.stroke();
     ctx.restore();
-    ctx.font = '600 11px system-ui, sans-serif';
+    ctx.font = `600 11px ${FONT_SANS}`;
     const width = ctx.measureText(label).width + 12;
     ctx.fillStyle = color;
     ctx.beginPath();
@@ -761,7 +785,7 @@ export class SetupSky {
     if (g === null) return [];
     const size = Math.min(w * 0.085, 120);
     g.fillStyle = '#fff';
-    g.font = `800 ${size}px system-ui, "Segoe UI", sans-serif`;
+    g.font = `800 ${size}px ${FONT_SANS}`;
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     g.fillText(word, w / 2, h * 0.42);
