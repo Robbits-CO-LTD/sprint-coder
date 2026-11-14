@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_ASSISTANT_PREFERENCES } from '@sprint-coder/contracts';
 import { useAppStore } from './store/appStore';
+import { LOGO_INTRO_SEEN_KEY } from './lib/setup-logo-intro';
 import { SETUP_COMPLETE_KEY, SETUP_REPLAY_EVENT, isSetupShowing } from './lib/setup-preference';
 import type * as UiSound from './lib/ui-sound';
 
@@ -241,8 +242,11 @@ describe('the Setup at launch', () => {
     });
     expect(settings.setTeamUsageMode).not.toHaveBeenCalled();
     expect(localStorage.getItem(SETUP_COMPLETE_KEY)).toBe('1');
-    // This computer's own settings were not on a step that changed: the only key written is the mark.
-    expect(Object.keys(localStorage)).toEqual([SETUP_COMPLETE_KEY, OLD_MARK].sort());
+    // This computer's own settings were not on a step that changed: the only keys written are the
+    // Setup's mark and the logo film's (the film was shown before this Setup, as its still card).
+    expect(Object.keys(localStorage).sort()).toEqual(
+      [LOGO_INTRO_SEEN_KEY, SETUP_COMPLETE_KEY, OLD_MARK].sort(),
+    );
     await relaunch();
     expect(q('[data-testid="setup-replay-dialog"]')).toBeNull();
   });
@@ -259,7 +263,10 @@ describe('the Setup at launch', () => {
     await flush();
     expect(q('[data-testid="setup-replay-dialog"]')).toBeNull();
     expect(localStorage.getItem(SETUP_COMPLETE_KEY)).toBe('1');
-    expect(Object.keys(localStorage)).toEqual([SETUP_COMPLETE_KEY]);
+    // (And the logo film's own mark: it was shown before this Setup.)
+    expect(Object.keys(localStorage).sort()).toEqual(
+      [LOGO_INTRO_SEEN_KEY, SETUP_COMPLETE_KEY].sort(),
+    );
     expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
     expect(settings.setTeamUsageMode).not.toHaveBeenCalled();
   });
