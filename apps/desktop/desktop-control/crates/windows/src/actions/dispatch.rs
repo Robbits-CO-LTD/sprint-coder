@@ -34,6 +34,10 @@ mod imp {
     };
     use crate::actions::disclosure::{collapse_steps, expand_steps};
     use crate::actions::focus::focus_element;
+    use crate::actions::foreground_hold::{ForegroundHold, note_target_in_front};
+    use crate::actions::list_item_click::{
+        background_click_refusal, background_click_takes_foreground,
+    };
     use crate::actions::mutation::{classify_success, classify_write};
     use crate::actions::physical_click::{
         double_click_steps, right_click_steps, triple_click_steps,
@@ -68,6 +72,37 @@ mod imp {
         let element = uia_element(handle)?;
         deadline.ensure_remaining()?;
         corroborate_verified_process(element)?;
+        // Desktop control (desktop-control) change: an action that may not
+        // take the foreground runs with the foreground locked, so a target
+        // that activates itself in answer cannot come to the front, and a
+        // target found in front afterwards is reported (`foreground_hold`).
+        let Some(hold) = ForegroundHold::begin(request.policy.allow_focus_steal) else {
+            return run_action(handle, element, request, lease);
+        };
+        let result = run_action(handle, element, request, lease);
+        let came_forward = hold.finish(target_pid(element, deadline), deadline);
+        result.map(|result| note_target_in_front(result, came_forward))
+    }
+
+    /// The target's process: from the ref's verified identity, or read from
+    /// the element within what is left of `deadline`.
+    fn target_pid(element: &UIAElement, deadline: Deadline) -> Option<u32> {
+        element.verified_process().map(|(pid, _)| pid).or_else(|| {
+            let client = crate::tree::automation::automation_client().ok()?;
+            crate::tree::walk::walker_source::with_transaction_timeout(&client, deadline, || {
+                element.0.get_process_id().ok()
+            })
+            .flatten()
+        })
+    }
+
+    fn run_action(
+        handle: &NativeHandle,
+        element: &UIAElement,
+        request: ActionRequest,
+        lease: &InteractionLease,
+    ) -> Result<ActionResult, AdapterError> {
+        let deadline = lease.deadline();
         match &request.action {
             Action::Click => execute_click(element, request.policy, deadline),
             Action::SetFocus => focus_element(element, &request, deadline),
@@ -215,11 +250,21 @@ mod imp {
         {
             return Ok(ActionResult::from_execution(&Action::Click, steps));
         }
+        // Desktop control (desktop-control) change: any other item of a
+        // standard Win32 list, and a list item clicked through its default
+        // action, brings its window to the front (`list_item_click`); a click
+        // that may not take the foreground is refused before anything is sent.
+        let invoke_available = invoke_available(element);
+        if !policy.allow_focus_steal
+            && background_click_takes_foreground(element, invoke_available, deadline)?
+        {
+            return Err(background_click_refusal(policy));
+        }
         let steps = click_chain_judged_for(
             deadline,
             policy,
             ClickAvailability {
-                invoke_available: invoke_available(element),
+                invoke_available,
                 legacy_available: click_legacy_available(element),
             },
             || {
