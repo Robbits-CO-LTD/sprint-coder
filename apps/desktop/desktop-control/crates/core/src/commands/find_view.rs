@@ -125,9 +125,16 @@ fn reads_view(adapter: &dyn PlatformAdapter, window: &WindowInfo, deadline: Dead
 
 /// The options of the snapshot of the visible elements a find answers from:
 /// those of a default snapshot, presented to the full depth a find searches.
+///
+/// `compact` and `interactive_only` are named here, not left to the defaults:
+/// [`refs_by_node`] pairs each match with its ref on the rule that the
+/// presented tree keeps every observed node, and either option would drop
+/// nodes from it.
 fn view_options() -> TreeOptions {
     TreeOptions {
         max_depth: crate::refs::resolve_saved_ref::WHOLE_WINDOW_DEPTH,
+        compact: false,
+        interactive_only: false,
         ..TreeOptions::default()
     }
 }
