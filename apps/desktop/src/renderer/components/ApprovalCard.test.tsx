@@ -4,7 +4,12 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  DESKTOP_CONTROL_WORKER_ACCENTS,
+  desktopControlWorkerAccent,
+} from '@sprint-coder/contracts';
 import { ApprovalCard } from './ApprovalCard';
+import { darkInkReadsOn } from './WorkerAvatar';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -61,6 +66,85 @@ describe('ApprovalCard user input mode', () => {
       />,
     );
     expect(html.match(/<button/g) ?? []).toHaveLength(2);
+  });
+});
+
+describe('ApprovalCard of a Team Worker’s call', () => {
+  const write: ApprovalSummary = {
+    ...approval,
+    toolName: 'apply_patch',
+    reason: 'Tool apply_patch requests workspace.write',
+    target: 'src/app.ts',
+    impact: 'write',
+    execution: '*** Update File: src/app.ts',
+    risk: 'medium',
+    capability: 'workspace.write',
+  };
+  const render = (value: ApprovalSummary) =>
+    renderToStaticMarkup(
+      <ApprovalCard approval={value} busy={false} onDecision={() => undefined} />,
+    );
+
+  it('opens with the Worker that asked: its face in its cursor’s color, and its name in words', () => {
+    const html = render({ ...write, requester: { label: '確認係', colorIndex: 1 } });
+    // The band comes first in the card, before the title.
+    expect(html.indexOf('data-testid="approval-requester"')).toBeGreaterThan(-1);
+    expect(html.indexOf('data-testid="approval-requester"')).toBeLessThan(
+      html.indexOf('実行の承認が必要です'),
+    );
+    expect(html).toContain('data-requester-color="1"');
+    // The same words as the desktop-control card, never the color alone.
+    expect(html).toContain('依頼した Worker</span><strong>確認係</strong>');
+    // The face the Team view draws: Main's palette, the Worker's first character, decorative.
+    expect(html).toContain(
+      `<span class="w-avatar" aria-hidden="true" data-worker-color="${desktopControlWorkerAccent(1)}" data-ink="dark" data-size="small" style="background-color:${desktopControlWorkerAccent(1)}">確</span>`,
+    );
+    // The card is described by the band, so assistive tech reads whose call it is.
+    const describedBy = /<section[^>]*aria-describedby="([^"]+)"/u.exec(html)?.[1];
+    expect(describedBy).toBeDefined();
+    expect(html).toContain(`<div id="${describedBy}" class="approval-card__requester-strip"`);
+  });
+
+  it('names a Worker with no desktop cursor without a color', () => {
+    const html = render({ ...write, requester: { label: '書き手' } });
+    expect(html).toContain('依頼した Worker</span><strong>書き手</strong>');
+    expect(html).toContain('data-requester-color="none"');
+    expect(html).toContain(
+      '<span class="w-avatar" aria-hidden="true" data-worker-color="none" data-size="small">書</span>',
+    );
+    expect(html).not.toContain('data-ink');
+    expect(html).not.toContain('background-color');
+  });
+
+  it('shows nothing of the kind on the Leader’s own card, and offers the same choices either way', () => {
+    const plain = render(write);
+    expect(plain).not.toContain('approval-requester');
+    expect(plain).not.toContain('依頼した Worker');
+    expect(plain).not.toContain('w-avatar');
+    expect(plain).not.toContain('aria-describedby');
+    // Display only: the buttons, their state and everything else on the card are the same.
+    const named = render({ ...write, requester: { label: '確認係', colorIndex: 1 } });
+    const withoutBand = named
+      .replace(/<div id="[^"]*" class="approval-card__requester-strip".*?<\/div>/u, '')
+      .replace(/ aria-describedby="[^"]*"/u, '');
+    expect(withoutBand).toBe(plain);
+  });
+
+  it('gives every color of the palette an initial that reads on it', () => {
+    const contrast = (first: number, second: number) =>
+      (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+    const luminance = (hex: string) => {
+      const [red, green, blue] = [1, 3, 5].map((at) => {
+        const channel = Number.parseInt(hex.slice(at, at + 2), 16) / 255;
+        return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      }) as [number, number, number];
+      return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    };
+    for (const accent of DESKTOP_CONTROL_WORKER_ACCENTS) {
+      // `--bg-app` (#131315) for the dark ink, white for the light one.
+      const ink = darkInkReadsOn(accent) ? '#131315' : '#FFFFFF';
+      expect(contrast(luminance(accent), luminance(ink))).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });
 

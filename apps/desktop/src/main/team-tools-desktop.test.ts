@@ -178,7 +178,7 @@ describe('the Leader’s desktop mark on a hire', () => {
       expect(desktopControlWorker('task-1', id)).toBeUndefined();
   });
 
-  it('counts the Workers at work, not every Worker ever marked, and reuses a freed accent', async () => {
+  it('counts the Workers at work, not every Worker ever marked, and gives the next a fresh accent', async () => {
     cursorsOn();
     const coordinator = team();
     for (let index = 1; index <= 3; index += 1)
@@ -187,13 +187,14 @@ describe('the Leader’s desktop mark on a hire', () => {
     await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
       desktopControl: false,
     });
-    // One finishes (or fails, or is stopped): the next one gets its place and its accent.
+    // One finishes (or fails, or is stopped): the next one gets its place, but not its accent,
+    // whose cursor may still be drawn; it gets the one after the last accent given.
     coordinator.workers.find(({ id }) => id === 'agent-2')!.state = 'done';
     await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
       workerId: 'agent-5',
       desktopControl: true,
     });
-    expect(desktopControlWorker('task-1', 'agent-5')).toMatchObject({ colorIndex: 1 });
+    expect(desktopControlWorker('task-1', 'agent-5')).toMatchObject({ colorIndex: 3 });
     expect(desktopControlWorker('task-1', 'agent-2')).toBeUndefined();
     await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
       desktopControl: false,

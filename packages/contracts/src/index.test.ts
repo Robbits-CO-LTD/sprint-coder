@@ -1563,6 +1563,28 @@ describe('public contracts', () => {
     expect(approvalContracts.approvalSummarySchema.parse(pendingApproval)).toEqual(pendingApproval);
   });
 
+  it('carries the Team Worker an approval is asked for as its name and color only', () => {
+    const { approvalSummarySchema } = approvalContracts;
+    // The Leader's own call names nobody.
+    expect(approvalSummarySchema.parse(pendingApproval)).not.toHaveProperty('requester');
+    // A Worker holding desktop control has its cursor's color; any other Worker has only its name.
+    for (const requester of [{ label: '確認係', colorIndex: 1 }, { label: '確認係' }])
+      expect(approvalSummarySchema.parse({ ...pendingApproval, requester })).toMatchObject({
+        requester,
+      });
+    for (const requester of [
+      { label: '' },
+      { label: 'x'.repeat(49) },
+      { label: '確認係', colorIndex: -1 },
+      { label: '確認係', colorIndex: 32 },
+      { label: '確認係', colorIndex: 1.5 },
+      { label: '確認係', agentId: 'agent-1' },
+      { leader: true },
+      '確認係',
+    ])
+      expect(() => approvalSummarySchema.parse({ ...pendingApproval, requester })).toThrow();
+  });
+
   it('requires a decision only for resolved approvals', () => {
     const resolved = {
       ...pendingApproval,
