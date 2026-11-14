@@ -71,7 +71,7 @@ pub fn execute(
 /// thousands of rows) ends the same way under any deadline, so it is not told
 /// to raise `--timeout-ms`. Either way, a window too large to search whole is
 /// pointed at `snapshot`, which reads the elements shown on screen of such a
-/// Chromium-hosted window. A find that could answer from those elements itself
+/// Chromium-hosted or WPF window. A find that could answer from those elements itself
 /// (see `find_view.rs`) does, so a timeout that reaches here is one it did not
 /// or could not answer that way.
 fn name_the_traversal_remedy(error: AppError) -> AppError {
@@ -95,9 +95,9 @@ fn name_the_traversal_remedy(error: AppError) -> AppError {
     AppError::Adapter(adapter_error.with_suggestion(suggestion))
 }
 
-const FIND_TIMEOUT_SUGGESTION: &str = "The search ran out of budget before it could answer. Raise --timeout-ms, or narrow the search with --root, --surface, or a more specific role and name. A window with thousands of elements, such as a long list, may not be searched whole in any useful time. When such a window is Chromium-hosted (Electron, WebView2), a find without --root, --surface, --count, --last, or --nth, given at least the default --timeout-ms, searches the elements shown on screen instead; this one did not or could not, so run snapshot instead, which reads only the elements shown on screen of such a window, and use a ref from it.";
+const FIND_TIMEOUT_SUGGESTION: &str = "The search ran out of budget before it could answer. Raise --timeout-ms, or narrow the search with --root, --surface, or a more specific role and name. A window with thousands of elements, such as a long list, may not be searched whole in any useful time. When such a window is Chromium-hosted (Electron, WebView2) or a WPF window, a find without --root, --surface, --count, --last, or --nth, given at least the default --timeout-ms, searches the elements shown on screen instead; this one did not or could not, so run snapshot instead, which reads only the elements shown on screen of such a window, and use a ref from it.";
 
-const FIND_READ_LIMIT_SUGGESTION: &str = "The search stopped at a limit on how much it reads (a container with more children than a search reads, such as a very long list), so a larger --timeout-ms does not help. Narrow the search with --root at a container outside that list. When such a window is Chromium-hosted (Electron, WebView2), a find without --root, --surface, --count, --last, or --nth searches the elements shown on screen instead; this one did not or could not, so run snapshot instead, which reads only the elements shown on screen of such a window, and use a ref from it.";
+const FIND_READ_LIMIT_SUGGESTION: &str = "The search stopped at a limit on how much it reads (a container with more children than a search reads, such as a very long list), so a larger --timeout-ms does not help. Narrow the search with --root at a container outside that list. When such a window is Chromium-hosted (Electron, WebView2) or a WPF window, a find without --root, --surface, --count, --last, or --nth searches the elements shown on screen instead; this one did not or could not, so run snapshot instead, which reads only the elements shown on screen of such a window, and use a ref from it.";
 
 pub fn parse_state_flag(raw: &str) -> Result<StatePredicate, AppError> {
     let (token, expected) = match raw.split_once('=') {

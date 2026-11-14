@@ -400,10 +400,35 @@ mod imp {
     /// offscreen. `None` is an answer that could not be read (a provider that
     /// timed out): nothing below such a root is read either, but that is a
     /// failed read, which may be retried, not a view known to be empty.
+    ///
+    /// A root whose own window is minimized is known not to be in the view
+    /// (`Some(false)`), though its provider may say otherwise: a minimized WPF
+    /// window reports its root and every row it lists onscreen (measured: the
+    /// root at -32000,-32000, all its rows read), and a minimized Electron
+    /// window does the same. Such a window shows nothing on screen, so its
+    /// view is empty. `IsIconic` sends the window no message.
     pub(crate) fn root_in_view(root: &UIAElement) -> Option<bool> {
+        if root_window_minimized(root) {
+            return Some(false);
+        }
         read_one(root, TreeProperty::IsOffscreen)
             .flag()
             .map(|offscreen| !offscreen)
+    }
+
+    /// Whether the root is a window's own element and that window is
+    /// minimized. A root without a window of its own, or whose window could
+    /// not be read, answers false (its `IsOffscreen` then decides).
+    fn root_window_minimized(root: &UIAElement) -> bool {
+        use windows::Win32::Foundation::HWND;
+        let Ok(handle) = root.0.get_native_window_handle() else {
+            return false;
+        };
+        let handle: HWND = handle.into();
+        // SAFETY: `IsIconic` only reads the window's state; a stale handle
+        // answers false.
+        !handle.0.is_null()
+            && unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(handle.0) } != 0
     }
 
     /// What the shown view's navigation fetches with each step.

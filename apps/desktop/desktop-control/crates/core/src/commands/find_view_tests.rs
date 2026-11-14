@@ -35,6 +35,12 @@ struct ViewAdapter {
     view_runs_out: bool,
     whole_reads: AtomicU32,
     view_reads: AtomicU32,
+    /// How often the adapter was asked whether it reads the window by its
+    /// visible elements (`reads_visible_elements`).
+    probes: AtomicU32,
+    /// The view cuts the list named "Rows" short by its own rule, as the shown
+    /// view of a WPF window does with a long list.
+    cuts_rows: bool,
     /// When the deadline of each whole read expires.
     whole_expiries: Mutex<Vec<std::time::Instant>>,
 }
@@ -63,8 +69,14 @@ impl ViewAdapter {
             view_runs_out: false,
             whole_reads: AtomicU32::new(0),
             view_reads: AtomicU32::new(0),
+            probes: AtomicU32::new(0),
+            cuts_rows: false,
             whole_expiries: Mutex::new(Vec::new()),
         }
+    }
+
+    fn probes(&self) -> u32 {
+        self.probes.load(Ordering::SeqCst)
     }
 
     /// How long after `start` the last whole read had to answer: the time the
@@ -119,6 +131,18 @@ fn cut(mut node: AccessibilityNode, depth: u8, max: u8) -> AccessibilityNode {
 }
 
 impl ObservationOps for ViewAdapter {
+    /// The window is read by its visible elements exactly when a read of them
+    /// is served, as the Windows adapter answers both from one check.
+    fn reads_visible_elements(
+        &self,
+        _window: &WindowInfo,
+        _surface: crate::SnapshotSurface,
+        _deadline: Deadline,
+    ) -> bool {
+        self.probes.fetch_add(1, Ordering::SeqCst);
+        self.view.lock().unwrap().is_some()
+    }
+
     fn list_windows(
         &self,
         _filter: &WindowFilter,
@@ -171,6 +195,18 @@ impl ObservationOps for ViewAdapter {
                 node.evidence.ref_evidence.runtime_id = Some(vec![42, index]);
             }
             with_two_identifiers(&mut observed);
+            if self.cuts_rows {
+                for node in &mut observed.nodes {
+                    if node
+                        .evidence
+                        .name
+                        .known()
+                        .is_some_and(|name| name == "Rows")
+                    {
+                        node.completeness.view_cut = true;
+                    }
+                }
+            }
             observed.mark_visible_scope();
             return Ok(observed);
         }
@@ -453,11 +489,8 @@ fn a_slow_whole_search_that_finishes_in_time_still_answers_whole() {
     assert!(response.get("scope").is_none(), "{response}");
     assert_eq!(response["total_matches"], 1);
     assert_eq!(adapter.whole_span(clock.start), OBSERVATION_TIME);
-    assert_eq!(
-        adapter.view_reads(),
-        1,
-        "only the probe of the window's root"
-    );
+    assert_eq!(adapter.probes(), 1, "only the probe of the window's root");
+    assert_eq!(adapter.view_reads(), 0, "and no read of the view");
 }
 
 /// A read limit ends the whole search at once, leaving the view most of the
@@ -491,11 +524,8 @@ fn a_window_searched_whole_is_answered_whole() {
     assert!(entry.identity.unique_at_capture);
     assert!(entry.identity.in_view.is_none());
     assert_eq!(adapter.whole_reads(), 1);
-    assert_eq!(
-        adapter.view_reads(),
-        1,
-        "only the probe of the window's root"
-    );
+    assert_eq!(adapter.probes(), 1, "only the probe of the window's root");
+    assert_eq!(adapter.view_reads(), 0, "and no read of the view");
 }
 
 /// A window not read by its visible elements keeps the whole deadline for its
@@ -553,7 +583,8 @@ fn counts_and_positions_never_answer_from_the_view() {
         }
         let error = run(&adapter, find(Some("Row 3"), selection)).expect_err(shape);
         assert_eq!(error.code(), "TIMEOUT", "{shape}");
-        assert_eq!(adapter.view_reads(), 0, "{shape}: not even the probe");
+        assert_eq!(adapter.view_reads(), 0, "{shape}: no read of the view");
+        assert_eq!(adapter.probes(), 0, "{shape}: not even the probe");
         assert!(
             adapter.whole_span(clock.start) > OBSERVATION_TIME,
             "{shape}: searched as before"
@@ -914,4 +945,57 @@ fn a_raised_deadline_keeps_the_observation_time_and_reads_the_view_in_the_rest()
     assert_eq!(response["scope"], "visible");
     assert_eq!(adapter.whole_span(clock.start), Duration::from_secs(19));
     assert!(clock.clock.elapsed() <= Duration::from_secs(20));
+}
+
+/// A list the view read only from its start (the shown view of a WPF window
+/// cuts a long list at its first items) still pairs each match with its own
+/// ref, since the cut node is presented with the children it was read with,
+/// and the response says that items further down are not read this way, so
+/// "scroll it into view" is not taken to reach them.
+#[test]
+fn a_list_cut_by_the_view_pairs_its_matches_and_says_it_was_cut() {
+    let _guard = HomeGuard::new();
+    let _clock = VirtualClock::freeze();
+    let mut adapter = ViewAdapter::new(WholeRead::RunsOut, Some(shown_rows()));
+    adapter.cuts_rows = true;
+
+    let response = run(&adapter, find(Some("Row 3"), listing())).expect("the view answers");
+    assert_eq!(response["scope"], "visible");
+    assert!(
+        response["scope_cut_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("subtree_truncated")),
+        "{response}"
+    );
+    let found = &response["matches"][0];
+    let entry = saved_entry(found["ref_id"].as_str().expect("the match carries a ref"));
+    assert_eq!(entry.identity.name.as_deref(), Some("Row 3"));
+    resolve(&adapter, &entry).expect("the ref resolves in the same view");
+
+    let missing =
+        run(&adapter, find(Some("Row 9"), listing())).expect("the view answers, with nothing");
+    assert_eq!(missing["scope_hint"], VISIBLE_NO_MATCH_HINT);
+    assert!(missing["scope_cut_hint"].is_string(), "{missing}");
+
+    // A view that cut nothing says nothing of a cut.
+    let adapter = ViewAdapter::new(WholeRead::RunsOut, Some(shown_rows()));
+    let whole_view = run(&adapter, find(Some("Row 3"), listing())).expect("the view answers");
+    assert!(whole_view.get("scope_cut_hint").is_none());
+}
+
+/// The question whether the window is read by its visible elements is the
+/// adapter's one check (`reads_visible_elements`), asked once, and a window
+/// it refuses is never read by its view.
+#[test]
+fn whether_the_view_is_read_is_the_adapters_one_check() {
+    let _guard = HomeGuard::new();
+    let _clock = VirtualClock::freeze();
+    let adapter = ViewAdapter::new(WholeRead::RunsOut, Some(shown_rows()));
+    run(&adapter, find(Some("Row 3"), listing())).expect("the view answers");
+    assert_eq!(adapter.probes(), 1);
+
+    let refused = ViewAdapter::new(WholeRead::RunsOut, None);
+    run(&refused, find(Some("Row 3"), listing())).expect_err("no view to answer");
+    assert_eq!(refused.probes(), 1);
+    assert_eq!(refused.view_reads(), 0);
 }

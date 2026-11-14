@@ -62,6 +62,11 @@ does the same when it cannot search the whole window within its 5 s, and marks
 its answer `"scope": "visible"` too: an empty answer then means "not on screen",
 not "not in the window".
 
+A WPF window with a long list that is not virtualized is read the same way:
+the elements it shows, without the rows reported off screen, with a list read
+only over its first 100 items (marked `subtree_truncated`, with a
+`scope_cut_hint`). A minimized window shows nothing.
+
 ## WPF: Reading Too Early Binds the Wrong Provider
 
 A UIA client that reads a WPF window before its automation peer exists binds the
