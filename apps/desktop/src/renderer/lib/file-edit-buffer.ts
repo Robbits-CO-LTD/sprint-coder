@@ -10,6 +10,8 @@ import { changedLineIndices } from './changed-lines';
 //
 // `version` is the whole API for change detection: a reader compares it to what it last saw. That
 // makes "did anything change" an integer compare rather than a string compare of a file body.
+// `subscribeFileEdits` only says "the version moved": a reader that listens need not look every
+// frame while nothing is being written (issue #1242).
 
 export type LiveFileEdit = {
   turnId: string;
@@ -37,9 +39,24 @@ const byKey = new Map<string, LiveFileEdit>();
 let version = 0;
 let nextOrder = 0;
 let currentTaskId: string | null = null;
+const listeners = new Set<() => void>();
 
 export function fileEditVersion(): number {
   return version;
+}
+
+/** Calls `listener` each time the version moves (it is told nothing: a reader reads when it is
+ * ready to). Returns the way to stop listening. */
+export function subscribeFileEdits(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function bump(): void {
+  version += 1;
+  for (const listener of listeners) listener();
 }
 
 export function applyFileEditFrame(frame: FileEditFrame): void {
@@ -72,7 +89,7 @@ export function applyFileEditFrame(frame: FileEditFrame): void {
     const oldest = [...byKey.entries()].sort((a, b) => a[1].order - b[1].order)[0];
     if (oldest !== undefined) byKey.delete(oldest[0]);
   }
-  version += 1;
+  bump();
 }
 
 /** Newest first: the file being written now is the one worth showing at the top. */
@@ -83,5 +100,5 @@ export function readFileEdits(): LiveFileEdit[] {
 export function clearFileEdits(): void {
   byKey.clear();
   currentTaskId = null;
-  version += 1;
+  bump();
 }

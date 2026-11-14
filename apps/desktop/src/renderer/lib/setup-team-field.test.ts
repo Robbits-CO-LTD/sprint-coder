@@ -31,9 +31,53 @@ function stagedCanvas(width = 600, height = 400): HTMLCanvasElement {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('SetupTeamField', () => {
+  it('follows the pixel ratio of the screen when that alone changes (issue #1242)', () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => fakeContext());
+    vi.stubGlobal('devicePixelRatio', 1);
+    // With motion: the running loop sees it, with the next frame.
+    const canvas = stagedCanvas(600, 400);
+    const field = new SetupTeamField(canvas, { animate: true, mode: 'proactive' });
+    expect([canvas.width, canvas.height]).toEqual([600, 400]);
+    vi.stubGlobal('devicePixelRatio', 2);
+    vi.advanceTimersByTime(17);
+    expect([canvas.width, canvas.height]).toEqual([1200, 800]);
+    field.destroy();
+
+    // Without motion there is no loop: it is told by the media query for the ratio it was sized for.
+    const listeners = new Set<() => void>();
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      media: query,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    }));
+    const stillCanvas = stagedCanvas(600, 400);
+    const still = new SetupTeamField(stillCanvas, { animate: false, mode: 'proactive' });
+    expect([stillCanvas.width, stillCanvas.height]).toEqual([1200, 800]);
+    vi.stubGlobal('devicePixelRatio', 1);
+    for (const listener of [...listeners]) listener();
+    expect([stillCanvas.width, stillCanvas.height]).toEqual([600, 400]);
+    still.destroy();
+    expect(listeners.size).toBe(0);
+  });
+
+  it('is sized for its stage as laid out, not as drawn while the scene is still coming in', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => fakeContext());
+    vi.stubGlobal('devicePixelRatio', 1);
+    // The scene comes in at 97% of its size: that is what the drawn box says at this moment.
+    const canvas = stagedCanvas(620.8, 700.34);
+    const stage = canvas.parentElement!;
+    Object.defineProperty(stage, 'clientWidth', { configurable: true, value: 640 });
+    Object.defineProperty(stage, 'clientHeight', { configurable: true, value: 722 });
+    const field = new SetupTeamField(canvas, { animate: false, mode: 'proactive' });
+    expect([canvas.width, canvas.height]).toEqual([640, 722]);
+    field.destroy();
+  });
+
   it('shows one light, one light and its helpers, or the whole field', () => {
     vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => fakeContext());

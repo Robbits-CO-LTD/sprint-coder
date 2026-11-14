@@ -110,6 +110,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('SetupLogoIntro (the film on its canvas)', () => {
@@ -395,6 +396,22 @@ describe('SetupLogoIntro (the film on its canvas)', () => {
     unsized.instance.destroy();
     expect(disconnect).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
+  });
+
+  it('follows the pixel ratio of the screen when that alone changes, and plays on (issue #1242)', async () => {
+    vi.stubGlobal('devicePixelRatio', 1);
+    const canvas = stage({ width: 960, height: 640 });
+    const { instance, events } = film('full', { canvas });
+    await settle();
+    vi.advanceTimersByTime(2000);
+    expect([canvas.width, canvas.height]).toEqual([960, 640]);
+    // The window moves to a denser screen part-way: same box, twice the pixels, from the next frame.
+    vi.stubGlobal('devicePixelRatio', 2);
+    vi.advanceTimersByTime(FRAME);
+    expect([canvas.width, canvas.height]).toEqual([1920, 1280]);
+    vi.advanceTimersByTime(logoIntroDuration('full'));
+    expect(events.map((event) => event.split('@')[0])).toEqual(['handoff', 'done']);
+    instance.destroy();
   });
 
   it('the still card (reduced motion) is up for under two seconds and fades out', async () => {
