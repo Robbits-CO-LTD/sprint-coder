@@ -126,13 +126,16 @@ fn chromium_menu_candidates(
         true
     })
     .map_err(super::narrow_to_permitted_codes)?;
-    // Read after the enumeration, which must not be re-entered. The process
-    // modules are listed once, and only for a WPF window.
+    // Read after the enumeration, which must not be re-entered. The framework
+    // of a window is read only when the window is not of Chromium provenance
+    // (a Chromium window is searched whatever it reports, so reading its
+    // framework would only spend the deadline the search shares), and the
+    // process modules are listed once, and only for a WPF window.
     let hosts_web_runtime = std::cell::OnceCell::new();
     handles.retain(|handle| {
         searches_window(
             crate::tree::chromium::window_has_chromium_provenance(*handle),
-            root_framework(*handle, deadline).as_deref(),
+            || root_framework(*handle, deadline),
             || *hosts_web_runtime.get_or_init(|| process_may_host_web_content(pid)),
         )
     });
@@ -159,12 +162,17 @@ const FRAMEWORK_READ_CAP: std::time::Duration = std::time::Duration::from_millis
 /// window of any other framework, one whose framework could not be read
 /// (`None`), and a WPF window of a process that loaded a web runtime are all
 /// searched, as before.
+///
+/// Each answer is asked for only when the ones before it leave the decision
+/// open: the framework (a call into the window's process) is not read for a
+/// window of Chromium provenance, and the modules are not listed unless the
+/// window is a WPF one.
 fn searches_window(
     chromium: bool,
-    framework: Option<&str>,
+    framework: impl FnOnce() -> Option<String>,
     hosts_web_runtime: impl FnOnce() -> bool,
 ) -> bool {
-    chromium || framework != Some(WPF_FRAMEWORK) || hosts_web_runtime()
+    chromium || framework().as_deref() != Some(WPF_FRAMEWORK) || hosts_web_runtime()
 }
 
 /// The UI Automation framework of a window's root, read within the deadline
@@ -312,8 +320,16 @@ mod candidate_tests {
                 loaded
             }
         };
-        assert!(!searches_window(false, Some("WPF"), runtime(false)));
-        assert!(searches_window(false, Some("WPF"), runtime(true)));
+        let read = std::cell::Cell::new(0);
+        let reads = |framework: Option<&'static str>| {
+            let read = &read;
+            move || {
+                read.set(read.get() + 1);
+                framework.map(str::to_owned)
+            }
+        };
+        assert!(!searches_window(false, reads(Some("WPF")), runtime(false)));
+        assert!(searches_window(false, reads(Some("WPF")), runtime(true)));
         assert_eq!(asked.get(), 2);
         for framework in [
             None,
@@ -323,12 +339,18 @@ mod candidate_tests {
             Some("wpf"),
         ] {
             assert!(
-                searches_window(false, framework, runtime(false)),
+                searches_window(false, reads(framework), runtime(false)),
                 "{framework:?}"
             );
         }
-        assert!(searches_window(true, Some("WPF"), runtime(false)));
+        assert_eq!(read.get(), 7, "the framework is read for each of them");
+        assert!(searches_window(true, reads(Some("WPF")), runtime(false)));
         assert_eq!(asked.get(), 2, "the modules are asked about only for WPF");
+        assert_eq!(
+            read.get(),
+            7,
+            "the framework of a Chromium window is never read"
+        );
     }
 
     #[test]
