@@ -8,7 +8,6 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
-import { DESKTOP_CONTROL_LEADER_ACCENT, desktopControlWorkerAccent } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { writeSetupComplete } from '../lib/setup-preference';
 import {
@@ -58,6 +57,7 @@ import {
   unlockSoundEffects,
 } from '../lib/ui-sound';
 import { useMediaQuery } from '../lib/useMediaQuery';
+import { useLogoGlyph } from '../lib/logo-glyph';
 import { readLogoIntroSeen, writeLogoIntroSeen } from '../lib/setup-logo-intro';
 import { chooseLogoIntro } from '../lib/setup-logo-timeline';
 import { SetupLogoIntro } from './SetupLogoIntro';
@@ -96,66 +96,43 @@ const ACCESS_OPTIONS: readonly SetupOption<AccessPresetDefault>[] = [
   { value: 'full', label: 'フルアクセス', description: '使う前に確認が出ます' },
 ];
 
-const KICKERS: Readonly<Record<SetupStepId, string>> = {
-  welcome: 'WELCOME',
-  ai: 'CONNECT',
-  reply: 'YOUR STYLE',
-  team: 'TEAMWORK',
-  details: 'FINE TUNE',
-  workspace: 'WORKSPACE',
-  done: 'READY',
-};
-
 /** The hand-off into the app after "最初の Task を始める". */
 const LEAVE_MS = 520;
 
-/** A colour token's current value, so the canvas paints with the same palette as the CSS. */
-function token(name: string, fallback: string): string {
-  if (typeof window === 'undefined' || typeof getComputedStyle !== 'function') return fallback;
-  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
-}
+/** The logo's colours, top to bottom: the sky runs in them on every step, as the film did. */
+const SKY_COLORS = ['#45befc', '#c679fd'] as const;
+/** The lights that cross the sky with the Team: white for the one AI, the logo's colours for the rest. */
+const SKY_TEAM = { leader: '#dfe9ff', workers: ['#45befc', '#c679fd', '#618ef8'] } as const;
 
-/** The background's look for a step. On "返事の仕方" it follows the choices: the tone picks the
- * light (calm blue, warm, or sharp), and the length how crowded the sky is. */
+/** The background's look for a step: always the logo's colours; its pace and how crowded it is
+ * follow the step — and, on "返事の仕方", the choices (the tone sets the pace, the length the crowd). */
 function skyLook(
   step: SetupStepId,
   preferences: AssistantPreferences,
   teamMode: TeamUsageMode,
 ): { theme: SkyTheme; density: number } {
-  const accent = token('--accent', '#8ab0f0');
-  const ai = token('--ai-accent', '#d4a7ff');
-  const info = token('--info', '#9dc0f5');
-  const success = token('--success', '#7bd89c');
-  const warning = token('--warning', '#f2c46d');
-  const danger = token('--danger', '#ff938a');
+  const look = (speed: number, density: number) => ({
+    theme: { colors: SKY_COLORS, speed },
+    density,
+  });
   switch (step) {
     case 'welcome':
-      return { theme: { colors: [accent, ai], speed: 1 }, density: 110 };
+      return look(1, 120);
     case 'ai':
-      return { theme: { colors: [info, success], speed: 0.9 }, density: 90 };
-    case 'reply': {
-      const density = { short: 50, balanced: 100, detailed: 165 }[preferences.length];
-      if (preferences.tone === 'casual')
-        return { theme: { colors: [warning, danger], speed: 1.15 }, density };
-      if (preferences.tone === 'crisp')
-        return { theme: { colors: [success, '#e9fbff'], speed: 2.1 }, density };
-      return { theme: { colors: [accent, info], speed: 0.75 }, density };
-    }
+      return look(0.7, 80);
+    case 'reply':
+      return look(
+        { polite: 0.7, casual: 1.1, crisp: 1.9 }[preferences.tone],
+        { short: 60, balanced: 100, detailed: 160 }[preferences.length],
+      );
     case 'team':
-      return {
-        theme: {
-          colors: [DESKTOP_CONTROL_LEADER_ACCENT, desktopControlWorkerAccent(0)],
-          speed: 1.2,
-        },
-        density: teamMode === 'proactive' ? 120 : 80,
-      };
+      return look(1.2, { explicit: 60, auto: 95, proactive: 165 }[teamMode]);
     case 'details':
-      return { theme: { colors: [warning, ai], speed: 0.9 }, density: 90 };
+      return look(0.7, 80);
     case 'workspace':
-      return { theme: { colors: [success, accent], speed: 1 }, density: 90 };
+      return look(0.8, 80);
     case 'done':
-      return { theme: { colors: [warning, ai], speed: 1.5 }, density: 150 };
+      return look(1.6, 150);
   }
 }
 
@@ -543,10 +520,7 @@ export function SetupWizard({
     const canvas = canvasRef.current;
     if (canvas === null) return;
     const sky = new SetupSky(canvas, { animate });
-    sky.setTeamPalette({
-      leader: DESKTOP_CONTROL_LEADER_ACCENT,
-      workers: [0, 1, 2].map((n) => desktopControlWorkerAccent(n)),
-    });
+    sky.setTeamPalette(SKY_TEAM);
     skyRef.current = sky;
     return () => {
       sky.destroy();
@@ -1029,12 +1003,7 @@ export function SetupWizard({
     mark('soundEnabled', onOff('効果音', saved.soundEnabled)),
     mark('accessDefault', `新しいタスクの安全設定: ${accessDisplay(saved.accessDefault)}`),
   );
-  const palette = {
-    '--setup-leader': DESKTOP_CONTROL_LEADER_ACCENT,
-    '--setup-worker-1': desktopControlWorkerAccent(0),
-    '--setup-worker-2': desktopControlWorkerAccent(1),
-  } as CSSProperties;
-
+  const glyph = useLogoGlyph();
   const heading = (text: ReactNode, hero = false) => (
     <h1 id="setup-title" ref={headingRef} tabIndex={-1} className={hero ? 'setup-hero' : undefined}>
       {text}
@@ -1054,7 +1023,6 @@ export function SetupWizard({
       data-team={teamMode}
       aria-labelledby="setup-title"
       aria-busy={busy || undefined}
-      style={palette}
       onFocus={onFocusIn}
       onKeyDown={onKeyDown}
       onPointerDown={(event) => {
@@ -1072,10 +1040,51 @@ export function SetupWizard({
       }}
     >
       <div className="setup-backdrop" aria-hidden="true">
-        <i className="setup-orb setup-orb--a" />
-        <i className="setup-orb setup-orb--b" />
         <canvas ref={canvasRef} className="setup-sky" data-testid="setup-sky" />
       </div>
+
+      {/* Across the top of the whole window: whose Setup this is, and where in it one is. */}
+      <header className="setup-progress" aria-label={`セットアップ ${position} / ${steps.length}`}>
+        <span className="setup-wordmark">
+          {glyph !== null && <img src={glyph} alt="" />}
+          Sprint Coder
+        </span>
+        <ol>
+          {steps.map((id, at) => (
+            <li
+              key={id}
+              className={`${at < index ? 'is-done' : ''}${at === index ? ' is-current' : ''}`}
+              aria-current={at === index ? 'step' : undefined}
+            >
+              <i />
+              <span className="setup-progress-name">{SETUP_STEP_LABELS[id]}</span>
+            </li>
+          ))}
+          {/* A light runs along the whole track each time the step moves. */}
+          <li
+            key={`comet-${index}`}
+            className={`setup-progress-comet is-${direction}`}
+            aria-hidden="true"
+          />
+        </ol>
+        <span className="setup-progress-count" aria-hidden="true">
+          {position} / {steps.length}
+          {remaining > 0 && <small>あと {remaining}</small>}
+        </span>
+        {replay && onClose && (
+          <button
+            type="button"
+            className="setup-close"
+            data-testid="setup-close"
+            aria-label="セットアップを閉じる"
+            onClick={onClose}
+            // Not while a step is being saved: it closes once the save is over.
+            disabled={busy}
+          >
+            <X size={18} />
+          </button>
+        )}
+      </header>
 
       {/* Decoration only: everything it shows is also said on the board. */}
       <div className="setup-visual" aria-hidden="true">
@@ -1094,10 +1103,6 @@ export function SetupWizard({
           runtime={runtimeStatus}
           folderLabel={folder?.label ?? null}
         />
-        <p className="setup-visual-caption" aria-hidden="true">
-          <span>STEP {String(position).padStart(2, '0')}</span>
-          <span>{SETUP_STEP_LABELS[step]}</span>
-        </p>
         {step === 'done' && animate && <SetupConfetti />}
       </div>
 
@@ -1113,48 +1118,6 @@ export function SetupWizard({
       )}
 
       <section className="setup-content">
-        <header
-          className="setup-progress"
-          aria-label={`セットアップ ${position} / ${steps.length}`}
-        >
-          <span className="setup-wordmark">SPRINT CODER</span>
-          <ol>
-            {steps.map((id, at) => (
-              <li
-                key={id}
-                className={`${at < index ? 'is-done' : ''}${at === index ? ' is-current' : ''}`}
-                aria-current={at === index ? 'step' : undefined}
-              >
-                <i />
-                <span className="setup-visually-hidden">{SETUP_STEP_LABELS[id]}</span>
-              </li>
-            ))}
-            {/* A light runs along the whole track each time the step moves. */}
-            <li
-              key={`comet-${index}`}
-              className={`setup-progress-comet is-${direction}`}
-              aria-hidden="true"
-            />
-          </ol>
-          <span className="setup-progress-count" aria-hidden="true">
-            {position} / {steps.length}
-            {remaining > 0 && <small>あと {remaining}</small>}
-          </span>
-          {replay && onClose && (
-            <button
-              type="button"
-              className="setup-close"
-              data-testid="setup-close"
-              aria-label="セットアップを閉じる"
-              onClick={onClose}
-              // Not while a step is being saved: it closes once the save is over.
-              disabled={busy}
-            >
-              <X size={16} />
-            </button>
-          )}
-        </header>
-
         <div className="setup-scroll">
           {/* A fieldset, so that while a step is being saved every control on it is locked at once:
               what is stored is always what was on screen when it was sent. */}
@@ -1165,7 +1128,10 @@ export function SetupWizard({
             disabled={busy}
             aria-labelledby="setup-title"
           >
-            <p className="setup-kicker">{KICKERS[step]}</p>
+            <p className="setup-kicker">
+              <b>{String(position).padStart(2, '0')}</b>
+              {SETUP_STEP_LABELS[step]}
+            </p>
 
             {step === 'welcome' && (
               <>
@@ -1242,7 +1208,7 @@ export function SetupWizard({
             {step === 'reply' && (
               <>
                 {heading('返事の仕方を選ぶ')}
-                <p className="setup-lead">選ぶたびに、左の見本がその場で書き変わります。</p>
+                <p className="setup-lead">選ぶたびに、見本の返事がその場で書き変わります。</p>
                 {/* The sample reply, read once and whole (the stage itself is hidden from reading). */}
                 <p
                   className="setup-visually-hidden"

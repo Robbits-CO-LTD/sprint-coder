@@ -1,0 +1,2971 @@
+/* ---------- Setup (first run, the launch after an update, and "セットアップをもう一度") ----------
+   The Setup is where the logo film lets you out, and it stays in the film's world: the same dark
+   blue-black, the logo's three colours (cyan, blue, violet) and no others, lanes of light that
+   fan out and come together, and the race still running quietly behind everything
+   (lib/setup-sky.ts). The whole window is one stage. Across its top runs the track — the product's
+   name and every step by name. Under it each step lays out its own way: the picture and the
+   choices change sides, and "細かい好み" takes the full width so that nothing scrolls. The
+   picture always answers the choices.
+
+   Choosing comes first: large type, large targets, the chosen card unmistakable (a bright frame
+   and a check mark, never colour alone), a visible focus ring on every control.
+
+   Motion is transform and opacity (and stroke-dashoffset on a few SVG lanes). Every loop and
+   decoration is switched off by `.setup-wizard.is-still`, which the component sets from the same
+   `prefers-reduced-motion` query the rest of the app uses: the canvases then draw one still frame
+   and steps change with a short fade. */
+
+.main--setup {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.setup-wizard {
+  --setup-bg: #05070a;
+  --su-cyan: #45befc;
+  --su-blue: #618ef8;
+  --su-violet: #c679fd;
+  --su-ink: #f3f6ff;
+  --su-ink-2: #c3cbe0;
+  --su-ink-3: #97a2bd;
+  --su-line: rgba(160, 180, 255, 0.16);
+  --su-line-strong: rgba(170, 190, 255, 0.34);
+  --su-fill: rgba(140, 165, 255, 0.055);
+  --su-fill-hover: rgba(140, 165, 255, 0.11);
+  --su-card: rgba(10, 14, 28, 0.78);
+  --su-grad: linear-gradient(90deg, var(--su-cyan), var(--su-blue) 52%, var(--su-violet));
+  --su-ring: #dfe9ff;
+  /* The Team's small pictures: white for the one AI, the logo's colours for its teammates. */
+  --setup-leader: #dfe9ff;
+  --setup-worker-1: var(--su-cyan);
+  --setup-worker-2: var(--su-violet);
+  --setup-worker-3: var(--su-blue);
+  /* Which column holds the choices and which the picture; each step sets its own. */
+  --su-cols: minmax(0, 1fr) minmax(0, 1fr);
+  --su-content: 1;
+  --su-visual: 2;
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--su-cols);
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(90% 70% at 0% 0%, rgba(69, 190, 252, 0.1), transparent 60%),
+    radial-gradient(80% 70% at 0% 100%, rgba(198, 121, 253, 0.1), transparent 62%),
+    radial-gradient(120% 100% at 50% 45%, #0c1326, #070b14 55%, var(--setup-bg));
+  color: var(--su-ink);
+  container: setup / size;
+  isolation: isolate;
+}
+
+.setup-wizard[data-step='welcome'] {
+  --su-cols: minmax(0, 0.94fr) minmax(0, 1.06fr);
+}
+.setup-wizard[data-step='ai'] {
+  --su-cols: minmax(0, 0.86fr) minmax(0, 1.14fr);
+}
+.setup-wizard[data-step='reply'] {
+  --su-cols: minmax(0, 0.88fr) minmax(0, 1.12fr);
+  --su-content: 2;
+  --su-visual: 1;
+}
+.setup-wizard[data-step='team'] {
+  --su-content: 2;
+  --su-visual: 1;
+}
+.setup-wizard[data-step='workspace'] {
+  --su-cols: minmax(0, 0.92fr) minmax(0, 1.08fr);
+}
+.setup-wizard[data-step='done'] {
+  --su-cols: minmax(0, 0.84fr) minmax(0, 1.16fr);
+  --su-content: 2;
+  --su-visual: 1;
+}
+/* "細かい好み" has the most to choose: the whole width, with its picture as a strip on top. */
+.setup-wizard[data-step='details'] {
+  --su-cols: minmax(0, 1fr);
+  --su-content: 1;
+  --su-visual: 1;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.setup-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The colour a lane, a node or a bar takes: the logo's three, top to bottom. */
+.setup-wizard [data-tone='0'] {
+  --c: var(--su-cyan);
+}
+.setup-wizard [data-tone='1'] {
+  --c: var(--su-blue);
+}
+.setup-wizard [data-tone='2'] {
+  --c: var(--su-violet);
+}
+
+/* ---------- Backdrop: the race goes on ---------- */
+.setup-backdrop {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.setup-sky {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  opacity: 0.55;
+}
+
+/* ---------- The track across the top ---------- */
+.setup-progress {
+  position: relative;
+  z-index: 3;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: clamp(16px, 3cqw, 40px);
+  padding: clamp(12px, 2.4cqh, 22px) clamp(20px, 3.2cqw, 44px) 4px;
+}
+
+.setup-wordmark {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  color: var(--su-ink);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.setup-wordmark img {
+  display: block;
+  width: auto;
+  height: 26px;
+}
+
+.setup-progress ol {
+  position: relative;
+  display: flex;
+  max-width: 760px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-progress li {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--su-ink-3);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+/* The line from the step before. */
+.setup-progress li + li::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 50%;
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--su-line);
+}
+
+.setup-progress li.is-done + li::before,
+.setup-progress li.is-done::before {
+  background: var(--su-blue);
+}
+
+.setup-progress li.is-current::before {
+  background: linear-gradient(90deg, var(--su-blue), var(--su-ring));
+}
+
+.setup-progress li > i {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--su-line-strong);
+  border-radius: 50%;
+  background: #080c18;
+}
+
+.setup-progress li.is-done > i {
+  border-color: var(--su-blue);
+  background: var(--su-blue);
+}
+
+.setup-progress li.is-current > i {
+  border-color: var(--su-ring);
+  background: var(--su-ring);
+  box-shadow:
+    0 0 0 4px rgba(97, 142, 248, 0.28),
+    0 0 18px 2px rgba(120, 160, 255, 0.8);
+}
+
+.setup-progress li.is-done {
+  color: var(--su-ink-2);
+}
+
+.setup-progress li.is-current {
+  color: var(--su-ink);
+  font-weight: 700;
+}
+
+/* A light runs along the whole track each time the step moves. */
+.setup-progress li.setup-progress-comet {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  flex: none;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.setup-progress li.setup-progress-comet::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 26%;
+  height: auto;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--su-cyan), #fff);
+  opacity: 0;
+}
+
+.setup-wizard.is-animated .setup-progress-comet.is-forward::before {
+  animation: su-track-forward 820ms var(--ease-spatial) both;
+}
+
+.setup-wizard.is-animated .setup-progress-comet.is-back::before {
+  background: linear-gradient(270deg, transparent, var(--su-violet), #fff);
+  animation: su-track-back 820ms var(--ease-spatial) both;
+}
+
+.setup-progress-count {
+  flex: none;
+  color: var(--su-ink-2);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.setup-progress-count small {
+  margin-left: 10px;
+  color: var(--su-ink-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.setup-close {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--su-line);
+  border-radius: 12px;
+  background: var(--su-fill);
+  color: var(--su-ink-2);
+  cursor: pointer;
+}
+
+.setup-close:hover:not(:disabled) {
+  border-color: var(--su-line-strong);
+  background: var(--su-fill-hover);
+  color: var(--su-ink);
+}
+
+.setup-close:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* ---------- The picture ---------- */
+.setup-visual {
+  position: relative;
+  z-index: 1;
+  grid-column: var(--su-visual);
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  container-type: size;
+  pointer-events: none;
+}
+
+.setup-wizard[data-step='details'] .setup-visual {
+  height: clamp(56px, 9cqh, 76px);
+  margin: clamp(6px, 3cqh - 10px, 16px) clamp(20px, 3.2cqw, 44px) 0;
+}
+
+.setup-stage {
+  position: absolute;
+  inset: 0;
+}
+
+.setup-scene {
+  position: absolute;
+  inset: 0;
+}
+
+.setup-wizard.is-animated .setup-scene {
+  animation: su-scene-in 700ms var(--ease-spatial) both;
+}
+
+/* A pulse of light across the stage when something is chosen. */
+.setup-burst {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.setup-burst i {
+  position: absolute;
+  top: calc(30% + var(--k) * 20%);
+  left: 0;
+  width: 46%;
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(90deg, transparent, var(--su-blue), #fff);
+  opacity: 0;
+  animation: su-burst 640ms var(--ease-ui) calc(var(--k) * 70ms) both;
+}
+
+.setup-burst i:first-child {
+  background: linear-gradient(90deg, transparent, var(--su-cyan), #fff);
+}
+
+.setup-burst i:last-child {
+  background: linear-gradient(90deg, transparent, var(--su-violet), #fff);
+}
+
+.setup-wizard[data-step='details'] .setup-burst {
+  display: none;
+}
+
+/* Shared: a lane drawn in an SVG that is stretched to its box. */
+.setup-sw-flow,
+.setup-ss-flow,
+.setup-sf-flow,
+.setup-sk-lanes {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.setup-sw-flow path,
+.setup-ss-flow path,
+.setup-sf-flow path,
+.setup-sk-lanes path {
+  fill: none;
+  stroke: var(--c, var(--su-blue));
+  stroke-linecap: round;
+  /* In the drawing's own units (a hundred to the box): about a pixel and a half. */
+  stroke-width: 0.26;
+}
+
+/* ---------- ようこそ: one request → a team → one result ---------- */
+.setup-sw {
+  position: absolute;
+  inset: 5% 5% 7% 0;
+}
+
+.setup-sw-flow path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 0.85;
+}
+
+.setup-sw:not([data-phase='0']) .setup-sw-out {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 560ms var(--ease-spatial) calc(var(--k) * 45ms);
+}
+
+.setup-sw[data-phase='3'] .setup-sw-in {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 520ms var(--ease-spatial) calc(var(--k) * 45ms);
+}
+
+.setup-sw-ask,
+.setup-sw-result {
+  position: absolute;
+  top: 50%;
+  box-sizing: border-box;
+  padding: clamp(12px, 2.4cqw, 20px);
+  border: 1px solid var(--su-line-strong);
+  border-radius: 18px;
+  background: var(--su-card);
+}
+
+.setup-sw-ask {
+  left: 0;
+  width: 34%;
+  transform: translateY(-50%);
+  box-shadow: 0 0 60px -18px rgba(97, 142, 248, 0.7);
+}
+
+.setup-sw-tag {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--su-ink-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+.setup-sw-typed {
+  display: block;
+  min-height: 2.9em;
+  color: var(--su-ink);
+  font-size: clamp(14px, 2.7cqw, 20px);
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.setup-sw-caret,
+.setup-sr-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 3px;
+  background: var(--su-ring);
+  vertical-align: -0.16em;
+}
+
+.setup-wizard.is-animated .setup-sw-caret,
+.setup-wizard.is-animated .setup-sr-caret {
+  animation: su-blink 1s steps(1) infinite;
+}
+
+.setup-wizard.is-animated .setup-sw-caret.is-typing,
+.setup-wizard.is-animated .setup-sr-caret.is-typing {
+  animation: none;
+}
+
+.setup-sw-team {
+  position: absolute;
+  inset: 0 34% 0 44%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-sw-team li {
+  position: absolute;
+  top: var(--y);
+  right: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  height: clamp(30px, 6cqh, 42px);
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--c) 55%, transparent);
+  border-radius: 999px;
+  background: var(--su-card);
+  opacity: 0.22;
+  transform: translateY(-50%);
+}
+
+.setup-sw:not([data-phase='0']) .setup-sw-team li {
+  opacity: 1;
+  box-shadow: 0 0 30px -12px var(--c);
+  transition: opacity 380ms var(--ease-ui) calc(260ms + var(--k) * 60ms);
+}
+
+.setup-sw-team b {
+  flex: none;
+  min-width: 2.3em;
+  color: var(--c);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.setup-sw-bar {
+  flex: 1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.setup-sw-bar i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--c), #fff);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.setup-sw[data-phase='2'] .setup-sw-bar i,
+.setup-sw[data-phase='3'] .setup-sw-bar i {
+  transform: none;
+  transition: transform calc(1300ms + var(--k) * 190ms) var(--ease-ui) calc(var(--k) * 110ms);
+}
+
+.setup-sw-result {
+  right: 0;
+  width: 24%;
+  min-height: 38%;
+  opacity: 0.22;
+  transform: translateY(-50%) scale(0.94);
+}
+
+.setup-sw[data-phase='3'] .setup-sw-result {
+  border-color: var(--su-ring);
+  box-shadow: 0 0 70px -14px rgba(198, 121, 253, 0.8);
+  opacity: 1;
+  transform: translateY(-50%);
+  transition:
+    opacity 420ms var(--ease-ui) 380ms,
+    transform 620ms var(--ease-spatial) 380ms;
+}
+
+.setup-sw-login,
+.setup-sw-chart,
+.setup-sw-fixed {
+  display: grid;
+  gap: 8px;
+  min-height: clamp(70px, 16cqh, 120px);
+  align-content: center;
+}
+
+.setup-sw-login i {
+  height: 12px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.setup-sw-login b {
+  height: 16px;
+  margin-top: 4px;
+  border-radius: 8px;
+  background: var(--su-grad);
+}
+
+.setup-sw-chart {
+  grid-auto-flow: column;
+  align-items: end;
+  align-content: stretch;
+  gap: 6px;
+}
+
+.setup-sw-chart i {
+  height: var(--h);
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, var(--su-cyan), var(--su-violet));
+}
+
+.setup-sw-fixed svg {
+  width: 62%;
+  margin: 0 auto;
+  fill: none;
+  stroke: var(--su-cyan);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.4;
+}
+
+/* ---------- AI: three nodes into one ---------- */
+.setup-ss {
+  position: absolute;
+  inset: 7% 8% 9% 4%;
+}
+
+.setup-ss-flow path {
+  stroke-width: 0.36;
+  opacity: 0.6;
+}
+
+.setup-ss-lane--authentication_required path {
+  stroke-dasharray: 0.035 0.03;
+  opacity: 0.5;
+}
+
+.setup-ss-lane--unavailable path {
+  stroke: var(--su-ink-3);
+  stroke-dasharray: 0.012 0.03;
+  opacity: 0.4;
+}
+
+.setup-ss-flow path.setup-ss-glint {
+  display: none;
+  stroke: #fff;
+  stroke-dasharray: 0.14 1;
+  stroke-dashoffset: 0.14;
+  stroke-width: 0.5;
+  opacity: 0.95;
+}
+
+.setup-wizard.is-animated .setup-ss-lane--ready path.setup-ss-glint {
+  display: inline;
+  animation: su-glint 2.2s linear calc(var(--i) * 0.45s) infinite;
+}
+
+.setup-ss-node {
+  position: absolute;
+  top: var(--y);
+  left: 30%;
+  width: 0;
+  height: 0;
+}
+
+.setup-ss-node i {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: clamp(44px, 11cqh, 72px);
+  height: clamp(44px, 11cqh, 72px);
+  border: 2px solid var(--c);
+  border-radius: 50%;
+  background: #080c18;
+  transform: translate(-50%, -50%);
+}
+
+.setup-ss-node i svg {
+  width: 46%;
+  fill: none;
+  stroke: var(--c);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.setup-ss-node--ready i {
+  background: var(--c);
+  box-shadow: 0 0 44px -4px var(--c);
+}
+
+.setup-ss-node--ready i svg {
+  stroke: #06101f;
+}
+
+.setup-ss-node--unavailable i {
+  border-style: dashed;
+  border-color: var(--su-ink-3);
+}
+
+.setup-ss-node--unavailable i svg {
+  stroke: var(--su-ink-3);
+}
+
+.setup-ss-node b {
+  position: absolute;
+  top: 0;
+  right: clamp(34px, 8cqh, 52px);
+  color: var(--su-ink);
+  font-size: clamp(14px, 2.6cqw, 19px);
+  font-weight: 700;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
+.setup-ss-node--unavailable b {
+  color: var(--su-ink-3);
+}
+
+.setup-wizard.is-animated .setup-ss-node {
+  animation: su-rise 520ms var(--ease-spatial) calc(120ms + var(--i) * 130ms) both;
+}
+
+.setup-ss-core {
+  position: absolute;
+  top: 50%;
+  left: 70%;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: clamp(92px, 22cqh, 150px);
+  aspect-ratio: 1;
+  border: 1px solid var(--su-line-strong);
+  border-radius: 28px;
+  background: var(--su-card);
+  box-shadow: 0 0 80px -20px rgba(97, 142, 248, 0.9);
+  color: var(--su-ink-2);
+  transform: translateY(-50%);
+}
+
+.setup-ss-core svg {
+  width: 44%;
+  align-self: end;
+  fill: none;
+  stroke: var(--su-ink);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.4;
+}
+
+.setup-ss-core b {
+  align-self: start;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ---------- 返事の仕方: the sample reply ---------- */
+.setup-sr {
+  --tone-c: var(--su-blue);
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  gap: clamp(10px, 2.2cqh, 18px);
+  padding: 4% 5% 6% clamp(24px, 9cqw, 72px);
+}
+
+.setup-sr[data-tone='casual'] {
+  --tone-c: var(--su-violet);
+}
+
+.setup-sr[data-tone='crisp'] {
+  --tone-c: var(--su-cyan);
+}
+
+.setup-sr-title {
+  margin: 0;
+  color: var(--su-ink-3);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+.setup-sr-chat {
+  display: grid;
+  gap: clamp(10px, 2.2cqh, 16px);
+}
+
+.setup-sr-bubble {
+  margin: 0;
+  padding: clamp(12px, 2.4cqh, 18px) clamp(14px, 3.4cqw, 22px);
+  border-radius: 20px;
+  color: var(--su-ink);
+  font-size: clamp(15px, 3.5cqw, 19px);
+  line-height: 1.75;
+}
+
+.setup-sr-bubble--you {
+  justify-self: end;
+  max-width: 84%;
+  border-bottom-right-radius: 6px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.setup-sr-answer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.setup-sr-avatar {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--su-grad);
+}
+
+.setup-sr-avatar i {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: #06101f;
+  transform: rotate(45deg);
+}
+
+.setup-sr-bubble--ai {
+  min-height: 9.4em;
+  border: 1px solid color-mix(in srgb, var(--tone-c) 60%, transparent);
+  border-top-left-radius: 6px;
+  background: var(--su-card);
+  box-shadow: 0 0 80px -24px var(--tone-c);
+  transition:
+    border-color 500ms var(--ease-ui),
+    box-shadow 500ms var(--ease-ui);
+}
+
+.setup-sr-chips,
+.setup-sd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+
+.setup-sr-chips {
+  padding-left: 50px;
+}
+
+.setup-sr-chips span,
+.setup-sd-chips span {
+  padding: 4px 12px;
+  border: 1px solid var(--su-line-strong);
+  border-radius: 999px;
+  color: var(--su-ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ---------- Team: the field ---------- */
+.setup-st {
+  position: absolute;
+  inset: 0;
+}
+
+.setup-st-field {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* The runners fade out as they reach the choices. */
+  mask-image: linear-gradient(90deg, #000 70%, transparent);
+}
+
+.setup-st-count {
+  position: absolute;
+  bottom: 9%;
+  left: clamp(24px, 9cqw, 72px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  max-width: 82%;
+  margin: 0;
+  color: var(--su-ink);
+}
+
+.setup-st-count small,
+.setup-st-count span {
+  text-shadow: 0 2px 20px #05070a;
+}
+
+.setup-st-count small {
+  flex-basis: 100%;
+  color: var(--su-ink-2);
+  font-size: clamp(15px, 3.2cqw, 21px);
+  font-weight: 600;
+}
+
+.setup-st-count b {
+  background: var(--su-grad);
+  background-clip: text;
+  color: transparent;
+  font-size: clamp(64px, 19cqw, 148px);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 0.92;
+  filter: drop-shadow(0 0 28px rgba(97, 142, 248, 0.55));
+  -webkit-text-fill-color: transparent;
+}
+
+.setup-st-count span {
+  flex-basis: 100%;
+  font-size: clamp(15px, 3.4cqw, 22px);
+  font-weight: 600;
+}
+
+.setup-wizard.is-animated .setup-st-count {
+  animation: su-rise 520ms var(--ease-spatial) both;
+}
+
+/* ---------- 細かい好み: the greeting, as a strip ---------- */
+.setup-sd {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: clamp(12px, 2cqw, 20px);
+  box-sizing: border-box;
+  padding: 0 clamp(14px, 2.4cqw, 28px);
+  border: 1px solid var(--su-line);
+  border-radius: 20px;
+  background: var(--su-card);
+}
+
+.setup-sd-avatar {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--su-grad);
+  color: #06101f;
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.setup-sd-avatar i {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: #06101f;
+  transform: rotate(45deg);
+}
+
+.setup-sd-greeting {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--su-ink);
+  font-size: clamp(15px, 1.7cqw, 20px);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setup-wizard.is-animated .setup-sd-greeting,
+.setup-wizard.is-animated .setup-sd-avatar b {
+  animation: su-rise 380ms var(--ease-spatial) both;
+}
+
+.setup-sd-chips {
+  flex: none;
+  flex-wrap: nowrap;
+  max-width: 52%;
+  overflow: hidden;
+}
+
+.setup-sd-sound {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  height: 24px;
+}
+
+.setup-sd-sound i {
+  width: 3px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--su-ink-3);
+}
+
+.setup-sd-sound.is-on i {
+  height: 100%;
+  background: var(--su-cyan);
+  transform: scaleY(0.4);
+}
+
+.setup-wizard.is-animated .setup-sd-sound.is-on i {
+  animation: su-sound 900ms ease-in-out infinite alternate;
+}
+
+.setup-sd-sound.is-on i:nth-child(2) {
+  animation-delay: 150ms;
+  transform: scaleY(0.9);
+}
+
+.setup-sd-sound.is-on i:nth-child(3) {
+  animation-delay: 300ms;
+  transform: scaleY(0.6);
+}
+
+.setup-sd-sound.is-on i:nth-child(4) {
+  animation-delay: 450ms;
+  transform: scaleY(0.8);
+}
+
+/* ---------- 作業場所: the lanes lead to one folder ---------- */
+.setup-sf {
+  position: absolute;
+  inset: 6% 6% 8% 0;
+}
+
+.setup-sf-flow path {
+  stroke-dasharray: 0.05 0.04;
+  opacity: 0.5;
+}
+
+.setup-wizard.is-animated .setup-sf-flow path {
+  animation: su-flow 1.6s linear infinite;
+}
+
+.setup-sf.is-picked .setup-sf-flow path {
+  stroke-dasharray: none;
+  opacity: 0.9;
+  animation: none;
+}
+
+.setup-sf-folder {
+  position: absolute;
+  top: 50%;
+  left: 46%;
+  width: min(46cqw, 44cqh, 320px);
+  aspect-ratio: 1.24;
+  transform: translate(-4%, -50%);
+}
+
+.setup-sf-back,
+.setup-sf-front {
+  position: absolute;
+  right: 0;
+  left: 0;
+  border-radius: 9%;
+}
+
+.setup-sf-back {
+  top: 8%;
+  bottom: 0;
+  background: #17203c;
+}
+
+.setup-sf-back::before {
+  content: '';
+  position: absolute;
+  top: -11%;
+  left: 0;
+  width: 42%;
+  height: 22%;
+  border-radius: 22% 22% 0 0;
+  background: #17203c;
+}
+
+.setup-sf-front {
+  top: 24%;
+  bottom: 0;
+  border: 1px solid rgba(190, 210, 255, 0.35);
+  background: linear-gradient(160deg, #3a5cb8, #5a49b8 60%, #7a48b4);
+  box-shadow: 0 30px 90px -30px rgba(97, 142, 248, 0.9);
+  transform-origin: bottom center;
+  transition: transform 520ms var(--ease-spatial);
+}
+
+.setup-sf-files {
+  position: absolute;
+  inset: 0 10% 30%;
+}
+
+.setup-sf-files i {
+  position: absolute;
+  bottom: 0;
+  left: calc(8% + var(--i) * 26%);
+  width: 30%;
+  height: 78%;
+  border-radius: 8px;
+  background: #e9efff;
+  opacity: 0;
+  transform: translateY(40%) rotate(calc(var(--i) * 6deg - 6deg));
+  transition:
+    transform 560ms var(--ease-spatial) calc(var(--i) * 70ms),
+    opacity 300ms var(--ease-ui) calc(var(--i) * 70ms);
+}
+
+.setup-sf.is-picked .setup-sf-front {
+  transform: perspective(600px) rotateX(-24deg);
+}
+
+.setup-sf.is-picked .setup-sf-files i {
+  opacity: 1;
+  transform: translateY(-14%) rotate(calc(var(--i) * 6deg - 6deg));
+}
+
+.setup-sf-label {
+  position: absolute;
+  top: calc(50% + min(46cqw, 44cqh, 320px) * 0.44);
+  left: 46%;
+  width: min(46cqw, 44cqh, 320px);
+  margin: 0;
+  overflow: hidden;
+  color: var(--su-ink-2);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  text-overflow: ellipsis;
+  transform: translateX(-4%);
+  white-space: nowrap;
+}
+
+.setup-sf.is-picked .setup-sf-label {
+  color: var(--su-ink);
+}
+
+/* ---------- 完了: the lanes, the logo, the beam ---------- */
+.setup-sk {
+  position: absolute;
+  inset: 0;
+}
+
+.setup-sk-mark,
+.setup-confetti {
+  --su-mark: min(36cqh, 46cqw, 300px);
+}
+
+.setup-sk-mark {
+  position: absolute;
+  top: 48%;
+  left: 60%;
+  height: var(--su-mark);
+  aspect-ratio: 672 / 686;
+  transform: translate(-50%, -50%);
+}
+
+/* Three logo-heights tall, ending at the logo's nodes. */
+.setup-sk-lanes {
+  inset: -100% 77.4% -100% auto;
+  width: 100cqw;
+  height: 300%;
+}
+
+.setup-sk-lanes path {
+  stroke-dasharray: 1;
+  stroke-width: 0.14;
+  opacity: 0.6;
+}
+
+.setup-wizard.is-animated .setup-sk-lanes path {
+  animation: su-draw 900ms var(--ease-spatial) calc(var(--k) * 40ms) both;
+}
+
+.setup-sk-beam {
+  position: absolute;
+  top: 50.1%;
+  left: 96%;
+  width: 30cqw;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    #fff,
+    rgba(173, 197, 250, 0.65) 30%,
+    rgba(173, 197, 250, 0.2) 70%,
+    transparent
+  );
+  box-shadow: 0 0 22px 2px rgba(150, 180, 255, 0.55);
+  transform: translateY(-50%);
+  transform-origin: left center;
+}
+
+.setup-wizard.is-animated .setup-sk-beam {
+  animation: su-beam 620ms var(--ease-spatial) 620ms both;
+}
+
+.setup-sk-halo {
+  position: absolute;
+  inset: -70%;
+  background: radial-gradient(closest-side, rgba(97, 142, 248, 0.34), transparent);
+}
+
+.setup-sk-glyph {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 0 26px rgba(110, 150, 255, 0.65));
+}
+
+.setup-wizard.is-animated .setup-sk-glyph {
+  animation: su-mark-in 760ms var(--ease-spatial) 240ms both;
+}
+
+.setup-wizard.is-animated .setup-sk-halo {
+  animation: su-halo 3.6s ease-in-out 1s infinite alternate;
+}
+
+/* Sparks off the arrow's tip, as the film's impact threw them. */
+.setup-confetti {
+  position: absolute;
+  top: 48%;
+  left: calc(60% + var(--su-mark) * 0.46);
+  width: 0;
+  height: 0;
+}
+
+.setup-confetti i {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--len);
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(90deg, transparent, var(--c), #fff);
+  opacity: 0;
+  transform: rotate(var(--a)) scaleX(0);
+  transform-origin: left center;
+  animation: su-spark 900ms var(--ease-ui) calc(700ms + var(--d)) both;
+}
+
+/* ---------- The choices ---------- */
+.setup-content {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-column: var(--su-content);
+  grid-row: 2;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 clamp(20px, 4.4cqw, 64px) clamp(14px, 3cqh, 30px);
+}
+
+/* The race goes on behind the choices too, but dimmed there: nothing bright crosses the words. */
+.setup-content::before {
+  position: absolute;
+  z-index: -1;
+  inset: -4% -3%;
+  background: radial-gradient(
+    closest-side,
+    rgb(6 9 20 / 0.74) 0%,
+    rgb(6 9 20 / 0.62) 62%,
+    rgb(6 9 20 / 0) 100%
+  );
+  content: '';
+  pointer-events: none;
+}
+
+.setup-wizard[data-step='details'] .setup-content {
+  grid-row: 3;
+  padding-inline: clamp(20px, 3.2cqw, 44px);
+}
+
+.setup-scroll {
+  display: grid;
+  align-content: safe center;
+  min-height: 0;
+  margin-inline: -8px;
+  padding: 8px;
+  /* Sideways there is never anything to scroll to (a step sliding in must not show a bar). */
+  overflow: hidden auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--su-line-strong) transparent;
+}
+
+.setup-step {
+  display: grid;
+  gap: clamp(12px, 2.2cqh, 20px);
+  justify-items: start;
+  min-width: 0;
+  max-width: 640px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.setup-wizard[data-step='details'] .setup-step {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: clamp(8px, 1.6cqh, 14px) 24px;
+  max-width: none;
+}
+
+.setup-wizard[data-step='details'] .setup-step > * {
+  grid-column: 1 / -1;
+}
+
+.setup-wizard[data-step='details'] .setup-step > h1 {
+  grid-column: 1;
+  font-size: clamp(24px, 2.8cqw, 34px);
+}
+
+.setup-wizard[data-step='details'] .setup-step > .setup-lead {
+  grid-column: 2;
+}
+
+.setup-step > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.setup-wizard.is-animated .setup-step > * {
+  animation: su-step-forward 520ms var(--ease-spatial) both;
+}
+
+.setup-wizard.is-animated .setup-step--back > * {
+  animation-name: su-step-back;
+}
+
+.setup-wizard.is-animated .setup-step > :nth-child(2) {
+  animation-delay: 50ms;
+}
+.setup-wizard.is-animated .setup-step > :nth-child(3) {
+  animation-delay: 100ms;
+}
+.setup-wizard.is-animated .setup-step > :nth-child(4) {
+  animation-delay: 150ms;
+}
+.setup-wizard.is-animated .setup-step > :nth-child(n + 5) {
+  animation-delay: 200ms;
+}
+
+.setup-kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--su-ink-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.setup-kicker b {
+  background: var(--su-grad);
+  background-clip: text;
+  color: transparent;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  -webkit-text-fill-color: transparent;
+}
+
+.setup-kicker b::after {
+  content: '';
+  display: inline-block;
+  width: 28px;
+  height: 2px;
+  margin-left: 10px;
+  border-radius: 1px;
+  background: var(--su-grad);
+  vertical-align: middle;
+}
+
+.setup-step h1 {
+  margin: 0;
+  color: var(--su-ink);
+  font-size: clamp(28px, 3.5cqw, 46px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+/* The heading takes the focus when a step opens (for reading aloud); it is not a control. */
+.setup-step h1:focus,
+.setup-step h1:focus-visible {
+  outline: none;
+}
+
+.setup-step h1.setup-hero {
+  font-size: clamp(34px, 5cqw, 68px);
+  line-height: 1.16;
+}
+
+.setup-wizard[data-step='done'] .setup-step h1.setup-hero {
+  font-size: clamp(30px, 4.2cqw, 56px);
+}
+
+.setup-words > span {
+  display: inline-block;
+}
+
+.setup-wizard.is-animated .setup-words > span {
+  animation: su-word-in 620ms var(--ease-spatial) calc(120ms + var(--w) * 90ms) both;
+}
+
+.setup-shine,
+.setup-shine > span {
+  background: var(--su-grad);
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.setup-lead {
+  max-width: 34em;
+  margin: 0;
+  color: var(--su-ink-2);
+  font-size: clamp(15px, 1.35cqw, 17px);
+  line-height: 1.8;
+}
+
+.setup-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--su-ink-3);
+  font-size: 13px;
+}
+
+.setup-note::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--su-ink-3);
+}
+
+/* ----- buttons ----- */
+.setup-primary,
+.setup-next,
+.setup-secondary,
+.setup-back,
+.setup-skip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  box-sizing: border-box;
+  border-radius: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    transform 180ms var(--ease-ui),
+    box-shadow 220ms var(--ease-ui),
+    background-color 180ms var(--ease-ui),
+    border-color 180ms var(--ease-ui);
+}
+
+.setup-primary,
+.setup-next {
+  position: relative;
+  min-height: 52px;
+  padding: 0 28px;
+  border: 0;
+  background: var(--su-ink);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.5),
+    0 12px 44px -12px rgba(97, 142, 248, 0.95),
+    0 0 60px -18px rgba(198, 121, 253, 0.9);
+  color: #070b18;
+  font-size: 16px;
+}
+
+.setup-primary {
+  min-height: 58px;
+  padding: 0 34px;
+  font-size: 17px;
+}
+
+.setup-primary:hover:not(:disabled),
+.setup-next:hover:not(:disabled) {
+  background: #fff;
+  box-shadow:
+    0 0 0 1px #fff,
+    0 16px 54px -10px rgba(97, 142, 248, 1),
+    0 0 80px -14px rgba(198, 121, 253, 1);
+  transform: translateY(-2px);
+}
+
+.setup-primary:active:not(:disabled),
+.setup-next:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.setup-primary svg,
+.setup-next svg {
+  transition: transform 220ms var(--ease-ui);
+}
+
+.setup-primary:hover:not(:disabled) svg,
+.setup-next:hover:not(:disabled) svg {
+  transform: translateX(4px);
+}
+
+.setup-secondary,
+.setup-back,
+.setup-skip {
+  min-height: 48px;
+  padding: 0 20px;
+  border: 1px solid var(--su-line-strong);
+  background: var(--su-fill);
+  color: var(--su-ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.setup-secondary:hover:not(:disabled),
+.setup-back:hover:not(:disabled),
+.setup-skip:hover:not(:disabled) {
+  border-color: var(--su-ring);
+  background: var(--su-fill-hover);
+}
+
+.setup-back {
+  border-color: transparent;
+  background: none;
+  color: var(--su-ink-2);
+}
+
+.setup-skip {
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.25;
+}
+
+.setup-skip small {
+  color: var(--su-ink-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.setup-wizard button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.setup-wizard button:focus-visible,
+.setup-wizard input[type='text']:focus-visible {
+  outline: 2px solid var(--su-ring);
+  outline-offset: 3px;
+}
+
+.setup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 640px;
+  padding-top: clamp(10px, 2cqh, 18px);
+}
+
+.setup-wizard[data-step='details'] .setup-actions {
+  max-width: none;
+}
+
+.setup-actions-forward {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ----- AI: what was found ----- */
+.setup-runtime-list {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-runtime-list li {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 56px;
+  padding: 0 18px;
+  border: 1px solid var(--su-line);
+  border-radius: 14px;
+  background: var(--su-fill);
+}
+
+.setup-runtime-list strong {
+  color: var(--su-ink);
+  font-size: 16px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.setup-runtime-list small {
+  padding-block: 6px;
+  color: var(--su-ink-2);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+/* A mark with a shape of its own for each state (never colour alone). */
+.setup-status {
+  position: relative;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--su-ink-3);
+  border-radius: 50%;
+}
+
+.setup-status--ready {
+  border-color: var(--su-cyan);
+  background: var(--su-cyan);
+}
+
+.setup-status--ready::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 5px;
+  width: 4px;
+  height: 8px;
+  border: solid #06101f;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.setup-status--authentication_required {
+  border-color: var(--warning);
+}
+
+.setup-status--authentication_required::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 7px;
+  width: 2px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--warning);
+  box-shadow: 0 9px 0 -0.2px var(--warning);
+}
+
+.setup-status--unavailable {
+  border-style: dashed;
+}
+
+/* ----- choice cards (radio groups) ----- */
+.setup-groups {
+  display: grid;
+  gap: clamp(12px, 2.2cqh, 20px);
+  width: 100%;
+}
+
+.setup-choices {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.setup-choices legend {
+  margin-bottom: 8px;
+  padding: 0;
+  color: var(--su-ink-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.setup-choices-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.setup-choices-row[data-columns='2'] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.setup-choices-row[data-columns='4'] {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.setup-choice,
+.setup-team-card {
+  position: relative;
+  display: flex;
+  box-sizing: border-box;
+  min-width: 0;
+  overflow: hidden;
+  border: 1.5px solid var(--su-line);
+  border-radius: 14px;
+  background: var(--su-fill);
+  cursor: pointer;
+  transition:
+    border-color 180ms var(--ease-ui),
+    background-color 180ms var(--ease-ui),
+    box-shadow 240ms var(--ease-ui),
+    transform 180ms var(--ease-ui);
+}
+
+.setup-choice {
+  min-height: 66px;
+  padding: 11px 34px 11px 14px;
+}
+
+.setup-choice:hover,
+.setup-team-card:hover {
+  border-color: var(--su-line-strong);
+  background: var(--su-fill-hover);
+  transform: translateY(-1px);
+}
+
+.setup-choice input,
+.setup-team-card input,
+.setup-switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.setup-choice.is-selected,
+.setup-team-card.is-selected {
+  border-color: var(--su-ring);
+  background: linear-gradient(135deg, rgba(69, 190, 252, 0.2), rgba(198, 121, 253, 0.2));
+  box-shadow:
+    0 0 0 1px var(--su-ring),
+    0 10px 40px -14px rgba(97, 142, 248, 0.9);
+}
+
+.setup-choice:has(input:focus-visible),
+.setup-team-card:has(input:focus-visible),
+.setup-switch:has(input:focus-visible) {
+  outline: 2px solid var(--su-ring);
+  outline-offset: 3px;
+}
+
+.setup-choice-text,
+.setup-team-card-text,
+.setup-switch-text {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.setup-choice-text strong,
+.setup-team-card-text strong,
+.setup-switch-text strong {
+  color: var(--su-ink);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.setup-choice-text small,
+.setup-team-card-text small,
+.setup-switch-text small {
+  color: var(--su-ink-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.setup-checkmark {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+}
+
+.setup-checkmark circle {
+  fill: none;
+  stroke: var(--su-line-strong);
+  stroke-width: 1.5;
+}
+
+.setup-checkmark path {
+  fill: none;
+  stroke: #06101f;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.is-selected > .setup-checkmark circle {
+  fill: var(--su-ring);
+  stroke: var(--su-ring);
+}
+
+.is-selected > .setup-checkmark path {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 260ms var(--ease-ui) 60ms;
+}
+
+/* The light that spreads from where a choice was pressed. */
+.setup-ripple {
+  position: absolute;
+  top: var(--ry, 50%);
+  left: var(--rx, 50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(223, 233, 255, 0.5);
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0);
+}
+
+.setup-wizard.is-animated .setup-ripple {
+  animation: su-ripple 620ms var(--ease-ui) both;
+}
+
+/* ----- Team cards ----- */
+.setup-team-cards {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.setup-team-card {
+  align-items: center;
+  gap: 18px;
+  min-height: 84px;
+  padding: 12px 44px 12px 14px;
+}
+
+.setup-mini {
+  display: block;
+  flex: none;
+  width: 124px;
+  border-radius: 10px;
+  background: rgba(4, 7, 16, 0.7);
+}
+
+.setup-mini svg {
+  display: block;
+  width: 100%;
+}
+
+.setup-mini-base {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.setup-mini-line {
+  fill: none;
+  stroke: var(--c);
+  stroke-linecap: round;
+  stroke-width: 2.4;
+}
+
+.setup-mini-dot {
+  fill: #fff;
+  offset-distance: 100%;
+  offset-rotate: 0deg;
+}
+
+.setup-mini.is-animated .setup-mini-line {
+  stroke-dasharray: 1;
+  animation: su-mini-draw 3.2s var(--ease-ui) calc(var(--k) * 90ms) infinite;
+}
+
+.setup-mini.is-animated .setup-mini-dot {
+  animation: su-mini-ride 3.2s var(--ease-ui) calc(var(--k) * 90ms) infinite;
+}
+
+.setup-mini.is-animated .is-join .setup-mini-line,
+.setup-mini.is-animated .is-join .setup-mini-dot {
+  animation-delay: calc(900ms + var(--k) * 90ms);
+}
+
+.setup-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--su-grad);
+  color: #06101f;
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: 2px;
+}
+
+/* ----- 細かい好み: three panels side by side ----- */
+.setup-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: clamp(10px, 1.4cqw, 18px);
+  width: 100%;
+}
+
+.setup-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: clamp(12px, 1.5cqw, 18px);
+  border: 1px solid var(--su-line);
+  border-radius: 18px;
+  background: var(--su-card);
+}
+
+.setup-panel h2 {
+  margin: 0;
+  color: var(--su-ink);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.setup-detail-grid .setup-choices-row,
+.setup-detail-grid .setup-choices-row[data-columns='4'] {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
+.setup-detail-grid .setup-choice {
+  align-items: center;
+  min-height: 42px;
+  padding: 6px 40px 6px 14px;
+}
+
+.setup-detail-grid .setup-choice-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 12px;
+}
+
+.setup-detail-grid .setup-choice-text strong {
+  font-size: 14.5px;
+}
+
+.setup-detail-grid .setup-checkmark {
+  top: 50%;
+  margin-top: -10px;
+}
+
+.setup-field {
+  display: grid;
+  gap: 6px;
+}
+
+.setup-field > span {
+  color: var(--su-ink-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.setup-field small {
+  margin-left: 8px;
+  color: var(--su-ink-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.setup-field input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border: 1.5px solid var(--su-line);
+  border-radius: 12px;
+  background: rgba(4, 7, 16, 0.6);
+  color: var(--su-ink);
+  font-size: 15px;
+}
+
+.setup-field input::placeholder {
+  color: var(--su-ink-3);
+}
+
+.setup-switch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 44px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.setup-switch-text strong {
+  font-weight: 600;
+}
+
+.setup-switch-track {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 26px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.16);
+  transition: background-color 200ms var(--ease-ui);
+}
+
+.setup-switch-track i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--su-ink-2);
+  transition:
+    transform 220ms var(--ease-spatial),
+    background-color 200ms var(--ease-ui);
+}
+
+.setup-switch.is-on .setup-switch-track {
+  background: var(--su-blue);
+}
+
+.setup-switch.is-on .setup-switch-track i {
+  background: #fff;
+  transform: translateX(20px);
+}
+
+/* ----- 作業場所 ----- */
+.setup-folder {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 84px;
+  padding: 14px 20px;
+  border: 1.5px dashed var(--su-line-strong);
+  border-radius: 18px;
+  background: var(--su-fill);
+  color: var(--su-ink);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 180ms var(--ease-ui),
+    background-color 180ms var(--ease-ui),
+    transform 180ms var(--ease-ui);
+}
+
+.setup-folder:hover:not(:disabled) {
+  border-color: var(--su-ring);
+  background: var(--su-fill-hover);
+  transform: translateY(-1px);
+}
+
+.setup-folder.is-selected {
+  border-style: solid;
+  border-color: var(--su-ring);
+  background: linear-gradient(135deg, rgba(69, 190, 252, 0.2), rgba(198, 121, 253, 0.2));
+}
+
+.setup-folder > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.setup-folder strong {
+  overflow: hidden;
+  font-size: 17px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setup-folder small {
+  overflow: hidden;
+  color: var(--su-ink-2);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ----- 完了: what is stored ----- */
+.setup-summary {
+  display: grid;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-summary li {
+  display: grid;
+  grid-template-columns: 22px 7.5em minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  padding: clamp(8px, 1.6cqh, 13px) 0;
+  border-top: 1px solid var(--su-line);
+}
+
+.setup-summary li:first-child {
+  border-top: 0;
+}
+
+.setup-wizard.is-animated .setup-summary li {
+  animation: su-rise 460ms var(--ease-spatial) calc(240ms + var(--i) * 80ms) both;
+}
+
+.setup-summary-check {
+  align-self: start;
+  width: 18px;
+  height: 18px;
+  margin-top: 0.22em;
+}
+
+.setup-summary-check path {
+  fill: none;
+  stroke: var(--su-cyan);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.setup-summary li > span:first-of-type {
+  color: var(--su-ink-2);
+  font-size: 14px;
+}
+
+.setup-summary-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.setup-summary-value strong {
+  color: var(--su-ink);
+  font-size: 15.5px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.setup-summary-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+}
+
+.setup-summary-note {
+  padding: 1px 9px;
+  border: 1px solid var(--su-line-strong);
+  border-radius: 999px;
+  color: var(--su-ink-2);
+  font-size: 12px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.setup-summary-note.is-changed {
+  border-color: var(--su-cyan);
+  color: var(--su-cyan);
+}
+
+.setup-summary-note.is-changed::before {
+  content: '● ';
+  font-size: 8px;
+  vertical-align: 2px;
+}
+
+.setup-summary-note.is-failed {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.setup-summary-note.is-failed::before {
+  content: '! ';
+  font-weight: 700;
+}
+
+/* ----- messages ----- */
+.setup-warning,
+.setup-error,
+.setup-reading {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--su-line-strong);
+  border-radius: 14px;
+  background: var(--su-fill);
+  color: var(--su-ink);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.setup-warning {
+  border-color: var(--warning);
+}
+
+.setup-error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.setup-reading p {
+  margin: 0 0 10px;
+}
+
+.setup-leaving-note {
+  position: absolute;
+  z-index: 5;
+  top: 50%;
+  left: 50%;
+  margin: 0;
+  color: var(--su-ink-2);
+  font-size: 15px;
+  transform: translate(-50%, -50%);
+}
+
+.setup-wizard.is-animated .setup-leaving-note {
+  animation: su-fade 400ms linear 700ms both;
+}
+
+/* ---------- The logo film over the Setup, and the hand-over ---------- */
+/* The film plays first. Meanwhile the Setup waits unseen with its own entrances held back; when
+   the film hands over ('arrive') the track drops in, the choices and the picture come in, and
+   everything in them starts its entrance from the beginning, under the film's last scene. */
+.setup-logo-intro {
+  position: absolute;
+  z-index: 6;
+  inset: 0;
+  overflow: hidden;
+  /* Dark from the very first paint, before the film has drawn anything. */
+  background: var(--setup-bg);
+}
+
+.setup-logo-intro[data-handoff='true'] {
+  background: transparent;
+  pointer-events: none;
+}
+
+.setup-logo-intro-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 50%;
+}
+
+.setup-logo-intro-hints {
+  position: absolute;
+  right: 22px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  opacity: 0;
+  pointer-events: none;
+  animation: setup-logo-skip-in 700ms var(--ease-ui) 1.5s both;
+}
+
+.setup-logo-intro-skip,
+.setup-logo-intro-mute {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.setup-logo-intro-mute {
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.setup-logo-intro-mute:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.setup-logo-intro-mute:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.setup-logo-intro-hints kbd {
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 45%, transparent);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.setup-logo-intro[data-handoff='true'] .setup-logo-intro-hints {
+  animation: none;
+  opacity: 0;
+}
+
+.setup-logo-intro[data-handoff='true'] .setup-logo-intro-mute {
+  pointer-events: none;
+}
+
+@keyframes setup-logo-skip-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 0.58;
+    transform: none;
+  }
+}
+
+.setup-wizard[data-intro='playing'] .setup-progress,
+.setup-wizard[data-intro='playing'] .setup-content,
+.setup-wizard[data-intro='playing'] .setup-visual {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.setup-wizard[data-intro='playing'] .setup-content *,
+.setup-wizard[data-intro='playing'] .setup-content *::before,
+.setup-wizard[data-intro='playing'] .setup-content *::after {
+  animation-name: none !important;
+}
+
+.setup-wizard[data-intro='arrive'] .setup-progress {
+  animation: su-track-in 700ms var(--ease-spatial) 120ms both;
+}
+
+.setup-wizard[data-intro='arrive'] .setup-content {
+  animation: su-fade 500ms linear both;
+}
+
+.setup-wizard[data-intro='arrive'] .setup-visual {
+  animation: su-fade 800ms linear 200ms both;
+}
+
+/* Leaving for the app, after "最初の Task を始める". */
+.setup-wizard.is-leaving .setup-content,
+.setup-wizard.is-leaving .setup-progress {
+  animation: su-leave 420ms var(--ease-ui) both;
+}
+
+.setup-wizard.is-leaving .setup-visual {
+  animation: su-leave 520ms var(--ease-ui) both;
+}
+
+/* ---------- The Setup over the app (a replay, or the launch after an update) ---------- */
+.setup-replay-dialog {
+  position: fixed;
+  inset: 40px 0 0;
+  width: 100%;
+  max-width: none;
+  height: calc(100% - 40px);
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--bg-app);
+  color: inherit;
+}
+
+.setup-replay-dialog[open] {
+  animation: su-fade 360ms var(--ease-ui) both;
+}
+
+.setup-replay-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.setup-replay-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---------- Smaller windows ---------- */
+/* The Setup fills the window (under the title bar), so the window's size decides its layout.
+   Not wide enough for the picture beside the choices: the choices take the width, and the picture
+   stays behind them, faint. */
+@media (max-width: 940px) {
+  .setup-wizard,
+  .setup-wizard[data-step] {
+    --su-cols: minmax(0, 1fr);
+    --su-content: 1;
+    --su-visual: 1;
+  }
+
+  /* Pictures with words in them would only be noise behind the choices: they are left out. The
+     wordless ones (the Team's field, the logo at the end) stay, faint. */
+  .setup-visual {
+    display: none;
+  }
+
+  .setup-wizard[data-step='team'] .setup-visual,
+  .setup-wizard[data-step='done'] .setup-visual {
+    display: block;
+    opacity: 0.24;
+  }
+
+  .setup-st-count {
+    display: none;
+  }
+
+  .setup-wizard[data-step='details'] .setup-visual {
+    display: block;
+  }
+
+  /* The sample reply is what "返事の仕方" is about: it stays, as a strip above the choices. */
+  .setup-wizard[data-step='reply'] {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .setup-wizard[data-step='reply'] .setup-visual {
+    display: block;
+    height: 118px;
+    margin: 4px clamp(20px, 4.4cqw, 64px) 0;
+  }
+
+  .setup-wizard[data-step='reply'] .setup-content {
+    grid-row: 3;
+  }
+
+  .setup-sr {
+    padding: 0;
+    align-content: stretch;
+  }
+
+  .setup-sr-title,
+  .setup-sr-bubble--you,
+  .setup-sr-chips {
+    display: none;
+  }
+
+  .setup-sr-bubble--ai {
+    box-sizing: border-box;
+    height: 118px;
+    min-height: 0;
+    padding: 10px 14px;
+    overflow: hidden;
+    font-size: 13.5px;
+    line-height: 1.62;
+  }
+
+  .setup-progress-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .setup-step,
+  .setup-actions {
+    max-width: 680px;
+    margin-inline: auto;
+    width: 100%;
+  }
+
+  .setup-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .setup-sd-chips {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .setup-wordmark {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .setup-progress-count small {
+    display: none;
+  }
+
+  .setup-choices-row,
+  .setup-choices-row[data-columns='4'] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .setup-detail-grid .setup-choices-row,
+  .setup-detail-grid .setup-choices-row[data-columns='4'] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setup-mini {
+    width: 84px;
+  }
+
+  .setup-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setup-skip small {
+    display: none;
+  }
+}
+
+/* Short windows: tighter, and the long steps scroll with a soft edge that says there is more. */
+@media (max-height: 800px) {
+  .setup-wizard[data-step='details'] .setup-visual {
+    height: 56px;
+  }
+
+  .setup-panel {
+    gap: 9px;
+    padding: 12px 14px;
+  }
+
+  .setup-detail-grid .setup-choice {
+    min-height: 38px;
+    padding-block: 4px;
+  }
+
+  .setup-field input {
+    height: 40px;
+  }
+
+  .setup-switch {
+    min-height: 38px;
+  }
+}
+
+@media (max-height: 680px) {
+  .setup-step h1 {
+    font-size: clamp(24px, 3cqw, 34px);
+  }
+
+  .setup-step h1.setup-hero {
+    font-size: clamp(30px, 4.4cqw, 48px);
+  }
+
+  .setup-choice {
+    min-height: 56px;
+    padding-block: 8px;
+  }
+
+  .setup-team-card {
+    min-height: 68px;
+    padding-block: 8px;
+  }
+
+  .setup-primary {
+    min-height: 50px;
+  }
+
+  .setup-primary,
+  .setup-next {
+    min-height: 46px;
+  }
+
+  .setup-secondary,
+  .setup-back,
+  .setup-skip {
+    min-height: 44px;
+  }
+
+  .setup-scroll {
+    mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent);
+  }
+}
+
+/* ---------- Reduced motion: one still, composed picture; steps change with a short fade ---- */
+.setup-wizard.is-still *,
+.setup-wizard.is-still *::before,
+.setup-wizard.is-still *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+.setup-wizard.is-still .setup-step,
+.setup-wizard.is-still .setup-scene,
+.setup-wizard.is-still[data-intro='arrive'] .setup-content,
+.setup-wizard.is-still[data-intro='arrive'] .setup-visual,
+.setup-wizard.is-still[data-intro='arrive'] .setup-progress {
+  animation: su-fade 160ms linear both !important;
+}
+
+.setup-wizard.is-still .setup-sw-flow path,
+.setup-wizard.is-still .setup-sk-lanes path {
+  stroke-dashoffset: 0;
+}
+
+.setup-wizard.is-still .setup-ripple,
+.setup-wizard.is-still .setup-progress-comet {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setup-replay-dialog[open] {
+    animation: none;
+  }
+}
+
+/* Windows high contrast: shadows, fills and gradients disappear, so edges, the chosen state, the
+   focus ring, the switch and where one is in the track are drawn with borders, outlines and
+   system colours — and words painted with a gradient are painted with the text colour. */
+@media (forced-colors: active) {
+  .setup-choice,
+  .setup-team-card,
+  .setup-panel,
+  .setup-folder,
+  .setup-runtime-list li {
+    border: 1px solid CanvasText;
+  }
+
+  .setup-choice.is-selected,
+  .setup-team-card.is-selected,
+  .setup-folder.is-selected {
+    border: 3px solid Highlight;
+  }
+
+  .setup-choice:has(input:focus-visible),
+  .setup-team-card:has(input:focus-visible),
+  .setup-switch:has(input:focus-visible) .setup-switch-track,
+  .setup-field input:focus-visible,
+  .setup-wizard button:focus-visible {
+    outline: 2px dashed Highlight;
+    outline-offset: 4px;
+  }
+
+  .setup-switch-track {
+    border: 1px solid CanvasText;
+  }
+
+  .setup-switch.is-on .setup-switch-track {
+    background: Highlight;
+  }
+
+  .setup-switch-track i {
+    background: CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .setup-switch.is-on .setup-switch-track i {
+    background: HighlightText;
+  }
+
+  .setup-progress li > i {
+    border: 2px solid CanvasText;
+  }
+
+  .setup-progress li.is-done > i,
+  .setup-progress li.is-current > i {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+
+  .setup-progress li.is-current > i {
+    outline: 2px solid Highlight;
+    outline-offset: 3px;
+  }
+
+  .setup-st-count b,
+  .setup-kicker b,
+  .setup-shine,
+  .setup-shine > span {
+    background: none;
+    color: CanvasText;
+    -webkit-text-fill-color: CanvasText;
+  }
+
+  /* Room between the lines, so one line's backplate never covers the next. */
+  .setup-st-count b {
+    line-height: 1.2;
+    filter: none;
+  }
+
+  /* The way forward loses its fill: it is told from the other buttons by a heavier edge. */
+  .setup-primary,
+  .setup-next {
+    border: 3px solid ButtonText;
+  }
+
+  /* The marks in the picture of the AIs are drawn in the text colour. */
+  .setup-ss-node i {
+    border: 2px solid CanvasText;
+  }
+
+  .setup-ss-node i svg {
+    stroke: CanvasText;
+  }
+
+  .setup-content::before {
+    display: none;
+  }
+}
+
+/* ---------- Keyframes ---------- */
+@keyframes su-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes su-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes su-step-forward {
+  from {
+    opacity: 0;
+    transform: translate3d(36px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes su-step-back {
+  from {
+    opacity: 0;
+    transform: translate3d(-36px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes su-scene-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes su-word-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 0.5em, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes su-track-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes su-track-forward {
+  0% {
+    opacity: 0;
+    transform: translate3d(-100%, 0, 0);
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(385%, 0, 0);
+  }
+}
+
+@keyframes su-track-back {
+  0% {
+    opacity: 0;
+    transform: translate3d(385%, 0, 0);
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-100%, 0, 0);
+  }
+}
+
+@keyframes su-burst {
+  0% {
+    opacity: 0;
+    transform: translate3d(-100%, 0, 0);
+  }
+  30% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(220%, 0, 0);
+  }
+}
+
+@keyframes su-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes su-glint {
+  from {
+    stroke-dashoffset: 0.14;
+  }
+  to {
+    stroke-dashoffset: -1;
+  }
+}
+
+@keyframes su-flow {
+  from {
+    stroke-dashoffset: 0.09;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes su-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes su-beam {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) scaleX(0);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) scaleX(1);
+  }
+}
+
+@keyframes su-mark-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.82);
+    filter: drop-shadow(0 0 0 rgba(110, 150, 255, 0)) brightness(2.2);
+  }
+  60% {
+    opacity: 1;
+    filter: drop-shadow(0 0 60px rgba(200, 220, 255, 1)) brightness(1.5);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: drop-shadow(0 0 26px rgba(110, 150, 255, 0.65)) brightness(1);
+  }
+}
+
+@keyframes su-halo {
+  from {
+    opacity: 0.7;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes su-spark {
+  0% {
+    opacity: 0;
+    transform: rotate(var(--a)) translate3d(0, 0, 0) scaleX(0);
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(var(--a)) translate3d(var(--len), 0, 0) scaleX(0.5);
+  }
+}
+
+@keyframes su-sound {
+  from {
+    transform: scaleY(0.3);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes su-ripple {
+  from {
+    opacity: 0.7;
+    transform: translate(-50%, -50%) scale(0);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(26);
+  }
+}
+
+@keyframes su-mini-draw {
+  0% {
+    stroke-dashoffset: 1;
+  }
+  55%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes su-mini-ride {
+  0% {
+    offset-distance: 0%;
+  }
+  55%,
+  100% {
+    offset-distance: 100%;
+  }
+}
+
+@keyframes su-leave {
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}

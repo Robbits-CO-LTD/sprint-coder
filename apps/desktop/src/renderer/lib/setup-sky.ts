@@ -1,7 +1,8 @@
-// The Setup's living background: one full-window canvas with drifting specks, a light that follows
-// the pointer, ripples that cross the whole window when something is chosen, the Team's cursors
-// racing with trails, confetti from both sides, and the opening where the specks gather into the
-// product's name.
+// The Setup's living background: one full-window canvas where the logo film's race goes quietly
+// on — streaks of light running left to right (the logo's colours, top to bottom), a light that
+// follows the pointer, ripples that cross the whole window when something is chosen, the Team's
+// lights racing with trails, confetti from both sides, and the opening where the specks gather
+// into the product's name.
 //
 // One requestAnimationFrame loop, owned here. It stops while the page is hidden and for good on
 // `destroy()`, which also removes every listener this object added. Without motion (`animate`
@@ -31,6 +32,8 @@ type Speck = {
   r: number;
   tone: 0 | 1;
   alpha: number;
+  /** How fast it runs to the right when nothing disturbs it. */
+  cruise: number;
   /** Opening: where this speck settles inside the word. */
   hx?: number | undefined;
   hy?: number | undefined;
@@ -214,6 +217,11 @@ export class SetupSky {
 
   /** center is where the formation runs, as a fraction of the height (clear of the scene). */
   setTeam(mode: SkyTeamMode | null, center = 0.5, spread = 0.05): void {
+    if (center !== this.laneCenter || spread !== this.laneSpread) {
+      // The formation moves to another height: the trails start again there, rather than drawing
+      // the jump.
+      for (const comet of this.comets) comet.trail = [];
+    }
     this.laneCenter = center;
     this.laneSpread = spread;
     const now = performance.now();
@@ -263,7 +271,7 @@ export class SetupSky {
   celebrate(): void {
     if (!this.animate) return;
     const now = performance.now();
-    const colors = [...this.theme.colors, this.team.leader, ...this.team.workers, '#f2c46d'];
+    const colors = [...this.theme.colors, this.team.leader, ...this.team.workers];
     for (let side = 0; side < 2; side += 1) {
       for (let index = 0; index < 70; index += 1) {
         this.confetti.push({
@@ -418,14 +426,18 @@ export class SetupSky {
   }
 
   private makeSpeck(anywhere: boolean): Speck {
+    const y = Math.random() * this.height;
+    const cruise = 0.5 + Math.random() * 2.1;
     return {
-      x: Math.random() * this.width,
-      y: anywhere ? Math.random() * this.height : Math.random() * this.height,
-      vx: (Math.random() - 0.5) * 0.3,
-      vy: -0.15 - Math.random() * 0.35,
-      r: 0.6 + Math.random() * 1.8,
-      tone: Math.random() < 0.5 ? 0 : 1,
-      alpha: 0.25 + Math.random() * 0.6,
+      x: anywhere ? Math.random() * this.width : Math.random() * this.width,
+      y,
+      vx: cruise,
+      vy: 0,
+      r: 0.6 + Math.random() * 1.5,
+      // The first colour at the top of the window, the second at the bottom, mixed between.
+      tone: Math.random() * (this.height || 1) < y ? 1 : 0,
+      alpha: 0.2 + Math.random() * 0.55,
+      cruise,
     };
   }
 
@@ -489,8 +501,9 @@ export class SetupSky {
         speck.y += (this.height / 2 - speck.y) * 0.12 * dt;
         continue;
       }
-      speck.vx *= 0.96;
-      speck.vy = speck.vy * 0.96 + (-0.3 * this.theme.speed - speck.vy) * 0.04;
+      // Back to its own run to the right, whatever pushed it.
+      speck.vx += (speck.cruise - speck.vx) * 0.04;
+      speck.vy *= 0.95;
       if (this.pointer) {
         const dx = speck.x - this.pointer.x;
         const dy = speck.y - this.pointer.y;
@@ -503,12 +516,10 @@ export class SetupSky {
       }
       speck.x += (speck.vx * this.theme.speed + (warping ? -this.warpDir * warpForce : 0)) * dt;
       speck.y += speck.vy * dt;
-      if (speck.y < -10) {
-        speck.y = this.height + 10;
-        speck.x = Math.random() * this.width;
-      }
-      if (speck.x < -20) speck.x += this.width + 40;
-      if (speck.x > this.width + 20) speck.x -= this.width + 40;
+      if (speck.y < -10) speck.y += this.height + 20;
+      if (speck.y > this.height + 10) speck.y -= this.height + 20;
+      if (speck.x < -40) speck.x += this.width + 80;
+      if (speck.x > this.width + 40) speck.x -= this.width + 80;
     }
 
     // Team cursors.
@@ -671,6 +682,18 @@ export class SetupSky {
         ctx.moveTo(speck.x, speck.y);
         ctx.lineTo(speck.x + this.warpDir * 26 * speck.r, speck.y);
         ctx.stroke();
+      } else if (speck.hx === undefined) {
+        // Running: a streak as long as it is fast, its head a point of light.
+        const length = 3 + Math.abs(speck.vx) * this.theme.speed * 11;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = speck.r;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(speck.x - length, speck.y);
+        ctx.lineTo(speck.x, speck.y);
+        ctx.stroke();
+        const size = speck.r * 4.5;
+        ctx.drawImage(this.sprite(color), speck.x - size / 2, speck.y - size / 2, size, size);
       } else {
         const size = speck.r * 7;
         ctx.drawImage(this.sprite(color), speck.x - size / 2, speck.y - size / 2, size, size);
@@ -708,7 +731,7 @@ export class SetupSky {
         const k = index / comet.trail.length;
         ctx.globalAlpha = fade * comet.life * k * 0.85;
         ctx.strokeStyle = comet.color;
-        ctx.lineWidth = 1 + k * 8;
+        ctx.lineWidth = 0.6 + k * 2.6;
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
@@ -716,63 +739,33 @@ export class SetupSky {
       }
       const head = comet.trail[comet.trail.length - 1]!;
       ctx.globalAlpha = fade * comet.life * 0.9;
-      ctx.drawImage(this.sprite(comet.color), head.x - 70, head.y - 70, 140, 140);
-      this.drawPointer(ctx, head.x, head.y, comet.color, comet.label, fade * comet.life);
+      ctx.drawImage(this.sprite(comet.color), head.x - 26, head.y - 26, 52, 52);
+      // The light itself (a runner, as in the logo film — not a pointer with a name tag).
+      ctx.globalAlpha = fade * comet.life;
+      ctx.drawImage(this.sprite('#ffffff'), head.x - 7, head.y - 7, 14, 14);
     }
 
-    // Confetti.
-    ctx.globalCompositeOperation = 'source-over';
+    // The celebration: sparks thrown up from both corners, each a streak along its own path.
+    ctx.lineCap = 'round';
     for (const piece of this.confetti) {
       if (now < piece.born) continue;
-      ctx.globalAlpha = Math.max(0, 1 - (now - piece.born) / 4200);
-      ctx.save();
-      ctx.translate(piece.x, piece.y);
-      ctx.rotate(piece.rot);
-      ctx.scale(1, Math.cos(piece.rot * 2));
-      ctx.fillStyle = piece.color;
-      ctx.fillRect(-piece.w / 2, -piece.h / 2, piece.w, piece.h);
-      ctx.restore();
+      const fade = Math.max(0, 1 - (now - piece.born) / 4200);
+      const speed = Math.hypot(piece.vx, piece.vy) || 1;
+      const length = Math.min(40, 4 + speed * 2.4);
+      ctx.globalAlpha = fade;
+      ctx.strokeStyle = piece.color;
+      ctx.lineWidth = piece.w * 0.28;
+      ctx.beginPath();
+      ctx.moveTo(piece.x - (piece.vx / speed) * length, piece.y - (piece.vy / speed) * length);
+      ctx.lineTo(piece.x, piece.y);
+      ctx.stroke();
+      const glow = piece.h * 1.3;
+      ctx.globalAlpha = fade * 0.9;
+      ctx.drawImage(this.sprite(piece.color), piece.x - glow / 2, piece.y - glow / 2, glow, glow);
     }
-    ctx.globalAlpha = 1;
-  }
-
-  private drawPointer(
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    color: string,
-    label: string,
-    alpha: number,
-  ): void {
+    ctx.lineCap = 'butt';
     ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = alpha;
-    ctx.save();
-    ctx.translate(x - 2, y - 4);
-    ctx.scale(2.6, 2.6);
-    ctx.beginPath();
-    ctx.moveTo(0.5, 0.5);
-    ctx.lineTo(0.5, 9.5);
-    ctx.lineTo(2.9, 7.3);
-    ctx.lineTo(4.5, 10.6);
-    ctx.lineTo(6, 10);
-    ctx.lineTo(4.4, 6.6);
-    ctx.lineTo(7.5, 6.6);
-    ctx.closePath();
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.lineWidth = 0.6;
-    ctx.strokeStyle = '#ffffff';
-    ctx.stroke();
-    ctx.restore();
-    ctx.font = `600 11px ${FONT_SANS}`;
-    const width = ctx.measureText(label).width + 12;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.roundRect?.(x + 14, y + 16, width, 18, 4);
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(label, x + 20, y + 29);
-    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 1;
   }
 
   private sampleWord(word: string): { x: number; y: number }[] {
