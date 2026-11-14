@@ -9911,6 +9911,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const executionsOfTeam = 'SELECT id FROM team_executions WHERE team_id = ?';
     const blockers: TeamRehireBlocker[] = [
       {
+        // Every Worker at work but the one being hired counts. Hires of one Task never overlap
+        // (`TeamCoordinator.enqueue` runs each to the end of its re-form before the next), so
+        // another Worker at work is never a fellow hire of this run, only a leftover.
         kind: 'workers',
         count: count(
           `SELECT COUNT(*) AS count FROM agents

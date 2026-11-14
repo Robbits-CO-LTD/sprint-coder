@@ -12791,6 +12791,141 @@ if (runsWithElectronAbi)
         blockers.mockRestore();
         persistence.close();
       });
+
+      // The Leader may call the hire tool several times in one reply. The Task's queue runs each
+      // hire, its runtime start and the re-form included, before the next one starts, so a later
+      // hire never sees an earlier one's Worker still starting as a leftover of the failed run.
+      /** Once armed, holds the next start until released (and may fail it); others run freely. */
+      class HeldStartRuntime extends TestWorkerRuntime {
+        readonly startedRoles: string[] = [];
+        private held: { promise: Promise<void>; release: () => void } | null = null;
+        failFirstStart = false;
+        arm(): void {
+          let release!: () => void;
+          const promise = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          this.held = { promise, release };
+          this.startedRoles.length = 0;
+        }
+        override async start(worker: AgentRecord): Promise<{ pid: null }> {
+          this.startedRoles.push(worker.role);
+          const held = this.held;
+          if (held !== null && this.startedRoles.length === 1) {
+            await held.promise;
+            if (this.failFirstStart) throw new Error('first runtime unavailable');
+          }
+          return super.start(worker);
+        }
+        release(): void {
+          this.held?.release();
+          this.held = null;
+        }
+      }
+
+      const concurrentHires = async (
+        coordinator: TeamCoordinator,
+        runtime: HeldStartRuntime,
+        taskId: string,
+      ) => {
+        runtime.arm();
+        const hires = ['one', 'two', 'three'].map((role) =>
+          hire(coordinator, taskId, role).then(
+            (worker) => ({ ok: true as const, worker }),
+            (error: unknown) => ({ ok: false as const, error }),
+          ),
+        );
+        await waitFor(() => runtime.startedRoles.length === 1);
+        // While the first Worker is still starting, the others wait in the queue: none started.
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(runtime.startedRoles).toEqual(['one']);
+        runtime.release();
+        return Promise.all(hires);
+      };
+
+      it('hires every Worker the Leader asks for at once into a failed Team, one after another', async () => {
+        const runtime = new HeldStartRuntime();
+        const { persistence, task, coordinator, previous } = await failedTeam(runtime);
+        const results = await concurrentHires(coordinator, runtime, task.id);
+        expect(results.map(({ ok }) => ok)).toEqual([true, true, true]);
+        expect(runtime.startedRoles).toEqual(['one', 'two', 'three']);
+        expect(runtime.maxActiveStarts).toBe(1);
+        const detail = coordinator.get(task.id);
+        expect(detail?.team.state).toBe('active');
+        expect(detail?.workers.find(({ id }) => id === previous.id)?.state).toBe('stopped');
+        expect(
+          detail?.workers
+            .filter(({ role }) => ['one', 'two', 'three'].includes(role))
+            .map(({ state }) => state),
+        ).toEqual(['ready', 'ready', 'ready']);
+        persistence.close();
+      });
+
+      it('refuses every one of hires asked for at once while the failed run left a Worker at work', async () => {
+        const runtime = new HeldStartRuntime();
+        const persistence = createPersistence();
+        const task = persistence.createTask('failed Team with a Worker left');
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const lingering = await hire(coordinator, task.id, 'lingering');
+        persistence.transitionTeamState(persistence.getTeamByTask(task.id)!.id, 'failed');
+        const results = await Promise.all(
+          ['one', 'two', 'three'].map((role) =>
+            hire(coordinator, task.id, role).catch((error: unknown) => error),
+          ),
+        );
+        for (const result of results) {
+          expect(result).toBeInstanceOf(TeamRehireBlockedError);
+          expect((result as TeamRehireBlockedError).blockers).toEqual([
+            { kind: 'workers', count: 1 },
+          ]);
+        }
+        const detail = coordinator.get(task.id);
+        expect(detail?.team.state).toBe('failed');
+        expect(detail?.workers.filter(({ kind }) => kind === 'worker').map(({ id }) => id)).toEqual(
+          [lingering.id],
+        );
+        persistence.close();
+      });
+
+      it('lets the next hire re-form the Team when the first one asked for at once fails to start', async () => {
+        const runtime = new HeldStartRuntime();
+        const { persistence, task, coordinator, previous } = await failedTeam(runtime);
+        runtime.failFirstStart = true;
+        const results = await concurrentHires(coordinator, runtime, task.id);
+        expect(results[0]).toMatchObject({ ok: false });
+        expect((results[0] as { error: Error }).error.message).toBe('first runtime unavailable');
+        expect(results.slice(1).map(({ ok }) => ok)).toEqual([true, true]);
+        const detail = coordinator.get(task.id);
+        expect(detail?.team.state).toBe('active');
+        // The failed start is history of the run before the re-form, like the earlier failure.
+        expect(detail?.workers.find(({ id }) => id === previous.id)?.state).toBe('stopped');
+        expect(detail?.workers.find(({ role }) => role === 'one')?.state).toBe('stopped');
+        expect(
+          detail?.workers
+            .filter(({ role }) => ['two', 'three'].includes(role))
+            .map(({ state }) => state),
+        ).toEqual(['ready', 'ready']);
+        persistence.close();
+      });
+
+      it('hires at once into a completed Team the same way (the behaviour before issue #1269)', async () => {
+        const runtime = new HeldStartRuntime();
+        const persistence = createPersistence();
+        const task = persistence.createTask('completed Team');
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const previous = await hire(coordinator, task.id, 'previous');
+        await coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: previous.id,
+          content: 'x',
+        });
+        expect(coordinator.get(task.id)?.team.state).toBe('completed');
+        const results = await concurrentHires(coordinator, runtime, task.id);
+        expect(results.map(({ ok }) => ok)).toEqual([true, true, true]);
+        expect(runtime.maxActiveStarts).toBe(1);
+        expect(coordinator.get(task.id)?.team.state).toBe('active');
+        persistence.close();
+      });
     });
 
     describe('hiring a writing Worker checks the Workspace first (issue #1241)', () => {
