@@ -15,6 +15,7 @@ import { ADD_TOGGLE_ID, ProviderSettingsSection } from './ProviderSettingsSectio
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { AssistantPreferencesSettings } from './AssistantPreferencesSettings';
 import { TeamUsageModeSetting } from './TeamUsageModeSetting';
+import { SetupReplayGroup } from './SetupReplayGroup';
 import { useTaskBoundary } from './TaskBoundary';
 import {
   TEAM_CONCURRENCY_DEFAULT,
@@ -229,6 +230,10 @@ export function LegacyBody({
   onClose: () => void;
   onCreateSkill?: SkillCreationHandler;
 }) {
+  // This body stays mounted while Settings is closed, and the Setup can change the two settings
+  // kept on this PC meanwhile: their groups are mounted afresh on each opening, so they show what
+  // is stored now (an old value on screen could not even be chosen again — nothing would change).
+  const freshOnOpen = open ? 'open' : 'closed';
   return (
     <div className="settings-body">
       <header className="settings-header">
@@ -244,7 +249,7 @@ export function LegacyBody({
         <>
           <ModelGroup />
           <EffortGroup />
-          <AccessDefaultGroup />
+          <AccessDefaultGroup key={freshOnOpen} />
           {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item, which
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
@@ -263,8 +268,9 @@ export function LegacyBody({
           />
         </>
       )}
-      <SoundEffectsGroup />
+      <SoundEffectsGroup key={freshOnOpen} />
       <LicenseGroup />
+      {supported && <SetupReplayGroup />}
     </div>
   );
 }
@@ -377,6 +383,7 @@ export function WorkspaceBody({
               <DiagnosticsGroup />
               <SoundEffectsGroup />
               <LicenseGroup />
+              <SetupReplayGroup />
             </WorkspacePage>
           </div>
         </>
@@ -556,6 +563,7 @@ function EffortGroup() {
   );
 }
 
+/** Reads what is stored when it mounts; both bodies mount it afresh each time Settings opens. */
 function AccessDefaultGroup() {
   const [accessDefault, setAccessDefault] = useState<AccessPresetDefault>(() =>
     readAccessPresetDefault(),
@@ -878,6 +886,7 @@ function LicenseGroup() {
   );
 }
 
+/** Reads what is stored when it mounts; both bodies mount it afresh each time Settings opens. */
 function SoundEffectsGroup() {
   const [preferences, setPreferences] = useState(readSoundEffectPreferences);
 
