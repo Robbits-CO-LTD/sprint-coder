@@ -53,7 +53,8 @@ const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/u;
  * (`--linger-ms`; the executable's own is about 6 seconds). An agent's actions are often several
  * seconds apart, so with the executable's own, the Team's cursors were rarely on screen together.
  * Finite, because a cursor is drawn above every window, the user's own included, whether or not
- * the window it acted on is still in view; a finished Worker's cursor goes away by the same time.
+ * the window it acted on is still in view. A finished Worker's cursor goes away at once
+ * (`retireDesktopControlWorkerCursor`), or by the same time if that could not run.
  */
 export const DESKTOP_CONTROL_CURSOR_LINGER_MS = 30_000;
 const LINGER = ['--linger-ms', String(DESKTOP_CONTROL_CURSOR_LINGER_MS)] as const;
@@ -306,6 +307,40 @@ export function markDesktopControlWorker(
   workers.set(workerId, worker);
   desktopWorkers.set(taskId, workers);
   return { worker };
+}
+
+/**
+ * Takes down the cursor of a Worker that is no longer at work (it finished, failed or was
+ * stopped), at once, rather than leaving it drawn for up to `DESKTOP_CONTROL_CURSOR_LINGER_MS`
+ * after its last action, where a Worker marked next with the freed accent could be seen beside a
+ * cursor of the same color. Run by Main itself (`cursor-overlay retire`, as the Worker's agent in
+ * the Task's session), which ends that one Worker's renderer and no other agent's.
+ *
+ * Only for a Worker the Leader marked whose cursor was styled in the Task's session: one that never
+ * drew a cursor has none to take down, and nothing runs. Called again for the same Worker, nothing
+ * runs again, until the Worker draws its cursor once more (its next run styles it again). Best
+ * effort: never throws, and a run that fails is only logged, so the Worker's end goes on.
+ */
+export async function retireDesktopControlWorkerCursor(
+  taskId: string,
+  workerId: string,
+): Promise<void> {
+  if (!teamCursors || workerId === '') return;
+  const worker = desktopWorkers.get(taskId)?.get(workerId);
+  if (worker === undefined) return;
+  const entry = sessions.get(taskId);
+  const styled = entry?.styled.get(worker.agentId);
+  if (entry === undefined || entry.id === null || styled === undefined) return;
+  // Forgotten first, so a second call for the same end runs nothing.
+  entry.styled.delete(worker.agentId);
+  try {
+    await styled;
+    await entry.run(['cursor-overlay', 'retire'], { id: entry.id, agentId: worker.agentId });
+  } catch (error) {
+    secureLogger.warn('Desktop control could not take down a finished Worker cursor', {
+      error: errorText(error),
+    });
+  }
 }
 
 /** The Worker's desktop-control mark, when the Leader gave it one and the Team's cursors are on. */

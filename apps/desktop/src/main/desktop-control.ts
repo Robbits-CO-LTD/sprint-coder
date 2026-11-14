@@ -550,6 +550,8 @@ const COMMAND_OPTIONS: Readonly<Record<string, string>> = {
   'cursor-overlay enable':
     '--multi-agent --label= --max-words= --fill= --rim= --accent= --size= --no-ripple --no-highlight --hotspot= --pointer-hotspot= --travel-ms= --bow= --overshoot= --tremor= --dwell-ms= --motion-seed= --linger-ms=',
   'cursor-overlay disable': '',
+  // Main's own runs only (`MAIN_ONLY_COMMANDS`); the agent and session are Main's variables.
+  'cursor-overlay retire': '',
   'cursor-overlay help': '',
 };
 const WITH_SUBCOMMANDS = new Set(['skills', 'session', 'cursor-overlay']);
@@ -864,6 +866,8 @@ const COMMAND_MODES: Readonly<Record<string, Exclude<DesktopControlMode, 'inert'
   'session gc': 'background',
   'cursor-overlay enable': 'background',
   'cursor-overlay disable': 'background',
+  // As `cursor-overlay disable`: it ends a cursor's renderer. Never the agent's (`MAIN_ONLY_COMMANDS`).
+  'cursor-overlay retire': 'background',
   // `batch` takes the strongest mode of its entries (`desktopControlArgvMode`).
   batch: 'background',
   'double-click': 'foreground',
@@ -1066,15 +1070,21 @@ export function desktopControlScopeOptionRefusal(argv: readonly string[]): strin
 
 // The options only Main's own runs give (how long the Task's cursors stay drawn).
 const MAIN_ONLY_OPTIONS = ['--linger-ms'];
+// The commands only Main's own runs run: taking down a finished Worker's cursor
+// (`retireDesktopControlWorkerCursor`), which no agent has a reason to do to another's.
+const MAIN_ONLY_COMMANDS = new Set(['cursor-overlay retire']);
 
 /**
- * Why an argv the agent chose may not run because it gives an option only Main's own runs give,
- * or `null`. Main's own runs are judged by `desktopControlArgvRefusal` alone, so this is what keeps
- * the option Main's: with the Team's cursors off, no run carries it, as before it existed.
+ * Why an argv the agent chose may not run because it gives an option, or runs a command, only
+ * Main's own runs give, or `null`. Main's own runs are judged by `desktopControlArgvRefusal` alone,
+ * so this is what keeps them Main's: with the Team's cursors off, no run carries them, as before
+ * they existed. A Main-only command is refused with its help too, so no agent is shown it.
  */
 export function desktopControlMainOnlyOptionRefusal(argv: readonly string[]): string | null {
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string') return null;
+  if (read.key !== undefined && MAIN_ONLY_COMMANDS.has(read.key))
+    return refusal(`${read.key} は使えない（Sprint Coder だけが使う）`);
   const given = MAIN_ONLY_OPTIONS.filter((name) => read.options.has(name));
   return given.length > 0 ? refusal(`${given.join(' と ')} は付けない`) : null;
 }
@@ -1087,6 +1097,7 @@ const SESSION_MANAGEMENT_COMMANDS = new Set([
   'session gc',
   'cursor-overlay enable',
   'cursor-overlay disable',
+  'cursor-overlay retire',
 ]);
 
 /**

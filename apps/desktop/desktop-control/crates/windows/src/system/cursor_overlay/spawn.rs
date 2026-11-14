@@ -49,6 +49,10 @@ pub(crate) fn update(control: &CursorOverlayControl) -> Result<(), AdapterError>
         return broadcast(&root, control, budget);
     }
 
+    if control.is_retire() {
+        return retire_agent(&root, control, budget);
+    }
+
     let name = pipe_name::pipe_name(&root, control.session_id(), control.agent_id());
 
     match transport::reach(&name, control, budget) {
@@ -93,6 +97,64 @@ fn broadcast(
     first_error.map_or(Ok(()), Err)
 }
 
+/// Takes down the one cursor an agent draws, and leaves every other agent's.
+///
+/// Each agent of a session draws through a renderer of its own, on a pipe
+/// whose name hashes that agent's id under the session's segment, so reaching
+/// that one name reaches that one renderer and no other. Nothing is discovered
+/// and nothing is spawned: an agent with no renderer has nothing to take down,
+/// and the reach says so (`NoRenderer`) without starting one.
+///
+/// What goes down the pipe is a `Disable` of the session, not the `Retire`
+/// itself. A renderer answers a session-wide `Disable` whoever it serves and
+/// ends, and every renderer of this protocol generation already decodes it, so
+/// a renderer started by an earlier build of the same generation is retired
+/// too, rather than dropping a control it has never seen.
+fn retire_agent(
+    root: &std::path::Path,
+    control: &CursorOverlayControl,
+    budget: Duration,
+) -> Result<(), AdapterError> {
+    retire_agent_through(root, control, budget, transport::reach)
+}
+
+/// `retire_agent` with the reach handed in, so which pipes a retire reaches,
+/// and what it does with each answer, can be asserted without a renderer.
+fn retire_agent_through(
+    root: &std::path::Path,
+    control: &CursorOverlayControl,
+    budget: Duration,
+    mut reach: impl FnMut(&str, &CursorOverlayControl, Duration) -> ReachOutcome,
+) -> Result<(), AdapterError> {
+    let Some((name, wire)) = retirement(root, control) else {
+        return Ok(());
+    };
+    match reach(&name, &wire, budget) {
+        ReachOutcome::Delivered | ReachOutcome::NoRenderer => Ok(()),
+        ReachOutcome::Unreachable(error) => Err(error),
+    }
+}
+
+/// The pipe a retire reaches and the control it sends there, or `None` for a
+/// control that is not a retire. Pure, so which renderer a retire aims at can
+/// be asserted without a renderer to aim at.
+fn retirement(
+    root: &std::path::Path,
+    control: &CursorOverlayControl,
+) -> Option<(String, CursorOverlayControl)> {
+    let CursorOverlayControl::Retire {
+        session_id,
+        agent_id,
+    } = control
+    else {
+        return None;
+    };
+    Some((
+        pipe_name::pipe_name(root, session_id, Some(agent_id)),
+        CursorOverlayControl::disable(session_id.clone()),
+    ))
+}
+
 /// Which controls clear retired protocol generations.
 ///
 /// Establishing a session and ending one both have to. A control inside a
@@ -104,7 +166,7 @@ fn sweeps_retired_generations(control: &CursorOverlayControl) -> bool {
 }
 
 fn budget_for(control: &CursorOverlayControl) -> Duration {
-    if control.is_disable() {
+    if control.is_disable() || control.is_retire() {
         TEARDOWN_BUDGET
     } else {
         ENABLE_BUDGET
@@ -328,6 +390,9 @@ mod imp {
         })
     }
 }
+#[cfg(test)]
+#[path = "spawn_retire_tests.rs"]
+mod agent_retire_tests;
 #[cfg(test)]
 #[path = "spawn_tests.rs"]
 mod tests;

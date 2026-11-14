@@ -87,7 +87,9 @@ impl SurfaceHost {
                 self.begin_reveal();
                 self.draw(0.0, None, 0.0);
             }
-            CursorOverlayControl::Hide { .. } | CursorOverlayControl::Disable { .. } => {
+            CursorOverlayControl::Hide { .. }
+            | CursorOverlayControl::Disable { .. }
+            | CursorOverlayControl::Retire { .. } => {
                 self.clear();
             }
             CursorOverlayControl::Present { instruction, .. } => match instruction.phase() {
@@ -142,7 +144,9 @@ impl SurfaceHost {
                     CursorPhase::Caret | CursorPhase::CaretFollow => {}
                 }
             }
-            CursorOverlayControl::Hide { .. } | CursorOverlayControl::Disable { .. } => {}
+            CursorOverlayControl::Hide { .. }
+            | CursorOverlayControl::Disable { .. }
+            | CursorOverlayControl::Retire { .. } => {}
         }
     }
 

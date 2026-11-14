@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{CursorMotionProfile, CursorOverlayInstruction, CursorOverlayStyle, CursorPhase};
 use crate::{AdapterError, ErrorCode, context::validate_session_id, session::validate_agent_id};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,13 @@ pub enum CursorOverlayControl {
     },
     Disable {
         session_id: String,
+    },
+    /// Takes down the one cursor an agent of the session draws, and no other.
+    /// It always names its agent: a retire that named none would be a
+    /// `Disable` of the whole session, which is not what its caller meant.
+    Retire {
+        session_id: String,
+        agent_id: String,
     },
 }
 
@@ -82,6 +90,13 @@ impl CursorOverlayControl {
         Self::Disable { session_id }
     }
 
+    pub fn retire(session_id: String, agent_id: String) -> Self {
+        Self::Retire {
+            session_id,
+            agent_id,
+        }
+    }
+
     pub fn hide(session_id: String) -> Self {
         Self::Hide {
             session_id,
@@ -102,7 +117,9 @@ impl CursorOverlayControl {
             | Self::Present { agent_id: id, .. }
             | Self::Hide { agent_id: id, .. }
             | Self::Show { agent_id: id, .. } => *id = agent_id,
-            Self::Disable { .. } => {}
+            // A retire is built for its agent and keeps it: clearing it here
+            // would leave a retire that names no one.
+            Self::Disable { .. } | Self::Retire { .. } => {}
         }
         self
     }
@@ -133,6 +150,7 @@ impl CursorOverlayControl {
             | Self::Present { agent_id, .. }
             | Self::Hide { agent_id, .. }
             | Self::Show { agent_id, .. } => agent_id.as_deref(),
+            Self::Retire { agent_id, .. } => Some(agent_id),
             Self::Disable { .. } => None,
         }
     }
@@ -164,6 +182,7 @@ impl CursorOverlayControl {
             | Self::Present { session_id, .. }
             | Self::Hide { session_id, .. }
             | Self::Show { session_id, .. }
+            | Self::Retire { session_id, .. }
             | Self::Disable { session_id } => session_id,
         }
     }
@@ -172,8 +191,14 @@ impl CursorOverlayControl {
         match self {
             Self::Enable { label, .. } => Some(label),
             Self::Present { instruction, .. } => instruction.label(),
-            Self::Hide { .. } | Self::Show { .. } | Self::Disable { .. } => None,
+            Self::Hide { .. } | Self::Show { .. } | Self::Disable { .. } | Self::Retire { .. } => {
+                None
+            }
         }
+    }
+
+    pub const fn is_retire(&self) -> bool {
+        matches!(self, Self::Retire { .. })
     }
 
     pub const fn is_enable(&self) -> bool {
@@ -206,6 +231,7 @@ impl CursorOverlayControl {
         self.is_hide()
             || self.is_show()
             || self.is_disable()
+            || self.is_retire()
             || self.is_travel()
             || self.instruction().is_some_and(|instruction| {
                 matches!(
@@ -230,3 +256,7 @@ impl CursorOverlayControl {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "control_retire_tests.rs"]
+mod retire_tests;
