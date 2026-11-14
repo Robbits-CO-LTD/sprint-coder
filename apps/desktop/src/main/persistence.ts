@@ -5534,7 +5534,15 @@ export interface PersistenceClient {
   getTeamByTask(taskId: string): TeamRecord | null;
   getTeamSnapshot(teamId: string): TeamSnapshot;
   transitionTeamState(teamId: string, to: TeamState): TeamRecord;
-  reformCompletedTeam(teamId: string): TeamRecord;
+  /** What a failed Team's run left unsettled, which keeps it from being re-formed (issue #1269).
+   * `hiringAgentId` is the Worker being hired, not counted among the Workers still at work. */
+  listFailedTeamRehireBlockers(
+    teamId: string,
+    hiringAgentId?: string | null,
+  ): readonly TeamRehireBlocker[];
+  /** Re-forms a completed or failed Team for a new run once `hiringAgentId`'s runtime started:
+   * its done and failed Workers become stopped history. A failed Team with leftovers is refused. */
+  reformEndedTeam(teamId: string, hiringAgentId: string): TeamRecord;
   updateTeamPolicy(teamId: string, policy: TeamPolicy, expectedRevision: number): TeamRecord;
   getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null;
   bindTeamBlueprint(input: {
@@ -9879,6 +9887,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.db.transaction(() => {
       const current = this.getTeam(teamId);
       transitionTeam(current.state, to);
+      // A failed Team opens again only through `reformEndedTeam`, which first checks that the
+      // failed run left nothing unsettled (issue #1269).
+      if (current.state === 'failed')
+        throw new Error('A failed Team is re-formed only by hiring a Worker');
       const result = this.db
         .prepare(
           `UPDATE teams SET state = ?, revision = revision + 1, updated_at = ?
@@ -9890,11 +9902,98 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
-  reformCompletedTeam(teamId: string): TeamRecord {
+  listFailedTeamRehireBlockers(
+    teamId: string,
+    hiringAgentId: string | null = null,
+  ): readonly TeamRehireBlocker[] {
+    const count = (sql: string, ...params: unknown[]): number =>
+      (this.db.prepare(sql).get(...params) as { count: number }).count;
+    const executionsOfTeam = 'SELECT id FROM team_executions WHERE team_id = ?';
+    const blockers: TeamRehireBlocker[] = [
+      {
+        kind: 'workers',
+        count: count(
+          `SELECT COUNT(*) AS count FROM agents
+           WHERE team_id = ? AND kind = 'worker' AND id IS NOT ?
+             AND state IN ('invited', 'spawning', 'ready', 'busy', 'waiting')`,
+          teamId,
+          hiringAgentId,
+        ),
+      },
+      {
+        // `waiting_resume` (a person resumes it) counts: the failed run may still go on.
+        kind: 'executions',
+        count: count(
+          `SELECT COUNT(*) AS count FROM team_executions
+           WHERE team_id = ? AND state NOT IN ('completed', 'failed', 'canceled')`,
+          teamId,
+        ),
+      },
+      {
+        kind: 'missions',
+        count: count(
+          `SELECT COUNT(*) AS count FROM team_missions
+           WHERE team_id = ? AND state NOT IN ('completed', 'failed', 'canceled')`,
+          teamId,
+        ),
+      },
+      {
+        kind: 'isolations',
+        count: count(
+          `SELECT COUNT(*) AS count FROM team_execution_isolations
+           WHERE execution_id IN (${executionsOfTeam})
+             AND phase NOT IN ('completed', 'quarantined')`,
+          teamId,
+        ),
+      },
+      {
+        kind: 'integration_holds',
+        count: count(
+          `SELECT COUNT(*) AS count FROM team_graph_integration_holds
+           WHERE execution_id IN (${executionsOfTeam})`,
+          teamId,
+        ),
+      },
+      {
+        kind: 'graph_resources',
+        count: count(
+          `SELECT COUNT(*) AS count FROM team_graph_resource_reservations
+           WHERE execution_id IN (${executionsOfTeam}) AND state <> 'released'`,
+          teamId,
+        ),
+      },
+      {
+        kind: 'worktrees',
+        count:
+          count(
+            `SELECT COUNT(*) AS count FROM team_mission_step_worktrees
+             WHERE execution_id IN (${executionsOfTeam})
+               AND state IN ('created', 'active', 'ready')`,
+            teamId,
+          ) +
+          count(
+            `SELECT COUNT(*) AS count FROM worker_worktrees
+             WHERE agent_id IN (SELECT id FROM agents WHERE team_id = ?)
+               AND state IN ('created', 'active')`,
+            teamId,
+          ),
+      },
+    ];
+    return blockers.filter(({ count }) => count > 0);
+  }
+
+  reformEndedTeam(teamId: string, hiringAgentId: string): TeamRecord {
     return this.db.transaction(() => {
       const current = this.getTeam(teamId);
-      if (current.state !== 'completed') throw new Error('Only a completed Team can be re-formed');
+      if (current.state !== 'completed' && current.state !== 'failed')
+        throw new Error('Only a completed or failed Team can be re-formed');
       transitionTeam(current.state, 'forming');
+      if (current.state === 'failed') {
+        // Checked in the re-form's own transaction: a failed run's leftovers are never carried
+        // into the new run unnoticed (issue #1269).
+        const blockers = this.listFailedTeamRehireBlockers(teamId, hiringAgentId);
+        if (blockers.length > 0) throw new TeamRehireBlockedError(blockers);
+      }
       const now = new Date().toISOString();
       const historicalWorkers = this.getTeamSnapshot(teamId).agents.filter(
         ({ kind, state }) => kind === 'worker' && (state === 'done' || state === 'failed'),
@@ -9918,9 +10017,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const reformed = this.db
         .prepare(
           `UPDATE teams SET state = 'forming', revision = revision + 1, updated_at = ?
-           WHERE id = ? AND state = 'completed' AND revision = ?`,
+           WHERE id = ? AND state = ? AND revision = ?`,
         )
-        .run(now, teamId, current.revision);
+        .run(now, teamId, current.state, current.revision);
       if (reformed.changes !== 1) throw new TeamConflictError();
       return this.getTeam(teamId);
     })();
@@ -10077,8 +10176,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     assertWorkerPersistenceInput(input);
     return this.db.transaction(() => {
       const team = this.getTeam(input.teamId);
-      if (!['draft', 'forming', 'active', 'paused', 'completed'].includes(team.state))
+      if (!['draft', 'forming', 'active', 'paused', 'completed', 'failed'].includes(team.state))
         throw new Error('Team does not accept new workers');
+      if (team.state === 'failed') {
+        const blockers = this.listFailedTeamRehireBlockers(team.id);
+        if (blockers.length > 0) throw new TeamRehireBlockedError(blockers);
+      }
       const parent = this.getAgent(input.parentAgentId ?? team.leaderAgentId);
       if (parent.teamId !== team.id) throw new Error('Parent Agent must belong to the same Team');
       if (['done', 'failed', 'stopped'].includes(parent.state))
@@ -21420,8 +21523,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * of such a Task is a Team Turn whatever its wording: the text classifiers above miss ordinary
    * follow-ups (「もう一度お願いします。新しく Worker を 1 人雇い…」), and the always-on system
    * prompt then makes the Leader refuse for want of the Skill. A Team without a Worker (the
-   * Team view was merely opened) and a failed Team (it accepts no new Worker) are left to the
-   * wording. A completed Team still counts: hiring re-forms it.
+   * Team view was merely opened) is left to the wording. A completed or failed Team still
+   * counts: hiring re-forms it, or (a failed run that left something unsettled) tells the
+   * Leader what to settle first (issue #1269).
    */
   private taskHasHiringTeam(taskId: string): boolean {
     const row = this.db
@@ -21429,7 +21533,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         `SELECT 1 AS present
          FROM teams team
          JOIN agents worker ON worker.team_id = team.id AND worker.kind = 'worker'
-         WHERE team.task_id = ? AND team.state <> 'failed'
+         WHERE team.task_id = ?
          LIMIT 1`,
       )
       .get(taskId) as { present: number } | undefined;
@@ -22845,6 +22949,53 @@ export class TurnActiveError extends Error {}
 export class TaskStillRunningError extends Error {
   constructor(readonly work: TaskRunningWork) {
     super('Task still has running work');
+  }
+}
+/** What a failed Team's run left unsettled (issue #1269). `unsettled_workers` is known to Main's
+ * Worker runtime only (a Turn whose process exit is not yet confirmed), never to the database. */
+export type TeamRehireBlocker = Readonly<{
+  kind:
+    | 'workers'
+    | 'executions'
+    | 'missions'
+    | 'isolations'
+    | 'integration_holds'
+    | 'graph_resources'
+    | 'worktrees'
+    | 'unsettled_workers';
+  count: number;
+}>;
+
+const TEAM_REHIRE_BLOCKER_LABELS: Readonly<Record<TeamRehireBlocker['kind'], string>> = {
+  workers: '止まっていない Worker {n} 人',
+  executions: '終わっていない Worker の作業 {n} 件（再開待ちを含む）',
+  missions: '終わっていない Mission {n} 件',
+  isolations: '作業場所への反映が終わっていない作業 {n} 件',
+  integration_holds: '反映の途中で止まった Graph の作業 {n} 件',
+  graph_resources: 'Graph の作業が押さえたままの資源 {n} 件',
+  worktrees: '片付いていない Worker の作業用コピー（worktree）{n} 件',
+  unsettled_workers: '終了を確かめられていない Worker の AI {n} 人',
+};
+
+export function teamRehireBlockedMessage(blockers: readonly TeamRehireBlocker[]): string {
+  const items = blockers
+    .map(({ kind, count }) => TEAM_REHIRE_BLOCKER_LABELS[kind].replace('{n}', String(count)))
+    .join('、');
+  const steps: string[] = [];
+  if (blockers.some(({ kind }) => kind !== 'unsettled_workers'))
+    steps.push(
+      'Team の画面で、再開待ちの作業を再開して終わらせるか、「すべて停止」で止めてください。',
+    );
+  if (blockers.some(({ kind }) => kind === 'unsettled_workers'))
+    steps.push('Worker の AI が終わったと確かめられるまで待つか、アプリを再起動してください。');
+  return `この Task の Team は失敗で終わりましたが、失敗した Team の残りが片付いていないため、新しい Worker を雇えません（Team は失敗のままです）。残っているもの: ${items}。${steps.join('')}片付いてから、もう一度 Worker を雇ってください。`;
+}
+
+/** A failed Team was asked to hire while its failed run left something unsettled (issue #1269). */
+export class TeamRehireBlockedError extends Error {
+  constructor(readonly blockers: readonly TeamRehireBlocker[]) {
+    super(teamRehireBlockedMessage(blockers));
+    this.name = 'TeamRehireBlockedError';
   }
 }
 export class SteerStaleError extends Error {}

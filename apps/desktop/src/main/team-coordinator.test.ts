@@ -30,7 +30,7 @@ import type {
   TeamMissionRecord,
   TeamSnapshot,
 } from './persistence';
-import { SqlitePersistenceClient, TeamConflictError } from './persistence';
+import { SqlitePersistenceClient, TeamConflictError, TeamRehireBlockedError } from './persistence';
 import { countRequiredTeamWorkers } from './ipc';
 import {
   DeterministicTeamWorkerRuntime,
@@ -12639,6 +12639,158 @@ if (runsWithElectronAbi)
       expect(detail?.workers.find(({ id }) => id === fresh.id)?.state).toBe('ready');
       expect(coordinator.latestTeamMessageSeq(task.id)).toBe(historicalMessageSeq);
       persistence.close();
+    });
+
+    describe('hiring into a failed Team (issue #1269)', () => {
+      const hire = (coordinator: TeamCoordinator, taskId: string, role: string) =>
+        coordinator.hireWorker({
+          taskId,
+          role,
+          objective: `${role} の作業`,
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+
+      async function failedTeam(runtime: TestWorkerRuntime) {
+        const persistence = createPersistence();
+        const task = persistence.createTask('failed Team');
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const previous = await hire(coordinator, task.id, 'failing worker');
+        runtime.completionStatus = 'failed';
+        await coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: previous.id,
+          content: 'x',
+        });
+        runtime.completionStatus = 'succeeded';
+        expect(coordinator.get(task.id)?.team.state).toBe('failed');
+        expect(coordinator.get(task.id)?.workers.find(({ id }) => id === previous.id)?.state).toBe(
+          'failed',
+        );
+        return { persistence, task, coordinator, previous };
+      }
+
+      it('re-forms it, keeping the failed Worker as history, and the new Worker works', async () => {
+        const runtime = new TestWorkerRuntime();
+        const { persistence, task, coordinator, previous } = await failedTeam(runtime);
+        // A Worker that failed stays unable to hire.
+        await expect(
+          coordinator.hireWorkerAs(
+            {
+              taskId: task.id,
+              role: 'child',
+              objective: 'must not reopen the Team',
+              contextInheritancePolicy: 'none',
+              writeCapable: false,
+            },
+            previous.id,
+          ),
+        ).rejects.toThrow('A terminal Agent cannot hire child Agents');
+        expect(coordinator.get(task.id)?.team.state).toBe('failed');
+
+        const fresh = await hire(coordinator, task.id, 'fresh worker');
+        const detail = coordinator.get(task.id);
+        expect(detail?.team.state).toBe('active');
+        expect(detail?.workers.find(({ id }) => id === previous.id)?.state).toBe('stopped');
+        expect(detail?.workers.find(({ id }) => id === fresh.id)?.state).toBe('ready');
+
+        await coordinator.sendToWorker({ taskId: task.id, targetAgentId: fresh.id, content: 'y' });
+        expect(coordinator.get(task.id)?.team.state).toBe('completed');
+        persistence.close();
+      });
+
+      it('refuses while the failed run still has work recorded, and the Team stays failed', async () => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('failed Team with work left');
+        let release!: () => void;
+        const hold = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const runtime = new (class extends TestWorkerRuntime {
+          override async execute(
+            input: Parameters<TestWorkerRuntime['execute']>[0],
+          ): Promise<WorkerRuntimeResult> {
+            await hold;
+            return super.execute(input);
+          }
+        })();
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const busy = await hire(coordinator, task.id, 'busy worker');
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: busy.id,
+          content: 'long work',
+          doneCriteria: ['return a result'],
+        });
+        await waitFor(
+          () => persistence.getTeamExecution(submission.executionId).state === 'running',
+        );
+        // The Team failed while the work is still recorded as running.
+        const team = persistence.getTeamByTask(task.id)!;
+        persistence.transitionTeamState(team.id, 'failed');
+
+        const refusal = await hire(coordinator, task.id, 'new worker').catch(
+          (error: unknown) => error,
+        );
+        expect(refusal).toBeInstanceOf(TeamRehireBlockedError);
+        expect((refusal as Error).message).toBe(
+          'この Task の Team は失敗で終わりましたが、失敗した Team の残りが片付いていないため、新しい Worker を雇えません（Team は失敗のままです）。残っているもの: 止まっていない Worker 1 人、終わっていない Worker の作業 1 件（再開待ちを含む）。Team の画面で、再開待ちの作業を再開して終わらせるか、「すべて停止」で止めてください。片付いてから、もう一度 Worker を雇ってください。',
+        );
+        const detail = coordinator.get(task.id);
+        expect(detail?.team.state).toBe('failed');
+        expect(detail?.workers.map(({ role }) => role)).not.toContain('new worker');
+
+        release();
+        await waitFor(() =>
+          ['completed', 'failed', 'canceled'].includes(
+            persistence.getTeamExecution(submission.executionId).state,
+          ),
+        );
+        persistence.close();
+      });
+
+      it('refuses while a failed Worker’s process may still run, naming it', async () => {
+        const runtime = new (class extends TestWorkerRuntime {
+          unsettled = new Set<string>();
+          hasUnsettledWorker(agentId: string): boolean {
+            return this.unsettled.has(agentId);
+          }
+        })();
+        const { persistence, task, coordinator, previous } = await failedTeam(runtime);
+        runtime.unsettled.add(previous.id);
+        await expect(hire(coordinator, task.id, 'new worker')).rejects.toThrow(
+          'この Task の Team は失敗で終わりましたが、失敗した Team の残りが片付いていないため、新しい Worker を雇えません（Team は失敗のままです）。残っているもの: 終了を確かめられていない Worker の AI 1 人。Worker の AI が終わったと確かめられるまで待つか、アプリを再起動してください。片付いてから、もう一度 Worker を雇ってください。',
+        );
+        expect(coordinator.get(task.id)?.team.state).toBe('failed');
+        expect(coordinator.get(task.id)?.workers.map(({ role }) => role)).not.toContain(
+          'new worker',
+        );
+
+        runtime.unsettled.clear();
+        await hire(coordinator, task.id, 'new worker');
+        expect(coordinator.get(task.id)?.team.state).toBe('active');
+        persistence.close();
+      });
+
+      it('stops the started runtime when a leftover appears while the new Worker starts', async () => {
+        const runtime = new TestWorkerRuntime();
+        const { persistence, task, coordinator } = await failedTeam(runtime);
+        const blockers = vi.spyOn(persistence, 'listFailedTeamRehireBlockers');
+        // Clear when the hire is checked and registered; a leftover when the Team is re-formed.
+        blockers
+          .mockReturnValueOnce([])
+          .mockReturnValueOnce([])
+          .mockReturnValueOnce([{ kind: 'executions', count: 1 }]);
+        await expect(hire(coordinator, task.id, 'raced worker')).rejects.toThrow(
+          TeamRehireBlockedError,
+        );
+        const raced = coordinator.get(task.id)?.workers.find(({ role }) => role === 'raced worker');
+        expect(raced?.state).toBe('failed');
+        expect(runtime.stopped).toContain(raced?.id);
+        expect(coordinator.get(task.id)?.team.state).toBe('failed');
+        blockers.mockRestore();
+        persistence.close();
+      });
     });
 
     describe('hiring a writing Worker checks the Workspace first (issue #1241)', () => {

@@ -124,7 +124,9 @@ const teamTransitions: Readonly<Record<TeamState, readonly TeamState[]>> = {
   // A later user turn may explicitly ask the same Task to do more Team work. Re-forming keeps
   // the completed Workers as history while allowing the Leader to hire fresh Workers.
   completed: ['forming'],
-  failed: [],
+  // The same holds after a failure (issue #1269): the failed Workers stay as history. Main
+  // re-forms a failed Team only once nothing the failed run left behind is still unsettled.
+  failed: ['forming'],
 };
 
 const workerTransitions: Readonly<Record<WorkerState, readonly WorkerState[]>> = {

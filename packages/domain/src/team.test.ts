@@ -15,7 +15,9 @@ import {
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
+  teamStates,
   workerStates,
+  type TeamState,
 } from './team';
 
 function delegationError(action: () => void): TeamDelegationError {
@@ -57,6 +59,27 @@ describe('team domain', () => {
     expect(transitionTeam('winding_down', 'completed')).toBe('completed');
     expect(transitionTeam('completed', 'forming')).toBe('forming');
     expect(() => transitionTeam('completed', 'active')).toThrow('Invalid team transition');
+  });
+
+  it('lets an ended Team be re-formed, and only re-formed (issue #1269)', () => {
+    const allowed = (from: TeamState) =>
+      teamStates.filter((to) => {
+        try {
+          transitionTeam(from, to);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    expect(Object.fromEntries(teamStates.map((from) => [from, allowed(from)]))).toEqual({
+      draft: ['forming', 'failed'],
+      forming: ['active', 'failed'],
+      active: ['paused', 'winding_down', 'failed'],
+      paused: ['active', 'winding_down', 'failed'],
+      winding_down: ['completed', 'failed'],
+      completed: ['forming'],
+      failed: ['forming'],
+    });
   });
 
   it('separates worker invitation from runtime readiness', () => {

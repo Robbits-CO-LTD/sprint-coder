@@ -761,6 +761,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     );
   }
 
+  /** Whether any Turn of this Worker may still be running, for whatever it ran (issue #1269). */
+  hasUnsettledWorker(agentId: string): boolean {
+    return this.blockingTurns(agentId).length > 0;
+  }
+
   /** The Worker's Turns whose exit is still awaited or unconfirmed, each with when it goes away. */
   private blockingTurns(agentId: string): { owner: TurnOwner; released: Promise<void> }[] {
     return [

@@ -868,9 +868,13 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     // Another execution's worktree and another Worker are not held by that Turn.
     expect(subject.hasUnsettledTurn(agent.id, 'execution-2')).toBe(false);
     expect(subject.hasUnsettledTurn('worker-2', 'execution-1')).toBe(false);
+    // Whatever it ran for, the Worker may still run: a failed Team is not re-formed (issue #1269).
+    expect(subject.hasUnsettledWorker(agent.id)).toBe(true);
+    expect(subject.hasUnsettledWorker('worker-2')).toBe(false);
 
     confirmExit?.();
     await vi.waitFor(() => expect(subject.hasUnsettledTurn(agent.id, 'execution-1')).toBe(false));
+    expect(subject.hasUnsettledWorker(agent.id)).toBe(false);
     subject.dispose();
   });
 
