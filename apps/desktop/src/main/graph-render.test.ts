@@ -134,13 +134,20 @@ describe('Archify generation boundary', () => {
         });
       const service = createService();
       const view = await service.render({ taskId, diagram: diagram(kind) });
-      expect(service.liveDocument(taskId, view.instanceId, view.renderRevision).id).toBe(view.id);
-      expect(() =>
-        service.liveDocument('other-task', view.instanceId, view.renderRevision),
-      ).toThrow('expired');
-      expect(() => service.liveDocument(taskId, view.instanceId, view.renderRevision + 1)).toThrow(
+      // Finishing a generation does not put it on screen; the panel's `get` does (issue #1162).
+      expect(service.response(new URL(view.artifactUrl)).status).toBe(404);
+      expect(() => service.liveDocument(taskId, view.instanceId, view.renderRevision)).toThrow(
         'expired',
       );
+      const shown = (await service.get(taskId))!;
+      expect(shown).toMatchObject({ id: view.id, viewRevision: view.viewRevision + 1 });
+      expect(service.liveDocument(taskId, shown.instanceId, shown.renderRevision).id).toBe(view.id);
+      expect(() =>
+        service.liveDocument('other-task', shown.instanceId, shown.renderRevision),
+      ).toThrow('expired');
+      expect(() =>
+        service.liveDocument(taskId, shown.instanceId, shown.renderRevision + 1),
+      ).toThrow('expired');
       expect(view.nodeIds).toEqual(['client', 'api', 'store']);
       await expect(
         service.render({ taskId, diagram: diagram(kind) }, { expectedRenderRevision: 0 }),
@@ -152,7 +159,7 @@ describe('Archify generation boundary', () => {
       expect(() =>
         service.compare({ taskId, beforeRenderRevision: 1, afterRenderRevision: 2 }),
       ).toThrow('not found');
-      const response = service.response(new URL(view.artifactUrl));
+      const response = service.response(new URL(shown.artifactUrl));
       expect(response.status).toBe(200);
       expect(response.headers.get('Content-Security-Policy')).toContain("connect-src 'none'");
       expect(response.headers.get('Content-Security-Policy')).not.toContain(
@@ -171,10 +178,10 @@ describe('Archify generation boundary', () => {
       expect(reopened).toMatchObject({
         id: view.id,
         revision: view.revision,
-        viewRevision: view.viewRevision + 1,
+        viewRevision: shown.viewRevision + 1,
       });
-      expect(service.response(new URL(view.artifactUrl)).status).toBe(404);
-      service.release(taskId, view.instanceId);
+      expect(service.response(new URL(shown.artifactUrl)).status).toBe(404);
+      service.release(taskId, shown.instanceId);
       expect(service.response(new URL(reopened.artifactUrl)).status).toBe(200);
       service.release(taskId, reopened.instanceId);
       expect(() =>

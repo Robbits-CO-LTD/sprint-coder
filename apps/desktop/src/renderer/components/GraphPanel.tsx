@@ -143,16 +143,25 @@ function GraphPanelForTask({ taskId, onClose }: { taskId: string; onClose: () =>
         setError(null);
       }
     };
-    const unsubscribe = api.subscribe(update);
-    void api
-      .get(taskId)
-      .then((next) => {
-        if (disposed && next) void api.release(taskId, next.instanceId).catch(() => undefined);
-        else if (next) update(next);
-      })
-      .catch(() => {
-        if (!disposed) setError('グラフを取得できませんでした。');
-      });
+    const fetchView = () =>
+      void api
+        .get(taskId)
+        .then((next) => {
+          if (disposed && next) void api.release(taskId, next.instanceId).catch(() => undefined);
+          else if (next) update(next);
+        })
+        .catch(() => {
+          if (!disposed) setError('グラフを取得できませんでした。');
+        });
+    // Main keeps a pushed version displayable only for the panel that already shows this Task's
+    // graph (issue #1162). A panel that holds nothing yet — its own `get` failed or is still in
+    // flight — asks for its own instance instead of adopting one nobody shows.
+    const unsubscribe = api.subscribe((next) => {
+      if (disposed || next.taskId !== taskId) return;
+      if (currentView.current === null) fetchView();
+      else update(next);
+    });
+    fetchView();
     return () => {
       disposed = true;
       unsubscribe();
