@@ -7,6 +7,7 @@ import type {
 import { TeamExecutionStatus } from '../TeamExecutionStatus';
 import { TeamMessageMarkdown } from '../TeamMessageMarkdown';
 import { WorkerDesktopMark } from '../DesktopCursorSwatch';
+import { WorkerAvatar } from '../WorkerAvatar';
 import {
   describeMessagePeer,
   describeWorkerModel,
@@ -174,9 +175,8 @@ function WorkerNodeCard({
           Camera panning already ignores anything inside `.worker` (see useCamera's pointerdown
           guard), so there is no pan/drag conflict to resolve here. */}
       <div className="w-head">
-        <div className="w-avatar" aria-hidden="true">
-          {worker.role.slice(0, 1) || '?'}
-        </div>
+        {/* In its desktop cursor's color while it holds one, as on its approval cards. */}
+        <WorkerAvatar name={worker.role} colorIndex={worker.desktopControl?.colorIndex} />
         <div className="role-line">
           <span className="role-name">{worker.role}</span>
           {/* The runtime name comes from the shared helper, not from `engine`: an external-API

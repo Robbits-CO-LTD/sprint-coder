@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ApprovalDecision } from '@sprint-coder/contracts';
+import type { ApprovalDecision, ApprovalRequester } from '@sprint-coder/contracts';
 import type {
   Capability,
   PermissionOperation,
@@ -32,7 +32,7 @@ import {
   isDesktopControlExecutable,
 } from './desktop-control';
 import { desktopControlApprovalAction } from './desktop-control-display';
-import { desktopControlSessionReadScope } from './desktop-control-session';
+import { desktopControlRoleLabel, desktopControlSessionReadScope } from './desktop-control-session';
 import {
   desktopAppGrantCovering,
   desktopAppGrantOffer,
@@ -176,6 +176,20 @@ export function sandboxProfileForToolAuthorization(
     : ('read-only' as const);
 }
 
+/**
+ * How a card names the Team Worker whose call it is for (display only): as its desktop-control
+ * cursor names and colors it when it holds the mark, or else by its role in the Team's own record,
+ * cleaned and cut like a cursor label, with no color. A Worker Main cannot name (no record, or an
+ * empty role) is still named as a Worker, so its card never reads as the Leader's.
+ */
+export function approvalWorkerRequester(
+  mark: Readonly<{ label: string; colorIndex: number }> | undefined,
+  role: string | undefined,
+): ApprovalRequester {
+  if (mark !== undefined) return { label: mark.label, colorIndex: mark.colorIndex };
+  return { label: desktopControlRoleLabel(role ?? '') || 'Worker' };
+}
+
 export class ApprovalCoordinator {
   private readonly waiters = new Map<string, Waiter>();
   /**
@@ -218,6 +232,16 @@ export class ApprovalCoordinator {
         turnId: string,
         callId: string,
       ) => Readonly<{ label: string; colorIndex: number }> | 'leader' | undefined;
+      /**
+       * The Team Worker behind this call (by the Turn and call id the broker sees), for every card
+       * to name, whatever the tool; `undefined` for the Leader's own calls. Display only: it is
+       * read after every decision about the call is made, and nothing is decided on it.
+       */
+      workerRequesterFor?: (
+        taskId: string,
+        turnId: string,
+        callId: string,
+      ) => ApprovalRequester | undefined;
     },
   ) {}
 
@@ -480,6 +504,13 @@ export class ApprovalCoordinator {
             ? ({ leader: true } as const)
             : undefined
           : { label: caller.label, colorIndex: caller.colorIndex };
+    // Whose call this is, on every card of a Team Worker's call (display only). Named by Main's
+    // binding of the call; nothing the call itself carries is read for it.
+    const workerRequester = this.options.workerRequesterFor?.(
+      request.context.taskId,
+      request.context.turnId,
+      request.callId,
+    );
     const specDigest = facts.specDigest;
     const resource = facts.resourceSet;
     const operation = facts.operation;
@@ -522,6 +553,16 @@ export class ApprovalCoordinator {
                 ...desktopAction,
                 ...(desktopAppGrant === null ? {} : { appGrant: { app: desktopAppGrant.label } }),
                 ...(requester === undefined ? {} : { requester }),
+              },
+            }),
+        ...(workerRequester === undefined
+          ? {}
+          : {
+              requester: {
+                label: workerRequester.label,
+                ...(workerRequester.colorIndex === undefined
+                  ? {}
+                  : { colorIndex: workerRequester.colorIndex }),
               },
             }),
       },

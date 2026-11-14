@@ -25,6 +25,12 @@ export function ApprovalAuditRow({ approval }: { approval: ApprovalSummary }) {
         )}
       </span>
       <span>{selectedChoice ?? DECISION_LABEL[approval.decision]}</span>
+      {approval.requester === undefined ? null : (
+        // Whose call it was, in words only: by now its color may belong to another Worker.
+        <span className="approval-audit__requester" data-testid="approval-audit-requester">
+          依頼した Worker: {approval.requester.label}
+        </span>
+      )}
       {approval.desktopAction === undefined ? (
         <span className="approval-audit__scope">
           {approval.capability} · {approval.risk}

@@ -81,6 +81,7 @@ import {
   SteerStaleError,
   TaskStillRunningError,
   TurnActiveError,
+  toApprovalSummary,
   validateCanvasCamera,
   validateCanvasNodePositions,
   __persistenceRecoveryTestables,
@@ -9068,6 +9069,66 @@ if (runsWithElectronAbi)
       const reopened = new SqlitePersistenceClient(path, verifyTestNativeSession);
       expect(reopened.getApproval(task.id, 'approval-1')).not.toHaveProperty('desktopAction');
       expect(reopened.getApproval(task.id, 'approval-1').target).toBe('C:\\desktop-control.exe');
+      reopened.close();
+    });
+
+    it('keeps the Team Worker a card is asked for through storage, and drops one that no longer reads as one', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const requester = { label: '確認係', colorIndex: 1 };
+      const input = approvalRequest(task.id, turn.turnId);
+      const named = { ...input, display: { ...input.display, requester } };
+      const requested = persistence.requestApproval(named);
+      expect(requested.approval.requester).toEqual(requester);
+      expect((requested.event as { approval: { requester?: unknown } }).approval.requester).toEqual(
+        requester,
+      );
+      expect(toApprovalSummary(requested.approval).requester).toEqual(requester);
+      // The same request again is the same card; the same call under another name is a conflict.
+      expect(persistence.requestApproval(named).approval.id).toBe(requested.approval.id);
+      expect(() =>
+        persistence.requestApproval({
+          ...input,
+          display: { ...input.display, requester: { label: '別の係' } },
+        }),
+      ).toThrow(OperationConflictError);
+      expect(persistence.listPendingApprovals(task.id)[0]?.requester).toEqual(requester);
+      expect(persistence.listRecentApprovals(task.id)[0]?.requester).toEqual(requester);
+
+      // A Worker with no desktop mark is named without a color; the Leader's own card names nobody.
+      const plain = approvalRequest(task.id, turn.turnId, {
+        id: 'approval-2',
+        itemId: 'item-2',
+        callId: 'call-2',
+        challenge: 'challenge-2',
+      });
+      persistence.requestApproval({
+        ...plain,
+        display: { ...plain.display, requester: { label: '書き手' } },
+      });
+      expect(persistence.getApproval(task.id, 'approval-2').requester).toEqual({ label: '書き手' });
+      const leader = approvalRequest(task.id, turn.turnId, {
+        id: 'approval-3',
+        itemId: 'item-3',
+        callId: 'call-3',
+        challenge: 'challenge-3',
+      });
+      expect(persistence.requestApproval(leader).approval).not.toHaveProperty('requester');
+
+      // A stored name that no longer reads as one is dropped; the card itself still reads.
+      persistence.close();
+      const edit = new Database(path);
+      edit
+        .prepare('UPDATE approvals SET display_json = ? WHERE id = ?')
+        .run(
+          JSON.stringify({ ...input.display, requester: { label: '', agentId: 'agent-1' } }),
+          'approval-1',
+        );
+      edit.close();
+      const reopened = new SqlitePersistenceClient(path, verifyTestNativeSession);
+      expect(reopened.getApproval(task.id, 'approval-1')).not.toHaveProperty('requester');
+      expect(reopened.getApproval(task.id, 'approval-1').target).toBe(input.display.target);
       reopened.close();
     });
 

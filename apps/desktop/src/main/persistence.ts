@@ -93,8 +93,10 @@ import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chatMessageSchema,
+  approvalRequesterSchema,
   approvalSummarySchema,
   desktopApprovalActionSchema,
+  type ApprovalRequester,
   type DesktopApprovalAction,
   commandSummarySchema,
   executionResolutionSchema,
@@ -4891,6 +4893,8 @@ export type ApprovalRequestInput = {
     execution: string;
     /** A desktop-control run's own card. Display only; kept in `display_json`. */
     desktopAction?: DesktopApprovalAction;
+    /** The Team Worker whose call this is. Display only; kept in `display_json`. */
+    requester?: ApprovalRequester;
   };
   /**
    * Live-only card detail. It is attached to the returned approval and event after both have been
@@ -21727,6 +21731,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       impact: display.impact,
       execution: display.execution,
       ...(display.desktopAction === undefined ? {} : { desktopAction: display.desktopAction }),
+      ...(display.requester === undefined ? {} : { requester: display.requester }),
       risk: row.risk,
       capability: row.capability,
       challenge,
@@ -23631,6 +23636,7 @@ export function toApprovalSummary(approval: PersistedApproval): ApprovalSummary 
     impact: approval.impact,
     execution: approval.execution,
     ...(approval.desktopAction === undefined ? {} : { desktopAction: approval.desktopAction }),
+    ...(approval.requester === undefined ? {} : { requester: approval.requester }),
     risk: approval.risk,
     capability: approval.capability,
     challenge: approval.challenge,
@@ -23743,7 +23749,7 @@ function parseApprovalDisplay(value: string): ApprovalDisplay {
   )
     throw new Error('Invalid approval display projection');
   // Older rows have no desktop-control card and show the plain one, as does a card that no longer
-  // reads as one.
+  // reads as one. The same goes for the Worker a card names.
   return sanitizedApprovalDisplay({
     target: parsed.target,
     impact: parsed.impact,
@@ -23751,20 +23757,29 @@ function parseApprovalDisplay(value: string): ApprovalDisplay {
     ...(parsed.desktopAction === undefined
       ? {}
       : { desktopAction: parsed.desktopAction as DesktopApprovalAction }),
+    ...(parsed.requester === undefined ? {} : { requester: parsed.requester as ApprovalRequester }),
   });
 }
 
-/** The display as it is stored and compared: bounded text, and a desktop card only when valid. */
+/**
+ * The display as it is stored and compared: bounded text, and a desktop card and the Worker the
+ * card names only when valid.
+ */
 function sanitizedApprovalDisplay(display: ApprovalDisplay): ApprovalDisplay {
   const desktopAction =
     display.desktopAction === undefined
       ? undefined
       : desktopApprovalActionSchema.safeParse(display.desktopAction);
+  const requester =
+    display.requester === undefined
+      ? undefined
+      : approvalRequesterSchema.safeParse(display.requester);
   return {
     target: sanitizeApprovalText(display.target, 500),
     impact: sanitizeApprovalText(display.impact, 500),
     execution: sanitizeApprovalText(display.execution, 100_000),
     ...(desktopAction?.success === true ? { desktopAction: desktopAction.data } : {}),
+    ...(requester?.success === true ? { requester: requester.data } : {}),
   };
 }
 
@@ -23856,6 +23871,7 @@ function persistedApprovalRequestDigest(approval: PersistedApproval): string {
         impact: approval.impact,
         execution: approval.execution,
         ...(approval.desktopAction === undefined ? {} : { desktopAction: approval.desktopAction }),
+        ...(approval.requester === undefined ? {} : { requester: approval.requester }),
       },
     }),
   );

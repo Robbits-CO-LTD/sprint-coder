@@ -3790,6 +3790,64 @@ describe('Main image attachment dispatch boundary', () => {
       }
     });
 
+    it('names the Worker an approval card is for from Main’s binding of the call and the Team’s record', () => {
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      const workspace = { roots: [{ rootId: 'root-w', path: 'C:\\worktrees\\worker-1' }] };
+      const get = vi.fn((_taskId: string) => ({
+        workers: [
+          { id: 'leader-1', role: 'Leader' },
+          { id: 'worker-1', role: '確認係' },
+          { id: 'worker-2', role: ' 書き\u0007手 ' },
+        ],
+      }));
+      Object.assign(router, {
+        managedWorkerCall: new Map<string, unknown>([
+          [JSON.stringify(['turn-parent', 'w1']), { workerId: 'worker-1', workspace }],
+          [JSON.stringify(['turn-parent', 'w2']), { workerId: 'worker-2', workspace }],
+          [JSON.stringify(['turn-parent', 'unbound']), { workspace }],
+          [JSON.stringify(['turn-parent', 'gone']), { workerId: 'worker-9', workspace }],
+        ]),
+        teamCoordinator: { get },
+      });
+      const requesterOf = Reflect.get(IpcRouter.prototype, 'approvalWorkerRequesterOf') as (
+        this: unknown,
+        taskId: string,
+        turnId: string,
+        callId: string,
+      ) => { label: string; colorIndex?: number } | undefined;
+      const name = (callId: string) => requesterOf.call(router, 'task-1', 'turn-parent', callId);
+      try {
+        // The Leader's own call (no binding) names nobody, and reads no record.
+        expect(name('leader-call')).toBeUndefined();
+        expect(get).not.toHaveBeenCalled();
+        // A Worker with no desktop mark: its role in the Team's record, cleaned, and no color.
+        expect(name('w1')).toEqual({ label: '確認係' });
+        expect(name('w2')).toEqual({ label: '書き 手' });
+        expect(get).toHaveBeenLastCalledWith('task-1');
+        // A Worker Main cannot name is still a Worker, never the Leader.
+        expect(name('unbound')).toEqual({ label: 'Worker' });
+        expect(name('gone')).toEqual({ label: 'Worker' });
+        // A Worker holding desktop control: exactly as its cursor names and colors it.
+        configureDesktopControlTeamCursors(true);
+        markDesktopControlWorker('task-1', 'worker-9', 'first');
+        const marked = markDesktopControlWorker('task-1', 'worker-1', 'カーソルの名前');
+        expect(name('w1')).toEqual({ label: 'カーソルの名前', colorIndex: 1 });
+        expect(marked).toMatchObject({ worker: { label: 'カーソルの名前', colorIndex: 1 } });
+        // Another Task's mark is not this Task's.
+        expect(requesterOf.call(router, 'task-2', 'turn-parent', 'w1')).toEqual({
+          label: '確認係',
+        });
+        // A record that cannot be read leaves the card without the role, and nothing else.
+        get.mockImplementation(() => {
+          throw new Error('record unavailable');
+        });
+        expect(name('w2')).toEqual({ label: 'Worker' });
+        expect(name('w1')).toEqual({ label: 'カーソルの名前', colorIndex: 1 });
+      } finally {
+        resetDesktopControlSessions();
+      }
+    });
+
     it.each(['cli', 'mcp'] as const)(
       'returns nested %s Worker results while retaining the parent authority and capability ceiling',
       async (kind) => {
