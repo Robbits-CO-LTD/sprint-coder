@@ -133,6 +133,35 @@ pub(crate) enum ButtonRead {
     Unread,
 }
 
+/// Whether an action that may post a click is refused because whether its
+/// element is a Win32 button could not be read: it would then go out through
+/// the proxy's post, the path that is only likely to be held, not the sent
+/// `BM_CLICK`. An element read as no button (WPF, Chromium) goes on.
+pub(crate) fn button_unread(posts_a_click: bool, button: ButtonRead) -> bool {
+    posts_a_click && button == ButtonRead::Unread
+}
+
+/// The refusal of an action whose element's window could not be read in
+/// time. Nothing was sent; it may be tried again.
+pub(crate) fn button_unread_refusal(
+    policy: agent_desktop_core::InteractionPolicy,
+) -> agent_desktop_core::AdapterError {
+    agent_desktop_core::AdapterError::policy_denied_for_policy(
+        "Whether this control is a Win32 button could not be read in time, so it is not \
+         clicked or toggled in the background",
+        policy,
+    )
+    .with_suggestion(
+        "Nothing was sent. Try again; if it keeps failing, take a fresh snapshot. Clicking it \
+         as a person would takes the foreground: only with --headed",
+    )
+    .with_details(serde_json::json!({
+        "kind": "button_window_unreadable",
+        "foreground_effect": "unknown",
+        "retryable": true,
+    }))
+}
+
 /// Whether an action is refused because the lock could not be taken: only a
 /// click or toggle of an element that is, or may be, a Win32 button.
 pub(crate) fn lock_needed(locked: bool, posts_a_click: bool, button: ButtonRead) -> bool {

@@ -35,7 +35,8 @@ mod imp {
     use crate::actions::disclosure::{collapse_steps, expand_steps};
     use crate::actions::focus::focus_element;
     use crate::actions::foreground_hold::{
-        ButtonRead, ForegroundHold, LATE_HOLD, lock_needed, lock_unavailable_refusal, note_report,
+        ButtonRead, ForegroundHold, LATE_HOLD, button_unread, button_unread_refusal, lock_needed,
+        lock_unavailable_refusal, note_report,
     };
     use crate::actions::list_item_click::{
         ClickCheck, background_click_refusal, button_read, check_background_click,
@@ -54,7 +55,7 @@ mod imp {
     use crate::actions::select_search::selection_item_available;
     use crate::actions::toggle_state::{check_steps, toggle_steps, uncheck_steps};
     use crate::actions::value_write::{clear_steps, left_list_unchosen, set_value_steps};
-    use crate::actions::win32_button::{ButtonTarget, HANDLER_STILL_RUNNING, with_button_delivery};
+    use crate::actions::win32_button::{ButtonTarget, with_button_delivery};
     use crate::tree::element::{UIAElement, uia_element};
     use crate::tree::live_read::corroborate_verified_process;
     use crate::tree::properties::property_ids::TreeProperty;
@@ -98,6 +99,9 @@ mod imp {
             Action::Click | Action::Toggle | Action::Check | Action::Uncheck
         );
         let button = button_read(window.read);
+        if button_unread(posts_a_click, button) {
+            return Err(button_unread_refusal(request.policy));
+        }
         let Some(hold) = ForegroundHold::begin(false) else {
             return run_action(handle, element, request, lease, gate);
         };
@@ -119,7 +123,7 @@ mod imp {
             }),
             _ => None,
         };
-        let (result, still_running) = with_button_delivery(button_target, || {
+        let (result, sent) = with_button_delivery(button_target, || {
             run_action(handle, element, request, lease, gate)
         });
         let hold_after = if button_target.is_some() {
@@ -132,18 +136,21 @@ mod imp {
         if button_target.is_none() {
             return result;
         }
-        note_button_delivery(result, still_running)
+        note_button_delivery(result, sent)
     }
 
     /// Says a button's click was sent as `BM_CLICK` (the step keeps the
-    /// pattern's label the chain chose it by), and that its handler was
-    /// still running when the wait ran out.
-    fn note_button_delivery(
+    /// pattern's label the chain chose it by), on the result or the error,
+    /// only when one was sent: a `check` of a box already checked sends none.
+    pub(crate) fn note_button_delivery(
         result: Result<ActionResult, AdapterError>,
-        still_running: bool,
+        sent: u32,
     ) -> Result<ActionResult, AdapterError> {
-        result.map(|mut result| {
-            let mut details = match result.details.take() {
+        if sent == 0 {
+            return result;
+        }
+        let mark = |details: Option<serde_json::Value>| {
+            let mut details = match details {
                 Some(serde_json::Value::Object(details)) => details,
                 Some(other) => {
                     let mut details = serde_json::Map::new();
@@ -153,14 +160,19 @@ mod imp {
                 None => serde_json::Map::new(),
             };
             details.insert("delivery".into(), "win32_bm_click_sent".into());
-            if still_running {
-                details.insert("click_handler".into(), HANDLER_STILL_RUNNING.into());
+            Some(serde_json::Value::Object(details))
+        };
+        match result {
+            Ok(mut result) => {
+                result.details = mark(result.details.take());
+                Ok(result)
             }
-            result.details = Some(details.into());
-            result
-        })
+            Err(mut error) => {
+                error.details = mark(error.details.take());
+                Err(error)
+            }
+        }
     }
-
     /// What a background click decided before anything was sent.
     #[derive(Clone, Copy)]
     struct ClickGate {
@@ -437,6 +449,9 @@ mod imp {
 }
 
 pub(crate) use imp::execute_action_impl;
+
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) use imp::note_button_delivery;
 
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) use imp::click_chain_judged_for;

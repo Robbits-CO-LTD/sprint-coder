@@ -27,15 +27,23 @@
 //! Before the click is sent, the window is checked again: it is still a
 //! window, still of the button's class, of the process the ref was proven
 //! for, enabled, and not hung. A failed check sends nothing
-//! (`not_delivered`). A send that times out (the handler is still running, a
-//! modal dialog it opened, say) was delivered: the result says so, and that
-//! whether it took effect is not known (`details.click_handler:
-//! "still_running"`); it is never reported as not delivered, which would
-//! invite a second click.
+//! (`not_delivered`).
+//!
+//! How a send ended is told in three ways only ([`send_end_of`]):
+//! delivered, when the send returned from the handler; not delivered, when
+//! Windows refused it (`ERROR_ACCESS_DENIED`, a window of a higher integrity
+//! level); and not known otherwise. A send that timed out is not known: the
+//! target's thread may have been busy and not started the handler yet, or the
+//! handler may still be running (a modal dialog it opened); it is returned as
+//! a timeout whose delivery is uncertain and which is not retried on its own
+//! (`TIMEOUT`, `delivery_uncertain`, `details.click_handler: "unknown"`, with
+//! the advice to look with a snapshot), the way a UI Automation call that
+//! times out is. An invalid window after the send began is not known either:
+//! it also comes back when the handler ran and closed the window or ended its
+//! process (a "Close" or "Exit" button).
 
-/// `details.click_handler` when the send timed out before the handler was done.
-pub(crate) const HANDLER_STILL_RUNNING: &str = "still_running";
-
+/// `details.click_handler` when whether the button's handler ran is not known.
+pub(crate) const HANDLER_UNKNOWN: &str = "unknown";
 /// The longest a click waits for the button's handler.
 pub(crate) const SEND_CAP: std::time::Duration = std::time::Duration::from_millis(3_000);
 
@@ -54,10 +62,10 @@ pub(crate) struct Recheck {
 pub(crate) enum SendEnd {
     /// The handler ran and returned.
     Handled,
-    /// The wait ran out; the message was handed over and may still run.
+    /// The wait ran out: the handler may not have started, or may still run.
     TimedOut,
-    /// The system refused to deliver it (another integrity level, the
-    /// window went away): nothing reached the button.
+    /// The system refused to deliver it (`ERROR_ACCESS_DENIED`: a window of
+    /// a higher integrity level): nothing reached the button.
     Refused,
     /// Failed for another reason: whether it reached the button is not known.
     Unknown,
@@ -71,7 +79,12 @@ pub(crate) fn send_end_of(sent: bool, last_error: u32) -> SendEnd {
     match (sent, last_error) {
         (true, _) => SendEnd::Handled,
         (false, ERROR_TIMEOUT) => SendEnd::TimedOut,
-        (false, ERROR_ACCESS_DENIED | ERROR_INVALID_WINDOW_HANDLE) => SendEnd::Refused,
+        // Only UIPI's refusal says nothing reached the button. An invalid
+        // window after the send began also comes back when the handler ran
+        // and the window, or its process, went away in it (a "Close" or
+        // "Exit" button): whether the click took effect is not known.
+        (false, ERROR_ACCESS_DENIED) => SendEnd::Refused,
+        (false, ERROR_INVALID_WINDOW_HANDLE) => SendEnd::Unknown,
         (false, _) => SendEnd::Unknown,
     }
 }
@@ -100,7 +113,18 @@ pub(crate) fn outcome_of(
         return not_sent(ErrorCode::AppUnresponsive, "The app is not responding");
     }
     match end {
-        Some(SendEnd::Handled | SendEnd::TimedOut) => Ok(true),
+        Some(SendEnd::Handled) => Ok(true),
+        Some(SendEnd::TimedOut) => Err(AdapterError::new(
+            ErrorCode::Timeout,
+            "The button's click handler did not answer in time: whether the click reached it \
+             is not known",
+        )
+        .with_suggestion(
+            "Do not click again blindly: take a snapshot to see whether the click took effect \
+             (a dialog it opened, a changed state) before trying again",
+        )
+        .with_details(serde_json::json!({ "click_handler": HANDLER_UNKNOWN }))
+        .with_disposition(DeliverySemantics::uncertain())),
         Some(SendEnd::Refused) => not_sent(
             ErrorCode::PermDenied,
             "Windows refused to deliver the click to the button (it may run with higher rights)",
@@ -129,16 +153,17 @@ mod imp {
 
     thread_local! {
         static TARGET: Cell<Option<ButtonTarget>> = const { Cell::new(None) };
-        static TIMED_OUT: Cell<bool> = const { Cell::new(false) };
+        static SENT: Cell<u32> = const { Cell::new(0) };
     }
 
     /// Runs `action` with clicks of this thread sent to `target`'s window
-    /// instead of through the proxy's pattern, and says whether a send timed
-    /// out. `None` runs it as before.
+    /// instead of through the proxy's pattern, and says how many clicks were
+    /// sent (none when the action decided it had nothing to do, such as a
+    /// `check` of a box already checked). `None` runs it as before.
     pub(crate) fn with_button_delivery<T>(
         target: Option<ButtonTarget>,
         action: impl FnOnce() -> T,
-    ) -> (T, bool) {
+    ) -> (T, u32) {
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -146,10 +171,10 @@ mod imp {
             }
         }
         TARGET.with(|cell| cell.set(target));
-        TIMED_OUT.with(|cell| cell.set(false));
+        SENT.with(|cell| cell.set(0));
         let _reset = Reset;
         let value = action();
-        (value, TIMED_OUT.with(Cell::get))
+        (value, SENT.with(Cell::get))
     }
 
     /// The click, when this thread is sending to a button: `Some` with what
@@ -170,8 +195,8 @@ mod imp {
             return outcome_of(recheck, None);
         }
         let end = send_bm_click(target.hwnd, target.deadline);
-        if end == Some(SendEnd::TimedOut) {
-            TIMED_OUT.with(|cell| cell.set(true));
+        if end.is_some() {
+            SENT.with(|cell| cell.set(cell.get().saturating_add(1)));
         }
         outcome_of(recheck, end)
     }

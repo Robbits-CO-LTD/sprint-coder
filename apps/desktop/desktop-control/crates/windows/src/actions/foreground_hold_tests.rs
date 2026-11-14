@@ -102,6 +102,20 @@ fn without_the_lock_a_click_that_may_be_a_win32_button_is_refused() {
 }
 
 #[test]
+fn a_click_or_toggle_whose_button_window_was_not_read_is_refused() {
+    assert!(super::button_unread(true, ButtonRead::Unread));
+    // Read as no button (WPF, Chromium: no window of its own) goes on.
+    assert!(!super::button_unread(true, ButtonRead::NotButton));
+    assert!(!super::button_unread(true, ButtonRead::Button));
+    assert!(!super::button_unread(false, ButtonRead::Unread));
+    let error = super::button_unread_refusal(InteractionPolicy::headless());
+    assert_eq!(error.code, ErrorCode::PolicyDenied);
+    let details = error.details.expect("details");
+    assert_eq!(details["kind"], "button_window_unreadable");
+    assert_eq!(details["retryable"], true);
+}
+
+#[test]
 fn the_lock_refusal_sends_nothing_and_may_be_retried() {
     let error = lock_unavailable_refusal(InteractionPolicy::headless(), ButtonRead::Unread);
     assert_eq!(error.code, ErrorCode::PolicyDenied);
@@ -151,6 +165,11 @@ fn dispatch_decides_before_it_locks() {
         .find("target_pid(element, deadline)")
         .expect("target pid");
     let lock = body.find("ForegroundHold::begin(").expect("lock");
+    let unread = body.find("button_unread_refusal(").expect("unread refusal");
+    assert!(
+        unread < lock,
+        "an unread button window is refused before the lock"
+    );
     assert!(check < lock && pid < lock, "reads come before the lock");
     let refusal = body
         .find("lock_unavailable_refusal(")
