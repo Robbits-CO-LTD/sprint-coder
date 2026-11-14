@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Source C of the menu detector: the Chromium/Electron DOM-menu arm.
 //!
 //! Measured on a real Chromium host (A26-12): its context menu is a DOM menu
@@ -116,6 +117,13 @@ fn chromium_menu_candidates(pid: ProcessId) -> Result<Vec<isize>, AdapterError> 
         true
     })
     .map_err(super::narrow_to_permitted_codes)?;
+    // Only a window of Chromium provenance can hold a Chromium-framework
+    // element, so no other window is searched: the search runs over the whole
+    // window inside its process, and on a WPF window holding a 2,000-row list
+    // it took about 5.6 s after every click to find nothing. The class reads
+    // send the target no message, and run after the enumeration, which must
+    // not be re-entered.
+    handles.retain(|handle| crate::tree::chromium::window_has_chromium_provenance(*handle));
     Ok(handles)
 }
 

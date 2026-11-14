@@ -80,24 +80,47 @@ fn resolve_locator_anchor_once(
         return Err(stale_ref_error(entry));
     }
 
+    use crate::tree::walk::shown_view::{ShownNode, ShownView, VisibleView, visible_view_of};
+
     let root = crate::tree::resolve::resolve_window_root(entry, deadline)?;
     // A path a view proof recorded counts positions among the visible elements,
-    // so it is descended in that view.
-    let source = if entry.identity.in_view.is_some() {
-        UiaTreeSource::for_visible_descent(&root, deadline)?
-    } else {
-        UiaTreeSource::for_descent(&root)?
+    // so it is descended in the view this window is read in (the one the
+    // capture walked): the shown view for a window read in it, the onscreen
+    // view otherwise, as before the shown view existed. Either way the landing
+    // must carry the recorded runtime identifier.
+    let view = entry.identity.in_view.as_ref().map(|_| {
+        if visible_view_of(&root) == Some(VisibleView::Shown) {
+            VisibleView::Shown
+        } else {
+            VisibleView::Onscreen
+        }
+    });
+    let source = match view {
+        Some(VisibleView::Onscreen) => UiaTreeSource::for_visible_descent(&root, deadline)?,
+        Some(VisibleView::Shown) => UiaTreeSource::for_shown_root(&root, deadline)?,
+        None => UiaTreeSource::for_descent(&root)?,
     };
     let prepared = source.prepare_root(&root)?;
     let budget = resolve_walk_budget(deadline);
 
-    let landing = super::resolve_search::descent::descend_path(
-        &source,
-        &prepared,
-        &entry.scope.path,
-        &budget,
-        &ANCHOR_DESCENT,
-    )?;
+    let landing = if view == Some(VisibleView::Shown) {
+        super::resolve_search::descent::descend_path(
+            &ShownView::new(&source, deadline),
+            &ShownNode::root(prepared),
+            &entry.scope.path,
+            &budget,
+            &ANCHOR_DESCENT,
+        )?
+        .map(|node| node.element)
+    } else {
+        super::resolve_search::descent::descend_path(
+            &source,
+            &prepared,
+            &entry.scope.path,
+            &budget,
+            &ANCHOR_DESCENT,
+        )?
+    };
     let Some(candidate) = landing else {
         return Err(stale_ref_error(entry));
     };

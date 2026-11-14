@@ -259,6 +259,61 @@ fn a_long_deadline_gives_the_whole_read_no_more_than_the_cap() {
     );
 }
 
+static FLOOR_READ_GIVEN_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn cut_short_noting_floor(
+    request: &ObservationRequest,
+    tree: AccessibilityNode,
+) -> Result<AccessibilityNode, AdapterError> {
+    let given = u64::try_from(request.deadline.remaining().as_millis()).unwrap_or(u64::MAX);
+    FLOOR_READ_GIVEN_MS.store(given, Ordering::SeqCst);
+    cut_short(request, tree)
+}
+
+/// A default snapshot that starts its whole read with 2.5 s left leaves the
+/// read of the visible elements at least the floor when the window has one,
+/// and keeps three quarters for the whole read of a window that has none.
+#[test]
+fn a_window_with_a_view_leaves_its_visible_read_the_floor() {
+    let _guard = HomeGuard::new();
+    let given_for = |view: bool| {
+        let adapter = CaptureAdapter::new(anchored_window());
+        adapter.fault_whole_read(cut_short_noting_floor);
+        if view {
+            adapter.serve_view();
+        }
+        let started = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(500))
+            .expect("the clock is past its first seconds");
+        let deadline = Deadline::at(started, crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS)
+            .expect("a deadline");
+        let captured =
+            crate::snapshot::build(&adapter, &skeleton_opts(), Some("Fixture"), None, deadline)
+                .expect("the window snapshots");
+        assert_eq!(captured.visible_scope, view);
+        FLOOR_READ_GIVEN_MS.load(Ordering::SeqCst)
+    };
+    let floor = u64::try_from(super::window_capture::ANSWER_READ_FLOOR.as_millis()).unwrap();
+    let with_view = given_for(true);
+    assert!(
+        with_view <= 2_500 - floor,
+        "the whole read was given {with_view} ms"
+    );
+    assert!(
+        with_view >= 2_500 - floor - 100,
+        "the whole read was given {with_view} ms"
+    );
+    let without = given_for(false);
+    assert!(
+        without > 2_500 - floor,
+        "the whole read was given {without} ms"
+    );
+    assert!(
+        without <= 2_500 * 3 / 4,
+        "the whole read was given {without} ms"
+    );
+}
+
 #[test]
 fn a_deadline_shorter_than_the_default_never_falls_back_to_the_view() {
     let _guard = HomeGuard::new();

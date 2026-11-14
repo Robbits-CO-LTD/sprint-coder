@@ -159,6 +159,15 @@ impl ObservationOps for CaptureAdapter {
         }
     }
 
+    fn reads_visible_elements(
+        &self,
+        _window: &WindowInfo,
+        _surface: crate::SnapshotSurface,
+        _deadline: Deadline,
+    ) -> bool {
+        self.view.load(Ordering::SeqCst)
+    }
+
     fn resolve_element_strict(
         &self,
         _entry: &RefEntry,

@@ -1,14 +1,16 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
-use super::{WHOLE_READ_CAP, needs_whole_window, whole_read_budget};
+use super::{
+    ANSWER_READ_FLOOR, WHOLE_READ_CAP, needs_whole_window, visible_share, whole_read_budget,
+};
 use std::time::Duration;
 
 /// The default snapshot keeps the share it always had: three quarters.
 #[test]
 fn a_default_deadline_gives_the_whole_read_three_quarters() {
     let default = Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
-    assert_eq!(whole_read_budget(default), default * 3 / 4);
+    assert_eq!(budget(default), default * 3 / 4);
     assert_eq!(
-        whole_read_budget(Duration::from_millis(4_000)),
+        budget(Duration::from_millis(4_000)),
         Duration::from_millis(3_000)
     );
 }
@@ -18,18 +20,9 @@ fn a_default_deadline_gives_the_whole_read_three_quarters() {
 #[test]
 fn a_long_deadline_caps_the_whole_read_independently_of_its_length() {
     assert_eq!(WHOLE_READ_CAP, Duration::from_millis(4_500));
-    assert_eq!(
-        whole_read_budget(Duration::from_millis(10_000)),
-        WHOLE_READ_CAP
-    );
-    assert_eq!(
-        whole_read_budget(Duration::from_millis(20_000)),
-        WHOLE_READ_CAP
-    );
-    assert_eq!(
-        whole_read_budget(Duration::from_secs(3_600)),
-        WHOLE_READ_CAP
-    );
+    assert_eq!(budget(Duration::from_millis(10_000)), WHOLE_READ_CAP);
+    assert_eq!(budget(Duration::from_millis(20_000)), WHOLE_READ_CAP);
+    assert_eq!(budget(Duration::from_secs(3_600)), WHOLE_READ_CAP);
 }
 
 /// The cap never starves the fallback gate: a capped read still had more than
@@ -38,7 +31,45 @@ fn a_long_deadline_caps_the_whole_read_independently_of_its_length() {
 fn the_cap_leaves_the_view_fallback_reachable() {
     let default = Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
     assert!(WHOLE_READ_CAP >= default / 2);
-    assert!(WHOLE_READ_CAP >= whole_read_budget(default));
+    assert!(WHOLE_READ_CAP >= budget(default));
+}
+
+/// The whole read's time for a full default deadline or more, which a read of
+/// the visible elements that can follow does not change.
+fn budget(remaining: Duration) -> Duration {
+    let budget = whole_read_budget(remaining, false);
+    assert_eq!(budget, whole_read_budget(remaining, true), "{remaining:?}");
+    budget
+}
+
+/// Past the window listing, a default snapshot has about 2.55 s left. When a
+/// read of the visible elements can follow, the whole read leaves it at least
+/// the floor; any other window keeps three quarters for its whole read.
+#[test]
+fn the_floor_for_the_visible_read_applies_only_where_one_can_follow() {
+    let remaining = Duration::from_millis(2_550);
+    assert_eq!(
+        whole_read_budget(remaining, false),
+        remaining * 3 / 4,
+        "a window read whole or not at all is split as before"
+    );
+    assert_eq!(
+        whole_read_budget(remaining, true),
+        remaining - ANSWER_READ_FLOOR
+    );
+    assert_eq!(ANSWER_READ_FLOOR, Duration::from_millis(750));
+}
+
+/// The visible read gets all that is left when the whole read left a tree to
+/// answer with in its place, and two thirds when it did not (a shallow walk
+/// then answers).
+#[test]
+fn the_visible_read_keeps_a_third_only_when_no_tree_is_left_to_answer() {
+    let deadline = crate::Deadline::after(900).expect("a deadline");
+    let all = visible_share(deadline, true).remaining();
+    let part = visible_share(deadline, false).remaining();
+    assert!(all > Duration::from_millis(850), "{all:?}");
+    assert!(part <= Duration::from_millis(600), "{part:?}");
 }
 use crate::locator::live_locator::{ObservationRoot, ObservedTree};
 use crate::{AccessibilityNode, WindowInfo};

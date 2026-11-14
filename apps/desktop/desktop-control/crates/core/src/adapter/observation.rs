@@ -142,6 +142,21 @@ pub trait ObservationOps: Send + Sync {
         false
     }
 
+    /// Whether this adapter reads the visible elements alone
+    /// (`ObservationMode::visible_only`) of `window`'s `surface`, rather than
+    /// refusing such a read. A cheap check that reads no tree: a capture asks
+    /// it before its whole-window read, to keep time for the visible read only
+    /// where one can follow. `false` (the default) leaves the capture's split
+    /// as it was.
+    fn reads_visible_elements(
+        &self,
+        _window: &WindowInfo,
+        _surface: SnapshotSurface,
+        _deadline: Deadline,
+    ) -> bool {
+        false
+    }
+
     /// Checks platform-specific context that the saved ref's identity predicate
     /// does not encode, against the token from the same observation that matched
     /// it. This must not take a second live read: rooted finds and drills publish

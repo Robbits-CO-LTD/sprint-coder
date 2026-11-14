@@ -65,6 +65,17 @@ impl ObservationOps for WindowsAdapter {
         crate::tree::observe::observe_tree(root, request, self)
     }
 
+    /// Whether the window's root has a view of its visible elements
+    /// (`shown_view::visible_view_of`): Chromium-hosted or WPF.
+    fn reads_visible_elements(
+        &self,
+        window: &WindowInfo,
+        surface: agent_desktop_core::SnapshotSurface,
+        deadline: Deadline,
+    ) -> bool {
+        crate::tree::observe::reads_visible_elements(window, surface, deadline)
+    }
+
     /// The FFI legacy entrypoint: a thin wrapper over the same `observe_tree`
     /// path the binary's `snapshot` uses (mirroring
     /// `crates/macos/src/tree/adapter.rs`).

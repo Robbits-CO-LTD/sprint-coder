@@ -109,6 +109,14 @@ pub trait TreeSource {
         Ok(true)
     }
 
+    /// Whether the child list enumerated last ended at a cut the source's own
+    /// view makes (more children exist, but the view does not hold them), not
+    /// at the list's real end. Only a view with such a rule answers true
+    /// (`shown_view::ShownView`).
+    fn children_cut(&self) -> bool {
+        false
+    }
+
     fn identity(&self, node: &Self::Node) -> NodeKey;
 
     /// Compares two elements when neither carries a runtime id.

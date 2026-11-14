@@ -150,7 +150,22 @@ pub(crate) fn annotate_visible_scope(body: &mut Value, result: &snapshot::Snapsh
     if result.visible_scope {
         body["scope"] = json!("visible");
         body["scope_hint"] = json!(VISIBLE_SCOPE_HINT);
+        if has_view_cut(&result.tree) {
+            body["scope_cut_hint"] = json!(VIEW_CUT_HINT);
+        }
     }
+}
+
+/// What a snapshot of the visible elements says when it read a long list only
+/// from its start (some windows are read that way: their lists are not
+/// searched for what they show past their first items).
+const VIEW_CUT_HINT: &str = "A container marked subtree_truncated holds more items than this read covers: only the items near its start that it shows are listed, and items further down are not read even when they are scrolled into view. To reach the first items, scroll the container back to its top and run snapshot again.";
+
+/// Whether a presented node is marked truncated. A capture of the visible
+/// elements is complete for its view, so there the mark means only that the
+/// view cut a long list.
+fn has_view_cut(node: &crate::AccessibilityNode) -> bool {
+    node.subtree_truncated || node.children.iter().any(has_view_cut)
 }
 
 /// What a snapshot that cut containers at its depth limit tells its reader.

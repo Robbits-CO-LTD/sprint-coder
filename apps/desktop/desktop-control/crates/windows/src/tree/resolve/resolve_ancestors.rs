@@ -46,15 +46,18 @@ pub(crate) fn read_ancestor_evidence(
     let client = automation_client()?;
     // The ancestors are read in the view they were recorded in: a view proof
     // recorded them among the visible elements, where an offscreen container
-    // between the element and its visible ancestors is not a level.
+    // between the element and its visible ancestors is not a level. The shown
+    // view leaves out an offscreen element with all that is below it, so there
+    // an element's parent in the view is its raw parent.
     let in_view = entry.identity.in_view.is_some();
-    // That view is bounded by the root only while the root is in it, so a
+    // Either view is bounded by the root only while the root is in it, so a
     // root that is not stops the read before any climb (the view no longer
     // shows what the proof was measured in). A root whose place in the view
     // could not be read stops it too, as an identity that could not be
     // confirmed (which may be retried), not as a stale ref. The read is a
     // live call to the provider, so it is bounded by the deadline like the
     // climb below: a provider that stalls cannot hold it past the deadline.
+    // Both views of visible elements hold to this.
     if in_view {
         let read = with_transaction_timeout(&client, deadline, || {
             crate::tree::walk::walker_source::root_in_view(&root)
@@ -70,7 +73,9 @@ pub(crate) fn read_ancestor_evidence(
         }
     }
     // The desktop, for telling a climb that went past the root (the root
-    // left the view meanwhile) from one that met it.
+    // left the view meanwhile) from one that met it. In the shown view the
+    // climb is raw and meets the root first, so this only ever stops a climb
+    // from an element that was not below the root.
     let desktop = if in_view {
         Some(
             client
@@ -80,7 +85,9 @@ pub(crate) fn read_ancestor_evidence(
     } else {
         None
     };
-    let walker = if in_view {
+    use crate::tree::walk::shown_view::{VisibleView, visible_view_of};
+    let onscreen_view = in_view && visible_view_of(&root) != Some(VisibleView::Shown);
+    let walker = if onscreen_view {
         crate::tree::walk::walker_source::visible_view_walker(&client)?
     } else {
         client

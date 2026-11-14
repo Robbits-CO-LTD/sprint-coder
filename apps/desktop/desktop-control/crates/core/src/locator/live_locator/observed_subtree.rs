@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{LocatorEvidence, ObservationCompleteness};
 
 pub struct ObservedSubtree {
@@ -41,6 +42,15 @@ impl ObservedSubtree {
     /// logical depth, so a shallow presentation keeps what a walk would.
     pub fn with_wrapper(mut self, wrapper: bool) -> Self {
         self.wrapper = wrapper;
+        self
+    }
+
+    /// Marks a node whose child list the view it was read in cut short by its
+    /// own rule (a read of the visible elements that reads only the start of a
+    /// long list). The subtree stays complete for that view; the node is
+    /// presented as truncated so a reader knows its list is not whole.
+    pub fn with_view_cut(mut self, view_cut: bool) -> Self {
+        self.completeness.view_cut = view_cut;
         self
     }
 
