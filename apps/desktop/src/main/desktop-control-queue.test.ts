@@ -478,6 +478,26 @@ describe('the executable’s answer that an operation was not delivered', () => 
         }),
       ),
     ).toBe(true);
+    // A ref action that could not have the interaction lease before it sent anything, as the
+    // executable answers it (`ref_action_wait.rs`): the lock's report with the wait's counters.
+    const leaseLost = {
+      kind: 'lock_timeout',
+      purpose: 'desktop interaction lease',
+      path: 'interaction.lock',
+      contention_count: 2,
+      auto_wait: { read_only_resolve_attempts: 1, read_only_preflight_attempts: 1 },
+    };
+    expect(
+      desktopControlReportsUndelivered(
+        envelope('TIMEOUT', 'not_delivered', 'safe', 'click', leaseLost),
+      ),
+    ).toBe(true);
+    // The same lock lost in a later round, which the executable leaves unknown, is not run again.
+    expect(
+      desktopControlReportsUndelivered(
+        envelope('TIMEOUT', 'unknown', 'unknown', 'click', leaseLost),
+      ),
+    ).toBe(false);
     for (const stdout of [
       WAIT_TIMED_OUT,
       envelope('TIMEOUT', 'not_delivered', 'safe', 'wait'),

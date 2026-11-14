@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     ActionRequest, ActionResult, AdapterError, AppError, Deadline,
     ref_action::ref_action_context::RefActionContext,
@@ -99,7 +100,10 @@ fn execute_with_deadline(
         let lease = context
             .adapter
             .acquire_interaction_lease(deadline)
-            .map_err(|error| state.attach_error_metrics(error))?;
+            .map_err(|error| {
+                let first_round = refusal.is_none();
+                state.attach_error_metrics(sent_nothing_without_lease(error, first_round))
+            })?;
         if deadline.is_expired() {
             let error = state.attach_error_metrics(deadline.timeout_error());
             return Err(with_refusal(error, refusal.as_ref()));
@@ -131,6 +135,31 @@ fn execute_with_deadline(
                 );
             }
         }
+    }
+}
+
+/// An action whose interaction lease could not be had in the loop's first
+/// round sent nothing to its target, so it says so: `not_delivered`, which a
+/// caller may retry.
+///
+/// It is said here rather than by the adapter because it is a fact about this
+/// path, not about the lease. Before the first lease, the wait only reads
+/// (resolve, actionability, hit tests), the pre-action capture only reads, and
+/// the travel before the lease draws only this tool's own cursor overlay.
+/// Dispatch, the only step that sends anything to the target, runs under the
+/// lease.
+///
+/// A later round is left as it was (`unknown`). It runs again after a dispatch
+/// that refused as `not_delivered` (`resolves_again`), but that dispatch ran
+/// under the lease and may already have sent its target something on the way
+/// (a preparatory scroll), so "nothing was sent" is not known there.
+///
+/// Only an `unknown` is settled: a disposition the adapter chose is kept.
+fn sent_nothing_without_lease(error: AdapterError, first_round: bool) -> AdapterError {
+    if first_round && error.disposition == crate::DeliverySemantics::unknown() {
+        error.with_disposition(crate::DeliverySemantics::not_delivered())
+    } else {
+        error
     }
 }
 
@@ -200,3 +229,7 @@ mod exactly_once_tests;
 #[cfg(test)]
 #[path = "ref_action_focus_order_tests.rs"]
 mod focus_order_tests;
+
+#[cfg(test)]
+#[path = "ref_action_wait_lease_undelivered_tests.rs"]
+mod lease_undelivered_tests;
