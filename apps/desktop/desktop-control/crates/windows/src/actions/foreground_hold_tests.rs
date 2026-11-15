@@ -53,6 +53,42 @@ fn the_hand_back_is_named_beside_the_foreground() {
     assert!(with(false, HandBackOutcome::None).is_empty());
 }
 
+/// #1293: the target's window that was in front closed and another of its
+/// windows took its place. Said as a replacement with the new window's id,
+/// never as a refused hand-back, whether or not the closed window still
+/// counted as the target's when the result was written.
+#[test]
+fn a_replaced_target_window_names_the_window_in_its_place() {
+    use crate::actions::foreground_return::WINDOW_REPLACED;
+    for came_forward in [true, false] {
+        let report = HoldReport {
+            hand_back: HandBackOutcome::Replaced(4_266_306),
+            ..report(true, Settle::Settled, came_forward)
+        };
+        assert_eq!(
+            report.entries(),
+            [
+                ("foreground", TARGET_IN_FRONT),
+                ("foreground_hand_back", WINDOW_REPLACED)
+            ]
+        );
+        let details = note_report(Ok(ActionResult::delivered_unverified("click")), report)
+            .expect("ok")
+            .details
+            .expect("details");
+        assert_eq!(details["foreground_window"], "w-4266306");
+        assert_ne!(details["foreground_hand_back"], HAND_BACK_FAILED);
+    }
+    let plain = note_report(
+        Ok(ActionResult::delivered_unverified("click")),
+        report(true, Settle::Settled, true),
+    )
+    .expect("ok")
+    .details
+    .expect("details");
+    assert!(plain.get("foreground_window").is_none());
+}
+
 #[test]
 fn only_a_target_that_was_behind_and_is_now_in_front_came_forward() {
     assert!(target_came_forward(false, true));

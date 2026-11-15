@@ -391,6 +391,34 @@ fn the_only_window_of_the_instance_is_named_only_when_it_is_the_only_one() {
     );
 }
 
+/// #1297: Chrome showed its browser window (in front) and its profile
+/// picker (covered by it); the launch made it bring the picker forward. With
+/// two visible windows there is no only window, but the picker is still read
+/// as raised: which window came forward does not depend on how many the
+/// instance shows.
+#[test]
+fn the_covered_window_of_two_that_came_forward_is_read_as_raised() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let before = ids(&["w-browser", "w-picker"]);
+    let windows = vec![
+        focused(window("w-picker", 20, Some("instance-20"))),
+        window("w-browser", 20, Some("instance-20")),
+    ];
+    let (raised, only) = read_existing(&windows, &targets, &before, Some("w-browser"), false);
+    assert_eq!(raised.map(|window| window.id), Some("w-picker".to_string()));
+    assert!(only.is_none(), "two windows: no only window");
+    let still = vec![
+        window("w-picker", 20, Some("instance-20")),
+        focused(window("w-browser", 20, Some("instance-20"))),
+    ];
+    assert!(
+        read_existing(&still, &targets, &before, Some("w-browser"), false)
+            .0
+            .is_none(),
+        "the window in front when the launch began did not come forward"
+    );
+}
+
 #[test]
 fn a_window_not_shown_before_or_beside_several_instances_is_not_an_existing_one() {
     let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];

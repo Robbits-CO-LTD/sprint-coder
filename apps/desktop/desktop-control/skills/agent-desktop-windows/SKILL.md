@@ -73,6 +73,10 @@ observation, actions and capture there fail or return nothing.
   picked it. Find the new window with `list-windows --app <app>`. A window the
   app opens after the action returned (even a few hundred milliseconds later)
   is not watched and can take the foreground.
+  `foreground_hand_back: "window_replaced"` means the window you acted on was
+  the one in front and closed, and the app's window named in
+  `details.foreground_window` took its place: nothing was given back, and
+  that window is the one to work in next.
 - **No permission dialog exists.** `permissions` reports `automation` as
   `not_required`. Elevation boundaries are the only access control.
 - **Chromium and Electron apps read thin before they settle.** Pass a longer
