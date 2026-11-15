@@ -79,7 +79,7 @@ Sprint Coderは、一人のAIとの対話を入口に、仕事が大きくなっ
 
 ### 必要なもの
 
-- macOS、Windows、またはLinux
+- macOS、またはWindows
 - [Node.js 22](https://nodejs.org/) とnpm
 - Git
 - 実AIを使う場合は、認証済みのCodex CLI / Claude Code CLI、または対応ProviderのAPI key
@@ -247,7 +247,7 @@ Task履歴、設定、実行状態は端末内に保存します。ただし、�
 
 ### どのOSで動作しますか？
 
-macOS、Windows、Linuxを対象にしています。ソースからの起動手順は[3分で起動](#3分で起動)、現在公開中のビルド済み配布物は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)で確認できます。
+macOSとWindowsを対象にしています。Linux版の配布は終了しました。ソースからの起動手順は[3分で起動](#3分で起動)、現在公開中のビルド済み配布物は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)で確認できます。
 
 ## Contributing
 
