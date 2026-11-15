@@ -22,6 +22,7 @@ import {
   type DesktopControlSessionVariables,
 } from './desktop-control';
 import {
+  approvalWorkerRequester,
   desktopControlSessionReadScope,
   desktopControlTeamCursors,
   desktopControlWorker,
@@ -828,6 +829,16 @@ export function registerCommandRunnerTool(
           'Team の Worker のデスクトップ操作は、承認カードかフルアクセスで許可された時だけ、その Worker として実行します。',
         );
       }
+      // Whose run this is, for its timeline row (display only, decided after every check above and
+      // from Main's own binding of the call, never from the argv): the Team Worker the call was
+      // prepared for, named as its approval card names it, or the Leader when the run draws the
+      // Leader's cursor (it runs in Main's session of the Task), as on the Leader's card.
+      const runRequester: DesktopApprovalAction['requester'] =
+        caller !== undefined
+          ? approvalWorkerRequester(desktopControlWorkers.get(spec), undefined)
+          : desktopSession === undefined
+            ? undefined
+            : { leader: true };
       // The windows a desktop-control run reported, as the executable printed them, name those
       // windows on the Task's later cards (display only).
       const rememberWindows = (): void => {
@@ -857,7 +868,9 @@ export function registerCommandRunnerTool(
             );
           command.persistence.beginCommand(
             commandId,
-            roots === undefined ? undefined : desktopControlRunAction(_context.taskId, spec.argv),
+            roots === undefined
+              ? undefined
+              : desktopControlRunAction(_context.taskId, spec.argv, runRequester),
           );
           // Recorded as the run starts, whether or not it then succeeds: a desktop operation
           // whose outcome is unknown is the one most dangerous to repeat.
@@ -1222,19 +1235,29 @@ export function commandToolTruncated(
  * card and the app-wide Task grant read (`desktopControlSessionReadScope`), for its timeline row
  * only: a run the app-wide grant allowed has no card that names them. Read as the run starts, so
  * before the run itself can change those records. Nothing decides on it; a run that only prints
- * names no part, and one whose parts cannot be read is shown as not confirmed, as before.
+ * names no part, and one whose parts cannot be read is shown as not confirmed, as before. With
+ * `requester` (who asked, as Main bound the call), the row also says whose run it was, a run that
+ * only prints included; without it the row is as before.
  */
 export function desktopControlRunAction(
   taskId: string,
   argv: readonly string[],
+  requester?: DesktopApprovalAction['requester'],
 ): DesktopApprovalAction | undefined {
   try {
-    if (desktopControlArgvIsInert(argv)) return undefined;
+    const whose = requester === undefined ? {} : { requester };
+    if (desktopControlArgvIsInert(argv))
+      return requester === undefined
+        ? undefined
+        : { ...desktopControlApprovalAction(argv, { names: false }), ...whose };
     const readScope = desktopControlSessionReadScope(taskId, argv);
-    return desktopControlApprovalAction(
-      argv,
-      readScope === null ? { taskId, names: false } : { taskId, ...readScope },
-    );
+    return {
+      ...desktopControlApprovalAction(
+        argv,
+        readScope === null ? { taskId, names: false } : { taskId, ...readScope },
+      ),
+      ...whose,
+    };
   } catch {
     // Never in the way of the run: its row is then described without the names, as before.
     return undefined;

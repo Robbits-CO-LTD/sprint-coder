@@ -541,6 +541,88 @@ describe('desktop-control history and timeline', () => {
     vi.unstubAllGlobals();
   });
 
+  it('says on the run’s row whose run it was, small in its head, and nobody on an older row', () => {
+    const command: CommandCardState['command'] = {
+      id: 'command-3',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-3',
+      specDigest: 'digest',
+      executable: 'C:\\desktop-control.exe',
+      argv: ['click', '@s1:e1'],
+      cwd: 'C:\\workspace',
+      envDelta: {},
+      purpose: 'ボタンを押す',
+      risk: 'high',
+      state: 'exited',
+      pid: 1,
+      exitCode: 0,
+      signal: null,
+      outputBytes: 0,
+      truncated: false,
+      createdAt: '2026-11-10T00:00:00.000Z',
+      startedAt: '2026-11-10T00:00:00.000Z',
+      finishedAt: '2026-11-10T00:00:01.000Z',
+    };
+    const click: DesktopAction = {
+      ...typing,
+      title: 'クリックします',
+      text: undefined,
+      textRole: undefined,
+    } as DesktopAction;
+    const row = (desktopAction: DesktopAction | undefined, approvalAction?: DesktopAction) =>
+      renderToStaticMarkup(
+        <CommandCard
+          taskId="task-1"
+          card={{
+            command: desktopAction === undefined ? command : { ...command, desktopAction },
+            tail: { lines: [], lastOutputSeq: 0 },
+          }}
+          desktopAction={approvalAction}
+        />,
+      );
+    const name = 'desktop-operator-cu-counter';
+    // A Worker's run (one allowed without a card, so only Main's record names it): the same face
+    // and color as its approval card, and its name, read whole from the title and by a reader.
+    const worker = row({ ...click, requester: { label: name, colorIndex: 2 } });
+    const head = worker.slice(worker.indexOf('command-card__head'), worker.indexOf('</header>'));
+    expect(head).toContain('data-testid="command-desktop-requester"');
+    expect(head).toContain('data-requester-color="2"');
+    expect(head).toContain(
+      `<span class="w-avatar" aria-hidden="true" data-worker-color="${desktopControlWorkerAccent(2)}" data-ink="light" data-size="small"`,
+    );
+    expect(head).toContain(`title="依頼した Worker: ${name}"`);
+    expect(head).toContain(
+      `<span class="sr-only">依頼した Worker: </span><span class="command-card__requester-name">${name}</span>`,
+    );
+    // Nothing else of the row changed: no band, no new section.
+    expect(worker).not.toContain('approval-requester');
+    expect(worker.replace(/<span class="command-card__requester".*?<\/span><\/span>/u, '')).toBe(
+      row(click),
+    );
+    // Named by its card when Main's record has nobody (a row started before this was recorded).
+    const fromCard = row(click, { ...click, requester: { label: name, colorIndex: 2 } });
+    expect(fromCard).toContain('data-requester-color="2"');
+    // A Worker Main names without a cursor color is drawn neutral, as on its card.
+    expect(row({ ...click, requester: { label: 'Worker' } })).toContain(
+      'data-requester-color="none"',
+    );
+    expect(card({ ...typing, requester: { label: 'Worker' } })).toContain(
+      'data-requester-color="none"',
+    );
+    // The Leader's run is not named on its row (every run of a Task without a Team is the
+    // Leader's); an older row, a run that drew no cursor, and a plain command: as before.
+    expect(row({ ...click, requester: { leader: true } })).toBe(row(click));
+    for (const html of [
+      row({ ...click, requester: { leader: true } }),
+      row(click),
+      row(undefined),
+    ]) {
+      expect(html).not.toContain('command-desktop-requester');
+      expect(html).not.toContain('w-avatar');
+    }
+  });
+
   it('tells apart same-titled windows by id, names lists of everything, and names each details', async () => {
     const withId = card({
       ...typing,

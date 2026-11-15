@@ -34,7 +34,7 @@ import {
   isDesktopControlExecutable,
 } from './desktop-control';
 import { desktopControlApprovalAction } from './desktop-control-display';
-import { desktopControlRoleLabel, desktopControlSessionReadScope } from './desktop-control-session';
+import { desktopControlSessionReadScope } from './desktop-control-session';
 import {
   desktopAppGrantCovering,
   desktopAppGrantOffer,
@@ -182,19 +182,8 @@ export function sandboxProfileForToolAuthorization(
     : ('read-only' as const);
 }
 
-/**
- * How a card names the Team Worker whose call it is for (display only): as its desktop-control
- * cursor names and colors it when it holds the mark, or else by its role in the Team's own record,
- * cleaned and cut like a cursor label, with no color. A Worker Main cannot name (no record, or an
- * empty role) is still named as a Worker, so its card never reads as the Leader's.
- */
-export function approvalWorkerRequester(
-  mark: Readonly<{ label: string; colorIndex: number }> | undefined,
-  role: string | undefined,
-): ApprovalRequester {
-  if (mark !== undefined) return { label: mark.label, colorIndex: mark.colorIndex };
-  return { label: desktopControlRoleLabel(role ?? '') || 'Worker' };
-}
+// Kept beside the cursor labels it cuts names like, where the command tool reads it too.
+export { approvalWorkerRequester } from './desktop-control-session';
 
 export class ApprovalCoordinator {
   private readonly waiters = new Map<string, Waiter>();
