@@ -740,15 +740,17 @@ export function registerCommandRunnerTool(
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
       const toolOutput = { stdout: '', stderr: '', truncated: false };
       // Only a call prepared as the shipped desktop control and allowed on its own card ("allow
-      // once", or "allow for the Task" kept for exactly this command) may start outside the
-      // command sandbox, and the runner checks the bytes again before it starts. So may one that
-      // only prints the bundled guides, help, the version or its own status, which the
-      // ApprovalCoordinator allows without a card; that is judged again here on the same sealed
-      // argv. Every other command, explicitly allowed or not, gets no roots and stays inside. A
-      // preset or policy allow never does; the Stop stays the same.
+      // once", or "allow for the Task" kept for exactly this command), or allowed by the Task's
+      // Full access preset (the ApprovalCoordinator's `access_preset_full`, the owner's decision of
+      // 2026-11-15), may start outside the command sandbox, and the runner checks the bytes again
+      // before it starts. So may one that only prints the bundled guides, help, the version or its
+      // own status, which the ApprovalCoordinator allows without a card; that is judged again here
+      // on the same sealed argv. Every other command, explicitly allowed or not, gets no roots and
+      // stays inside. Any other preset or policy allow never does; the Stop stays the same.
       const roots =
         control.authorizationDecision === 'allow_once' ||
         control.authorizationDecision === 'allow_task' ||
+        control.desktopControlAuthority === 'access_preset_full' ||
         desktopControlArgvIsInert(spec.argv)
           ? desktopControlRoots.get(spec)
           : undefined;
@@ -823,7 +825,7 @@ export function registerCommandRunnerTool(
         failUnstarted();
         throw new CommandRunnerError(
           'EXECUTION_SPEC_INVALID',
-          'Team の Worker のデスクトップ操作は、承認カードで許可された時だけ、その Worker として実行します。',
+          'Team の Worker のデスクトップ操作は、承認カードかフルアクセスで許可された時だけ、その Worker として実行します。',
         );
       }
       // The windows a desktop-control run reported, as the executable printed them, name those

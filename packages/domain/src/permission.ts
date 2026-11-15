@@ -358,6 +358,13 @@ const AUTO_WORKSPACE_EDIT_RULES: readonly PermissionRule[] = [
  */
 export const FULL_PRESET_DISCLOSURE_AUDIT_REASON = 'preset_full_disclosure';
 
+/**
+ * Audit reason for the Full preset's own allow rules (Workspace and external writes, commands,
+ * network, opening). Exported so Main can tell "the Full preset allowed this" apart from a
+ * remembered grant or any other allow without matching a bare string. Only FULL_RULES carry it.
+ */
+export const FULL_PRESET_AUDIT_REASON = 'preset_full';
+
 const FULL_RULES: readonly PermissionRule[] = [
   ...SAFE_AUTO_RULES,
   // Full access means the user already accepted that this Task's Workspace files reach the
@@ -378,37 +385,37 @@ const FULL_RULES: readonly PermissionRule[] = [
     capability: 'workspace.write',
     resourceSet: { kind: 'path-classification', classifications: ['workspace'] },
     operations: ['write'],
-    auditReason: 'preset_full',
+    auditReason: FULL_PRESET_AUDIT_REASON,
   },
   {
     capability: 'filesystem.external.read',
     resourceSet: { kind: 'path-classification', classifications: ['external'] },
     operations: ['read'],
-    auditReason: 'preset_full',
+    auditReason: FULL_PRESET_AUDIT_REASON,
   },
   {
     capability: 'filesystem.external.write',
     resourceSet: { kind: 'path-classification', classifications: ['external'] },
     operations: ['write'],
-    auditReason: 'preset_full',
+    auditReason: FULL_PRESET_AUDIT_REASON,
   },
   {
     capability: 'shell.execute',
     resourceSet: { kind: 'all' },
     operations: ['execute'],
-    auditReason: 'preset_full',
+    auditReason: FULL_PRESET_AUDIT_REASON,
   },
   {
     capability: 'network.fetch',
     resourceSet: { kind: 'all' },
     operations: ['fetch'],
-    auditReason: 'preset_full',
+    auditReason: FULL_PRESET_AUDIT_REASON,
   },
   {
     capability: 'external.open',
     resourceSet: { kind: 'all' },
     operations: ['open'],
-    auditReason: 'preset_full',
+    auditReason: FULL_PRESET_AUDIT_REASON,
   },
 ];
 

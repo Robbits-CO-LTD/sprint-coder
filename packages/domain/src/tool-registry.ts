@@ -121,6 +121,12 @@ export type ToolExecutionControl = Readonly<{
    * any window id it names must still belong to when the executable runs.
    */
   desktopControlExpectedWindowOwner?: string;
+  /**
+   * `'access_preset_full'` for a desktop-control run the Task's Full access preset allowed without
+   * a card (the owner's decision of 2026-11-15). Not a decision of the person on a card, so it is
+   * never carried as `authorizationDecision`.
+   */
+  desktopControlAuthority?: 'access_preset_full';
 }>;
 
 export type ToolResourceClaim = Readonly<{

@@ -71,6 +71,8 @@ export type ToolAuthorizationDecision = Readonly<{
   userInputSelection?: number;
   /** See `ToolExecutionControl.desktopControlExpectedWindowOwner`. */
   desktopControlExpectedWindowOwner?: string;
+  /** See `ToolExecutionControl.desktopControlAuthority`. */
+  desktopControlAuthority?: 'access_preset_full';
 }>;
 export type ToolAuthorizer = (
   request: ToolAuthorizationRequest,
@@ -433,6 +435,9 @@ export class ToolBroker {
             : {
                 desktopControlExpectedWindowOwner: authorization.desktopControlExpectedWindowOwner,
               }),
+          ...(authorization.desktopControlAuthority === undefined
+            ? {}
+            : { desktopControlAuthority: authorization.desktopControlAuthority }),
           ...(entry.supportsBackground
             ? { onBackgroundCompletion: observeBackgroundCompletion }
             : {}),

@@ -297,7 +297,7 @@ describe('managed command root selection (issue #840)', () => {
 });
 
 describe('desktop control Workspace roots', () => {
-  it('hands the Turn roots to the runner only for desktop control allowed on its card or touching no other app', async () => {
+  it('hands the Turn roots to the runner only for desktop control allowed on its card, by Full access or touching no other app', async () => {
     const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-a-'));
     const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-b-'));
     roots.push(primary, secondary);
@@ -330,6 +330,8 @@ describe('desktop control Workspace roots', () => {
     const sessions = new ManagedCommandSessions(managedRunner);
     // What the person chose on the card; `undefined` is a preset or policy allow with no card.
     let approvalDecision: 'allow_once' | 'allow_task' | undefined = 'allow_once';
+    // Set by the ApprovalCoordinator for a desktop-control run the Full access preset allowed.
+    let fullAccess = false;
     const broker = new ToolBroker(
       registry,
       () => 1,
@@ -338,6 +340,7 @@ describe('desktop control Workspace roots', () => {
         reason: 'test',
         beforeExecute: () => true,
         ...(approvalDecision === undefined ? {} : { approvalDecision }),
+        ...(fullAccess ? { desktopControlAuthority: 'access_preset_full' as const } : {}),
       }),
     );
     registerCommandRunnerTool(broker, managedRunner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions);
@@ -386,13 +389,22 @@ describe('desktop control Workspace roots', () => {
       await dispatchAll('task');
       expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
 
-      // A preset or policy allow never lets a command out of the sandbox.
+      // Any other preset or policy allow never lets a command out of the sandbox.
       approvalDecision = undefined;
       managedRun.mockClear();
       directRun.mockClear();
       await dispatchAll('preset');
       for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
         expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
+
+      // The Full access preset's allow of a desktop-control run does, with no card.
+      fullAccess = true;
+      managedRun.mockClear();
+      directRun.mockClear();
+      await dispatchAll('full');
+      expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
+      expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+      fullAccess = false;
 
       // A run that only prints the guides or the status needs no card, and runs outside the
       // sandbox with the roots, judged again on the sealed argv.
@@ -408,8 +420,9 @@ describe('desktop control Workspace roots', () => {
       // Any other command never gets the roots, even when the person allowed it on its card, or
       // when it has the same arguments as a desktop-control status check.
       desktop.mockReturnValue(false);
-      for (const decision of ['allow_once', 'allow_task', undefined] as const) {
-        approvalDecision = decision;
+      for (const decision of ['allow_once', 'allow_task', undefined, 'full'] as const) {
+        approvalDecision = decision === 'full' ? undefined : decision;
+        fullAccess = decision === 'full';
         managedRun.mockClear();
         directRun.mockClear();
         await dispatchAll(`ordinary-${decision ?? 'preset'}`);

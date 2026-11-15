@@ -8,6 +8,7 @@ import {
   createToolDefinition,
   createToolId,
   executionSpecDigest,
+  type AccessPreset,
   type Capability,
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
@@ -296,10 +297,13 @@ function createHarness(input?: {
     turnId: string,
     callId: string,
   ) => Readonly<{ label: string; colorIndex?: number }> | undefined;
+  /** The Task's stored access preset. Omitted, the coordinator is told none, as a fail-closed Main. */
+  accessPreset?: AccessPreset;
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
   let policyEpoch = 7;
+  let accessPreset = input?.accessPreset;
   const activeTurns = new Set(['task-1\0turn-1', 'task-1\0turn-2', 'task-1\0turn-3']);
   const coordinator = new ApprovalCoordinator({
     persistence,
@@ -317,6 +321,9 @@ function createHarness(input?: {
     ...(input?.workerRequesterFor === undefined
       ? {}
       : { workerRequesterFor: input.workerRequesterFor }),
+    ...(accessPreset === undefined
+      ? {}
+      : { accessPresetFor: () => accessPreset ?? ('ask' as const) }),
     publish: (approval: StoredApproval) => {
       persistence.timeline.push(`published:${approval.id}`);
       published.push(approval);
@@ -328,6 +335,9 @@ function createHarness(input?: {
     published,
     setPolicyEpoch: (epoch: number) => {
       policyEpoch = epoch;
+    },
+    setAccessPreset: (preset: AccessPreset) => {
+      accessPreset = preset;
     },
     endTurn: (turnId: string) => activeTurns.delete(`task-1\0${turnId}`),
   };
@@ -2255,35 +2265,315 @@ describe('ApprovalCoordinator desktop control card', () => {
     beforeExecute: () => true,
   });
 
-  it('raises a card for desktop control even when the preset allows, and records the person', async () => {
-    const harness = createHarness({ evaluatePermission: policyAllow });
-    const desktop = vi
-      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
-      .mockReturnValue(true);
-    try {
-      await withSpecs(async (prepare) => {
-        const pending = harness.coordinator.authorizeTool(
-          request(await prepare(['snapshot']), 'desktop-once'),
-        );
-        const approval = await waitForPublished(harness);
-        harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
-        await expect(pending).resolves.toMatchObject({
-          decision: 'allow',
-          approvalDecision: 'allow_once',
-        });
-
-        // Any other executable keeps the preset's silent allow, with no decision of the person.
-        desktop.mockReturnValue(false);
-        const silent = await harness.coordinator.authorizeTool(
-          request(await prepare(['--version']), 'other-silent'),
-        );
-        expect(silent.decision).toBe('allow');
-        expect(silent).not.toHaveProperty('approvalDecision');
-        expect(harness.published).toHaveLength(1);
+  it('raises a card for desktop control under ask and auto even when a policy allow says Full, and records the person', async () => {
+    // Under ask and auto Main never hands a command allow on (it is upgraded to a card), but even
+    // an allow that reads as the Full preset's does not skip the card unless the Task's stored
+    // preset is Full access now; nor does it when Main does not say which preset is stored.
+    for (const accessPreset of [undefined, 'ask', 'auto'] as const) {
+      const harness = createHarness({
+        evaluatePermission: policyAllow,
+        ...(accessPreset === undefined ? {} : { accessPreset }),
       });
-    } finally {
-      desktop.mockRestore();
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          const pending = harness.coordinator.authorizeTool(
+            request(await prepare(['snapshot']), 'desktop-once'),
+          );
+          const approval = await waitForPublished(harness);
+          harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+          const decided = await pending;
+          expect(decided).toMatchObject({ decision: 'allow', approvalDecision: 'allow_once' });
+          expect(decided).not.toHaveProperty('desktopControlAuthority');
+
+          // Any other executable keeps the preset's silent allow, with no decision of the person.
+          desktop.mockReturnValue(false);
+          const silent = await harness.coordinator.authorizeTool(
+            request(await prepare(['--version']), 'other-silent'),
+          );
+          expect(silent.decision).toBe('allow');
+          expect(silent).not.toHaveProperty('approvalDecision');
+          expect(silent).not.toHaveProperty('desktopControlAuthority');
+          expect(harness.published).toHaveLength(1);
+        });
+      } finally {
+        desktop.mockRestore();
+      }
     }
+  });
+
+  describe('under Full access (the owner’s decision of 2026-11-15)', () => {
+    const foreground: string[][] = [
+      ['--headed', 'click', '@s1:e1'],
+      ['focus-window', '--window-id', 'w-1'],
+      ['press', 'return'],
+      ['type', '@s1:e1', 'ABC'],
+      ['mouse-click', '--xy', '10,10'],
+      ['launch', 'charmap', '--activate'],
+      ['close-app', 'charmap'],
+    ];
+    const everyKind: string[][] = [
+      // Reads, of one window and of the whole screen.
+      ['snapshot', '--window-id', 'w-1', '-i'],
+      ['list-windows'],
+      ['screenshot', '--window-id', 'w-1'],
+      // Background operations.
+      ['click', '@s1:e1'],
+      ['set-value', '@s1:e1', 'ABC'],
+      ['move-window', '--window-id', 'w-1', '--x', '1', '--y', '1'],
+      // Launches.
+      ['launch', 'charmap'],
+      ['launch', 'chrome'],
+      ...foreground,
+    ];
+
+    it('runs every kind of desktop-control run without a card, recorded as the preset’s allow', async () => {
+      const harness = createHarness({ evaluatePermission: policyAllow, accessPreset: 'full' });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      const resolved = vi.spyOn(harness.persistence, 'resolveApproval');
+      try {
+        await withSpecs(async (prepare) => {
+          for (const argv of everyKind) {
+            const decided = await harness.coordinator.authorizeTool(
+              request(await prepare(argv), `full-${argv.join('-')}`),
+            );
+            expect(decided, argv.join(' ')).toMatchObject({
+              decision: 'allow',
+              desktopControlAuthority: 'access_preset_full',
+            });
+            // Nobody decided it on a card: no allow_once or allow_task is made up for it, and no
+            // window owner (that belongs to the app-wide grant only).
+            expect(decided, argv.join(' ')).not.toHaveProperty('approvalDecision');
+            expect(decided, argv.join(' ')).not.toHaveProperty('desktopControlExpectedWindowOwner');
+            expect(decided.beforeExecute?.(), argv.join(' ')).toBe(true);
+          }
+          // A run that only prints keeps its own path, as under every preset.
+          const guide = await harness.coordinator.authorizeTool(
+            request(await prepare(['skills', 'get', 'desktop']), 'full-guide'),
+          );
+          expect(guide).toMatchObject({ decision: 'allow' });
+          expect(guide).not.toHaveProperty('desktopControlAuthority');
+          expect(harness.published).toHaveLength(0);
+          expect(harness.persistence.approvals.size).toBe(0);
+          expect(resolved).not.toHaveBeenCalled();
+          expect(harness.persistence.grants).toHaveLength(0);
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    });
+
+    it('runs a standard menu item and a browser window’s parts without a card', async () => {
+      const stateRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-full-'));
+      const write = async (snapshot: string, inner: unknown) => {
+        await mkdir(join(stateRoot, 'snapshots', snapshot), { recursive: true });
+        await writeFile(
+          join(stateRoot, 'snapshots', snapshot, 'refmap.json'),
+          JSON.stringify({ inner }),
+        );
+      };
+      const part = (app: string, pid: number, window: string) => ({
+        pid,
+        process_instance: `windows-proc-v1:${pid}:1`,
+        role: 'button',
+        name: 'OK',
+        source_app: app,
+        source_window_id: window,
+        source_window_title: app,
+      });
+      await write('smenu', {
+        '@e1': {
+          ...part('charmap.exe', 100, 'w-1'),
+          role: 'menuitem',
+          name: '終了(X)',
+          source_surface: 'menubar',
+          proven_in_menu: {
+            steps: [
+              { name: 'ファイル(F)', position: 0, submenu: true },
+              { name: '終了(X)', position: 3, submenu: false },
+            ],
+            command_id: 1009,
+          },
+        },
+      });
+      await write('schrome', { '@e1': { ...part('chrome.exe', 400, 'w-4'), role: 'link' } });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      const folder = vi
+        .spyOn(desktopControlModule, 'desktopControlStateFolder')
+        .mockReturnValue(stateRoot);
+      try {
+        await withSpecs(async (prepare) => {
+          for (const accessPreset of ['ask', 'full'] as const) {
+            const harness = createHarness({ evaluatePermission: policyAllow, accessPreset });
+            for (const argv of [
+              ['click', '@smenu:e1'],
+              ['click', '@schrome:e1'],
+              ['type', '@schrome:e1', 'ABC'],
+            ]) {
+              harness.published.length = 0;
+              const pending = harness.coordinator.authorizeTool(
+                request(await prepare(argv), `${accessPreset}-${argv.join('-')}`),
+              );
+              if (accessPreset === 'full') {
+                await expect(pending, argv.join(' ')).resolves.toMatchObject({
+                  decision: 'allow',
+                  desktopControlAuthority: 'access_preset_full',
+                });
+                expect(harness.published).toHaveLength(0);
+              } else {
+                // The same runs under ask still get their card.
+                const approval = await waitForPublished(harness);
+                harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+                await expect(pending).resolves.toMatchObject({ decision: 'deny' });
+              }
+            }
+          }
+        });
+      } finally {
+        desktop.mockRestore();
+        folder.mockRestore();
+        await rm(stateRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('runs a Team Worker’s desktop-control run without a card as well', async () => {
+      const harness = createHarness({
+        evaluatePermission: policyAllow,
+        accessPreset: 'full',
+        desktopControlWorkerFor: (_taskId, _turnId, callId) =>
+          callId.startsWith('w1:') ? { label: '確認係', colorIndex: 1 } : 'leader',
+        workerRequesterFor: (_taskId, _turnId, callId) =>
+          callId.startsWith('w1:') ? { label: '確認係', colorIndex: 1 } : undefined,
+      });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          for (const argv of [['click', '@s1:e1'], ['type', '@s1:e1', 'ABC'], ['list-windows']])
+            await expect(
+              harness.coordinator.authorizeTool(
+                request(await prepare(argv), `w1:${argv.join('-')}`),
+              ),
+            ).resolves.toMatchObject({
+              decision: 'allow',
+              desktopControlAuthority: 'access_preset_full',
+            });
+          expect(harness.published).toHaveLength(0);
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    });
+
+    it('keeps every deny of the policy', async () => {
+      const harness = createHarness({ evaluatePermission: () => 'deny', accessPreset: 'full' });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          for (const argv of [['click', '@s1:e1'], ['launch', 'charmap'], ...foreground])
+            await expect(
+              harness.coordinator.authorizeTool(
+                request(await prepare(argv), `deny-${argv.join('-')}`),
+              ),
+            ).resolves.toMatchObject({ decision: 'deny' });
+          expect(harness.published).toHaveLength(0);
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    });
+
+    it('takes no other allow for the preset’s: a narrow allow, a reviewer’s or one with another reason gets its card', async () => {
+      let reason = 'narrow_allow';
+      const harness = createHarness({
+        evaluatePermission: () => ({ decision: 'allow', reason, beforeExecute: () => true }),
+        accessPreset: 'full',
+      });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          for (const next of ['narrow_allow', 'preset_auto_safe', 'reviewer_allow_once']) {
+            reason = next;
+            harness.published.length = 0;
+            const pending = harness.coordinator.authorizeTool(
+              request(await prepare(['press', 'return']), `other-${next}`),
+            );
+            const approval = await waitForPublished(harness);
+            harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+            await expect(pending).resolves.toMatchObject({ decision: 'deny' });
+          }
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    });
+
+    it('withdraws the allow before the run once the Task leaves Full access, even within the Turn', async () => {
+      let policyAllows = true;
+      const harness = createHarness({
+        evaluatePermission: () => ({
+          decision: 'allow',
+          reason: 'preset_full',
+          beforeExecute: () => policyAllows,
+        }),
+        accessPreset: 'full',
+      });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          const spec = await prepare(['click', '@s1:e1']);
+          const first = await harness.coordinator.authorizeTool(request(spec, 'full-first'));
+          expect(first).toMatchObject({ desktopControlAuthority: 'access_preset_full' });
+          expect(first.beforeExecute?.()).toBe(true);
+
+          // Back to ask within the Turn: the stored preset is no longer Full, so the allow already
+          // given is withdrawn before its run starts, whatever the policy's own check says.
+          harness.setAccessPreset('ask');
+          expect(first.beforeExecute?.()).toBe(false);
+          // And the next run is not allowed without a card.
+          const next = harness.coordinator.authorizeTool(request(spec, 'after-ask'));
+          const approval = await waitForPublished(harness);
+          harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+          await expect(next).resolves.toMatchObject({ decision: 'deny' });
+
+          // The same for auto.
+          harness.setAccessPreset('auto');
+          harness.published.length = 0;
+          const auto = harness.coordinator.authorizeTool(request(spec, 'after-auto'));
+          harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'deny'));
+          await expect(auto).resolves.toMatchObject({ decision: 'deny' });
+
+          // Back on Full, each of the policy's check, the epoch and the Turn withdraws it too.
+          harness.setAccessPreset('full');
+          const again = await harness.coordinator.authorizeTool(request(spec, 'full-again'));
+          expect(again.beforeExecute?.()).toBe(true);
+          policyAllows = false;
+          expect(again.beforeExecute?.()).toBe(false);
+          policyAllows = true;
+          harness.setPolicyEpoch(8);
+          expect(again.beforeExecute?.()).toBe(false);
+          harness.setPolicyEpoch(7);
+          expect(again.beforeExecute?.()).toBe(true);
+          harness.endTurn('turn-1');
+          expect(again.beforeExecute?.()).toBe(false);
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    });
   });
 
   it('reuses only a Task grant given on the card of this exact desktop-control command', async () => {
@@ -2395,7 +2685,8 @@ describe('ApprovalCoordinator desktop control card', () => {
           expect(desktopGuide.beforeExecute?.()).toBe(false);
           harness.setPolicyEpoch(7);
 
-          // Reading the screen, operating, a batch or a shared option still asks every time.
+          // Outside Full access, reading the screen, operating, a batch or a shared option still
+          // asks every time.
           for (const argv of [['list-windows'], ['launch', 'notepad'], ['--headed', 'status']]) {
             const asked = harness.coordinator.authorizeTool(
               request(await prepare(argv), `asked-${argv.join('-')}`),
@@ -2426,7 +2717,7 @@ describe('ApprovalCoordinator desktop control card', () => {
     }
   });
 
-  it('asks every time for a run that uses the foreground, whatever Task grant exists', async () => {
+  it('asks every time outside Full access for a run that uses the foreground, whatever Task grant exists', async () => {
     let reason = 'remembered_grant';
     const harness = createHarness({
       evaluatePermission: () => ({ decision: 'allow', reason, beforeExecute: () => true }),

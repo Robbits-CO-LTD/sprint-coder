@@ -24,7 +24,7 @@ export function accessDescription(
   if (preset === 'ask')
     return `Workspace内のファイルの読み取り・一覧も含め、権限が必要な操作は実行前に確認します（「Task中許可」を選ぶと、このTaskでは同じ操作を確認なしで続けます）。${sandbox}`;
   if (preset === 'full')
-    return `変更・コマンド・標準入力書き込みを確認なしで実行しますが、credential・アプリ領域・署名鍵の保護と監査は維持されます。${sandbox}`;
+    return `変更・コマンド・標準入力書き込みと、デスクトップ操作（ほかのアプリの窓を読む・押す・入力する・アプリの起動）を確認なしで実行しますが、credential・アプリ領域・署名鍵の保護と監査は維持されます。${sandbox}`;
   return `Workspace内のファイルの作成・編集は自動で許可します。コマンドは実行前に確認します。それ以外の操作は自動レビューが安全と判定したものだけ自動で許可し、残りは確認します。${sandbox}`;
 }
 
