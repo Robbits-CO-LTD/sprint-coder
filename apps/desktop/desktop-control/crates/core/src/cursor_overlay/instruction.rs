@@ -1,6 +1,11 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{CursorOverlayConfig, CursorPhase};
 use crate::{AdapterError, ErrorCode, Point, Rect};
 use serde::{Deserialize, Serialize};
+
+/// The longest window id an instruction carries. A platform's window id is a
+/// short handle token (`w-<number>` on Windows); anything longer is not one.
+const MAX_CURSOR_WINDOW_ID_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +22,12 @@ pub struct CursorOverlayInstruction {
     phase: CursorPhase,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pointer: bool,
+    /// The window the action works in, so a renderer can draw the cursor at
+    /// that window's height in the stacking order rather than above every
+    /// window: hidden when the window is covered, seen where it is seen.
+    /// Absent when the action names no window (a bare coordinate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window: Option<String>,
 }
 
 impl CursorOverlayInstruction {
@@ -40,7 +51,19 @@ impl CursorOverlayInstruction {
             target: None,
             phase: CursorPhase::Travel,
             pointer: false,
+            window: None,
         })
+    }
+
+    /// Names the window the action works in. An empty or over-long id is
+    /// dropped rather than sent, the same way an unusable target is.
+    pub fn with_window(mut self, window: Option<String>) -> Self {
+        self.window = window.filter(|id| !id.is_empty() && id.len() <= MAX_CURSOR_WINDOW_ID_BYTES);
+        self
+    }
+
+    pub fn window(&self) -> Option<&str> {
+        self.window.as_deref()
     }
 
     pub const fn with_phase(mut self, phase: CursorPhase) -> Self {
@@ -85,6 +108,16 @@ impl CursorOverlayInstruction {
         self.destination.validate()?;
         if let Some(drag_from) = &self.drag_from {
             drag_from.validate()?;
+        }
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > MAX_CURSOR_WINDOW_ID_BYTES)
+        {
+            return Err(AdapterError::new(
+                ErrorCode::InvalidArgs,
+                "Invalid cursor overlay window id",
+            ));
         }
         Ok(())
     }

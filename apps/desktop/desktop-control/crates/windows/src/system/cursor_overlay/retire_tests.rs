@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::retirement_targets;
 use crate::system::cursor_overlay::pipe_name::{
     PROTOCOL_GENERATIONS, pipe_name, pipe_name_for_generation,
@@ -13,11 +14,15 @@ fn root() -> &'static Path {
 
 const SESSION: &str = "s0000001";
 
-/// While the ledger holds only the live generation, there is no earlier renderer to
-/// clear and the sweep costs an enable nothing.
+/// The shipped ledger has been bumped once (`w2`, the instruction's window),
+/// so the sweep clears exactly the one earlier generation and never the live
+/// one.
 #[test]
-fn the_shipped_ledger_gives_the_sweep_nothing_to_do() {
-    assert!(retirement_targets(root(), SESSION, &PROTOCOL_GENERATIONS).is_empty());
+fn the_shipped_ledger_sweeps_the_one_generation_it_displaced() {
+    assert_eq!(
+        retirement_targets(root(), SESSION, &PROTOCOL_GENERATIONS),
+        vec![pipe_name_for_generation(root(), SESSION, None, "w1")]
+    );
 }
 
 /// What a bump must produce: the displaced generation's name becomes a target,

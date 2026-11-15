@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! `type --interval-ms`: types text one keystroke unit at a time on a steady
 //! clock, inside one command. The first unit is a full ref action: strict
 //! resolution, actionability, cursor travel and verification, and a headed one
@@ -52,6 +53,9 @@ pub(crate) fn execute(
         let mut landed = None;
         let delivered = match &burst {
             Some(burst) => deliver(adapter, burst, request, budget(unit)).map(|_| {
+                let _anchor = crate::cursor_overlay::anchor_window(
+                    burst.entry.source.source_window_id.clone(),
+                );
                 crate::ref_action::presentation::move_caret(adapter, context, &burst.handle);
             }),
             None => execute_landing(

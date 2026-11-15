@@ -182,6 +182,11 @@ fn enabled_cursor_moves_before_dispatch_then_clicks_after_it() {
         "the click effect lands after dispatch confirms"
     );
     assert_eq!(click.target().map(|rect| rect.width), Some(20.0));
+    assert_eq!(
+        (travel.window(), click.window()),
+        (Some("w-1"), Some("w-1")),
+        "both name the window the ref was captured in, so the cursor is drawn at its height"
+    );
     assert_eq!(presented[0].label(), Some("Opening menu"));
     assert_eq!(
         *adapter.events.lock().unwrap(),

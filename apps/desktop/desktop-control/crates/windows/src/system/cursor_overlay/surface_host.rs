@@ -43,6 +43,9 @@ pub(crate) struct SurfaceHost {
     rest: RestState,
     watch: session_state::EndWatch,
     topology: DisplayTopology,
+    /// The window the last instruction worked in, whose height in the
+    /// stacking order the cursor and caret are drawn at (`stacking`).
+    anchor: Option<isize>,
 }
 
 #[cfg(target_os = "windows")]
@@ -61,7 +64,24 @@ impl SurfaceHost {
             },
             watch: session_state::EndWatch::default(),
             topology,
+            anchor: None,
         })
+    }
+
+    /// Takes the window an instruction names as the one the cursor is
+    /// drawn with. An instruction that names none (a bare coordinate) puts
+    /// the cursor back above everything - except a caret-follow, which only
+    /// moves the caret an earlier instruction placed and keeps its window.
+    fn adopt_anchor(&mut self, control: &CursorOverlayControl) {
+        let Some(instruction) = control.instruction() else {
+            return;
+        };
+        let named = instruction
+            .window()
+            .and_then(|id| crate::system::window::window_ops::parse_window_id(id).ok());
+        if named.is_some() || instruction.phase() != CursorPhase::CaretFollow {
+            self.anchor = named;
+        }
     }
 
     pub(crate) fn idle_tick(&self) -> Duration {
@@ -82,6 +102,7 @@ impl SurfaceHost {
             self.presentation.style = style.clone();
         }
         self.adopt_label(control);
+        self.adopt_anchor(control);
         match control {
             CursorOverlayControl::Enable { .. } | CursorOverlayControl::Show { .. } => {
                 self.begin_reveal();
@@ -110,7 +131,8 @@ impl SurfaceHost {
                 phase @ (CursorPhase::Caret | CursorPhase::CaretFollow) => {
                     let accent = self.presentation.style.accent_rgb();
                     let follow = phase == CursorPhase::CaretFollow;
-                    self.caret.place(instruction.target(), accent, follow);
+                    self.caret
+                        .place(instruction.target(), accent, follow, self.anchor);
                 }
                 CursorPhase::Effect => {}
             },
@@ -285,7 +307,7 @@ impl SurfaceHost {
             fade::dim_region(&mut composed.surface, &card, self.card_opacity());
         }
         fade::dim_surface(&mut composed.surface, overlay_opacity);
-        self.window.raise();
+        self.window.place(self.anchor);
         let _ = self.window.present(
             composed.origin.x as i32,
             composed.origin.y as i32,
@@ -313,12 +335,19 @@ impl SurfaceHost {
     /// window procedure is a plain `DefWindowProcW` and handles no
     /// topology message, and a message handler could not reach this state
     /// anyway without sharing it across the callback boundary.
+    ///
+    /// A cursor still on screen is re-placed here too, so one left standing
+    /// between actions follows its window when the operator brings that
+    /// window to the front (a window brought in front of it hides it with
+    /// no help).
     pub(crate) fn rest(&mut self) {
         self.window.pump();
         self.topology.reprobe();
         if self.rest.resting {
             return;
         }
+        self.window.place(self.anchor);
+        self.caret.restack(self.anchor);
         if self.rest.quiet_since.elapsed() < schedule::rest_after(&self.presentation.style) {
             return;
         }
