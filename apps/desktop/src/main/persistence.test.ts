@@ -9811,6 +9811,8 @@ if (runsWithElectronAbi)
         state: 'completed',
       });
       expect(canceledApprovalIds(persistence, task.id)).toEqual([cardOne.id, cardTwo.id]);
+      // The Turn ended on its own, not by a stop, so its withdrawn cards are marked (issue #1285).
+      expect(persistence.snapshot(task.id).canceledTurnIds).toEqual([]);
       for (const callId of ['call-1', 'call-2'])
         expect(
           fixture.lifecycle.filter((event) => event.callId === callId).map(({ state }) => state),
@@ -9823,6 +9825,27 @@ if (runsWithElectronAbi)
         count: 0,
       });
       inspection.close();
+      persistence.close();
+    });
+
+    it('names a stopped Turn whose card was withdrawn in the snapshot, and no other (issue #1285)', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      // Stopped with nothing waiting: not named, there is nothing to leave unmarked.
+      const bare = startExecutingTurn(persistence, task.id);
+      persistence.cancelTurn(task.id, bare.turnId);
+      const turn = startExecutingTurn(persistence, task.id);
+      const fixture = turnApprovalFixture(persistence, task.id, turn.turnId);
+      const call = fixture.call('call-1');
+      const card = await fixture.cardFor('call-1');
+
+      persistence.cancelTurn(task.id, turn.turnId);
+      fixture.coordinator.turnEnded(task.id, turn.turnId, 'canceled');
+
+      await expect(call).rejects.toThrow('Tool authorization deny');
+      expect(fixture.executions()).toBe(0);
+      expect(persistence.getApproval(task.id, card.id)).toMatchObject({ state: 'canceled' });
+      expect(persistence.snapshot(task.id).canceledTurnIds).toEqual([turn.turnId]);
       persistence.close();
     });
 

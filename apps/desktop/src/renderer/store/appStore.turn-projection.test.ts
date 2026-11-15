@@ -20,6 +20,7 @@ function snapshot(lastSeq: number, turnId = 'turn-a', text = 'saved'): TurnSnaps
     activatedSkills: [],
     latestTurnDiff: null,
     interruptedTurnIds: [],
+    canceledTurnIds: [],
     autoDecisions: [],
     autoDecisionCounts: [],
   };
@@ -195,5 +196,53 @@ describe('Task Turn subscription projection boundary', () => {
       status: 'running',
       streamingContent: 'saved+during-cancel',
     });
+  });
+
+  it('keeps a card withdrawn unanswered in the history, and records a stopped Turn (issue #1285)', async () => {
+    const h = harness([Promise.resolve({ ...snapshot(2), canceledTurnIds: ['old-turn'] })]);
+    await useAppStore.getState().selectTask('task-a');
+    expect(useAppStore.getState().canceledTurnIdsByTask['task-a']).toEqual(['old-turn']);
+    const withdrawn = {
+      id: 'approval-1',
+      taskId: 'task-a',
+      turnId: 'turn-a',
+      callId: 'call-1',
+      state: 'canceled' as const,
+      decision: null,
+      revision: 1,
+      policyEpoch: 1,
+      toolName: 'run_command',
+      reason: 'Tool requests shell.execute',
+      target: 'desktop-control',
+      impact: 'execute',
+      execution: 'desktop-control launch',
+      risk: 'medium' as const,
+      capability: 'shell.execute' as const,
+      challenge: 'redacted',
+      createdAt,
+      expiresAt: createdAt,
+    };
+    const listener = h.subscriptions[0]!.listener;
+    listener({
+      type: 'approval.canceled',
+      taskId: 'task-a',
+      turnId: 'turn-a',
+      seq: 3,
+      approvalId: withdrawn.id,
+      approval: withdrawn,
+    });
+    expect(useAppStore.getState().approvalsByTask['task-a'] ?? []).toEqual([]);
+    expect(useAppStore.getState().approvalHistoryByTask['task-a']).toEqual([withdrawn]);
+    // A Turn that ended on its own is not recorded as stopped.
+    expect(useAppStore.getState().canceledTurnIdsByTask['task-a']).toEqual(['old-turn']);
+    listener({
+      type: 'turn.completed',
+      taskId: 'task-a',
+      turnId: 'turn-a',
+      seq: 4,
+      state: 'canceled',
+      diff: [],
+    });
+    expect(useAppStore.getState().canceledTurnIdsByTask['task-a']).toEqual(['old-turn', 'turn-a']);
   });
 });

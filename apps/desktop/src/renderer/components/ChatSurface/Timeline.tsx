@@ -26,7 +26,7 @@ import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
 import { ApprovalCard } from '../ApprovalCard';
 import { CommandCard } from '../CommandCard';
-import { ApprovalAuditRow } from '../ApprovalAuditRow';
+import { ApprovalAuditRow, ApprovalCanceledRow } from '../ApprovalAuditRow';
 import { AutoDecisionAuditGroup } from '../AutoDecisionAuditRow';
 import { TurnDiffCard } from '../TurnDiffCard';
 import { GeneratedImageCard, MissingGeneratedImageNotice } from '../GeneratedImageCard';
@@ -73,6 +73,8 @@ export function Timeline({
   const turnDiff = useAppStore((s) => s.turnDiffByTask[taskId]);
   const interruptedTurnIds =
     useAppStore((s) => s.interruptedTurnIdsByTask[taskId]) ?? NO_INTERRUPTED_TURNS;
+  const canceledTurnIds =
+    useAppStore((s) => s.canceledTurnIdsByTask[taskId]) ?? NO_INTERRUPTED_TURNS;
   const images = useAppStore((s) => s.imagesByTask[taskId]) ?? NO_IMAGES;
   const fileChanges = useAppStore((s) => s.fileChangesByTask[taskId]) ?? NO_FILE_CHANGES;
   const graphVersions = useAppStore((s) => s.graphVersionsByTask[taskId]);
@@ -156,6 +158,35 @@ export function Timeline({
     for (const messageId of lastReply.values()) markers.set(messageId, 'reply');
     return markers;
   }, [interruptedTurnIds, messages]);
+
+  // The cards a Turn left unanswered (issue #1285), under the Turn's last reply — or its last
+  // request when nothing was written — so they read after what the Turn said, not above it. A
+  // stopped Turn's cards are left unmarked: the stop already says why they went.
+  const liveTurnId = turn?.turnId;
+  const liveStatus = turn?.status;
+  const canceledApprovalsByMessage = useMemo(() => {
+    const byMessage = new Map<string, ApprovalSummary[]>();
+    const stopped = new Set(canceledTurnIds);
+    if (liveTurnId !== undefined && (liveStatus === 'canceling' || liveStatus === 'canceled'))
+      stopped.add(liveTurnId);
+    const withdrawn = approvalHistory.filter(
+      (approval) => approval.state === 'canceled' && !stopped.has(approval.turnId),
+    );
+    if (withdrawn.length === 0) return byMessage;
+    const lastReply = new Map<string, string>();
+    const lastRequest = new Map<string, string>();
+    for (const message of messages) {
+      if (message.turnId === null) continue;
+      if (message.author === 'assistant') lastReply.set(message.turnId, message.id);
+      else if (message.author === 'user') lastRequest.set(message.turnId, message.id);
+    }
+    for (const approval of withdrawn) {
+      const messageId = lastReply.get(approval.turnId) ?? lastRequest.get(approval.turnId);
+      if (messageId === undefined) continue;
+      byMessage.set(messageId, [...(byMessage.get(messageId) ?? []), approval]);
+    }
+    return byMessage;
+  }, [approvalHistory, canceledTurnIds, messages, liveTurnId, liveStatus]);
 
   const runtimeSummaryByTurn = useMemo(() => {
     const recordsByTurn = new Map<string, { changes: (typeof fileChanges)[number]['changes'] }[]>();
@@ -333,8 +364,12 @@ export function Timeline({
                 : [];
             const approvalRows =
               message.author === 'user' && message.turnId !== null
-                ? approvalHistory.filter((approval) => approval.turnId === message.turnId)
+                ? approvalHistory.filter(
+                    (approval) =>
+                      approval.turnId === message.turnId && approval.state === 'resolved',
+                  )
                 : [];
+            const canceledApprovalRows = canceledApprovalsByMessage.get(message.id) ?? [];
             const autoDecisionRows =
               message.author === 'user' && message.turnId !== null
                 ? (autoDecisionsByTurn.get(message.turnId) ?? NO_AUTO_DECISIONS)
@@ -456,6 +491,9 @@ export function Timeline({
                       desktopCallKey(card.command.turnId, card.command.callId),
                     )}
                   />
+                ))}
+                {canceledApprovalRows.map((approval) => (
+                  <ApprovalCanceledRow key={approval.id} approval={approval} />
                 ))}
                 {turnFileChanges.map((entry) => (
                   <FileChangeCard key={entry.seq} changes={entry.changes} />
