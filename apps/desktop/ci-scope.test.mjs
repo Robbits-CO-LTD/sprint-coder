@@ -104,26 +104,66 @@ describe('CI change boundaries', () => {
     'apps/desktop/assets/fonts/SOURCES.txt',
     'apps/desktop/src/main/auto-update.ts',
     'apps/desktop/scripts/ensure-inno-setup.ps1',
-  ])('checks packages on main changes to %s, including deletion, but not on PRs', (path) => {
+  ])('leaves package smokes for %s to the full run, not to PRs or main pushes', (path) => {
     for (const status of ['A', 'M', 'D']) {
-      expect(classifyChanges([{ path, status }], { eventName: 'push' }).distribution).toBe(true);
+      expect(classifyChanges([{ path, status }], { eventName: 'push' }).distribution).toBe(false);
       expect(classifyChanges([{ path, status }]).distribution).toBe(false);
       expect(classifyChanges([{ path, status }], withPrTests).distribution).toBe(true);
     }
   });
 
-  it('keeps the full test matrix on main and manual CI, with distribution driven by the diff', () => {
-    for (const eventName of ['push', 'workflow_dispatch']) {
-      const scope = classifyChanges(changes('README.md'), { eventName });
+  // The owner's rule (2026-11-15): every test runs only before a release.
+  it('runs every test and package smoke only in the release call and in manual CI', () => {
+    for (const options of [
+      { eventName: 'workflow_dispatch' },
+      // release-beta.yml calls ci.yml from its tag push, so the event is still `push`.
+      { eventName: 'push', fullTests: true },
+      { eventName: 'pull_request', fullTests: true },
+    ]) {
+      const scope = classifyChanges(changes('README.md'), options);
       expect(scope).toMatchObject({
         mode: 'full',
         platforms: ['linux', 'macos', 'windows'],
         websiteRequired: true,
-        distribution: false,
+        distribution: true,
       });
       expect(JSON.parse(scopeOutputs(scope).platform_matrix).include).toHaveLength(8);
+      expect(scopeOutputs(scope)).toMatchObject({
+        full_matrix: 'true',
+        distribution_required: 'true',
+      });
     }
     expect(classifyChanges(changes('apps/desktop/src/main/ipc.ts')).distribution).toBe(false);
+    expect(() => classifyChanges([], { fullTests: 'true' })).toThrow('fullTests');
+    const full = classifyChanges([], { eventName: 'workflow_dispatch' });
+    expect(() => scopeOutputs({ ...full, distribution: false })).toThrow('Invalid CI scope');
+  });
+
+  it.each([
+    ['README.md'],
+    ['website/index.html'],
+    [`${renderer}components/RunCard.tsx`],
+    ['apps/desktop/src/main/persistence.ts'],
+    ['apps/desktop/forge.config.ts'],
+    ['package-lock.json'],
+    ['packages/contracts/src/index.ts'],
+    ['apps/desktop/desktop-control/crates/windows/src/lib.rs'],
+    ['apps/desktop/sandbox-runner/src/main.rs'],
+    ['.github/workflows/ci.yml'],
+    ['unclassified/new.ts'],
+  ])('selects the same static checks for a main push as for a PR changing %s', (path) => {
+    for (const status of ['M', 'D']) {
+      const pr = classifyChanges([{ path, status }]);
+      const push = classifyChanges([{ path, status }], { eventName: 'push' });
+      expect(push).toEqual(pr);
+      expect(push.mode).not.toBe('full');
+      expect(scopeOutputs(push)).toMatchObject({
+        full_matrix: 'false',
+        platform_required: 'false',
+        distribution_required: 'false',
+        native_required: 'false',
+      });
+    }
   });
 
   it.each([
@@ -188,11 +228,14 @@ describe('CI change boundaries', () => {
     expect(required.includes('sandbox-rust-windows')).toBe(sandbox || dc);
   });
 
-  it('leaves the desktop-control build to the full Windows shards on main and manual CI', () => {
-    for (const eventName of ['push', 'workflow_dispatch']) {
+  it('leaves the desktop-control build to the full Windows shards in the full run', () => {
+    for (const options of [
+      { eventName: 'workflow_dispatch' },
+      { eventName: 'push', fullTests: true },
+    ]) {
       const scope = classifyChanges(
         changes('apps/desktop/desktop-control/crates/windows/src/lib.rs'),
-        { eventName },
+        options,
       );
       expect(scope).toMatchObject({ mode: 'full', windowsRust: true, desktopControlRust: false });
       expect(scopeOutputs(scope)).toMatchObject({
@@ -252,10 +295,20 @@ describe('CI change boundaries', () => {
   });
 
   it('never splits related runs outside pull requests', () => {
-    for (const eventName of ['push', 'workflow_dispatch'])
-      expect(classifyChanges(changes('apps/desktop/src/main/ipc.ts'), { eventName })).toMatchObject(
-        { mode: 'full', splitRelated: false },
-      );
+    for (const options of [
+      { eventName: 'workflow_dispatch' },
+      { eventName: 'push', fullTests: true },
+    ])
+      expect(classifyChanges(changes('apps/desktop/src/main/ipc.ts'), options)).toMatchObject({
+        mode: 'full',
+        splitRelated: false,
+      });
+    expect(
+      classifyChanges(changes('apps/desktop/src/main/ipc.ts'), {
+        eventName: 'push',
+        pullRequestTests: true,
+      }),
+    ).toMatchObject({ mode: 'pr', splitRelated: true });
     const scope = classifyChanges(changes('README.md'));
     expect(() => scopeOutputs({ ...scope, splitRelated: true })).toThrow('Invalid CI scope');
     expect(() => scopeOutputs({ ...scope, splitRelated: undefined })).toThrow('Invalid CI scope');
@@ -295,7 +348,7 @@ describe('required CI result aggregation', () => {
         [['website/index.html'], 'website'],
         [[`${renderer}components/RunCard.tsx`], 'platform-tests', withPrTests],
         [['packages/contracts/src/index.ts'], 'package-tests'],
-        [['apps/desktop/forge.config.ts'], 'package-windows', { eventName: 'push' }],
+        [['apps/desktop/forge.config.ts'], 'package-windows', { eventName: 'workflow_dispatch' }],
         [['apps/desktop/desktop-control/src/main.rs'], 'sandbox-rust-windows'],
       ]) {
         const scope = classifyChanges(changes(...paths), options);
@@ -517,6 +570,7 @@ describe('GitHub classification entrypoint', () => {
       expect(entries.distribution_required).toBe('false');
       expect(entries.comparison_base).toBe(base);
       expect(entries.diff_base).toBe(ancestor);
+      expect(entries.diff_head).toBe(head);
       expect(JSON.parse(entries.scope_json)).toMatchObject({
         mode: 'pr',
         platforms: [],
@@ -588,22 +642,44 @@ describe('GitHub classification entrypoint', () => {
     },
   );
 
-  it('selects full tests and no installers for manual CI', () => {
-    const result = spawnSync(process.execPath, [join(root, 'ci-scope.mjs'), 'classify'], {
+  const classifyCli = (env, cwd = undefined) =>
+    spawnSync(process.execPath, [join(root, 'ci-scope.mjs'), 'classify'], {
+      cwd,
       encoding: 'utf8',
       env: {
         ...process.env,
-        GITHUB_EVENT_NAME: 'workflow_dispatch',
+        CI_FULL_TESTS: '',
         GITHUB_EVENT_PATH: '/nonexistent-event.json',
         GITHUB_OUTPUT: '',
         GITHUB_STEP_SUMMARY: '',
+        ...env,
       },
     });
+
+  it('selects full tests and package smokes for manual CI', () => {
+    const result = classifyCli({ GITHUB_EVENT_NAME: 'workflow_dispatch' });
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ mode: 'full', distribution: false });
+    expect(JSON.parse(result.stdout)).toMatchObject({ mode: 'full', distribution: true });
   });
 
-  it('uses the full before-to-after push range for distribution detection', () => {
+  it('runs the full set for the release call without reading the tag push diff', () => {
+    // The event file does not exist: a full call must not depend on the tag's before/after.
+    for (const event of ['push', 'pull_request']) {
+      const result = classifyCli({ GITHUB_EVENT_NAME: event, CI_FULL_TESTS: 'true' });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ mode: 'full', distribution: true });
+    }
+    const light = classifyCli({ GITHUB_EVENT_NAME: 'push', CI_FULL_TESTS: 'false' });
+    expect(light.status).toBe(1);
+    expect(light.stderr).toContain('nonexistent-event.json');
+    for (const value of ['TRUE', '1', 'yes']) {
+      const result = classifyCli({ GITHUB_EVENT_NAME: 'workflow_dispatch', CI_FULL_TESTS: value });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('CI_FULL_TESTS must be true or false');
+    }
+  });
+
+  it('classifies a main push from its full before-to-after range, like a PR', () => {
     const directory = mkdtempSync(join(tmpdir(), 'ci-push-scope-'));
     cleanup.push(directory);
     const git = (...args) => {
@@ -637,25 +713,34 @@ describe('GitHub classification entrypoint', () => {
     writeFileSync(join(directory, 'README.md'), 'docs only');
     const after = commit('documentation');
     const event = join(directory, 'event.json');
-    for (const [base, distribution] of [
-      [before, true],
-      [packaged, false],
-      ['0'.repeat(40), true],
+    const output = join(directory, 'output');
+    for (const [base, mode, shared] of [
+      [before, 'pr', true],
+      [packaged, 'docs', false],
+      ['0'.repeat(40), 'pr', true],
     ]) {
       writeFileSync(event, JSON.stringify({ before: base, after }));
-      const result = spawnSync(process.execPath, [join(root, 'ci-scope.mjs'), 'classify'], {
-        cwd: directory,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_EVENT_NAME: 'push',
-          GITHUB_EVENT_PATH: event,
-          GITHUB_OUTPUT: '',
-          GITHUB_STEP_SUMMARY: '',
-        },
-      });
+      writeFileSync(output, '');
+      const result = classifyCli(
+        { GITHUB_EVENT_NAME: 'push', GITHUB_EVENT_PATH: event, GITHUB_OUTPUT: output },
+        directory,
+      );
       expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout)).toMatchObject({ mode: 'full', distribution });
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        mode,
+        shared,
+        distribution: false,
+        platforms: [],
+      });
+      const entries = Object.fromEntries(
+        readFileSync(output, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+      );
+      // The docs whitespace check diffs diff_base..diff_head, so a push needs its own head.
+      expect(entries.diff_head).toBe(after);
+      expect(entries.full_matrix).toBe('false');
     }
   });
 

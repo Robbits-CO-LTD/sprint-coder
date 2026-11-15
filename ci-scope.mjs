@@ -193,16 +193,18 @@ function websiteCheckPath(path) {
 }
 
 /**
- * Pull requests run static checks only: typecheck, lint, package tests, the website checks and,
- * for Rust changes, a Windows compile. Every test suite and package smoke first runs on main after
- * the merge, and a release requires that main run to have passed (release-beta.yml).
+ * Pull requests and pushes to main run the same static checks, selected from their diff:
+ * typecheck, lint, package tests, the website checks and, for Rust changes, a Windows compile
+ * (mode `pr`). Every test suite and package smoke runs only before a release: the release
+ * workflow calls this workflow with `full: true` (release-beta.yml), and a manual run
+ * (workflow_dispatch) runs the same set so it can be tried before tagging.
  * `pullRequestTests` restores the earlier PR selection of related tests and package smokes.
  * @param {Change[]} changes The complete PR or push diff.
- * @param {{eventName?: string, pullRequestTests?: boolean}} [options]
+ * @param {{eventName?: string, fullTests?: boolean, pullRequestTests?: boolean}} [options]
  */
 export function classifyChanges(
   changes,
-  { eventName = 'pull_request', pullRequestTests = false } = {},
+  { eventName = 'pull_request', fullTests = false, pullRequestTests = false } = {},
 ) {
   if (!Array.isArray(changes)) throw new Error('Changes must be an array');
   for (const change of changes) {
@@ -216,8 +218,10 @@ export function classifyChanges(
       throw new Error('Each change requires a safe repository path and a Git status');
   }
 
-  const full = eventName !== 'pull_request';
-  const distribution = changes.some(({ path }) => distributionPath(path));
+  if (typeof fullTests !== 'boolean') throw new Error('fullTests must be a boolean');
+  const full = fullTests || eventName === 'workflow_dispatch';
+  // The full run is the only place package smokes run, so it never narrows them by the diff.
+  const distribution = full || changes.some(({ path }) => distributionPath(path));
   const websiteRequired = full || changes.some(({ path }) => websiteCheckPath(path));
   const desktop = changes.filter(
     ({ path, status }) =>
@@ -259,7 +263,7 @@ export function classifyChanges(
     platforms: full || prTests ? platforms : [],
     native: full || (prTests && (!rendererOnly || allRelatedPlatforms)),
     windowsRust: full || rustCompile(sandboxPath),
-    // Main builds desktop control in every full Windows test shard; a PR only compiles it.
+    // The full run builds desktop control in every Windows test shard; a PR or push only compiles it.
     desktopControlRust: rustCompile(desktopControlRustPath),
     distribution: (full || prTests) && distribution,
     websiteRequired,
@@ -298,6 +302,7 @@ function validateScope(scope) {
         !scope.native ||
         !scope.shared ||
         !scope.windowsRust ||
+        !scope.distribution ||
         !scope.websiteRequired)) ||
     // Related tests and their native builds need at least one platform to run on.
     (scope.platforms.length === 0 &&
@@ -604,12 +609,21 @@ function main() {
   if (process.argv[2] === 'classify') {
     const eventName = process.env.GITHUB_EVENT_NAME;
     if (!eventName) throw new Error('GITHUB_EVENT_NAME is required');
-    const input = eventChanges(eventName, process.env.GITHUB_EVENT_PATH);
-    const scope = classifyChanges(input.changes, { eventName });
+    // Set from the `full` input when release-beta.yml calls this workflow. That call keeps the
+    // caller's event (a tag push), whose diff is irrelevant to a full run, so it is not read.
+    const flag = process.env.CI_FULL_TESTS ?? '';
+    if (!['', 'true', 'false'].includes(flag))
+      throw new Error('CI_FULL_TESTS must be true or false');
+    const fullTests = flag === 'true';
+    const input = fullTests
+      ? { changes: [] }
+      : eventChanges(eventName, process.env.GITHUB_EVENT_PATH);
+    const scope = classifyChanges(input.changes, { eventName, fullTests });
     const output = {
       ...scopeOutputs(scope),
       comparison_base: input.comparisonBase ?? '',
       diff_base: input.base ?? '',
+      diff_head: input.head ?? '',
     };
     if (process.env.GITHUB_OUTPUT)
       appendFileSync(
@@ -621,7 +635,7 @@ function main() {
     if (process.env.GITHUB_STEP_SUMMARY)
       appendFileSync(
         process.env.GITHUB_STEP_SUMMARY,
-        `CI scope: **${scope.mode}**\n\nSelected platforms: ${scope.platforms.join(', ') || 'none'}\n\n` +
+        `CI scope: **${scope.mode}**${fullTests ? ' (requested by the calling workflow)' : ''}\n\nSelected platforms: ${scope.platforms.join(', ') || 'none'}\n\n` +
           `Tested SHA: ${/^[a-f0-9]{40,64}$/u.test(process.env.GITHUB_SHA ?? '') ? process.env.GITHUB_SHA : 'not provided'}\n\n` +
           `Comparison base: ${input.base ?? 'not applicable'}\n\n` +
           `Diff head: ${input.head ?? 'not applicable'}\n`,

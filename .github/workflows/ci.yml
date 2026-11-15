@@ -1,10 +1,19 @@
 name: CI
 
+# Pull requests and pushes to main run the same static checks, selected from their diff.
+# Every test suite and package smoke runs only before a release: release-beta.yml calls this
+# workflow with `full: true`, and a manual run (workflow_dispatch) runs the same full set.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      full:
+        description: Run every test suite and package smoke instead of the diff-scoped checks.
+        type: boolean
+        required: true
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -33,6 +42,7 @@ jobs:
       platform_matrix: ${{ steps.scope.outputs.platform_matrix }}
       distribution_required: ${{ steps.scope.outputs.distribution_required }}
       diff_base: ${{ steps.scope.outputs.diff_base }}
+      diff_head: ${{ steps.scope.outputs.diff_head }}
       comparison_base: ${{ steps.scope.outputs.comparison_base }}
       native_required: ${{ steps.scope.outputs.native_required }}
       boundary_specs: ${{ steps.scope.outputs.boundary_specs }}
@@ -53,12 +63,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Select checks from the complete change set
         id: scope
+        env:
+          # Only a workflow_call sets inputs.full; every other event leaves it empty.
+          CI_FULL_TESTS: ${{ inputs.full && 'true' || 'false' }}
         run: node ci-scope.mjs classify
       - name: Check documentation whitespace
         if: steps.scope.outputs.mode == 'docs'
         env:
           CI_DIFF_BASE: ${{ steps.scope.outputs.diff_base }}
-          CI_DIFF_HEAD: ${{ github.event.pull_request.head.sha }}
+          # The PR head, or the pushed main tip: both runs check the same diff.
+          CI_DIFF_HEAD: ${{ steps.scope.outputs.diff_head }}
         run: git diff --check "$CI_DIFF_BASE" "$CI_DIFF_HEAD"
 
   quality:
@@ -170,7 +184,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --no-run --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml
           exit $LASTEXITCODE
-      # The same cached release build that the Windows test shards use on main.
+      # The same cached release build that the Windows test shards use in the full run.
       - name: Build Windows desktop control
         if: needs.classify.outputs.desktop_control_rust_required == 'true'
         uses: ./.github/actions/prepare-desktop-control
@@ -802,7 +816,8 @@ jobs:
           CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
         run: node ci-scope.mjs gate
 
-  # Main is the first place every test runs, so a failed main run opens (or extends) a bug Issue.
+  # Main runs the same static checks as a PR; if they still fail after the merge, a bug Issue
+  # is opened (or extended). A release call keeps the tag push event, so its ref excludes it.
   report-main-failure:
     name: Report main CI failure
     needs: required
@@ -827,7 +842,7 @@ jobs:
             --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name')"
           body="${RUNNER_TEMP}/main-ci-failure.md"
           {
-            echo "main の CI（push）が失敗しました。"
+            echo "main の CI（push。PR と同じ静的な検査）が失敗しました。"
             echo
             echo "- commit: ${GITHUB_SHA}"
             echo "- 実行: ${run_url}"
