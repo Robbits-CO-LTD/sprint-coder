@@ -204,13 +204,13 @@ pub(super) fn prepare(
         // window, such as a browser kept running in the background.
         let window = super::observe_window_once(root, &token, deadline)?;
         let suggestion = if window.is_some() {
-            ATTACHED
+            attached_guidance()
         } else {
-            ATTACHED_WITHOUT_WINDOW
+            ATTACHED_WITHOUT_WINDOW.to_string()
         };
         let mut attached = super::launch_result(id, root, token, window);
         attached.attached = true;
-        attached.suggestion = Some(suggestion.to_string());
+        attached.suggestion = Some(suggestion);
         return Ok(Prepared {
             executable,
             attached: Some(attached),
@@ -402,13 +402,20 @@ pub(super) fn ambiguous_instances(instances: &[(ProcessId, Option<String>)]) -> 
     ))
 }
 
+/// What a launch says about using a window the running instance already
+/// had: allowed within the task, without disturbing what the user left there.
+const USE_EXISTING_WINDOW: &str = "You may use this window for what the user asked, and only \
+     that: if the task is to read, only read; do not change what it shows or any unsaved work, \
+     and do not close it.";
+
 /// The guidance a launch reports when it attached to an instance that was
 /// already running instead of starting one, and that instance shows a window.
-pub(super) const ATTACHED: &str = "Nothing was started: the app was already running, and this \
-     result names that running instance and its window, which the user already had open. If \
-     you need a new window, launch again with --no-attach. A single-instance app (a browser, \
-     many editors) then opens the new window in this same running instance, and the result \
-     says handed_off.";
+pub(super) const ATTACHED: &str = "Nothing was started: the app was already running with a \
+     window open, and `window` is that window, which the user had open before. If the task \
+     needs a window of its own, launch again with --no-attach once. A single-instance app (a \
+     browser, many editors) then opens the new window in this same running instance, and the \
+     result says handed_off; an app that keeps one window opens none, and the result says \
+     existing_window.";
 
 /// The guidance a launch reports when it attached to a running instance that
 /// shows no window (it runs in the background or in the tray).
@@ -421,10 +428,28 @@ pub(super) const ATTACHED_WITHOUT_WINDOW: &str = "Nothing was started and no win
 /// launch to the running instance, which then opened the reported window.
 pub(super) const HANDED_OFF_NEW_WINDOW: &str = "The launched process passed the launch to the \
      instance of the same app that was already running and exited (a single-instance app). \
-     That running instance showed `window` after this launch started (a new window, or one it \
-     had kept hidden), so it is most likely the window this launch asked for. It belongs to the running instance (`window.pid`), not to a \
-     process this launch started, so new_instance is false; the instance's other windows may be \
-     ones the user already had open.";
+     That running instance showed `window`, a window that did not exist before this launch \
+     started, so it is most likely the window this launch opened: use it for the task. It is owned by the running instance (`window.pid`) rather than by a process this \
+     launch started, which is why new_instance is false; that does not make it one of the \
+     user's windows. The instance's other windows may be ones the user had open.";
+
+/// The guidance a launch reports when, passed to the running instance, no new
+/// window appeared and the instance brought a window it already had to the
+/// front as the launch was handed over.
+pub(super) const HANDED_OFF_EXISTING_RAISED: &str = "The launched process passed the launch to \
+     the instance of the same app that was already running and exited. No new window \
+     appeared: the instance brought `window`, a window it already had before this launch, to \
+     the front instead (existing_window). This app likely keeps one window, so do not repeat \
+     --no-attach.";
+
+/// The guidance a launch reports when, passed to the running instance, no new
+/// window appeared and the instance shows exactly one window, which it
+/// already had before the launch.
+pub(super) const HANDED_OFF_EXISTING_ONLY: &str = "The launched process passed the launch to \
+     the instance of the same app that was already running and exited. No new window appeared \
+     within a few seconds, and `window` is the only window that instance shows, one it already \
+     had before this launch (existing_window). Whether the app used it for this launch or \
+     ignored the launch cannot be told. Do not repeat --no-attach: it may open nothing again.";
 
 /// Added to the guidance when, without `--activate`, the window a running
 /// instance showed stayed in front: the app took the foreground and it could
@@ -439,8 +464,8 @@ pub(super) const HANDED_OFF_AMBIGUOUS: &str = "The launched process passed the l
      Several windows of the running instances appeared, or several instances already had \
      windows open (a browser with more than one profile), so which window this launch opened \
      is not confirmed and none is named here. Run `list-windows` for the app and pick the \
-     window by its title; they belong to the running instances, which the user may already \
-     have open.";
+     window by its title; windows that were open before the launch may be ones the user had \
+     open.";
 
 /// The guidance a launch reports when the process it started exited without
 /// a window of its own while an instance of the same executable was running,
@@ -450,9 +475,49 @@ pub(super) const HANDED_OFF: &str = "The launched process exited without a windo
      launch to that running instance (a single-instance app). No new window of that instance \
      appeared within a few seconds, so whether it opened one is not confirmed: it may have \
      brought an existing window forward instead, or may still open one. Run `list-windows` \
-     for the app to see its windows; they belong to the running instance, which the user may \
-     already have open.";
+     for the app to see its windows before launching again; windows that were open before \
+     the launch may be ones the user had open.";
 
+/// How a window the running instance already had before the launch came to
+/// be the launch's `window` (`existing_window`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExistingWindow {
+    /// Shown before the launch, and brought to the front as the launch was
+    /// handed over.
+    Raised,
+    /// Shown before the launch, and the instance's only visible window when
+    /// no new one appeared.
+    Only,
+    /// Hidden before the launch (its handle already existed), and shown again
+    /// for the launch: a tray app's main window, with whatever the user left
+    /// in it.
+    Revealed,
+}
+
+/// The guidance a launch reports when, passed to the running instance, the
+/// instance showed again a window it already had but kept hidden.
+pub(super) const HANDED_OFF_EXISTING_REVEALED: &str = "The launched process passed the \
+     launch to the instance of the same app that was already running and exited. The instance \
+     showed `window` again: a window it already had before this launch but kept hidden (an app \
+     in the tray shows its main window again), not a new one (existing_window). It may hold \
+     what the user left in it.";
+
+/// The full guidance for a window the running instance already had.
+pub(super) fn existing_window_guidance(kind: ExistingWindow) -> String {
+    let head = match kind {
+        ExistingWindow::Raised => HANDED_OFF_EXISTING_RAISED,
+        ExistingWindow::Only => HANDED_OFF_EXISTING_ONLY,
+        ExistingWindow::Revealed => HANDED_OFF_EXISTING_REVEALED,
+    };
+    format!("{head} {USE_EXISTING_WINDOW}")
+}
+
+/// The guidance for an attached window, with what using it allows.
+pub(super) fn attached_guidance() -> String {
+    format!(
+        "{ATTACHED} If no new window can be had (the app keeps one window): {USE_EXISTING_WINDOW}"
+    )
+}
 pub(super) fn matching_processes(image: &str) -> Result<Vec<ProcessRow>, AdapterError> {
     Ok(process_snapshot()?
         .into_iter()

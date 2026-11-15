@@ -369,6 +369,7 @@ impl crate::adapter::SystemOps for SuggestingAdapter {
             new_instance: false,
             handed_off: false,
             running_without_window: false,
+            existing_window: false,
             activated: None,
         })
     }

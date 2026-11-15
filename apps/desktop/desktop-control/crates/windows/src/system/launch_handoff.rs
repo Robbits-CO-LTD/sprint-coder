@@ -68,6 +68,16 @@ pub(super) struct Handoff {
     /// time since a window appeared is known when the launch is found to have
     /// been passed on, however long the launched process took to exit.
     first_seen: RefCell<HashMap<String, Instant>>,
+    /// The id of the foreground window when the launch began, so a window
+    /// that was already in front is not taken as brought forward.
+    prior_foreground: Option<String>,
+    /// The ids of every top-level window before the launch, hidden ones too
+    /// (`None` when they could not be read).
+    all_before: Option<HashSet<String>>,
+    /// Windows the instances already had that came to the front while the
+    /// launched process still ran: the user may have picked them, so they are
+    /// never taken as brought forward by the instance.
+    in_front_before_exit: RefCell<HashSet<String>>,
 }
 
 impl Handoff {
@@ -81,12 +91,15 @@ impl Handoff {
         let pids: Vec<ProcessId> = instances.iter().map(|instance| instance.pid).collect();
         let several_instances = shown
             .as_ref()
-            .is_some_and(|(_, owners)| several_instances_show_windows(owners, &pids));
+            .is_some_and(|(_, owners, _)| several_instances_show_windows(owners, &pids));
         Self {
             instances,
-            before: shown.map(|(ids, _)| ids),
+            all_before: shown.as_ref().map(|(_, _, all)| all.clone()),
+            before: shown.map(|(ids, _, _)| ids),
+            in_front_before_exit: RefCell::new(HashSet::new()),
             several_instances,
             first_seen: RefCell::new(HashMap::new()),
+            prior_foreground: foreground_window_id(),
         }
     }
 
@@ -100,7 +113,24 @@ impl Handoff {
     /// One read of the windows, only to record when each window an instance
     /// showed after the launch started was first seen.
     pub(super) fn note(&self, deadline: Deadline) -> Result<(), AdapterError> {
-        self.look(deadline).map(|_| ())
+        let read = self.read(deadline)?;
+        if let Some(window) = read.raised {
+            self.in_front_before_exit.borrow_mut().insert(window.id);
+        }
+        Ok(())
+    }
+
+    /// Whether the window `id`, which the instances already had, came to the
+    /// front while the launched process still ran (see `note`).
+    pub(super) fn was_in_front_before_exit(&self, id: &str) -> bool {
+        self.in_front_before_exit.borrow().contains(id)
+    }
+
+    /// Whether a window an instance shows now already existed, shown or
+    /// hidden, before the launch: then it is not a window the launch opened.
+    /// Unreadable reads as existing (the restricted side).
+    pub(super) fn existed_before(&self, id: &str) -> bool {
+        existed_before(self.all_before.as_ref(), id)
     }
 
     /// When the window `id` was first seen by `note` or `look`, if it was.
@@ -108,11 +138,12 @@ impl Handoff {
         self.first_seen.borrow().get(id).copied()
     }
 
-    /// One look for the window a still-running instance showed for the launch.
-    /// Every such window seen is recorded with the time it was first seen.
-    pub(super) fn look(&self, deadline: Deadline) -> Result<HandoffLook, AdapterError> {
+    /// One look for the window a still-running instance showed for the launch,
+    /// and for the windows it already had (see [`HandoffRead`]). Every newly
+    /// shown window seen is recorded with the time it was first seen.
+    pub(super) fn read(&self, deadline: Deadline) -> Result<HandoffRead, AdapterError> {
         let Some(before) = &self.before else {
-            return Ok(HandoffLook::None);
+            return Ok(HandoffRead::nothing());
         };
         let targets: Vec<(ProcessId, Option<String>)> = self
             .instances
@@ -121,7 +152,7 @@ impl Handoff {
             .map(|instance| (instance.pid, instance.token.clone()))
             .collect();
         if targets.is_empty() {
-            return Ok(HandoffLook::None);
+            return Ok(HandoffRead::nothing());
         }
         let filter = WindowFilter {
             focused_only: false,
@@ -134,14 +165,107 @@ impl Handoff {
                     fresh_window_ids(&windows, &targets, before),
                     Instant::now(),
                 );
-                pick_handoff_window(windows, &targets, before, self.several_instances)
+                let (raised, only_existing) = read_existing(
+                    &windows,
+                    &targets,
+                    before,
+                    self.prior_foreground.as_deref(),
+                    self.several_instances,
+                );
+                HandoffRead {
+                    look: pick_handoff_window(windows, &targets, before, self.several_instances),
+                    raised,
+                    only_existing,
+                }
             }),
-            Err(error) if super::is_unobservable_within_budget(&error) => Ok(HandoffLook::None),
+            Err(error) if super::is_unobservable_within_budget(&error) => {
+                Ok(HandoffRead::nothing())
+            }
             Err(error) => Err(error),
         }
     }
 }
 
+/// What one read of the windows found for a launch passed to a running
+/// instance.
+pub(super) struct HandoffRead {
+    /// A window the instances showed after the launch started.
+    pub(super) look: HandoffLook,
+    /// A window the instances already showed before the launch that is now in
+    /// front, though it was not when the launch began: the instance brought
+    /// it forward (an app with one window uses it instead of opening one).
+    pub(super) raised: Option<WindowInfo>,
+    /// The only window the instances show, when it was already shown before
+    /// the launch and no new one appeared: all a launch can say then is that
+    /// no new window appeared and this is the instance's one visible window.
+    pub(super) only_existing: Option<WindowInfo>,
+}
+
+impl HandoffRead {
+    fn nothing() -> Self {
+        Self {
+            look: HandoffLook::None,
+            raised: None,
+            only_existing: None,
+        }
+    }
+}
+
+/// From one listing: the window of `targets` shown before the launch that is
+/// now in front but was not when the launch began (`raised`), and the one
+/// window `targets` show when it is their only one and was shown before the
+/// launch (`only_existing`). Neither when several instances already showed
+/// windows: which one the launch reached cannot be told.
+pub(super) fn read_existing(
+    windows: &[WindowInfo],
+    targets: &[(ProcessId, Option<String>)],
+    before: &HashSet<String>,
+    prior_foreground: Option<&str>,
+    several_instances: bool,
+) -> (Option<WindowInfo>, Option<WindowInfo>) {
+    if several_instances {
+        return (None, None);
+    }
+    let owned: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|window| {
+            targets.iter().any(|(pid, token)| {
+                window.pid == *pid && token.is_some() && window.process_instance == *token
+            })
+        })
+        .collect();
+    let raised = owned
+        .iter()
+        .find(|window| {
+            before.contains(&window.id)
+                && window.state.is_focused
+                && prior_foreground != Some(window.id.as_str())
+        })
+        .map(|window| (*window).clone());
+    let only_existing = match owned.as_slice() {
+        [window] if before.contains(&window.id) => Some((*window).clone()),
+        _ => None,
+    };
+    (raised, only_existing)
+}
+
+/// The id of the foreground window now, as the window inventory names it.
+#[cfg(target_os = "windows")]
+fn foreground_window_id() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let handle = unsafe { GetForegroundWindow() };
+    (!handle.is_null()).then(|| super::super::window::window_ops::window_id(handle))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn foreground_window_id() -> Option<String> {
+    None
+}
+/// Whether `id` was among every top-level window before the launch; `true`
+/// when those could not be read, so doubt restricts how the window is used.
+pub(super) fn existed_before(all_before: Option<&HashSet<String>>, id: &str) -> bool {
+    all_before.is_none_or(|all| all.contains(id))
+}
 /// The ids of the windows of `targets` (same pid and process instance) that
 /// were not shown before the launch.
 pub(super) fn fresh_window_ids<'a>(
@@ -266,11 +390,15 @@ pub(super) fn several_instances_show_windows(
 /// window that was hidden (a tray app's main window) is left out, so the
 /// instance showing it for the launch counts as showing a window. Beside the
 /// ids, the processes that own those windows (or the app a shell frame hosts).
-fn shown_windows() -> Option<(HashSet<String>, HashSet<ProcessId>)> {
+/// Last, the ids of every top-level window, shown or hidden: a window an
+/// instance shows later under one of these ids is one it already had.
+fn shown_windows() -> Option<(HashSet<String>, HashSet<ProcessId>, HashSet<String>)> {
     use super::super::window::{frame_identity, window_enum, window_identity, window_ops};
     let mut ids = HashSet::new();
     let mut owners = HashSet::new();
+    let mut all = HashSet::new();
     window_enum::enumerate_top_level(|window| {
+        all.insert(window_ops::window_id(window.handle));
         if super::launch_attach::is_shown(&window) {
             ids.insert(window_ops::window_id(window.handle));
             owners.extend(window_identity::live_window_owner(window.handle));
@@ -279,7 +407,7 @@ fn shown_windows() -> Option<(HashSet<String>, HashSet<ProcessId>)> {
         true
     })
     .ok()?;
-    Some((ids, owners))
+    Some((ids, owners, all))
 }
 
 /// The launched process and every descendant proven to be its own.
