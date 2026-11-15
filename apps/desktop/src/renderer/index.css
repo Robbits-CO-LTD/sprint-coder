@@ -1730,6 +1730,22 @@ body.is-resizing-sidebar iframe {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
+/* Whose desktop-control run the row is (a Team Worker's face and name, or the Leader's cursor),
+   quiet beside the title: no fill of its own, and a long name is cut (read whole from its title). */
+.command-card__requester {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.command-card__requester-name {
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .command-card__body {
   padding: 10px 16px 7px;
 }

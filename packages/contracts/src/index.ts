@@ -2293,6 +2293,20 @@ export function desktopControlWorkerAccent(colorIndex: number): string {
   return DESKTOP_CONTROL_WORKER_ACCENTS[((Math.trunc(colorIndex) % count) + count) % count]!;
 }
 
+/**
+ * The Team Worker whose tool call an approval is asked for, for the card to name: its role as Main
+ * holds it, and, while it holds desktop control, the place of its cursor's color in
+ * `DESKTOP_CONTROL_WORKER_ACCENTS`. A Worker with no desktop mark has a name and no color. Display
+ * only: nothing is decided, granted or matched on it.
+ */
+export const approvalRequesterSchema = z
+  .object({
+    label: desktopControlMarkSchema.shape.label,
+    colorIndex: desktopControlMarkSchema.shape.colorIndex.optional(),
+  })
+  .strict();
+export type ApprovalRequester = z.infer<typeof approvalRequesterSchema>;
+
 export const desktopApprovalActionSchema = desktopActionStepSchema
   .extend({
     /** The operations of a batch, in order, up to the bound; `stepsOmitted` counts the rest. */
@@ -2312,10 +2326,13 @@ export const desktopApprovalActionSchema = desktopActionStepSchema
      * Who asked for this run, as its cursor names and colors it: a Team Worker (its role, and the
      * place of its color in `DESKTOP_CONTROL_WORKER_ACCENTS`), or the Leader (`{ leader: true }`)
      * when the run draws the Leader's cursor. Absent when the run draws no Team cursor (the hidden
-     * team-cursors opt-in is off, or the run only prints).
+     * team-cursors opt-in is off, or the run only prints). On a command's row (`commandSummary`),
+     * Main records it as the run starts, from the run's own Worker binding (a Worker in the same
+     * form as `approvalRequesterSchema`), so a run allowed without a card still says whose it was;
+     * rows recorded before that have none. Display only.
      */
     requester: z
-      .union([desktopControlMarkSchema, z.object({ leader: z.literal(true) }).strict()])
+      .union([approvalRequesterSchema, z.object({ leader: z.literal(true) }).strict()])
       .optional(),
     notes: z.array(z.string().min(1).max(200)).max(6),
     /** Whether the card opens its details: something could not be confirmed or shown in full. */
@@ -2323,20 +2340,6 @@ export const desktopApprovalActionSchema = desktopActionStepSchema
   })
   .strict();
 export type DesktopApprovalAction = z.infer<typeof desktopApprovalActionSchema>;
-
-/**
- * The Team Worker whose tool call an approval is asked for, for the card to name: its role as Main
- * holds it, and, while it holds desktop control, the place of its cursor's color in
- * `DESKTOP_CONTROL_WORKER_ACCENTS`. A Worker with no desktop mark has a name and no color. Display
- * only: nothing is decided, granted or matched on it.
- */
-export const approvalRequesterSchema = z
-  .object({
-    label: desktopControlMarkSchema.shape.label,
-    colorIndex: desktopControlMarkSchema.shape.colorIndex.optional(),
-  })
-  .strict();
-export type ApprovalRequester = z.infer<typeof approvalRequesterSchema>;
 
 export const approvalSummarySchema = z
   .object({

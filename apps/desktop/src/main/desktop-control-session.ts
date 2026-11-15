@@ -6,6 +6,7 @@ import {
   DESKTOP_CONTROL_LEADER_LABEL,
   DESKTOP_CONTROL_WORKER_ACCENTS,
   desktopControlWorkerAccent,
+  type ApprovalRequester,
 } from '@sprint-coder/contracts';
 import {
   desktopControlArgvIsInert,
@@ -380,6 +381,21 @@ export function desktopControlRoleLabel(role: string): string {
   return characters.length > LABEL_MAX
     ? `${characters.slice(0, LABEL_MAX - 1).join('')}…`
     : characters.join('');
+}
+
+/**
+ * How a card names the Team Worker whose call it is for (display only): as its desktop-control
+ * cursor names and colors it when it holds the mark, or else by its role in the Team's own record,
+ * cleaned and cut like a cursor label, with no color. A Worker Main cannot name (no record, or an
+ * empty role) is still named as a Worker, so its card never reads as the Leader's. The timeline row
+ * of a Worker's desktop-control run names it the same way (`desktopControlRunAction`).
+ */
+export function approvalWorkerRequester(
+  mark: Readonly<{ label: string; colorIndex: number }> | undefined,
+  role: string | undefined,
+): ApprovalRequester {
+  if (mark !== undefined) return { label: mark.label, colorIndex: mark.colorIndex };
+  return { label: desktopControlRoleLabel(role ?? '') || 'Worker' };
 }
 
 /**
