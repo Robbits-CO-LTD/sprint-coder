@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 #[test]
@@ -127,6 +128,7 @@ fn url_launch(app: &str, url: &str) -> crate::cli_args::system::LaunchArgs {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_url_launch_passes_only_the_new_window_switch_and_the_url_and_never_attaches() {
     let options = build_launch_options(&url_launch(
@@ -168,4 +170,11 @@ fn a_url_launch_refuses_other_arguments_a_non_browser_and_a_non_canonical_url() 
             "INVALID_ARGS"
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_url_launch_is_unavailable_on_macos_before_launching() {
+    let error = build_launch_options(&url_launch("chrome", "https://example.com/")).unwrap_err();
+    assert!(error.to_string().contains("not available on this OS"));
 }

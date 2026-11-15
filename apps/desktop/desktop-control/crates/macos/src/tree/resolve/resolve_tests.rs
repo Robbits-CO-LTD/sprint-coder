@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::tree::AXElement;
 use crate::tree::resolve::resolve_classify::classify_candidates;
@@ -24,6 +25,9 @@ pub(super) fn entry(
             process_instance: Some("test-instance".into()),
         },
         identity: RefEntryIdentity {
+            ancestors: Vec::new(),
+            in_menu: None,
+            in_view: None,
             retained_object: None,
             role: "cell".into(),
             name: Some("Investors".into()),
@@ -42,6 +46,7 @@ pub(super) fn entry(
             available_actions: vec![],
         },
         source: RefSource {
+            settled_thin_nodes: None,
             source_app: None,
             source_window_id: source_window_id.map(String::from),
             source_window_title: source_window_title.map(String::from),

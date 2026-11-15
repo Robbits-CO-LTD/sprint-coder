@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
 use std::time::{Duration, Instant};
 
@@ -223,6 +224,10 @@ pub(crate) fn perform_action(
     deadline: impl AxDeadline,
 ) -> Result<i32, AdapterError> {
     prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
+    crate::system::own_window::check_element(element, deadline)?;
+    // The owner read installs the short read slice on this element; the mutation gets its own
+    // timeout back right before the native call, as upstream.
+    prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
     Ok(unsafe { AXUIElementPerformAction(element.0, action) })
 }
 
@@ -233,6 +238,9 @@ pub(crate) fn set_attribute_value(
     value: CFTypeRef,
     deadline: impl AxDeadline,
 ) -> Result<i32, AdapterError> {
+    prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
+    crate::system::own_window::check_element(element, deadline)?;
+    // As in `perform_action`: the mutation timeout, not the owner read's slice, bounds the call.
     prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
     Ok(unsafe { AXUIElementSetAttributeValue(element.0, attribute, value) })
 }

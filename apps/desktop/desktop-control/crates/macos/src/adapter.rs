@@ -1,8 +1,25 @@
-pub struct MacOSAdapter;
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
+pub struct MacOSAdapter {
+    refused_owner: crate::system::own_window::RefusedWindowOwner,
+}
 
 impl MacOSAdapter {
+    pub fn refusing_windows_of(
+        mut self,
+        owner: crate::system::own_window::RefusedWindowOwner,
+    ) -> Self {
+        self.refused_owner = owner;
+        self
+    }
+
+    pub(crate) fn acting(&self, operation: &'static str) -> crate::system::own_window::ActingScope {
+        crate::system::own_window::enter(&self.refused_owner, operation)
+    }
+
     pub fn new() -> Self {
-        Self
+        Self {
+            refused_owner: Default::default(),
+        }
     }
 }
 

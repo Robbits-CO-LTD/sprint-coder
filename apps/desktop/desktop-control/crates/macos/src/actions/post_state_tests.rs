@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::tree::{
     properties::node_attr_states::NodeAttrStates, properties::node_attrs::NodeAttrs,
@@ -192,6 +193,7 @@ fn optional_identity_gaps_do_not_poison_complete_actionability_evidence() {
         identifiers: agent_desktop_core::IdentifierEvidence::unknown(),
         states: LocatorField::Known(Vec::new()),
         ref_evidence: agent_desktop_core::LocatorRefEvidence {
+            runtime_id: None,
             window_bounds: LocatorField::Absent,
             bounds: LocatorField::Known(Rect {
                 x: 0.0,

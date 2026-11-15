@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     Action, ActionOps, ActionResult, ActionStep, AdapterError, InteractionLease, NativeHandle,
     StepMechanism, actions::action_request::ActionRequest,
@@ -12,9 +13,12 @@ impl ActionOps for MacOSAdapter {
         request: ActionRequest,
         lease: &InteractionLease,
     ) -> Result<ActionResult, AdapterError> {
+        let _scope = self.acting(request.action.name());
         if handle.is_null() {
+            crate::system::own_window::check_front()?;
             return execute_global_action(request, lease);
         }
+        crate::system::own_window::check_element(ax_element(handle)?, lease.deadline())?;
         execute_action_impl(handle, request, lease)
     }
 
@@ -23,6 +27,8 @@ impl ActionOps for MacOSAdapter {
         handle: &NativeHandle,
         lease: &InteractionLease,
     ) -> Result<(), AdapterError> {
+        let _scope = self.acting("scroll_into_view");
+        crate::system::own_window::check_element(ax_element(handle)?, lease.deadline())?;
         crate::actions::scroll_into_view::scroll_into_view_impl(
             ax_element(handle)?,
             lease.deadline(),

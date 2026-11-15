@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{Modifier, event_flags, standalone_state_error, wheel_lines_to_i32};
 use core_graphics::event::CGEventFlags;
 
@@ -110,4 +111,38 @@ fn native_cg_event_contract_is_bounded() {
             Duration::from_secs(5),
         );
     }
+}
+
+#[cfg(not(feature = "interactive-tests"))]
+#[test]
+fn a_click_release_is_sent_even_when_the_point_is_now_refused() {
+    use core_graphics::event::{CGEventType, CGMouseButton};
+    use core_graphics::geometry::CGPoint;
+    super::POSTED.with(|posted| posted.borrow_mut().clear());
+    let point = CGPoint::new(30.0, 40.0);
+    let down = super::create_event(
+        CGEventType::LeftMouseDown,
+        point,
+        CGMouseButton::Left,
+        CGEventFlags::empty(),
+    )
+    .unwrap();
+    let up = super::create_event(
+        CGEventType::LeftMouseUp,
+        point,
+        CGMouseButton::Left,
+        CGEventFlags::empty(),
+    )
+    .unwrap();
+    let _scope =
+        crate::system::own_window::enter(&crate::RefusedWindowOwner::Unreadable, "mouse_event");
+    // A press is judged and refused before anything is posted.
+    assert!(super::post_checked(&down).is_err());
+    assert!(super::POSTED.with(|posted| posted.borrow().is_empty()));
+    // The release of a press already sent is posted regardless.
+    drop(super::ClickReleaseGuard { event: Some(up) });
+    assert_eq!(
+        super::POSTED.with(|posted| posted.borrow().clone()),
+        vec![(CGEventType::LeftMouseUp as u32, 30.0, 40.0)]
+    );
 }

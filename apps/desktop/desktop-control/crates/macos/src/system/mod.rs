@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 mod adapter;
 pub(crate) mod app;
 pub(crate) mod appkit_bridge;
@@ -10,7 +11,9 @@ pub(crate) mod key_dispatch;
 pub(crate) mod launch;
 pub(crate) mod launch_callback_result;
 pub(crate) mod launch_completion;
+pub(crate) mod launch_location;
 pub(crate) mod launch_workspace;
+pub(crate) mod own_window;
 pub(crate) mod permissions;
 pub(crate) mod process;
 pub(crate) mod renderer_activation;

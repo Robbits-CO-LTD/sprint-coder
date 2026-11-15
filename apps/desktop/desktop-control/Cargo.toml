@@ -1,6 +1,6 @@
 # Changed by Sprint Coder from agent-desktop 1.2.0; see VENDORED.md in apps/desktop/desktop-control.
 [workspace]
-members         = ["crates/core", "crates/windows", "src"]
+members         = ["crates/core", "crates/macos", "crates/windows", "src"]
 default-members = ["crates/core", "crates/windows", "src"]
 resolver = "2"
 

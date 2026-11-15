@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, InteractionPolicy, KeyCombo, ProcessIdentity};
 
 const CLEANUP_TIMEOUT_MS: u64 = 2_000;
@@ -7,6 +8,42 @@ pub(crate) fn close_session<T>(
     result: Result<T, AdapterError>,
 ) -> Result<T, AdapterError> {
     merge_session_result(result, session.close())
+}
+
+/// Closes the session after an operation that acts on a notification. When the operation
+/// succeeded and only the cleanup failed, the cleanup error is returned, but it says that the
+/// operation was carried out (its result is in the details), not that nothing was sent.
+pub(crate) fn close_acting_session<T: serde::Serialize>(
+    session: NcSession,
+    result: Result<T, AdapterError>,
+) -> Result<T, AdapterError> {
+    merge_acting_session_result(result, session.close())
+}
+
+fn merge_acting_session_result<T: serde::Serialize>(
+    result: Result<T, AdapterError>,
+    cleanup: Result<(), AdapterError>,
+) -> Result<T, AdapterError> {
+    match (result, cleanup) {
+        (Ok(value), Err(close_err)) => {
+            let mut error =
+                crate::actions::DeliveryTracker::from_delivered_units(1).annotate(close_err);
+            let mut details = error
+                .details
+                .take()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(details) = details.as_object_mut() {
+                details.insert("physical_delivery_started".into(), true.into());
+                details.insert("operation_completed".into(), true.into());
+                details.insert("cleanup_failed".into(), true.into());
+                if let Ok(value) = serde_json::to_value(&value) {
+                    details.insert("operation_result".into(), value);
+                }
+            }
+            Err(error.with_details(details))
+        }
+        (result, cleanup) => merge_session_result(result, cleanup),
+    }
 }
 
 fn merge_session_result<T>(
@@ -203,6 +240,15 @@ fn reactivate_app(app: &ProcessIdentity, deadline: Deadline) -> Result<(), Adapt
     if !crate::system::process::process_identity::matches_instance(pid, &app.instance)? {
         return Ok(());
     }
+    // Sprint Coder itself is never re-activated by us: skipped, not failed, so the operation's
+    // result stands. An unreadable variable or owner still fails.
+    if let Err(error) = crate::system::own_window::check_pid(Some(pid)) {
+        return if crate::system::own_window::is_own_refusal(&error) {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
     crate::system::focus::ensure_app_focused(pid, deadline)
 }
 
@@ -274,6 +320,10 @@ fn is_nc_open(_pid: i32, _deadline: Deadline) -> bool {
 
 #[cfg(target_os = "macos")]
 fn open_nc(deadline: Deadline) -> Result<(), AdapterError> {
+    crate::system::own_window::check_named_app(
+        "com.apple.controlcenter",
+        operation_deadline(deadline, std::time::Duration::from_secs(1))?,
+    )?;
     let script = r#"tell application "System Events" to tell its application process "ControlCenter"
         click (first menu bar item of menu bar 1 whose description is "Clock")
     end tell"#;
@@ -314,7 +364,14 @@ fn close_nc(deadline: Deadline) -> Result<(), AdapterError> {
         key: "escape".into(),
         modifiers: vec![],
     };
-    keyboard::synthesize_key(&combo, None, deadline)?;
+    // When the key cannot go to whatever is in front (Sprint Coder itself, or a front that
+    // cannot be read), it goes to Notification Center's own process instead.
+    match keyboard::synthesize_key(&combo, None, deadline) {
+        Err(error) if crate::system::own_window::is_refusal(&error) => {
+            keyboard::synthesize_key(&combo, Some(pid), deadline)?
+        }
+        other => other?,
+    }
     std::thread::sleep(std::time::Duration::from_millis(300));
     Ok(())
 }

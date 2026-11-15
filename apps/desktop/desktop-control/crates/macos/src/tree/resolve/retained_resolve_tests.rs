@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     RetainedFacts, RetainedMismatch, native_identifier_attribute, resolve_saved_token,
     token_mismatch,
@@ -14,6 +15,9 @@ fn entry(role: &str) -> RefEntry {
             process_instance: Some("test-instance".into()),
         },
         identity: RefEntryIdentity {
+            ancestors: Vec::new(),
+            in_menu: None,
+            in_view: None,
             unique_at_capture: false,
             retained_object: None,
             role: role.into(),
@@ -32,6 +36,7 @@ fn entry(role: &str) -> RefEntry {
             available_actions: vec![],
         },
         source: RefSource {
+            settled_thin_nodes: None,
             source_app: None,
             source_window_id: Some("w-10".into()),
             source_window_title: None,

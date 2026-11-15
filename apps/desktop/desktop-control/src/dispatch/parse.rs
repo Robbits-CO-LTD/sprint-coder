@@ -175,8 +175,14 @@ fn url_launch_options(
             "--url cannot be combined with --arg, --env, --cwd or --cdp; nothing was launched",
         ));
     }
+    let args = super::launch_url::launch_url_args(&launch.app, url)?;
+    if cfg!(target_os = "macos") {
+        return Err(AppError::invalid_input(
+            "launch --url is not available on this OS (macOS); nothing was launched",
+        ));
+    }
     Ok(LaunchOptions {
-        args: super::launch_url::launch_url_args(&launch.app, url)?,
+        args,
         env: BTreeMap::new(),
         cwd: None,
         timeout_ms: launch.timeout,

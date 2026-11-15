@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod actions;
@@ -10,6 +11,7 @@ mod tree;
 pub use adapter::MacOSAdapter;
 pub use input::clipboard::helper_entry_from_env as clipboard_helper_from_env;
 pub use system::cocoa_runtime::ensure_cocoa_multithreaded;
+pub use system::own_window::{REFUSED_WINDOW_OWNER_VARIABLE, RefusedWindowOwner};
 pub use system::permissions::permission_guide::entry_from_env as permission_guide_from_env;
 pub use system::permissions::permission_helper::entry_from_env as permission_prompt_helper_from_env;
 pub use system::process::legacy_host::stop_legacy_command_hosts;

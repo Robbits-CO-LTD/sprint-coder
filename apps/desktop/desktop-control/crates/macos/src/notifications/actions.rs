@@ -1,9 +1,10 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     ActionResult, AdapterError, Deadline, ErrorCode, InteractionPolicy, NotificationFilter,
     NotificationIdentity, NotificationInfo, verify_notification_identity,
 };
 
-use super::nc_session::{NcSession, close_session};
+use super::nc_session::{NcSession, close_acting_session};
 
 #[cfg(test)]
 #[path = "actions_tests.rs"]
@@ -19,7 +20,7 @@ pub fn dismiss_notification(
     require_foreground_policy(policy)?;
     let session = NcSession::open(policy, deadline)?;
     let result = dismiss_impl(index, app_filter, identity, policy, session.pid(), deadline);
-    close_session(session, result)
+    close_acting_session(session, result)
 }
 
 pub fn dismiss_all(
@@ -30,7 +31,7 @@ pub fn dismiss_all(
     require_foreground_policy(policy)?;
     let session = NcSession::open(policy, deadline)?;
     let result = dismiss_all_impl(app_filter, policy, session.pid(), deadline);
-    close_session(session, result)
+    close_acting_session(session, result)
 }
 
 pub fn notification_action(
@@ -43,7 +44,7 @@ pub fn notification_action(
     require_foreground_policy(policy)?;
     let session = NcSession::open(policy, deadline)?;
     let result = action_impl(index, identity, action_name, session.pid(), deadline);
-    close_session(session, result)
+    close_acting_session(session, result)
 }
 
 #[cfg(target_os = "macos")]

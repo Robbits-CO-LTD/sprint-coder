@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, ClipboardContent, ClipboardFormat, Deadline, DragParams, InputOps,
     InteractionLease, KeyCombo, MouseEvent, OperationReport,
@@ -11,6 +12,8 @@ impl InputOps for MacOSAdapter {
         event: MouseEvent,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        let _scope = self.acting("mouse_event");
+        crate::system::own_window::check_point(&event.point)?;
         let report = crate::input::pointer_report::pointer_report(&event);
         crate::input::mouse::synthesize_mouse(event, lease.deadline())?;
         Ok(report)
@@ -22,6 +25,8 @@ impl InputOps for MacOSAdapter {
         down: bool,
         _lease: &InteractionLease,
     ) -> Result<(), AdapterError> {
+        let _scope = self.acting("key_event");
+        crate::system::own_window::check_front()?;
         crate::input::keyboard::reject_standalone_key_state(combo, down)
     }
 
@@ -30,6 +35,9 @@ impl InputOps for MacOSAdapter {
         params: DragParams,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        let _scope = self.acting("drag");
+        crate::system::own_window::check_point(&params.from)?;
+        crate::system::own_window::check_point(&params.to)?;
         let report = OperationReport::drag_dispatched(&params);
         crate::input::mouse::synthesize_drag(params, lease.deadline())?;
         Ok(report)

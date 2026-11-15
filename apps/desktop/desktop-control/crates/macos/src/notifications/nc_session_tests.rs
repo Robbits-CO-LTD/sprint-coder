@@ -1,5 +1,7 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
-    NcSession, NcSessionOps, closed_center_policy_error, merge_session_result, nc_pid_from_output,
+    NcSession, NcSessionOps, closed_center_policy_error, merge_acting_session_result,
+    merge_session_result, nc_pid_from_output,
 };
 use agent_desktop_core::{AdapterError, ErrorCode, ProcessIdentity};
 
@@ -210,4 +212,97 @@ fn close_delay_does_not_consume_focus_restoration_budget() {
     assert!(restore_attempted);
     assert!(session.previous_app.is_none());
     session.close_pending = false;
+}
+
+#[test]
+fn a_refused_cleanup_after_a_completed_operation_is_not_reported_as_not_delivered() {
+    let _scope = crate::system::own_window::enter(
+        &crate::RefusedWindowOwner::Process {
+            pid: 42,
+            instance: None,
+        },
+        "dismiss_notification",
+    );
+    let refused = crate::system::own_window::check_pid(Some(42)).unwrap_err();
+    assert_eq!(
+        refused.disposition,
+        agent_desktop_core::DeliverySemantics::not_delivered()
+    );
+
+    let error = merge_acting_session_result(Ok("dismissed"), Err(refused)).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::PolicyDenied);
+    assert_ne!(
+        error.disposition,
+        agent_desktop_core::DeliverySemantics::not_delivered()
+    );
+    let details = error.details.unwrap();
+    assert_eq!(details["kind"], "own_window_refused");
+    assert_eq!(details["physical_delivery_started"], true);
+    assert_eq!(details["operation_completed"], true);
+    assert_eq!(details["cleanup_failed"], true);
+    assert_eq!(details["operation_result"], "dismissed");
+    assert!(!error.message.contains("nothing was sent"));
+}
+
+#[test]
+fn a_failed_cleanup_after_a_completed_operation_keeps_its_code_and_the_delivery() {
+    let cleanup = AdapterError::timeout("cleanup failed")
+        .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered());
+
+    let error = merge_acting_session_result(Ok(vec![1, 2]), Err(cleanup)).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::Timeout);
+    assert_eq!(
+        error.disposition,
+        agent_desktop_core::DeliverySemantics::delivered_unverified()
+    );
+    let details = error.details.unwrap();
+    assert_eq!(details["physical_delivery_started"], true);
+    assert_eq!(details["operation_result"], serde_json::json!([1, 2]));
+}
+
+#[test]
+fn an_acting_operation_failure_still_wins_over_its_cleanup() {
+    let operation = AdapterError::new(ErrorCode::ElementNotFound, "operation failed");
+
+    let error = merge_acting_session_result::<()>(
+        Err(operation),
+        Err(AdapterError::timeout("cleanup failed")),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::ElementNotFound);
+    assert!(merge_acting_session_result(Ok(1), Ok(())).is_ok_and(|value| value == 1));
+}
+
+#[test]
+fn sprint_coder_is_skipped_not_reactivated_after_the_notification_center() {
+    let pid = std::process::id();
+    let raw_pid = i32::try_from(pid).unwrap();
+    let instance = crate::system::process::process_identity::token_for_pid(raw_pid)
+        .unwrap()
+        .expect("own instance");
+    let own = ProcessIdentity::new(pid, instance);
+    let deadline = agent_desktop_core::Deadline::standard().unwrap();
+
+    {
+        let _scope = crate::system::own_window::enter(
+            &crate::RefusedWindowOwner::Process {
+                pid,
+                instance: None,
+            },
+            "list_notifications",
+        );
+        assert!(super::reactivate_app(&own, deadline).is_ok());
+    }
+    let _scope = crate::system::own_window::enter(
+        &crate::RefusedWindowOwner::Unreadable,
+        "list_notifications",
+    );
+    let error = super::reactivate_app(&own, deadline).unwrap_err();
+    assert_eq!(
+        error.details.unwrap()["kind"],
+        "own_window_variable_unreadable"
+    );
 }

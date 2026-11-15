@@ -192,7 +192,7 @@ clang -I./crates/ffi/include main.c \
       -o snapshot_demo
 ```
 
-The macOS install name is `@rpath/libagent_desktop_ffi.dylib`, so a linking consumer
+The macOS install name is `libagent_desktop_ffi.dylib` under `@rpath`, so a linking consumer
 needs an rpath to the library's directory or dyld aborts at launch. `dlopen` and
 ctypes callers resolve by path and need nothing.
 

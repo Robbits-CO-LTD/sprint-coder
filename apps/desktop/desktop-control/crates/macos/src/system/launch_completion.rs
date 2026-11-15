@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, DeliverySemantics, ErrorCode};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,6 +76,7 @@ pub(crate) unsafe fn open_and_wait(request: &[u8], deadline: Deadline) -> Launch
             context,
             launch_completed,
             release_context,
+            launch_allowed,
         )
     };
     if !accepted {
@@ -85,6 +87,36 @@ pub(crate) unsafe fn open_and_wait(request: &[u8], deadline: Deadline) -> Launch
         .with_disposition(DeliverySemantics::not_delivered()));
     }
     state.wait(deadline)
+}
+
+unsafe extern "C" fn launch_allowed(
+    context: *mut c_void,
+    pid: i32,
+    path: *const std::ffi::c_char,
+) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let checked = std::panic::catch_unwind(|| {
+        crate::system::own_window::check_variable()?;
+        if pid > 0 {
+            crate::system::own_window::check_pid(Some(pid))?;
+        }
+        if path.is_null() {
+            return Err(crate::system::launch_location::refused());
+        }
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(
+            unsafe { std::ffi::CStr::from_ptr(path) }.to_bytes(),
+        ));
+        crate::system::launch_location::require(path).map(|_| ())
+    })
+    .unwrap_or_else(|_| Err(crate::system::launch_location::refused()));
+    match checked {
+        Ok(()) => true,
+        Err(error) => {
+            let state = unsafe { &*(context as *const LaunchCompletion) };
+            state.complete(Err(error));
+            false
+        }
+    }
 }
 
 unsafe extern "C" fn launch_completed(
@@ -233,6 +265,7 @@ unsafe extern "C" {
             *const crate::system::launch_callback_result::LaunchCallbackResult,
         ),
         release: unsafe extern "C" fn(*mut c_void),
+        guard: unsafe extern "C" fn(*mut c_void, i32, *const std::ffi::c_char) -> bool,
     ) -> bool;
     fn agent_desktop_running_application_is_live(application: *mut c_void, expected_pid: i32)
     -> u8;
@@ -241,6 +274,37 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_policy_callback_preserves_the_own_window_refusal_before_opening() {
+        let _scope = crate::system::own_window::enter(
+            &crate::RefusedWindowOwner::Process {
+                pid: 42,
+                instance: None,
+            },
+            "launch_app",
+        );
+        let state = LaunchCompletion::new();
+        let context = (&state as *const LaunchCompletion).cast_mut().cast();
+        assert!(!unsafe { launch_allowed(context, 42, std::ptr::null()) });
+        // The bridge's generic completion must not overwrite the precise policy error.
+        state.complete(Ok((42, "later".into())));
+        let error = state.wait(Deadline::after(100).unwrap()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert_eq!(error.details.unwrap()["kind"], "own_window_refused");
+    }
+
+    #[test]
+    fn launch_policy_callback_refuses_an_unconfirmed_bundle_location() {
+        let _scope =
+            crate::system::own_window::enter(&crate::RefusedWindowOwner::Nobody, "launch_app");
+        let state = LaunchCompletion::new();
+        let context = (&state as *const LaunchCompletion).cast_mut().cast();
+        assert!(!unsafe { launch_allowed(context, 0, c"/tmp/outside.app".as_ptr()) });
+        let error = state.wait(Deadline::after(100).unwrap()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert_eq!(error.details.unwrap()["kind"], "launch_location_refused");
+    }
 
     #[test]
     fn late_completion_state_remains_safe_after_timeout() {

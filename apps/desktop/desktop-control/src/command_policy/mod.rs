@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, AppError, DeliverySemantics, ErrorCode, PermissionReport, refs::validate_ref_id,
 };
@@ -141,6 +142,12 @@ pub(crate) fn requires_permission_report(cmd: &Commands) -> bool {
 
 fn validate_args(cmd: &Commands) -> Result<(), AppError> {
     match cmd {
+        #[cfg(target_os = "macos")]
+        Commands::Launch(args) if args.url.is_some() => {
+            return Err(AppError::invalid_input(
+                "launch --url is not available on this OS (macOS); nothing was launched",
+            ));
+        }
         Commands::Snapshot(args) => {
             if let Some(root) = &args.root {
                 if args.surface != crate::cli_args::Surface::Window {

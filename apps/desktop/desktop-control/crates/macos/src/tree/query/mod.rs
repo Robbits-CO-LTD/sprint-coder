@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 mod arena;
 mod child_page;
 pub(crate) mod child_read;
@@ -265,6 +266,9 @@ mod tests {
                 process_instance: Some(process_instance),
             },
             identity: RefEntryIdentity {
+                ancestors: Vec::new(),
+                in_menu: None,
+                in_view: None,
                 retained_object: None,
                 role: "button".into(),
                 name: Some("Save".into()),
@@ -283,6 +287,7 @@ mod tests {
                 available_actions: Vec::new(),
             },
             source: RefSource {
+                settled_thin_nodes: None,
                 source_app: Some("Fixture".into()),
                 source_window_id: None,
                 source_window_title: None,

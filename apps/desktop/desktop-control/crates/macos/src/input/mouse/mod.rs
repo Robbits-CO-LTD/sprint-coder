@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #[cfg(not(target_os = "macos"))]
 use agent_desktop_core::DragParams;
 use agent_desktop_core::{
@@ -7,11 +8,49 @@ use agent_desktop_core::{
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
-    use core_graphics::event::{
-        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
-    };
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton, EventField};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
+
+    /// Posts an event that starts an effect (a press, a move, a wheel chunk) after judging the
+    /// window at its location.
+    pub(crate) fn post_checked(event: &CGEvent) -> Result<(), AdapterError> {
+        let point = event.location();
+        crate::system::own_window::check_point(&Point {
+            x: point.x,
+            y: point.y,
+        })?;
+        deliver(event);
+        Ok(())
+    }
+
+    /// Posts without judging: the release that pairs with a press already sent, and the drag
+    /// path between a judged press and a judged drop. Refusing it would leave the button down.
+    pub(crate) fn post_unjudged(event: &CGEvent) {
+        deliver(event);
+    }
+
+    #[cfg(not(all(test, not(feature = "interactive-tests"))))]
+    fn deliver(event: &CGEvent) {
+        event.post(core_graphics::event::CGEventTapLocation::HID);
+    }
+
+    /// Unit tests never post real input; they read what would have been posted.
+    #[cfg(all(test, not(feature = "interactive-tests")))]
+    fn deliver(event: &CGEvent) {
+        let point = event.location();
+        POSTED.with(|posted| {
+            posted
+                .borrow_mut()
+                .push((event.get_type() as u32, point.x, point.y))
+        });
+    }
+
+    #[cfg(all(test, not(feature = "interactive-tests")))]
+    thread_local! {
+        pub(crate) static POSTED: std::cell::RefCell<Vec<(u32, f64, f64)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
 
     pub(crate) fn event_flags(modifiers: &[Modifier]) -> CGEventFlags {
         modifiers.iter().fold(CGEventFlags::empty(), |flags, m| {
@@ -153,7 +192,7 @@ mod imp {
             set_click_count(&up, i as i64);
             ensure_budget(deadline, delivery)?;
             verify_target().map_err(|error| delivery.annotate(error))?;
-            down.post(CGEventTapLocation::HID);
+            post_checked(&down).map_err(|error| delivery.annotate(error))?;
             delivery.mark_delivered();
             let mut release = ClickReleaseGuard { event: Some(up) };
             sleep_bounded(deadline, std::time::Duration::from_millis(10), delivery)?;
@@ -164,7 +203,7 @@ mod imp {
                     AdapterError::internal("Mouse click release guard lost its pending event")
                 })
                 .map_err(|error| delivery.annotate(error))?;
-            up.post(CGEventTapLocation::HID);
+            post_unjudged(&up);
             ensure_budget(deadline, delivery)?;
             if i < spec.count {
                 sleep_bounded(deadline, std::time::Duration::from_millis(30), delivery)?;
@@ -173,14 +212,14 @@ mod imp {
         Ok(())
     }
 
-    struct ClickReleaseGuard {
-        event: Option<CGEvent>,
+    pub(crate) struct ClickReleaseGuard {
+        pub(crate) event: Option<CGEvent>,
     }
 
     impl Drop for ClickReleaseGuard {
         fn drop(&mut self) {
             if let Some(event) = self.event.take() {
-                event.post(CGEventTapLocation::HID);
+                post_unjudged(&event);
             }
         }
     }
@@ -226,7 +265,8 @@ mod imp {
         ensure_budget(deadline, *delivery)?;
         let ev = create_event_with_source(source, event.0, event.1, event.2, event.3)
             .map_err(|error| delivery.annotate(error))?;
-        ev.post(CGEventTapLocation::HID);
+        // Only the drag path uses this: its press and drop are judged, the points between are not.
+        post_unjudged(&ev);
         delivery.mark_delivered();
         ensure_budget(deadline, *delivery)
     }
@@ -317,9 +357,12 @@ pub(crate) use imp::synthesize_drag;
 
 #[cfg(target_os = "macos")]
 pub(crate) use imp::{
-    create_event_with_source, ensure_budget, event_flags, event_source, post_event_with_source,
-    sleep_bounded, validate_point,
+    create_event_with_source, ensure_budget, event_flags, event_source, post_checked,
+    post_event_with_source, post_unjudged, sleep_bounded, validate_point,
 };
+
+#[cfg(all(test, target_os = "macos", not(feature = "interactive-tests")))]
+pub(crate) use imp::{ClickReleaseGuard, POSTED, create_event};
 
 #[cfg(all(test, target_os = "macos", feature = "interactive-tests"))]
 pub(crate) use imp::{create_event, standalone_state_error, wheel_lines_to_i32};
