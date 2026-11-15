@@ -1,6 +1,6 @@
 # macOS 版デスクトップ操作の作成計画（2026-11-15）
 
-オーナーの指示（2026-11-15）: 「macOS は完全に非対応なので対応させる。agent-desktop を見て作る。まず計画を立て、余計なことはせず、どうしても難しい問題は Issue に上げ、とりあえず使えることを目標にする。Apple の公証は今は使えないので、使えないまま試験する。」
+オーナーの指示（2026-11-15）: 「macOS は完全に非対応なので対応させる。デスクトップ操作の取り込み元のソースを見て作る。まず計画を立て、余計なことはせず、どうしても難しい問題は Issue に上げ、とりあえず使えることを目標にする。Apple の公証は今は使えないので、使えないまま試験する。」
 
 ## 1. 到達点
 
@@ -18,7 +18,7 @@ macOS（Apple シリコン）の Sprint Coder で、AI がデスクトップ操�
 
 ### 2.1 Sprint Coder 側
 
-- デスクトップ操作は、`apps/desktop/desktop-control` に取り込んだ agent-desktop 1.2.0（Rust の CLI）を、`exec_command` の経路で 1 コマンド 1 プロセスとして起動する。専用の IPC は無い。
+- デスクトップ操作は、`apps/desktop/desktop-control` に取り込んだ第三者のソース（Rust の CLI、1.2.0。出典は `docs/licenses/desktop-control-license.txt`）を、`exec_command` の経路で 1 コマンド 1 プロセスとして起動する。専用の IPC は無い。
 - `desktopControlSupported` が `win32 && x64` だけ true を返す。macOS では AI への案内・Team の項目・承認カードがすべて出ない。
 - **macOS で止めてある直接の理由は、起動の規則。** `prepareExecutionImage` は、macOS では `/usr/bin` など root 所有の場所にある実行ファイルしか起動を許さない（`macOS cannot safely launch this mutable native execution image`）。アプリに同梱した実行ファイルは通らない。
 - 先例がある。sandbox runner は、同梱の実行ファイルを SHA-256 の照合の後にパスで起動していて、`prepareExecutionImage` を通らない。
@@ -26,14 +26,14 @@ macOS（Apple シリコン）の Sprint Coder で、AI がデスクトップ操�
 - 起動の名前解決（スタートメニュー）、許可しないアプリの一覧、AI への案内文、ブラウザーの一覧は Windows の名前で書かれている。
 - 配布の設定（`forge.config.ts`）、build（`build-desktop-control.mjs`）、CI の準備（`prepare-desktop-control`）は Windows だけ。
 
-### 2.2 agent-desktop 1.2.0 の macOS 実装
+### 2.2 取り込み元（1.2.0）の macOS 実装
 
 - **常駐プロセス（command host）は 1.1.0 で削除済み。** 1 コマンド 1 プロセスで、Windows と同じ形で使える。11 月 1 日の検証（1.0.2）で見つけた「権限を借りられる」「Stop の後に書き込みが届く」は、この作りでは起きない。
 - `crates/macos` は Rust 約 3.5 万行（試験を除く）と Objective-C 約 2,400 行。取り込み済みの core に合わせると、compile エラーは 4 件だけ（`LaunchResult` の新しい欄が 2 か所、`LocatorRefEvidence.runtime_id` が 2 か所）。
 - 権限は、起動元のアプリに付く（Sprint Coder.app、開発版では Electron.app）。通常のコマンドは権限の確認の画面を出さず、無ければ `PERM_DENIED` を返す。
 - 窓の id は `w-<CGWindowID>`、プロセスの識別は `macos-proc-v1:<開始秒>:<マイクロ秒>`。
 - 起動は、アプリの表示名か bundle ID だけを受け取り、LaunchServices で解決する。`--activate` を付けなければ前面に出さない。
-- クリップボードは、別の実行ファイル（`agent-desktop-macos-helper`）が要る。
+- クリップボードは、別の補助の実行ファイル（取り込み元の macOS 用の helper）が要る。
 - Stop で残り得るもの: すでに送った AX の呼び出し（Windows の UIA と同じ）、自分のプロセスグループを持つ子（screencapture、osascript、カーソルの描画）。
 
 ### 2.3 この Mac の試験の環境
@@ -46,14 +46,14 @@ macOS（Apple シリコン）の Sprint Coder で、AI がデスクトップ操�
 
 | # | 判断 | 理由 |
 | --- | --- | --- |
-| D1 | `crates/macos` は upstream の同じ commit（1.2.0、`2b0a7334`）から取り込む | 取り込み済みの core と版が合う。1.3 系へ上げると、Windows 用に直した core の付け替えが要る |
+| D1 | `crates/macos` は upstream の同じ commit（1.2.0）から取り込む | 取り込み済みの core と版が合う。1.3 系へ上げると、Windows 用に直した core の付け替えが要る |
 | D2 | 対象は Apple シリコンだけ | 配布物が arm64 だけ。build は host と同じ arch しか作れない |
 | D3 | macOS の起動の規則に、同梱の実行ファイルだけの例外を足す。条件は「パスが同梱の実行ファイルそのもの」「中身の SHA-256 が封印と一致」「相対の読み込みパスを持たない」「Workspace の外」。満たせばパスで起動する | sandbox runner と同じ扱い。それ以外の実行ファイルは今のまま拒否する |
 | D4 | Sprint Coder 自身の窓を操作させない仕組みを、macOS の adapter にも入れる。有効にする PR より前に入れる | 安全に関わる。Windows は `own_window.rs` で実装済みで、macOS は素通しになっている |
 | D5 | 最初の段階では、Team のカーソルは macOS では切る | カーソルの描画は別プロセスで、Windows 用の起動と終了の仕組みに依存している。基本の操作には要らない |
 | D6 | 最初の段階では、クリップボードの書き込みと `launch --url` は macOS では使えないままにする | 別の実行ファイルの同梱と、ブラウザーの一覧の Mac 版が要る。基本の操作には要らない |
 | D7 | `launch` の解決先は、標準のアプリの場所に限る（`/Applications`、`/System/Applications`、`/System/Library/CoreServices`、`~/Applications`） | LaunchServices は、Workspace の中に置かれたアプリも解決し得る。Windows の「標準のフォルダーだけ」と同じ線を引く |
-| D8 | 状態の置き場所は `userData/desktop-control`（0700）にし、`AGENT_DESKTOP_HOME` で渡す | `HOME` が渡らないので既定の `~/.agent-desktop` は使えない。refmap に欄の文字が入るので、他から読めない場所にする |
+| D8 | 状態の置き場所は `userData/desktop-control`（0700）にし、環境変数で渡す | `HOME` が渡らないので、既定の `HOME` の下の場所は使えない。refmap に欄の文字が入るので、他から読めない場所にする |
 | D9 | 公証・release・tag には触らない。試験は未署名の手元 build で行う | オーナーの指示 |
 
 ## 4. 段階
@@ -138,7 +138,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 - Intel の Mac、Linux。
 - 公証、release、tag、既存の 0.8.0 への macOS 版の追加（[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315)）。
-- agent-desktop の版上げ（1.3 系）。
+- 取り込み元の版上げ（1.3 系）。
 - 以前の「Computer Use（ベータ）」の DB の表の整理。
 
 ## 6. 試験の方針
@@ -180,14 +180,14 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 取り込んだ upstream のコードに関わるもの:
 
 - `AXValueGetValue` に渡す前の型の確認が無い箇所がある（`node_attribute_decode.rs` ほか）。相手のアプリが別の型を返した時の挙動は未確認。
-- 起動のたびに、古い版（1.0 系）の常駐プロセスを探して終了させる処理（`stop_legacy_command_hosts`）が残っている。利用者が別に入れた古い agent-desktop に作用し得る。
-- 権限が無い時の案内の文言が upstream のまま（「agent-desktop を起動するアプリ」）。
+- 起動のたびに、古い版（1.0 系）の常駐プロセスを探して終了させる処理（`stop_legacy_command_hosts`）が残っている。利用者が別に入れた、取り込み元の古い版に作用し得る。
+- 権限が無い時の案内の文言が upstream のまま（取り込み元の道具の名前が出る）。
 - screenshot の一時ファイルが、強制終了の時に `$TMPDIR` に残り得る。
 
 試験と CI:
 
 - PR の CI では macOS の Rust を compile しない。release の前の全試験と release の workflow で build する。
-- CLI の試験（`cargo test -p agent-desktop`）は、取り込んでいない upstream のファイルを読むので compile できない。Windows と同じ。
+- CLI の package の試験は、取り込んでいない upstream のファイルを読むので compile できない。Windows と同じ。
 
 ### 段階 2 の独立レビューと実機の試験で出て、残したもの
 
@@ -240,4 +240,4 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 - 宛先を指定しない `press` は、最前面のアプリへ届く。システムのダイアログが最前面にある時は、そのダイアログへ届き得る（承認カードは出る）。自身の窓の拒否は、Sprint Coder の窓だけが対象。
 - 通知の command（`osascript` を使う）が、hardened runtime の配布物で動くかは未確認。
 - `cargo clippy -- -D warnings` は、`crates/core` の既存の警告 2 件（`snapshot/window_capture.rs`）で止まる。CI では clippy を流していない。
-- upstream の agent-desktop にも同じ不具合がある（v1.3.1 の後でも同じ作り）。upstream への報告はしていない。
+- upstream にも同じ不具合がある（v1.3.1 の後でも同じ作り）。upstream への報告はしていない。

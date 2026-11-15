@@ -8,7 +8,7 @@ Sprint Coder の中の実 AI に、macOS のアプリをデスクトップ操作
 | --- | --- |
 | OS | macOS 27.0.1（26A434）、Apple シリコン |
 | アプリ | 開発版（`electron-forge` の dev bundle）。段階 2 の commit `12ba8b46`（A〜D）と、レビュー指摘の修正後の `298031b7`（E） |
-| 実行ファイル | `sprint-coder-desktop-control`（agent-desktop 1.2.0、段階 1 の `ce6a5185` から build。SHA-256 `0e408f2f…da754e`） |
+| 実行ファイル | `sprint-coder-desktop-control`（取り込み元の 1.2.0、段階 1 の `ce6a5185` から build。SHA-256 `0e408f2f…da754e`） |
 | 起動 | `open -n -g -a <repo>/node_modules/electron/dist/Electron.app --args … apps/desktop`。LaunchServices 経由で起動し、開発版の Electron が持つアクセシビリティと画面収録の許可を使う。シェルから直接起動した場合は許可が付かない |
 | profile | 試験専用の `SPRINT_CODER_USER_DATA_DIR`（新規）。利用者の profile には触れていない |
 | AI | Codex CLI（runtime `codex`、要求モデル `auto`）。実際に解決されたモデルの ID は、アプリの記録に残っていない |

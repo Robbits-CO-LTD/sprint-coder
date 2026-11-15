@@ -316,7 +316,7 @@ describe('macOS sandbox runner sealing', () => {
 });
 
 describe('desktop-control resources', () => {
-  const LICENSE = resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt');
+  const LICENSE = resolve(__dirname, '..', '..', 'docs', 'licenses', 'desktop-control-license.txt');
 
   it('ships only the Windows x64 and macOS arm64 build output, its seal and its license, under their build names', () => {
     expect(desktopControlSource('win32', 'x64')).toBe(DESKTOP_CONTROL_SOURCE);
