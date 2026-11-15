@@ -47,4 +47,24 @@ pub struct LaunchResult {
     /// started: a started process may still be running without a window.
     #[serde(default)]
     pub new_instance: bool,
+    /// `true` when the started process exited without a window of its own
+    /// while an instance of the same executable that ran before the launch
+    /// still runs: the app passed the launch to that instance (`attached` is
+    /// then `true` too). A `window` beside it is one that instance showed
+    /// after the launch started (new, or kept hidden until then), owned by
+    /// `window.pid`; without a `window`, no such window was seen. Left out
+    /// when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handed_off: bool,
+    /// `true` when a bare launch found the app already running with no
+    /// window shown (in the background or the tray) and so started it, as a
+    /// double click on its icon would, instead of attaching. The other fields
+    /// say what the start did. Left out when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running_without_window: bool,
+    /// Present only with `--activate`: whether `window` was in front when the
+    /// launch returned. `false` when there is no window, or Windows refused
+    /// the foreground; the window is then open behind others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
 }

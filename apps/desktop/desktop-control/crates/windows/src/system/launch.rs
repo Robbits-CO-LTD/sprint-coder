@@ -33,96 +33,239 @@ pub(crate) fn launch_app_impl(
     };
     deadline.ensure_remaining().map_err(before_launch)?;
     let prepared = prepare(id, options, deadline).map_err(before_launch)?;
-    if let Some(attached) = prepared.attached {
+    if let Some(mut attached) = prepared.attached {
+        bring_forward_if_asked(&mut attached, options.activate, deadline);
         return Ok(attached);
     }
+    // Read before anything starts, so a window the running instance opens
+    // for this launch can be told apart from the ones it already had.
+    let handoff = launch_handoff::Handoff::begin(prepared.running);
     let guard = ForegroundGuard::begin(options.activate);
     let (pid, token, process) = create_process(&prepared.executable, options, deadline)?;
     let lineage = launch_handoff::Lineage::new(pid, &token, process);
-    let observed = observe_launched_window(pid, &token, lineage, options, deadline)?;
+    let observed = observe_launched_window(pid, &token, lineage, &handoff, options, deadline)?;
     if let Some(guard) = guard {
         guard.finish(&observed.owners, observed.window.as_ref());
     }
-    let new_instance = observed.window.is_some();
+    let new_instance = observed.window.is_some() && !observed.handed_off;
     let mut result = launch_result(id, pid, token, observed.window);
     result.new_instance = new_instance;
     if observed.exited_without_window {
-        let handed_off = prepared.running.iter().any(|process| !process.has_exited());
+        // A descendant still running may yet show the window, so the launch
+        // is taken as passed on only when none is left.
+        let handed_off =
+            observed.handed_off || (handoff.any_running() && !observed.descendants_alive);
         result.attached = handed_off;
+        result.handed_off = handed_off;
         result.suggestion = Some(
-            if handed_off {
-                launch_attach::HANDED_OFF
-            } else {
-                launch_handoff::EXITED_WITHOUT_WINDOW
+            match (
+                handed_off,
+                result.window.is_some(),
+                observed.handoff_ambiguous,
+            ) {
+                (true, true, _) => launch_attach::HANDED_OFF_NEW_WINDOW,
+                (true, false, true) => launch_attach::HANDED_OFF_AMBIGUOUS,
+                (true, false, false) => launch_attach::HANDED_OFF,
+                (false, _, _) => launch_handoff::EXITED_WITHOUT_WINDOW,
             }
             .to_string(),
         );
     }
+    result.running_without_window = prepared.running_without_window;
+    bring_forward_if_asked(&mut result, options.activate, deadline);
     Ok(result)
+}
+
+/// With `--activate`, brings the result's window to the front and records
+/// whether it is there (`activated`). Before, `--activate` only skipped
+/// keeping the window behind, so a window the app did not raise itself (one
+/// a running instance showed for a single-instance app, or the window a
+/// launch attached to) stayed behind although the caller asked for it in
+/// front. Windows may refuse the foreground to this process (it may take it
+/// only while the user's last input went to the process that started it);
+/// then `activated` is `false` and nothing else is tried.
+fn bring_forward_if_asked(result: &mut LaunchResult, activate: bool, deadline: Deadline) {
+    if !activate {
+        return;
+    }
+    result.activated = Some(
+        result
+            .window
+            .as_ref()
+            .is_some_and(|window| bring_forward(window, deadline)),
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn bring_forward(window: &WindowInfo, deadline: Deadline) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
+    };
+    let handle = super::window::window_ops::parse_handle(&window.id);
+    // Only the window the result names, still owned by the process it names.
+    if handle.is_null() || !window_is_owned_by(handle, &[window.pid]) {
+        return false;
+    }
+    if unsafe { GetForegroundWindow() } == handle {
+        return true;
+    }
+    if unsafe { IsIconic(handle) } != 0 {
+        unsafe { ShowWindowAsync(handle, SW_RESTORE) };
+    }
+    unsafe { SetForegroundWindow(handle) };
+    // The switch can land a moment after the call returns.
+    let until = std::time::Instant::now() + Duration::from_millis(500).min(deadline.remaining());
+    loop {
+        if unsafe { GetForegroundWindow() } == handle {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bring_forward(_window: &WindowInfo, _deadline: Deadline) -> bool {
+    false
 }
 
 /// What watching a fresh launch found: the window, if one can be tied to the
 /// launch; the processes that may own it (the launched one, then any
-/// descendant once it exited); and whether the launched process exited with
-/// no window tied to it.
+/// descendant once it exited, and the running instance whose new window was
+/// taken); whether the launched process exited with no window of its own or
+/// of a descendant; and whether the window is the running instance's.
+/// `handoff_ambiguous` is set when several windows the running instances
+/// showed could be the one asked for, so none was taken; `descendants_alive`
+/// when the watch ended with a descendant of the launch still running, so the
+/// launch is not taken as passed to the running instance.
 struct LaunchObservation {
     window: Option<WindowInfo>,
     owners: Vec<ProcessId>,
     exited_without_window: bool,
+    handed_off: bool,
+    handoff_ambiguous: bool,
+    descendants_alive: bool,
 }
 
-/// [`observe_window`] for a process this launch created. While the process
+impl LaunchObservation {
+    fn none(lineage: &launch_handoff::Lineage, exited: bool) -> Self {
+        Self {
+            window: None,
+            owners: lineage.pids(),
+            exited_without_window: exited,
+            handed_off: false,
+            handoff_ambiguous: false,
+            descendants_alive: false,
+        }
+    }
+}
+
+/// Watches a process this launch created for its window. While the process
 /// runs, only its own window counts, exactly as before. Once it has exited, a
-/// window of a live descendant counts instead (see `launch_handoff`), and with
-/// no live descendant the watch ends at once instead of at the deadline.
+/// window of a live descendant counts instead (see `launch_handoff`), and a
+/// live descendant is waited for until the deadline, as before. While an
+/// instance of the same executable that ran before the launch still runs, a
+/// window that instance showed after the launch started counts too, when it
+/// is the only such window ([`launch_handoff::HandoffLook`]); without a live
+/// descendant that watch lasts at most [`launch_handoff::HANDOFF_WINDOW_WAIT`].
+/// With nothing to watch, the watch ends at once instead of at the deadline.
 fn observe_launched_window(
     pid: ProcessId,
     process_instance: &str,
     mut lineage: launch_handoff::Lineage,
+    handoff: &launch_handoff::Handoff,
     options: &LaunchOptions,
     deadline: Deadline,
 ) -> Result<LaunchObservation, AdapterError> {
     let mut poll_interval = Duration::from_millis(50);
+    let mut handoff_deadline: Option<Deadline> = None;
     loop {
         if let Some(window) = observe_window_once(pid, process_instance, deadline)? {
             return Ok(LaunchObservation {
                 window: Some(window),
                 owners: vec![pid],
                 exited_without_window: false,
+                handed_off: false,
+                handoff_ambiguous: false,
+                descendants_alive: false,
             });
         }
         let exited = lineage.launched_has_exited();
+        let mut wait_until = deadline;
+        let mut descendants_alive = false;
         if exited {
             lineage.refresh();
             let live = lineage.live_descendants();
-            if live.is_empty() {
-                return Ok(LaunchObservation {
-                    window: None,
-                    owners: lineage.pids(),
-                    exited_without_window: true,
-                });
+            descendants_alive = !live.is_empty();
+            if descendants_alive {
+                let window =
+                    launch_handoff::descendant_window(&live, deadline).map_err(after_launch)?;
+                if window.is_some() {
+                    return Ok(LaunchObservation {
+                        window,
+                        owners: lineage.pids(),
+                        exited_without_window: false,
+                        handed_off: false,
+                        handoff_ambiguous: false,
+                        descendants_alive: false,
+                    });
+                }
             }
-            let window =
-                launch_handoff::descendant_window(&live, deadline).map_err(after_launch)?;
-            if window.is_some() {
+            let instance_runs = handoff.any_running();
+            if instance_runs {
+                match handoff.look(deadline).map_err(after_launch)? {
+                    launch_handoff::HandoffLook::One(window) => {
+                        let mut owners = lineage.pids();
+                        owners.push(window.pid);
+                        return Ok(LaunchObservation {
+                            window: Some(window),
+                            owners,
+                            exited_without_window: true,
+                            handed_off: true,
+                            handoff_ambiguous: false,
+                            descendants_alive: false,
+                        });
+                    }
+                    // Several candidates: none is taken, nor restacked.
+                    launch_handoff::HandoffLook::Several => {
+                        return Ok(LaunchObservation {
+                            handed_off: true,
+                            handoff_ambiguous: true,
+                            ..LaunchObservation::none(&lineage, true)
+                        });
+                    }
+                    launch_handoff::HandoffLook::None => {}
+                }
+                let handoff_until = *handoff_deadline
+                    .get_or_insert_with(|| deadline.capped(launch_handoff::HANDOFF_WINDOW_WAIT));
+                // A live descendant keeps the whole deadline (a launcher whose
+                // GUI child is slow to show its window); only without one is
+                // the watch held to the short handoff wait.
+                if !descendants_alive {
+                    wait_until = handoff_until;
+                }
+            }
+            let wait_over = wait_until.remaining().is_zero();
+            if launch_handoff::after_exit(descendants_alive, instance_runs, wait_over)
+                == launch_handoff::AfterExit::Stop
+            {
                 return Ok(LaunchObservation {
-                    window,
-                    owners: lineage.pids(),
-                    exited_without_window: false,
+                    descendants_alive,
+                    ..LaunchObservation::none(&lineage, true)
                 });
             }
         }
         if !should_poll_after_first_observation(options.timeout_ms)
-            || deadline.remaining().is_zero()
+            || wait_until.remaining().is_zero()
         {
             return Ok(LaunchObservation {
-                window: None,
-                owners: lineage.pids(),
-                exited_without_window: exited,
+                descendants_alive,
+                ..LaunchObservation::none(&lineage, exited)
             });
         }
-        let remaining = deadline.remaining();
-        std::thread::sleep(poll_interval.min(remaining));
+        std::thread::sleep(poll_interval.min(wait_until.remaining()));
         poll_interval = (poll_interval * 3 / 2).min(Duration::from_millis(250));
     }
 }
@@ -280,32 +423,6 @@ impl ForegroundGuard {
     fn finish(self, _owners: &[ProcessId], _window: Option<&WindowInfo>) {}
 }
 
-/// The window a launch actually caused, or `None`. A process that presents no
-/// window is a fact the caller reads from `LaunchResult.window`, not a failure:
-/// a background or windowless process is a legitimate launch outcome, and
-/// erroring on it made every such launch spend its whole timeout first.
-fn observe_window(
-    pid: ProcessId,
-    process_instance: &str,
-    options: &LaunchOptions,
-    deadline: Deadline,
-) -> Result<Option<WindowInfo>, AdapterError> {
-    let mut poll_interval = Duration::from_millis(50);
-    loop {
-        if let Some(window) = observe_window_once(pid, process_instance, deadline)? {
-            return Ok(Some(window));
-        }
-        if !should_poll_after_first_observation(options.timeout_ms)
-            || deadline.remaining().is_zero()
-        {
-            return Ok(None);
-        }
-        let remaining = deadline.remaining();
-        std::thread::sleep(poll_interval.min(remaining));
-        poll_interval = (poll_interval * 3 / 2).min(Duration::from_millis(250));
-    }
-}
-
 fn launch_result(
     id: &str,
     pid: ProcessId,
@@ -326,6 +443,9 @@ fn launch_result(
         suggestion: None,
         attached: false,
         new_instance: false,
+        handed_off: false,
+        running_without_window: false,
+        activated: None,
     }
 }
 
