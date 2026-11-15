@@ -102,7 +102,7 @@ mod imp {
         if button_unread(posts_a_click, button) {
             return Err(button_unread_refusal(request.policy));
         }
-        let Some(hold) = ForegroundHold::begin(false) else {
+        let Some(mut hold) = ForegroundHold::begin(false) else {
             return run_action(handle, element, request, lease, gate);
         };
         if !hold.locked() && posts_a_click && lock_needed(false, true, button) {
@@ -123,6 +123,9 @@ mod imp {
             }),
             _ => None,
         };
+        // Read just before the action, so a window it makes the target open,
+        // and that takes the foreground, can be told and handed back (#1293).
+        hold.watch_target(target_pid);
         let (result, sent) = with_button_delivery(button_target, || {
             run_action(handle, element, request, lease, gate)
         });

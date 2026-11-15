@@ -44,12 +44,21 @@
 //! - A proxy that moves the foreground from this process, the lock's owner,
 //!   is not stopped by it (`list_item_click` refuses the measured ones).
 //!
-//! Nothing here moves the foreground. When the target's process is in front
-//! after the action and was not before, the result (or the error) says so
+//! The hold itself never moves the foreground. When the target opened a
+//! window during the action, or one of its windows took the foreground, the
+//! lock is kept and the foreground watched and handed back by the launch's
+//! rules (`foreground_return`, #1293); a hand-back that worked says
+//! `details.foreground: "handed_back"`. When the target's process is in front
+//! after all that and was not before, the result (or the error) says so
 //! (`details.foreground: "target_in_front"`), whoever moved it (the person
-//! may have clicked the target). A window counts as the target's when the
-//! target's process owns it, owns its root owner, or is the app a shell frame
-//! hosts in it. An answer that comes after the action is over is not seen.
+//! may have clicked the target), with `details.foreground_hand_back:
+//! "failed"` when a hand-back was refused, or `"left_for_user"` when the take
+//! was left alone as possibly the user's. A window counts as the target's
+//! when the target's process owns it, owns its root owner, or is the app a
+//! shell frame hosts in it. An answer that comes after the action is over is
+//! not seen.
+
+use crate::actions::foreground_return::HandBackOutcome;
 
 /// `details.foreground` when the target's process came to the front.
 pub(crate) const TARGET_IN_FRONT: &str = "target_in_front";
@@ -90,15 +99,27 @@ pub(crate) struct HoldReport {
     pub(crate) locked: bool,
     pub(crate) settle: Settle,
     pub(crate) came_forward: bool,
+    /// What the watch over the target's new windows did (`foreground_return`).
+    pub(crate) hand_back: HandBackOutcome,
 }
 
 impl HoldReport {
     /// The details this report adds; none when the lock held, the wait
     /// completed and the target stayed behind.
     pub(crate) fn entries(self) -> Vec<(&'static str, &'static str)> {
+        use crate::actions::foreground_return::{HAND_BACK_FAILED, HANDED_BACK, LEFT_FOR_USER};
         let mut entries = Vec::new();
         if self.came_forward {
             entries.push(("foreground", TARGET_IN_FRONT));
+            match self.hand_back {
+                HandBackOutcome::Failed => entries.push(("foreground_hand_back", HAND_BACK_FAILED)),
+                HandBackOutcome::LeftForUser => {
+                    entries.push(("foreground_hand_back", LEFT_FOR_USER))
+                }
+                HandBackOutcome::None | HandBackOutcome::HandedBack => {}
+            }
+        } else if self.hand_back == HandBackOutcome::HandedBack {
+            entries.push(("foreground", HANDED_BACK));
         }
         if !self.locked {
             entries.push(("foreground_lock", LOCK_UNAVAILABLE));
@@ -241,6 +262,8 @@ mod imp {
     pub(crate) struct ForegroundHold {
         prior: HWND,
         locked: bool,
+        /// The target's windows before the action (`watch_target`).
+        watch: Option<crate::actions::foreground_return::ActionWatch>,
     }
 
     impl ForegroundHold {
@@ -268,11 +291,24 @@ mod imp {
             } else {
                 false
             };
-            Some(Self { prior, locked })
+            Some(Self {
+                prior,
+                locked,
+                watch: None,
+            })
         }
 
         pub(crate) fn locked(&self) -> bool {
             self.locked
+        }
+
+        /// Reads the windows of the target's process, so `finish` can tell a
+        /// window the action made it open (`foreground_return`). Call it just
+        /// before the action is sent; nothing is read without a target.
+        pub(crate) fn watch_target(&mut self, target_pid: Option<u32>) {
+            self.watch = target_pid.and_then(|pid| {
+                crate::actions::foreground_return::ActionWatch::begin(pid, self.prior)
+            });
         }
 
         /// Waits, while the lock still holds, for the target's window threads
@@ -302,9 +338,15 @@ mod imp {
                 }
             }
             let locked = self.locked;
+            // Still locked here: a window the action made the target open is
+            // watched first with the lock held (`foreground_return`).
+            let watched = match self.watch.take() {
+                Some(watch) => watch.finish(deadline, || self.unlock()),
+                None => None,
+            };
             self.unlock();
+            let now = unsafe { GetForegroundWindow() };
             let came_forward = target_pid.is_some_and(|pid| {
-                let now = unsafe { GetForegroundWindow() };
                 super::target_came_forward(
                     window_belongs_to(self.prior, pid),
                     window_belongs_to(now, pid),
@@ -314,6 +356,11 @@ mod imp {
                 locked,
                 settle,
                 came_forward,
+                hand_back: crate::actions::foreground_return::outcome(
+                    watched,
+                    came_forward,
+                    now == self.prior,
+                ),
             }
         }
 
@@ -455,7 +502,7 @@ mod imp {
 
     /// Whether `window` is the target's: its own process, the process of its
     /// root owner, or the app a shell frame hosts in it is `pid`.
-    fn window_belongs_to(window: HWND, pid: u32) -> bool {
+    pub(crate) fn window_belongs_to(window: HWND, pid: u32) -> bool {
         use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOTOWNER, GetAncestor};
         if window.is_null() {
             return false;
@@ -479,7 +526,7 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::ForegroundHold;
+pub(crate) use imp::{ForegroundHold, window_belongs_to};
 
 #[cfg(test)]
 #[path = "foreground_hold_tests.rs"]

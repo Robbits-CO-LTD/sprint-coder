@@ -631,8 +631,8 @@ impl ForegroundGuard {
 /// synthesizes input drops the lock) and hands the foreground back. Both stay
 /// inside the launch's deadline; 2 seconds in all is the price, paid only by
 /// a launch passed to a running instance without `--activate`.
-const HANDOFF_FOREGROUND_HOLD: Duration = Duration::from_millis(1_200);
-const HANDOFF_FOREGROUND_WATCH: Duration = Duration::from_millis(800);
+pub(crate) const HANDOFF_FOREGROUND_HOLD: Duration = Duration::from_millis(1_200);
+pub(crate) const HANDOFF_FOREGROUND_WATCH: Duration = Duration::from_millis(800);
 
 /// How soon after the handed-off window was first seen that window may
 /// take the foreground and still be taken as the app's move while the user is
@@ -649,7 +649,7 @@ const HANDOFF_FOREGROUND_WATCH: Duration = Duration::from_millis(800);
 /// found it had been passed on (which can be seconds later, when the launched
 /// process is slow to exit): so the clock starts at most one look interval
 /// (100 ms) plus one window listing after the window appeared.
-const HANDOFF_APP_ACTIVATION_GRACE: Duration = Duration::from_millis(300);
+pub(crate) const HANDOFF_APP_ACTIVATION_GRACE: Duration = Duration::from_millis(300);
 
 /// When the handed-off window was first seen (`None` when it is not known),
 /// and the deadline the watch on its foreground stays inside.
@@ -664,14 +664,14 @@ struct HandoffSettle {
 /// Whether `now` is within [`HANDOFF_APP_ACTIVATION_GRACE`] of when the
 /// window was first seen. A window whose first sight is not known gets no
 /// grace: with the user's input, its taking the foreground is left alone.
-fn within_grace(shown_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+pub(crate) fn within_grace(shown_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
     shown_at
         .is_some_and(|shown| now.saturating_duration_since(shown) <= HANDOFF_APP_ACTIVATION_GRACE)
 }
 
 /// What the watch does with the foreground it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForegroundStep {
+pub(crate) enum ForegroundStep {
     /// Still on the window that was in front (or between windows): wait.
     Keep,
     /// The handed-off window itself took it as the app's move: hand it back.
@@ -692,7 +692,7 @@ enum ForegroundStep {
 /// (`is_focused: true`, with a note). The same holds for a second take after
 /// a hand-back.
 #[cfg(any(target_os = "windows", test))]
-fn foreground_step(
+pub(crate) fn foreground_step(
     foreground_is_null: bool,
     foreground_is_prior: bool,
     foreground_is_handed_window: bool,
@@ -723,7 +723,7 @@ fn input_at_or_after(last: u32, started: u32) -> bool {
 /// to take the foreground, another run sending input), which also stops the
 /// watch, on the safe side. Unreadable reads as input.
 #[cfg(target_os = "windows")]
-fn user_input_since(started: u32) -> bool {
+pub(crate) fn user_input_since(started: u32) -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     let mut info = LASTINPUTINFO {
         cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -737,7 +737,7 @@ fn user_input_since(started: u32) -> bool {
 
 /// How a watch over the handed-off window's foreground goes on or ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WatchAction {
+pub(crate) enum WatchAction {
     /// Nothing to do yet (or the watch ran its span).
     Wait,
     /// Hand the foreground back to the window that was in front.
@@ -756,12 +756,12 @@ enum WatchAction {
 /// window that stays in front through a refused hand-back is not taken as
 /// the user's choice once the grace runs out.
 #[derive(Debug, Default)]
-struct HandBack {
+pub(crate) struct HandBack {
     pending: bool,
 }
 
 impl HandBack {
-    fn observe(
+    pub(crate) fn observe(
         &mut self,
         step: ForegroundStep,
         foreground_is_prior: bool,
@@ -781,6 +781,11 @@ impl HandBack {
             }
             ForegroundStep::LeftAlone => WatchAction::StopForUser,
         }
+    }
+
+    /// Whether a hand-back was tried and not yet seen to work.
+    pub(crate) fn pending(&self) -> bool {
+        self.pending
     }
 }
 
