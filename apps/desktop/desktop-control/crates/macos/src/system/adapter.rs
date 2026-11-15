@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     ActionResult, AdapterError, Deadline, DismissAllNotificationsRequest,
     DismissNotificationRequest, ImageBuffer, InteractionLease, NotificationActionRequest,
@@ -77,10 +78,14 @@ impl SystemOps for MacOSAdapter {
         process: ProcessIdentity,
         lease: &InteractionLease,
     ) -> Result<(), AdapterError> {
+        let _scope = self.acting("activate_renderer_accessibility");
+        crate::system::own_window::check_pid(i32::try_from(process.pid.get()).ok())?;
         crate::system::renderer_activation::activate(process, lease.deadline())
     }
 
     fn focus_window(&self, win: &WindowInfo, lease: &InteractionLease) -> Result<(), AdapterError> {
+        let _scope = self.acting("focus_window");
+        crate::system::own_window::check_window(win)?;
         crate::system::focus::focus_window_impl(win, lease.deadline())
     }
 
@@ -90,6 +95,8 @@ impl SystemOps for MacOSAdapter {
         options: &agent_desktop_core::system::launch_options::LaunchOptions,
         lease: &InteractionLease,
     ) -> Result<agent_desktop_core::system::launch_result::LaunchResult, AdapterError> {
+        let _scope = self.acting("launch_app");
+        crate::system::own_window::check_variable()?;
         crate::system::launch::launch_app_impl(id, options, lease.deadline())
     }
 
@@ -146,6 +153,8 @@ impl SystemOps for MacOSAdapter {
         force: bool,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        let _scope = self.acting("close_app");
+        crate::system::own_window::check_pid(i32::try_from(app.pid.get()).ok())?;
         let dispatched = crate::system::app::app_ops::close_app_impl(app, force, lease.deadline())
             .map(|outcome| outcome == CloseOutcome::Exited);
         OperationReport::from_close_dispatch(app, dispatched)
@@ -206,6 +215,8 @@ impl SystemOps for MacOSAdapter {
         policy: agent_desktop_core::InteractionPolicy,
         lease: &InteractionLease,
     ) -> Result<ActionResult, AdapterError> {
+        let _scope = self.acting("press_key_for_app");
+        crate::system::own_window::check_pid(i32::try_from(process.pid.get()).ok())?;
         crate::system::key_dispatch::press_for_app_impl(process, combo, policy, lease.deadline())
     }
 
@@ -235,6 +246,8 @@ impl SystemOps for MacOSAdapter {
         op: WindowOp,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        let _scope = self.acting("window_op");
+        crate::system::own_window::check_window(win)?;
         let readback = crate::system::window::window_report::window_readback(&op);
         let dispatched =
             crate::system::window::window_ops::execute(win, op.clone(), lease.deadline());
@@ -248,6 +261,8 @@ impl SystemOps for MacOSAdapter {
         deadline: Deadline,
         lease: Option<&InteractionLease>,
     ) -> Result<Vec<NotificationInfo>, AdapterError> {
+        let _scope = self.acting("list_notifications");
+
         if policy.allow_focus_steal && lease.is_none() {
             return Err(AdapterError::internal(
                 "Headed notification observation requires an interaction lease",
@@ -261,6 +276,8 @@ impl SystemOps for MacOSAdapter {
         request: DismissNotificationRequest<'_>,
         _lease: &InteractionLease,
     ) -> Result<NotificationInfo, AdapterError> {
+        let _scope = self.acting("dismiss_notification");
+        crate::system::own_window::check_variable()?;
         crate::notifications::actions::dismiss_notification(
             request.index,
             request.app_filter,
@@ -275,6 +292,8 @@ impl SystemOps for MacOSAdapter {
         request: DismissAllNotificationsRequest<'_>,
         _lease: &InteractionLease,
     ) -> Result<(Vec<NotificationInfo>, Vec<String>), AdapterError> {
+        let _scope = self.acting("dismiss_all_notifications");
+        crate::system::own_window::check_variable()?;
         crate::notifications::actions::dismiss_all(
             request.app_filter,
             request.policy,
@@ -287,6 +306,8 @@ impl SystemOps for MacOSAdapter {
         request: NotificationActionRequest<'_>,
         _lease: &InteractionLease,
     ) -> Result<ActionResult, AdapterError> {
+        let _scope = self.acting("notification_action");
+        crate::system::own_window::check_variable()?;
         crate::notifications::actions::notification_action(
             request.index,
             Some(request.identity),

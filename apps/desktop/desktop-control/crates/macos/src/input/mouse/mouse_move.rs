@@ -1,8 +1,9 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #[cfg(target_os = "macos")]
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode, Modifier, Point};
 #[cfg(target_os = "macos")]
 use core_graphics::{
-    event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton},
+    event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton},
     geometry::CGPoint,
 };
 
@@ -25,7 +26,7 @@ pub(crate) fn post_move_events(
             flags,
         )
         .map_err(|error| delivery.annotate(error))?;
-        event.post(CGEventTapLocation::HID);
+        crate::input::mouse::post_checked(&event).map_err(|error| delivery.annotate(error))?;
         delivery.mark_delivered();
         crate::input::mouse::sleep_bounded(
             deadline,

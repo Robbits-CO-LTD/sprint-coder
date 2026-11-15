@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 // Builds the desktop-control executable from the source kept in apps/desktop/desktop-control
-// (see VENDORED.md there). Desktop control is on for Windows x64 only, so every other host
-// builds nothing and succeeds.
-if (process.platform !== 'win32' || process.arch !== 'x64') {
+// (see VENDORED.md there). Build Windows x64 and macOS arm64. The app enables
+// desktop control separately from building this executable.
+const macOS = process.platform === 'darwin' && process.arch === 'arm64';
+if (!macOS && (process.platform !== 'win32' || process.arch !== 'x64')) {
   console.log(`desktop-control: nothing to build on ${process.platform}-${process.arch}`);
   process.exit(0);
 }
@@ -21,6 +22,8 @@ const result = spawnSync(
     'build',
     '--release',
     '--locked',
+    // The default members include the Windows crate, which does not compile on macOS.
+    ...(macOS ? ['-p', 'agent-desktop'] : []),
     '--manifest-path',
     join(crate, 'Cargo.toml'),
     '--message-format=json-render-diagnostics',
@@ -36,7 +39,7 @@ const result = spawnSync(
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 
-// The workspace has one binary: take its path from Cargo's own report of what it built.
+// The selected packages build one binary: take its path from Cargo's own report.
 const executables = result.stdout
   .split('\n')
   .filter((line) => line.startsWith('{'))
@@ -48,8 +51,12 @@ if (executables.length !== 1)
 
 const output = join(crate, 'build', 'Release');
 mkdirSync(output, { recursive: true });
-const destination = join(output, 'sprint-coder-desktop-control.exe');
+const destination = join(
+  output,
+  macOS ? 'sprint-coder-desktop-control' : 'sprint-coder-desktop-control.exe',
+);
 copyFileSync(executables[0], destination);
+if (macOS) chmodSync(destination, 0o755);
 const digest = createHash('sha256').update(readFileSync(destination)).digest('hex');
 writeFileSync(`${destination}.sha256`, `${digest}\n`, { mode: 0o600 });
 console.log(`desktop-control: ${destination} ${digest}`);

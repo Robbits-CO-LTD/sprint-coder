@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, DeliverySemantics};
 
 #[derive(Clone, Copy, Default)]
@@ -18,7 +19,21 @@ impl DeliveryTracker {
         self.delivered_units
     }
 
-    pub(crate) fn annotate(self, error: AdapterError) -> AdapterError {
+    pub(crate) fn annotate(self, mut error: AdapterError) -> AdapterError {
+        if self.delivered_units > 0 && crate::system::own_window::is_refusal(&error) {
+            error.message = error.message.replace(
+                "nothing was sent",
+                "the inputs before this one were sent and nothing after them",
+            );
+            if let Some(details) = error
+                .details
+                .as_mut()
+                .and_then(|details| details.as_object_mut())
+            {
+                details.insert("physical_delivery_started".into(), true.into());
+                details.insert("delivered_events".into(), self.delivered_units.into());
+            }
+        }
         let disposition = match error.disposition {
             DeliverySemantics::DeliveryUncertain
             | DeliverySemantics::DeliveredUnverified

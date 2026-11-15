@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #import <AppKit/AppKit.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -102,7 +103,8 @@ bool agent_desktop_open_application(
     size_t requestLength,
     void *context,
     AgentDesktopLaunchCompletion completion,
-    AgentDesktopLaunchRelease releaseContext
+    AgentDesktopLaunchRelease releaseContext,
+    bool (*guard)(void *, int32_t, const char *)
 ) {
     AgentDesktopLaunchReleaseBox *box = calloc(1, sizeof(*box));
     if (box == NULL) {
@@ -138,15 +140,9 @@ bool agent_desktop_open_application(
             return true;
         }
         NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
-        NSURL *url = nil;
-        if ([request[@"bundle_id"] boolValue]) {
-            url = [workspace URLForApplicationWithBundleIdentifier:identifier];
-        } else {
-            NSString *path = [workspace fullPathForApplication:identifier];
-            if (path != nil) {
-                url = [NSURL fileURLWithPath:path];
-            }
-        }
+        NSString *resolvedPath = request[@"resolved_path"];
+        NSURL *url = [resolvedPath isKindOfClass:[NSString class]]
+            ? [NSURL fileURLWithPath:resolvedPath] : nil;
         if (url == nil) {
             completeError(holder, @"Application bundle was not found", 1, 0);
             return true;
@@ -160,6 +156,21 @@ bool agent_desktop_open_application(
         configuration.createsNewApplicationInstance = [request[@"new_instance"] boolValue];
         configuration.arguments = arguments;
         configuration.environment = environment;
+        // Recheck the validated bundle and every instance LaunchServices could reuse.
+        if (!guard(context, 0, url.path.fileSystemRepresentation)) {
+            completeError(holder, @"Launch refused by Sprint Coder policy", 4, 0);
+            return true;
+        }
+        NSString *bundleID = [NSBundle bundleWithURL:url].bundleIdentifier;
+        for (NSRunningApplication *running in workspace.runningApplications) {
+            if ((bundleID != nil && [running.bundleIdentifier isEqualToString:bundleID]) ||
+                [running.bundleURL.URLByResolvingSymlinksInPath isEqual:url.URLByResolvingSymlinksInPath]) {
+                if (!guard(context, running.processIdentifier, running.bundleURL.path.fileSystemRepresentation)) {
+                    completeError(holder, @"Launch refused by Sprint Coder policy", 4, 0);
+                    return true;
+                }
+            }
+        }
         [workspace openApplicationAtURL:url
                          configuration:configuration
                      completionHandler:^(NSRunningApplication *app, NSError *error) {
@@ -211,5 +222,27 @@ uint8_t agent_desktop_running_application_is_live(void *application, int32_t exp
     } @catch (NSException *exception) {
         (void)exception;
         return 0;
+    }
+}
+
+char *agent_desktop_copy_application_path(const uint8_t *bytes, size_t length, bool bundleID, int32_t pid) {
+    @autoreleasepool {
+        @try {
+            NSString *identifier = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
+            NSURL *url = nil;
+            if (pid > 0) {
+                url = [NSRunningApplication runningApplicationWithProcessIdentifier:pid].bundleURL;
+            } else if (bundleID) {
+                url = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:identifier];
+            } else {
+                NSString *path = [[NSWorkspace sharedWorkspace] fullPathForApplication:identifier];
+                if (path != nil) url = [NSURL fileURLWithPath:path];
+            }
+            const char *path = url.path.fileSystemRepresentation;
+            return path == NULL ? NULL : strdup(path);
+        } @catch (NSException *exception) {
+            (void)exception;
+            return NULL;
+        }
     }
 }

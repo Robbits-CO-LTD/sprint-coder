@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, InteractionPolicy, KeyCombo, ProcessIdentity};
 
 const CLEANUP_TIMEOUT_MS: u64 = 2_000;
@@ -274,6 +275,10 @@ fn is_nc_open(_pid: i32, _deadline: Deadline) -> bool {
 
 #[cfg(target_os = "macos")]
 fn open_nc(deadline: Deadline) -> Result<(), AdapterError> {
+    crate::system::own_window::check_named_app(
+        "com.apple.controlcenter",
+        operation_deadline(deadline, std::time::Duration::from_secs(1))?,
+    )?;
     let script = r#"tell application "System Events" to tell its application process "ControlCenter"
         click (first menu bar item of menu bar 1 whose description is "Clock")
     end tell"#;

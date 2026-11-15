@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, DeliverySemantics, ErrorCode};
 
 const MAX_BRIDGE_BYTES: usize = 1024 * 1024;
@@ -59,6 +60,7 @@ pub(crate) fn terminate(
     expected_launch_time: f64,
     force: bool,
 ) -> Result<TerminationOutcome, AdapterError> {
+    crate::system::own_window::check_pid(Some(pid))?;
     let result = unsafe {
         agent_desktop_terminate_application(
             pid,

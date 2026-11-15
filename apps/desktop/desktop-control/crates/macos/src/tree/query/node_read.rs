@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, ErrorCode, LocatorEvidence, LocatorField, LocatorRefEvidence, LocatorStats,
 };
@@ -205,6 +206,7 @@ pub(crate) fn read_node(
             LocatorField::Known(states.unwrap_or_default())
         },
         ref_evidence: LocatorRefEvidence {
+            runtime_id: None,
             window_bounds: LocatorField::Absent,
             bounds: if requirements.ref_evidence.bounds {
                 option_field(tree.bounds_for(attrs.bounds), read.status.bounds_unknown())

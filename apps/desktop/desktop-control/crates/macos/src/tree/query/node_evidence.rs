@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     IdentifierEvidence, LocatorEvidence, LocatorField, LocatorRefEvidence, LocatorStats,
 };
@@ -82,6 +83,7 @@ pub(crate) fn unknown() -> LocatorEvidence {
         identifiers: IdentifierEvidence::unknown(),
         states: LocatorField::Unknown,
         ref_evidence: LocatorRefEvidence {
+            runtime_id: None,
             window_bounds: LocatorField::Absent,
             bounds: LocatorField::Unknown,
             available_actions: LocatorField::Unknown,

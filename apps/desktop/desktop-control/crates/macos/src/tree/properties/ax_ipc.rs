@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
 use std::time::{Duration, Instant};
 
@@ -223,6 +224,7 @@ pub(crate) fn perform_action(
     deadline: impl AxDeadline,
 ) -> Result<i32, AdapterError> {
     prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
+    crate::system::own_window::check_element(element, deadline)?;
     Ok(unsafe { AXUIElementPerformAction(element.0, action) })
 }
 
@@ -234,6 +236,7 @@ pub(crate) fn set_attribute_value(
     deadline: impl AxDeadline,
 ) -> Result<i32, AdapterError> {
     prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
+    crate::system::own_window::check_element(element, deadline)?;
     Ok(unsafe { AXUIElementSetAttributeValue(element.0, attribute, value) })
 }
 

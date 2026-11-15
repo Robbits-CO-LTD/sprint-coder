@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode, Modifier, Point};
 
 const MAX_LINES_PER_EVENT: i32 = 10;
@@ -10,7 +11,7 @@ pub(crate) fn synthesize_scroll_at(
     modifiers: &[Modifier],
     deadline: Deadline,
 ) -> Result<(), AdapterError> {
-    use core_graphics::event::{CGEvent, CGEventTapLocation, ScrollEventUnit};
+    use core_graphics::event::{CGEvent, ScrollEventUnit};
     use core_graphics::geometry::CGPoint;
 
     crate::input::mouse::validate_point(&point)?;
@@ -33,7 +34,7 @@ pub(crate) fn synthesize_scroll_at(
             .map_err(|error| delivery.annotate(error))?;
         event.set_location(CGPoint::new(point.x, point.y));
         event.set_flags(flags);
-        event.post(CGEventTapLocation::HID);
+        crate::input::mouse::post_checked(&event).map_err(|error| delivery.annotate(error))?;
         delivery.mark_delivered();
         if index + 1 < chunks.len() {
             crate::input::mouse::sleep_bounded(

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -85,11 +86,11 @@ fn post_pair(
 ) -> Result<(), AdapterError> {
     ensure_budget(deadline, total, *delivery)?;
     let (down, up) = events;
+    post(&down, target_pid).map_err(|error| delivery.annotate(error))?;
     let mut release = KeyReleaseGuard {
         event: Some(up),
         target_pid,
     };
-    post(&down, target_pid);
     delivery.mark_delivered();
     sleep_bounded(deadline, KEY_SETTLE, *delivery, total)?;
     let up = release
@@ -97,7 +98,7 @@ fn post_pair(
         .take()
         .ok_or_else(|| AdapterError::internal("Keyboard release guard lost its key-up event"))
         .map_err(|error| delivery.annotate(error))?;
-    post(&up, target_pid);
+    post(&up, target_pid).map_err(|error| delivery.annotate(error))?;
     ensure_budget(deadline, total, *delivery)
 }
 
@@ -109,7 +110,7 @@ struct KeyReleaseGuard {
 impl Drop for KeyReleaseGuard {
     fn drop(&mut self) {
         if let Some(event) = self.event.take() {
-            post(&event, self.target_pid);
+            let _ = post(&event, self.target_pid);
         }
     }
 }
@@ -131,12 +132,14 @@ fn event_source() -> Result<CGEventSource, AdapterError> {
         .map_err(|()| AdapterError::internal("Failed to create keyboard CGEventSource"))
 }
 
-fn post(event: &CGEvent, target_pid: Option<i32>) {
+fn post(event: &CGEvent, target_pid: Option<i32>) -> Result<(), AdapterError> {
+    crate::system::own_window::check_key(target_pid)?;
     if let Some(pid) = target_pid {
         event.post_to_pid(pid);
     } else {
         event.post(CGEventTapLocation::HID);
     }
+    Ok(())
 }
 
 fn sleep_bounded(

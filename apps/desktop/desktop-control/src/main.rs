@@ -354,15 +354,15 @@ fn build_adapter() -> impl agent_desktop_core::PlatformAdapter {
     #[cfg(target_os = "macos")]
     {
         agent_desktop_macos::MacOSAdapter::new()
+            .refusing_windows_of(agent_desktop_macos::RefusedWindowOwner::from_environment())
     }
 
     // Sprint Coder's Main names its own process in `SPRINT_CODER_DESKTOP_REFUSED_WINDOW_OWNER`
     // for every run it starts; no operation then acts on that process's windows.
     #[cfg(target_os = "windows")]
     {
-        agent_desktop_windows::WindowsAdapter::new().refusing_windows_of(
-            agent_desktop_windows::RefusedWindowOwner::from_environment(),
-        )
+        agent_desktop_windows::WindowsAdapter::new()
+            .refusing_windows_of(agent_desktop_windows::RefusedWindowOwner::from_environment())
     }
 
     #[cfg(target_os = "linux")]

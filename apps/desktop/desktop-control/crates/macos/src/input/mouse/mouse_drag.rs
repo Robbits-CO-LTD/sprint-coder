@@ -1,5 +1,6 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, CursorMotion, Deadline, DragParams, ErrorCode};
-use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton};
 use core_graphics::event_source::CGEventSource;
 use core_graphics::geometry::CGPoint;
 use std::time::Duration;
@@ -43,8 +44,8 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
     let mut release = DragReleaseGuard::prepare(&source, from, to)
         .map_err(|error| pre_delivery.annotate(error))?;
     crate::input::mouse::ensure_budget(deadline, pre_delivery)?;
+    crate::input::mouse::post_checked(&down)?;
     release.arm();
-    down.post(CGEventTapLocation::HID);
     release.mark_down_posted();
 
     let outcome = (|| {
@@ -149,7 +150,7 @@ impl DragReleaseGuard {
         let event = self.destination_up.take().ok_or_else(|| {
             AdapterError::internal("Drag release guard lost its destination event")
         })?;
-        event.post(CGEventTapLocation::HID);
+        crate::input::mouse::post_checked(&event)?;
         self.delivery.disarm();
         crate::input::mouse::ensure_budget(deadline, self.delivery())
     }
@@ -162,8 +163,8 @@ impl DragReleaseGuard {
 impl Drop for DragReleaseGuard {
     fn drop(&mut self) {
         if self.delivery.should_release() {
-            self.abort_drag.post(CGEventTapLocation::HID);
-            self.abort_up.post(CGEventTapLocation::HID);
+            let _ = crate::input::mouse::post_checked(&self.abort_drag);
+            let _ = crate::input::mouse::post_checked(&self.abort_up);
         }
     }
 }

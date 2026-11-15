@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::AdapterError;
 
 #[derive(Default)]
@@ -36,6 +37,7 @@ impl DragDeliveryState {
         if self.delivery.delivered_units() == 0 {
             return error;
         }
+        let own_refusal = crate::system::own_window::is_refusal(&error);
         let mut details = error
             .details
             .take()
@@ -45,12 +47,14 @@ impl DragDeliveryState {
                 "delivered_events".into(),
                 self.delivery.delivered_units().into(),
             );
-            if self.armed {
+            if self.armed && !own_refusal {
                 details.insert("emergency_release_posted".into(), true.into());
                 details.insert("emergency_release_acknowledged".into(), false.into());
             }
         }
-        error.with_details(details).with_suggestion(if self.armed {
+        error.with_details(details).with_suggestion(if own_refusal {
+            crate::system::own_window::OWN_WINDOW_SUGGESTION
+        } else if self.armed {
             "Inspect the source and destination before retrying; the emergency release was posted without an OS acknowledgement"
         } else {
             "Inspect the source and destination before retrying; the normal release was posted without an OS acknowledgement"
@@ -91,6 +95,29 @@ mod tests {
 
         assert_eq!(details["delivered_events"], 4);
         assert_eq!(details["emergency_release_posted"], true);
+    }
+
+    #[test]
+    fn own_window_refusal_does_not_claim_that_guarded_cleanup_was_posted() {
+        let _scope =
+            crate::system::own_window::enter(&crate::RefusedWindowOwner::Unreadable, "drag");
+        let mut state = DragDeliveryState::default();
+        state.arm();
+        state.mark_down_posted();
+        let error = state.enrich_error(crate::system::own_window::check_pid(Some(42)).unwrap_err());
+        assert!(
+            error
+                .details
+                .as_ref()
+                .unwrap()
+                .get("emergency_release_posted")
+                .is_none()
+        );
+        assert_eq!(
+            error.suggestion.as_deref(),
+            Some(crate::system::own_window::OWN_WINDOW_SUGGESTION)
+        );
+        assert_eq!(error.details.unwrap()["physical_delivery_started"], true);
     }
 
     #[test]

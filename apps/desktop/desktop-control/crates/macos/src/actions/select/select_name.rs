@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ErrorCode, EvidenceRequirements, LocatorEvidence};
 
 pub(crate) fn collection_target(
@@ -262,6 +263,7 @@ mod tests {
             identifiers: IdentifierEvidence::absent(),
             states: LocatorField::Unknown,
             ref_evidence: LocatorRefEvidence {
+                runtime_id: None,
                 window_bounds: LocatorField::Absent,
                 bounds: LocatorField::Unknown,
                 available_actions: LocatorField::Known(vec!["Click".into()]),

@@ -1,28 +1,29 @@
 # このフォルダーの出どころ
 
-Sprint Coder のデスクトップ操作の実行ファイルは、このフォルダーのソースから build している（repo の root の `build-desktop-control.mjs`。出力は `build/Release/sprint-coder-desktop-control.exe` と、その SHA-256 を書いた `.sha256`）。
+Sprint Coder のデスクトップ操作の実行ファイルは、このフォルダーのソースから build している（repo の root の `build-desktop-control.mjs`。出力は Windows が `build/Release/sprint-coder-desktop-control.exe`、macOS arm64 が `build/Release/sprint-coder-desktop-control` と、それぞれの SHA-256 を書いた `.sha256`）。
 
 - 出典: [vercel-labs/agent-desktop](https://github.com/vercel-labs/agent-desktop)（Apache License 2.0。全文は同じフォルダーの `LICENSE` と `docs/licenses/agent-desktop-license.txt`。upstream に NOTICE は無い）
 - 版: 1.2.0（tag `v1.2.0`、commit `2b0a7334fc111730454b726e6800aa41cdafc093`、2026-11-04 の "chore: release 1.2.0 with mcp support (#568)"。`Cargo.toml` の `version = "1.2.0"`、`CHANGELOG.md` の 1.2.0 の節と、npm の `agent-desktop@1.2.0` に一致）
 - 取り込んだ日: 2026-11-10
 - 取り込み方: 上の commit の git の中身（改行は LF のまま）を、元の構成のままコピーした。
+- macOS の取り込みは 2026-11-15。同じ upstream commit の `crates/macos` を、内容を変えずに独立した commit で取り込んだ。その後の変更は下の表に記載した。
 
 以後の変更は、この repo で行い、下の「変えたファイル」に書き足す。upstream の更新を取り込む時も、ここに版と commit を書く。
 
 ## 入れたもの
 
-Windows 用の CLI の build に要る部分だけ。
+Windows と macOS arm64 用の CLI の build に要る部分。Sprint Coder のアプリで macOS の機能を有効にする変更は別の段階で行う。
 
 - `Cargo.toml`（workspace）、`Cargo.lock`、`rust-toolchain.toml`（1.89.0）、`LICENSE`
-- `crates/core`、`crates/windows`
-- `src`（CLI。upstream の試験のコードも含めて、そのまま）
+- `crates/core`、`crates/windows`、`crates/macos`
+- `src`（CLI。upstream の試験のコードも含む）
 - `skills`（`crates/core/src/commands/skills.rs` が `include_str!` でバイナリに埋め込む説明書。macOS・Linux・FFI の分も埋め込まれるので全部入れた）
 
 ## 入れなかったもの
 
-`crates/macos`、`crates/linux`、`crates/ffi`、`apps`（説明のサイト）、`npm`、`benchmarks`、`probes`、`assets`、`docs`、`tests`、`scripts`、`.github`、`.githooks`、`.agents`、`.claude`、`.git`、root の説明の文書（`README.md`、`AGENTS.md`、`CHANGELOG.md`、`CONCEPTS.md`、`CONTRIBUTING.md` など）、`clippy.toml`、`deny.toml`、`.gitleaks.toml` など build に要らない設定。
+`crates/linux`、`crates/ffi`、`apps`（説明のサイト）、`npm`、`benchmarks`、`probes`、`assets`、`docs`、`tests`、`scripts`、`.github`、`.githooks`、`.agents`、`.claude`、`.git`、root の説明の文書（`README.md`、`AGENTS.md`、`CHANGELOG.md`、`CONCEPTS.md`、`CONTRIBUTING.md` など）、`clippy.toml`、`deny.toml`、`.gitleaks.toml` など build に要らない設定。
 
-macOS は今は無効なので入れていない。Mac に対応する時に、その時の upstream から入れ直す。
+macOS のソースは取り込み済み。clipboard helper、カーソル、配布への同梱、アプリ側での有効化は別の段階で扱う。
 
 ## 取り込んだ後に消したもの
 
@@ -42,9 +43,9 @@ build にも同梱にも使わないファイル（2026-11-11）。
 
 | ファイル | 変えた点 |
 | --- | --- |
-| `Cargo.toml` | 1 行目に変更の注記を足した。`members` と `default-members` から、入れなかった `crates/macos`・`crates/linux`・`crates/ffi` を外した。ほかは元のまま（`[profile.release.package.agent-desktop-macos]` も残したので、build の時に「どの package にも当たらない」という警告が 1 行出る） |
-| `src/Cargo.toml` | 1 行目に変更の注記を足した。入れなかった crate を指す `[target.'cfg(target_os = "macos")'.dependencies]` の `agent-desktop-macos` と、`[target.'cfg(target_os = "linux")'.dependencies]` の `agent-desktop-linux` を外した |
-| `Cargo.lock` | 上の 2 つの変更に合わせて、cargo が自動で落とした分だけ（`cargo update` はしていない）。macOS・Linux・FFI の 3 つの crate と、それらだけが使っていた 64 の package が消えた（追加・版の変更は無し）。残った 99 の package の版と checksum は元のまま |
+| `Cargo.toml` | 1 行目に変更の注記を足した。入れなかった Linux・FFI を workspace から外した。2026-11-15 に `members` へ `crates/macos` を戻した。`default-members` は core・windows・src のまま。Windows の通常の cargo build は今までどおり |
+| `src/Cargo.toml` | 1 行目に変更の注記を足した。入れなかった OS の依存を外し、2026-11-15 に macOS の時だけの `agent-desktop-macos` の依存を戻した。Windows の依存は今までどおり |
+| `Cargo.lock` | 初回に入れなかった OS 用の package を落とした。2026-11-15 に macOS crate と専用の外部 package 7 個を、同じ upstream の版と checksum で戻した（計 8 package）。既存 package の版は変えていない |
 | `crates/windows/src/tree/automation.rs` | 1 行目に変更の注記を足した。UI Automation の client を作る所（`create_bounded_client`）で `SetAutoSetFocus(false)` を呼ぶようにした（失敗したら client を作らずにエラーを返す。そのための `auto_set_focus_error` を足した）。既定の有効のままだと、`set-value`・`clear`・`click`・`toggle`・`expand`・`select` などの pattern の呼び出しが、対象にキーボードのフォーカスを移し、対象の窓を前面に出していた。`focus`・`focus-window`・`--headed` の入力は、自分で前面に出すので変わらない |
 | `crates/windows/src/tree/automation_tests.rs` | 1 行目に変更の注記を足した。配る client の `AutoSetFocus` が切れていることを確かめる試験 `the_shipped_client_does_not_move_focus_before_pattern_calls` を足した |
 | `src/dispatch/window_owner.rs` | 新しく足したファイル（1 行目に変更の注記）。環境変数 `SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER`（`<pid>:<process instance>`。instance は refmap の `process_instance` と同じ形）がある時、窓の id を取る command（`snapshot`・`find`・`screenshot`・`resize-window`・`move-window`・`minimize`・`maximize`・`restore`・`focus-window`・`press`・`wait --event`）は、今その id を持つ窓が、ちょうどその pid と process instance の process のものかを先に確かめ、違えば何も読まず・何もせずに `POLICY_DENIED`（details の `kind` は `window_owner_mismatch`）で終わる。値を読めない時は、どの command も同じく終わる。変数が無い時は何も変わらない。判定の unit test を同じファイルに置いた |
@@ -250,7 +251,45 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/core/src/tree/roles.rs`、`skills/agent-desktop-windows/SKILL.md`（17 回目）、`crates/windows/src/actions/list_item_click_tests.rs`（2 回目） | ブラウザーのアドレス欄を裏で確定できず止まった件（#1298）。`roles.rs` は 1 行目に変更の注記を足し、`find`・`wait` などの role の指定で `listitem` を受け付けて `option` に読み替えるようにした（一覧の項目は Windows では `option` と出るが、AI が `--role listitem` で探して `INVALID_ARGS` になり、候補の一覧を探すのをやめていた。探す範囲が変わるだけで、操作の許可・ref の証明は変えていない）。その別名の試験を同じファイルの試験に足した。`SKILL.md` の First Contact に「ブラウザーのアドレス欄は `set-value` だけでは移らない」の項を足した: Chrome は、アドレス欄に入力の焦点がある時だけ候補の一覧を作る（`OmniboxEditModel::UpdateInput` が焦点の無い時は候補を作らずに返る）ので、`set-value` の結果の `post_state.states` に `focused` があれば、窓の全体から `--role option` で探し、入れた URL で始まる行を `click` する（候補の行は `ListItem` で Invoke を持つので、今の決まりでも裏で click できる）。`focused` が無ければ裏では確定できないので、頁の中のリンクや検索欄を使う。Enter は使わない。`list_item_click_tests.rs` に、Chrome で読んだ形（候補の行は Chrome の窓の下の Invoke を持つ `ListItem` で通る、頁の Invoke の無い `listitem` は断る）を固定する試験 `a_chromium_option_with_invoke_is_clicked_and_a_web_list_item_without_is_not` を足した（判定は変えていない） |
 | 新しい `src/dispatch/launch_url.rs`・`launch_url_tests.rs`・`launch_url_cases.json`・`launch_url_apps.json`、`src/dispatch/parse.rs`・`parse_tests.rs`・`src/dispatch/mod.rs`（2 回目）・`src/cli_args/system.rs`（2 回目）・`system_tests.rs`、`skills/agent-desktop-windows/SKILL.md`（18 回目） | `parse.rs` と `system_tests.rs` の 1 行目に変更の注記を足した。`launch <ブラウザー> --url <URL>` を足した（#1298。裏の操作だけでブラウザーの page を開く道。Chromium はアドレス欄に焦点がある時しか候補を作らないので、`set-value` の後の確定が裏ではできなかった）。`--url` がある時（batch では `url`）、`build_launch_options` は、実行ファイルの名前（`.exe` を除いて小文字。chrome・msedge・brave・vivaldi・opera・chromium・thorium は Chromium 系、firefox・librewolf・waterfox は Firefox 系）で知っているブラウザーかを確かめ、Chromium 系は `--new-window <URL>`、Firefox 系は `-new-window <URL>` だけを引数にし、`--arg`・`--env`・`--cwd`・`--cdp` が一緒にあれば断る。URL は、Sprint Coder の Main が正規の形（WHATWG の `URL.href`）に直したものだけを受け、形だけで確かめる（`url_shape_refusal`: 小文字の `http://`・`https://`、小文字・数字・`.`・`-`・`_` の host〔数で終わる host は 10 進 4 つの IPv4 だけ。IPv6 は断る〕、既定でない port、`/` で始まる path、印字できる ASCII だけで引用符・backtick・`\`・`<>` が無い、`@` が無い、`%` の後に 16 進 2 文字、`.`・`..` の path の区切りが無い、2048 文字まで、host は末尾の `.` を除いて 253 文字・各 label は 1〜63 文字まで〔カードで host が必ず全部見えるように〕）。正規の形の URL には空白も引用符も無いので、`command_line_for` は 1 つの引数としてそのまま渡し、`-` でも始まらない。`attach_if_running` は常に偽（引数のある起動はもともとつながない）。起動の本体（`crates/windows/src/system/launch*.rs`）は変えていない。Main の試験と同じ表（URL は `launch_url_cases.json`、ブラウザーの名前は trim しない読み方で `launch_url_apps.json`）で、Main が通す正規の形はそのまま受け、Main が断るものは入力のままでも断ることを確かめる。`SKILL.md` に `--url` の項目を 1 つ足した |
 
+| `crates/macos/src/adapter.rs` | 拒否する process を持つようにし、`refusing_windows_of` と操作中の範囲を足した。範囲は入れ子と unwind でも元に戻す |
+| `crates/macos/src/lib.rs` | `RefusedWindowOwner` と環境変数の名前を公開した |
+| `crates/macos/src/system/mod.rs` | 自己ウィンドウの拒否と起動先の制限の module を登録した |
+| `crates/macos/src/system/own_window.rs` | 新しいファイル。Windows と同じ環境変数の読み方・PID の再利用の判断・拒否の code と kind と suggestion。AX の所有者、前面の app、座標の最前面の窓を、その都度読む |
+| `crates/macos/src/system/own_window_tests.rs` | 新しいファイル。変数、読めない所有者、instance の違い、拒否の形、範囲の復元、座標、途中まで届いた時の証拠の試験 |
+| `crates/macos/src/actions/adapter.rs` | 部品の全 action と scroll-into-view の前に所有者を確認する。対象の無い key は前面を確認する |
+| `crates/macos/src/input/adapter.rs` | mouse・drag・key の入口で確認する。操作中の拒否の範囲を低い入力層まで渡す |
+| `crates/macos/src/tree/properties/ax_ipc.rs` | AX の action と属性の書き込みの直前に、実際の部品の PID を読み直す。menu・focus・窓の変更・renderer の有効化もこの経路を通る |
+| `crates/macos/src/input/keyboard/keyboard_event.rs` | 各 key の押下と解放、文字の各 chunk、異常時の解放も送信の直前に確認する。対象 PID が無い時は前面の app を読む |
+| `crates/macos/src/input/mouse/mod.rs` | 物理的な pointer の送信を共通の確認に通す。連続 click と解放の前も、座標の一番上の窓の持ち主を読む |
+| `crates/macos/src/input/mouse/mouse_drag.rs` | drag の押下・途中・drop・異常時の戻しと解放を確認する。押下が送れた後で解放の guard を有効にする |
+| `crates/macos/src/input/mouse/mouse_drag_state.rs` | 途中の自己ウィンドウ拒否でも Windows と同じ suggestion を保つ。拒否し得る異常時の解放は、送信済みの欄を省く |
+| `crates/macos/src/input/mouse/mouse_move.rs` | pointer の近づけと最終位置の各送信を確認する |
+| `crates/macos/src/input/mouse/mouse_scroll.rs` | wheel の各 chunk を送る直前に確認する |
+| `crates/macos/src/actions/delivery_tracker.rs` | 途中の拒否には、すでに入力が届いたことと件数を載せる。拒否の code・kind・suggestion は保つ |
+| `crates/macos/src/system/adapter.rs` | focus-window・launch・close-app・窓の全変更・app 宛ての key・renderer の有効化・通知の各操作へ拒否の範囲を渡し、名指した相手を先に確認する。通知の list は開閉と復帰の副作用だけを確認する |
+| `crates/macos/src/system/appkit_bridge.rs` | app を終了させる native 呼び出しの直前にも PID を確認する |
+| `crates/macos/src/notifications/nc_session.rs` | 通知を開く AppleScript の前に ControlCenter の所有者を確認する。閉じる key と前の app への復帰は、入力層と AX 層で確認する |
+| `crates/macos/src/system/launch.rs` | core に増えた結果の欄を埋める。既存 instance につないだ時だけ attached、新しく始めた process の窓を得た時だけ new_instance、activate は実際の前面との照合を返す。attach でも実行中の bundle の場所と拒否の PID を確認する |
+| `crates/macos/src/system/launch_location.rs` | 新しいファイル。symlink 解決後の bundle を標準のアプリの場所だけに限る。home は実効 uid の password database から読む。OS 所有の Cryptex の場所も symlink 解決して照合する。場所の判定と symlink の試験を含む |
+| `crates/macos/src/system/launch_workspace.rs` | 起動せずに bundle の場所を解決し、検査した絶対パスを NSWorkspace に渡す。attach では指定 PID の bundle の場所を読む |
+| `crates/macos/src/system/launch_bridge.m` | 検査済みの bundle のパスを開く。開く直前に Rust の判定を呼び、その bundle と同じ ID または場所を持つ実行中の app の PID と場所も確認する。bundle の場所だけを読む関数を足した |
+| `crates/macos/src/system/launch_completion.rs` | 起動直前の判定で、自己ウィンドウと場所の拒否を元のエラーの形で返す。後から来る汎用の完了で上書きしない。callback の拒否の試験を足した |
+| `crates/macos/src/tree/query/node_evidence.rs` | macOS では UIA の runtime_id を読んでいないので None にする |
+| `crates/macos/src/tree/query/node_read.rs` | macOS では UIA の runtime_id を読んでいないので None にする |
+| `crates/macos/src/actions/post_state_tests.rs` | 試験の LocatorRefEvidence に core が足した runtime_id の欄を足した |
+| `crates/macos/src/actions/select/select_name.rs` | 試験の LocatorRefEvidence に core が足した runtime_id の欄を足した |
+| `crates/macos/src/tree/query/mod.rs` | 試験の ref に core が足した ancestors・in_view・in_menu・settled_thin_nodes の欄を足した |
+| `crates/macos/src/tree/resolve/resolve_tests.rs` | 試験の ref に core が足した ancestors・in_view・in_menu・settled_thin_nodes の欄を足した |
+| `crates/macos/src/tree/resolve/retained_resolve_tests.rs` | 試験の ref に core が足した ancestors・in_view・in_menu・settled_thin_nodes の欄を足した |
+| `src/main.rs` | macOS の adapter も Windows と同じく環境変数から自己ウィンドウ拒否を組み立てる |
+| `src/dispatch/parse.rs` | macOS の launch --url を OS 未対応として起動前に断る。Windows の引数の組み立ては今までどおり |
+| `src/dispatch/parse_tests.rs` | URL の引数の試験は Windows の動作を保ち、macOS には OS 未対応の拒否の試験を足した |
+| `src/command_policy/mod.rs` | macOS の launch --url は権限の不足を返す前にも OS 未対応として断る。batch にも同じ事前確認が効く |
+| `src/tests/cli_process.rs` | macOS の launch --url が OS 未対応・not_delivered で終わることを実行ファイルから確かめる |
+| `../../../build-desktop-control.mjs` | repo root の build script。darwin-arm64 では CLI の package だけを build し（`-p agent-desktop`。既定の members にある Windows の crate は macOS で compile できないため）、拡張子なし・実行可の出力と同じ形式の封印を作る。Windows の cargo 引数・出力・封印は今までどおり |
+| `VENDORED.md` | macOS の取り込みと、この段階の manifest・lock・ソース・試験の変更を記録した |
+
 ## build と試験
 
-- build: `node build-desktop-control.mjs`（Windows x64 の時だけ。ほかは何もせずに成功で終わる）。`cargo build --release --locked` を、`rust-toolchain.toml` が効くようにこのフォルダーで動かす。
-- upstream の試験（`cargo test`）は、入れなかった `probes`・`tests`・`docs`・`.github` などのファイルを `include_str!` で読むものがあるので、このままでは compile できない。Sprint Coder の CI でも回していない。
+- build は repo root の `node build-desktop-control.mjs`。Windows x64 は従来の `cargo build --release --locked`、macOS arm64 はそれに `-p agent-desktop` を加える。`rust-toolchain.toml` が効くようにこのフォルダーで動かす。ほかの OS と arch は何もせずに成功で終わる。
+- macOS の crate の試験は `cargo test --locked -p agent-desktop-macos --lib` で回せる（socket・process の一覧・Accessibility を使う一部の試験は、実行する環境の許可が要る）。CLI の試験（`cargo test -p agent-desktop`）は、入れなかった `tests`・`docs`・`.github` などのファイルを `include_str!` で読むものがあるので、このままでは compile できない。Sprint Coder の CI でも回していない。

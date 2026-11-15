@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, AppInfo, Deadline, DeliverySemantics, ErrorCode, WindowInfo,
     system::launch_options::LaunchOptions, system::launch_result::LaunchResult,
@@ -31,6 +32,12 @@ pub(crate) fn launch_app_impl(
     let initial = matching_apps(id, deadline).map_err(before_launch)?;
     if options.attach_if_running && initial.len() == 1 && !options.activate {
         let app = initial[0].clone();
+        crate::system::own_window::check_pid(i32::try_from(app.pid.get()).ok())?;
+        let path = super::launch_workspace::resolved_path(
+            id,
+            Some(super::process::process_identity::to_pid_t(app.pid)?),
+        )?;
+        super::launch_location::require(&path)?;
         let instance = required_instance(&app).map_err(before_launch)?;
         let pid = super::process::process_identity::to_pid_t(app.pid).map_err(before_launch)?;
         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
@@ -42,7 +49,7 @@ pub(crate) fn launch_app_impl(
     validate_launched_target(&target, &launched).map_err(after_launch)?;
     let window =
         settled_window(launched.0, &launched.1, options, deadline).map_err(after_launch)?;
-    result_from_launched(&launched, window, id).map_err(after_launch)
+    result_from_launched(&launched, window, id, &target, options, deadline).map_err(after_launch)
 }
 
 /// Waits only for the windows the launch itself produces. Starting up is what
@@ -153,6 +160,12 @@ fn result_from_app(app: &AppInfo, window: Option<WindowInfo>) -> LaunchResult {
         cdp: None,
         renderer,
         suggestion: None,
+        attached: true,
+        new_instance: false,
+        handed_off: false,
+        running_without_window: false,
+        existing_window: false,
+        activated: None,
     }
 }
 
@@ -161,9 +174,33 @@ fn result_from_launched(
     launched: &(i32, String),
     window: Option<WindowInfo>,
     id: &str,
+    target: &LaunchTarget,
+    options: &LaunchOptions,
+    deadline: Deadline,
 ) -> Result<LaunchResult, AdapterError> {
     let renderer = crate::system::renderer_kind::detect_chromium(launched.0);
+    let attached = matches!(target, LaunchTarget::Existing { .. });
+    let activated = if options.activate {
+        let focused = crate::system::window::window_inventory::focused_window_until(
+            deadline_instant(deadline)?,
+        )?;
+        Some(window.as_ref().is_some_and(|window| {
+            focused.as_ref().is_some_and(|front| {
+                front.id == window.id
+                    && front.pid == window.pid
+                    && front.process_instance == window.process_instance
+            })
+        }))
+    } else {
+        None
+    };
     Ok(LaunchResult {
+        attached,
+        new_instance: !attached && window.is_some(),
+        handed_off: false,
+        running_without_window: false,
+        existing_window: false,
+        activated,
         app: launched_display_name(window.as_ref(), id),
         pid: agent_desktop_core::ProcessId::try_from(launched.0)
             .map_err(|_| AdapterError::internal("Launched process identifier is out of range"))?,
