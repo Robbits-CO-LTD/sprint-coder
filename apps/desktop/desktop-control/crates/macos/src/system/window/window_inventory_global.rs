@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::system::{window::cg_window::WindowRecord, window::window_ax_state::WindowAxState};
 use agent_desktop_core::{AdapterError, ErrorCode, WindowInfo};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -57,7 +58,17 @@ fn capture_global_once(
                 crate::system::window::cg_window::WindowRecordScope::Pids(eligible_pids),
             )
         },
-        |pid| crate::system::window::window_ax_state::read_frontmost_until(pid, deadline),
+        |pid| {
+            focus_layer::read_frontmost_in_inventory(
+                pid,
+                |pid| crate::system::window::window_ax_state::read_frontmost_until(pid, deadline),
+                |number| {
+                    crate::system::window::cg_window_exact::exact_window_owner_layer_until(
+                        number, deadline,
+                    )
+                },
+            )
+        },
     )?;
     crate::system::window::window_ax_state::label_accessibility(&mut windows, |pid| {
         let probe_deadline = Instant::now()
@@ -370,6 +381,9 @@ fn owner_churn_error(pid: Option<i32>, phase: &str) -> AdapterError {
 fn retryable_global_error(error: &AdapterError) -> bool {
     error.code == ErrorCode::AppUnresponsive && error.is_explicitly_retryable()
 }
+
+#[path = "window_inventory_global_focus_layer.rs"]
+mod focus_layer;
 
 #[path = "window_inventory_global_timeout.rs"]
 mod timeout;

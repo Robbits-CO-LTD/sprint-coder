@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::AdapterError;
 use core_foundation::array::CFArray;
 use std::time::Instant;
@@ -44,6 +45,50 @@ fn exact_window_record_until_with(
         ));
     }
     Ok(record)
+}
+
+/// The owner PID and CoreGraphics layer of one window, read for that window
+/// alone and at any layer. `Ok(None)` means CoreGraphics has no such window.
+pub(in crate::system) fn exact_window_owner_layer_until(
+    window_number: i64,
+    deadline: Instant,
+) -> Result<Option<(i32, i64)>, AdapterError> {
+    super::cg_window::ensure_before_deadline(deadline)?;
+    let dictionaries = exact_window_dictionaries(window_number)?;
+    super::cg_window::ensure_before_deadline(deadline)?;
+    exact_owner_layer(
+        window_number,
+        dictionaries.iter().map(|dictionary| {
+            let field = |key: &str| super::cg_window::int_field(dictionary, key);
+            (
+                field("kCGWindowNumber"),
+                field("kCGWindowOwnerPID"),
+                field("kCGWindowLayer"),
+            )
+        }),
+    )
+}
+
+type ExactOwnerLayerFields = (Option<i64>, Option<i64>, Option<i64>);
+
+fn exact_owner_layer(
+    window_number: i64,
+    mut fields: impl Iterator<Item = ExactOwnerLayerFields>,
+) -> Result<Option<(i32, i64)>, AdapterError> {
+    let Some((number, pid, layer)) = fields.next() else {
+        return Ok(None);
+    };
+    let source_error = |message| Err(exact_window_source_error(message, window_number));
+    if fields.next().is_some() {
+        return source_error("CoreGraphics returned multiple records for one exact window ID");
+    }
+    if number != Some(window_number) {
+        return source_error("CoreGraphics returned a different record for one exact window ID");
+    }
+    let (Some(pid), Some(layer)) = (pid.and_then(|pid| i32::try_from(pid).ok()), layer) else {
+        return source_error("CoreGraphics omitted the owner or layer of one exact window ID");
+    };
+    Ok(Some((pid, layer)))
 }
 
 fn exact_window_dictionaries(window_number: i64) -> Result<Vec<WindowDictionary>, AdapterError> {
