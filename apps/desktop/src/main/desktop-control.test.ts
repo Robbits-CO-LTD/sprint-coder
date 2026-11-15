@@ -335,7 +335,7 @@ describe('launching Sprint Coder itself', () => {
 });
 
 describe('desktop-control build', () => {
-  it('runs on Windows x64 and Apple silicon macOS, ships for Windows x64 only, from the 1.2.0 source', () => {
+  it('runs on and ships for Windows x64 and Apple silicon macOS, from the 1.2.0 source', () => {
     expect(DESKTOP_CONTROL_VERSION).toBe('1.2.0');
     expect(DESKTOP_CONTROL_EXECUTABLE).toBe('sprint-coder-desktop-control.exe');
     expect(desktopControlExecutableName('win32')).toBe('sprint-coder-desktop-control.exe');
@@ -343,7 +343,7 @@ describe('desktop-control build', () => {
     expect(desktopControlSupported('win32', 'x64')).toBe(true);
     expect(desktopControlSupported('darwin', 'arm64')).toBe(true);
     expect(desktopControlPackaged('win32', 'x64')).toBe(true);
-    expect(desktopControlPackaged('darwin', 'arm64')).toBe(false);
+    expect(desktopControlPackaged('darwin', 'arm64')).toBe(true);
     for (const [platform, arch] of [
       ['win32', 'arm64'],
       ['win32', 'ia32'],
@@ -1226,7 +1226,7 @@ describe('desktop control on Apple silicon macOS', () => {
     expect(runsOutsideCommandSandbox(BUILD, OTHER, ['/Users/me/work'], mac)).toBe(false);
   });
 
-  it('is off, and says nothing, in a package, which does not ship it yet', () => {
+  it('uses the executable shipped in the package, from Contents/Resources', () => {
     const packagedMac = {
       ...mac,
       packaged: true,
@@ -1234,10 +1234,16 @@ describe('desktop control on Apple silicon macOS', () => {
       contentDigest: () => SEALED,
       sealedDigest: () => SEALED,
     };
-    expect(resolveDesktopControlCommand(packagedMac)).toBeNull();
+    const shipped =
+      '/Applications/Sprint Coder.app/Contents/Resources/sprint-coder-desktop-control';
+    expect(resolveDesktopControlCommand(packagedMac)).toBe(shipped);
+    expect(isDesktopControlExecutable(shipped, SEALED, packagedMac)).toBe(true);
+    expect(isDesktopControlExecutable(shipped, OTHER, packagedMac)).toBe(false);
     const messages: string[] = [];
     reportDesktopControlAvailability(packagedMac, (message) => messages.push(message));
     expect(messages).toEqual([]);
+    // A package whose bytes no longer match their seal has no desktop control.
+    expect(resolveDesktopControlCommand({ ...packagedMac, contentDigest: () => OTHER })).toBeNull();
   });
 
   it('tells a development run how to build it, by its macOS name', () => {

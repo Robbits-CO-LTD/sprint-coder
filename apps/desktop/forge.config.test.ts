@@ -367,8 +367,6 @@ describe('desktop-control resources', () => {
       // Nothing is checked for a target it is not shipped for.
       await expect(runHook('linux', 'x64')).resolves.toBeUndefined();
       await expect(runHook('win32', 'arm64')).resolves.toBeUndefined();
-      // macOS runs it from the development build but does not ship it yet.
-      await expect(runHook('darwin', 'arm64')).resolves.toBeUndefined();
       rmSync(shipped);
       await expect(runHook('win32', 'x64')).rejects.toThrow();
     } finally {
