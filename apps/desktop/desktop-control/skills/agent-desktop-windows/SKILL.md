@@ -71,7 +71,8 @@ observation, actions and capture there fail or return nothing.
   the app's window is in front now; `foreground_hand_back: "failed"` beside it
   means giving it back was refused, `"left_for_user"` that the user may have
   picked it. Find the new window with `list-windows --app <app>`. A window the
-  app opens well after the action returned (a second or so) is not watched.
+  app opens after the action returned (even a few hundred milliseconds later)
+  is not watched and can take the foreground.
 - **No permission dialog exists.** `permissions` reports `automation` as
   `not_required`. Elevation boundaries are the only access control.
 - **Chromium and Electron apps read thin before they settle.** Pass a longer
