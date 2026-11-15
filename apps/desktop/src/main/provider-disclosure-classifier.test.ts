@@ -5,199 +5,126 @@ import {
   assessProviderEgressDisclosure,
 } from './provider-disclosure-classifier';
 
-describe('sealed Workspace root egress classification', () => {
+describe('Provider send (egress) classification', () => {
+  const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+  const pullRequest = 'https://github.com/Robbits-CO-LTD/sprint-coder/pull/1306';
   const root = '/private/tmp/sprint-coder-patrol-20260905/workspace';
-  const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+  const isolationRoot =
+    '/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/worktree-3f1c9a7e-5b2d-4e8a-9c04-7d6b1f2a8e35-1';
+  // Assembled at run time so the fixtures never sit in the source as a literal webhook or token.
+  const slackWebhook = [
+    'https://hooks.slack.com/services',
+    'T024BE7LD',
+    'B01ABCDEF12',
+    'aB3aB3cD4cD4eF5eF5gH6gH6',
+  ].join('/');
+  const discordWebhook = [
+    'https://discord.com/api/webhooks',
+    '123456789012345678',
+    ['Zx8Kp2Qm7Lw4Nv9Rt3Ys6Hb1Jd5Fg0Ca', 'Qw7Er4Ty1Ui8Op5As2Df9Gh6Jk3Lz0Xc', 'Vb'].join('_'),
+  ].join('/');
+  const telegramBot = `https://api.telegram.org/bot${['123456789', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'].join(':')}/sendMessage`;
+  const jwt = [
+    'eyJhbGciOiJIUzI1NiJ9',
+    'eyJzdWIiOiIxMjM0NTY3ODkwIn0',
+    'abcdefghijklmnopqrstuvwxyz012345',
+  ].join('.');
 
-  it('recognizes a Windows descendant only with its Main-issued drive and root', () => {
-    const windowsRoot = 'F:\\sc-real-ai-20260910\\fixtures';
-    const path = 'F:/sc-real-ai-20260910/fixtures/qwen38';
-    expect(assessProviderEgressDisclosure(path).classification).toBe('sensitive');
-    for (const root of [windowsRoot, `${windowsRoot}\\`, windowsRoot.replaceAll('\\', '/')]) {
-      const content = JSON.stringify({ message: path });
-      expect(assessProviderEgressDisclosure(content, [root])).toMatchObject({
-        classification: 'safe',
-        redactedContent: content,
-      });
-    }
-    for (const content of [
-      path.replace('F:', 'G:'),
-      path.replace('/fixtures/', '/fixtures-other/'),
-      `${path}/${opaque}`,
-      `${path}/8Jv2mQp7Zx4Lk9Wd6Tn3R/s5Yc1Ua0BfH8Jv2mQp7Zx`,
-      `password="${path}"`,
-      `${path}\n${opaque}`,
-    ])
-      expect(assessProviderEgressDisclosure(content, [windowsRoot]).classification).toBe(
-        'sensitive',
-      );
-  });
-
-  it('uses exact Main-issued root context only for composite entropy', () => {
-    expect(assessProviderDisclosure(root).classification).toBe('sensitive');
-    expect(assessProviderEgressDisclosure(root).classification).toBe('sensitive');
-    expect(assessProviderEgressDisclosure(root, [root])).toMatchObject({
+  // Each of these used to stop the send as `high-entropy-value`: long, mixed, random-looking.
+  it.each([
+    'https://example.com/',
+    'https://www.amazon.co.jp/dp/B09B8V1LZ3',
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    'https://www.google.com/search?q=bluetooth+speaker&sca_esv=5f1c2d3e4a5b6c7d&ei=AbCdEfGh',
+    'https://www.amazon.co.jp/Echo-Dot-5th-Gen/dp/B09B8SZLLG/ref=sr_1_1',
+    pullRequest,
+    `${pullRequest} を見て`,
+    `[PR 1306](${pullRequest})`,
+    'https://github.com/Robbits-CO-LTD/sprint-coder/issues/1298#issuecomment-6892857211',
+    'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd/edit',
+    'https://zenn.dev/example/articles/2a9c1f0b7e3d4c5a6b',
+    'https://github.com/Robbits-CO-LTD/sprint-coder/actions/workflows/ci.yml',
+    `launch msedge --url ${pullRequest}`,
+    JSON.stringify({ request: `この PR を見て\n${pullRequest}\n終わったら教えて` }),
+    createHash('sha256').update('fixture').digest('hex'),
+    createHash('sha256').update('fixture').digest('base64'),
+    '3f1c9a7e-5b2d-4e8a-9c04-7d6b1f2a8e35',
+    Buffer.from('a short image chunk for the test').toString('base64'),
+    'quickBrownFoxJumpsOverLazyDog123',
+    'realai-ws-codex-graph-Hnb2yq',
+    // A Workspace root, a Worker's isolation worktree, and an opaque name under either.
+    'F:/sc-real-ai-20260910/fixtures/qwen38',
+    root,
+    `隔離worktree: ${isolationRoot}（このディレクトリ内だけを変更してください）`,
+    `${isolationRoot}/${opaque}`,
+    `session ${opaque}`,
+  ])('lets a value that only looks random through the send (%#)', (content) => {
+    expect(assessProviderEgressDisclosure(content)).toMatchObject({
       classification: 'safe',
-      redactedContent: root,
+      reasons: [],
+      redactedContent: content,
     });
   });
 
   it.each([
-    `${root}-other`,
-    `${root}/${opaque}`,
-    opaque,
-    `${root}\n${opaque}`,
-    `password="${root}"`,
-    `cookie: ${root}`,
-  ])('does not exempt other values or credential fields (%#)', (content) => {
-    const assessment = assessProviderEgressDisclosure(content, [root]);
-    expect(assessment.classification).toBe('sensitive');
-    expect(assessment.redactedContent).not.toBe(content);
-  });
-
-  it.each(['sk-proj-abcdefghijklmnopqrstuvwxyz1234', 'AKIAIOSFODNN7EXAMPLE'])(
-    'still blocks a secret-bearing root (%#)',
-    (value) => {
-      const secretRoot = `/private/tmp/${value}/workspace`;
-      expect(assessProviderEgressDisclosure(secretRoot, [secretRoot]).classification).toBe(
-        'sensitive',
-      );
-    },
-  );
-
-  it('does not treat an ordinary name under a Main-issued root as a secret', () => {
-    expect(assessProviderEgressDisclosure(`${root}/child`, [root])).toMatchObject({
-      classification: 'safe',
-      redactedContent: `${root}/child`,
-    });
-  });
-
-  it('cannot exempt an opaque value just by supplying it as a root', () => {
-    expect(assessProviderEgressDisclosure(opaque, [opaque]).classification).toBe('sensitive');
-    expect(assessProviderEgressDisclosure(`x/${opaque}`, [`x/${opaque}`]).classification).toBe(
-      'sensitive',
-    );
-  });
-
-  it('blocks a high-entropy value that a Main-issued root splits into sub-threshold halves', () => {
-    // Neither half clears the 24-character entropy window on its own, so scanning the leftovers
-    // one by one reads the whole thing as clean. Removing only the root's bytes does not.
-    const split = `8Jv2mQp7Zx4Lk9Wd6Tn3=${root}/Rs5Yc1Ua0BfHgW7pQz2X`;
-    const assessment = assessProviderEgressDisclosure(split, [root]);
-    expect(assessment.classification).toBe('sensitive');
-    expect(assessment.reasons).toContain('high-entropy-value');
-    expect(assessment.redactedContent).not.toBe(split);
-    // The root on its own, and an ordinary descendant of it, stay exempt.
-    expect(assessProviderEgressDisclosure(root, [root]).classification).toBe('safe');
-    expect(assessProviderEgressDisclosure(`${root}/apps/desktop/src`, [root]).classification).toBe(
-      'safe',
-    );
-  });
-
-  it('exempts nothing when a declared root is not a usable path', () => {
-    // `roots.map(({ path }) => path)` can hand over holes. A malformed declaration must leave the
-    // scan exactly as strict as no declaration at all, never throw out of the egress gate.
-    for (const roots of [
-      [undefined as unknown as string],
-      [''],
-      ['   '],
-      ['relative/workspace'],
-      [null as unknown as string, root],
-    ])
-      expect(assessProviderEgressDisclosure(`${root}/${opaque}`, roots).classification).toBe(
-        'sensitive',
-      );
-    expect(assessProviderEgressDisclosure(root, [undefined as unknown as string])).toMatchObject({
-      classification: 'sensitive',
-    });
-  });
-});
-
-describe('Worker isolation worktree egress classification', () => {
-  const executionId = '3f1c9a7e-5b2d-4e8a-9c04-7d6b1f2a8e35';
-  const worktreeDirectory = `worktree-${executionId}-1`;
-  const isolationRoot = `/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/${worktreeDirectory}`;
-  const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
-
-  it('lets a Worker name the isolation worktree Main generated for it', () => {
-    const prompt = JSON.stringify({
-      request: `隔離worktree: ${isolationRoot}（このディレクトリ内だけを変更してください）`,
-    });
-    expect(assessProviderEgressDisclosure(prompt).classification).toBe('sensitive');
-    expect(assessProviderEgressDisclosure(prompt, [isolationRoot])).toMatchObject({
-      classification: 'safe',
-      redactedContent: prompt,
-    });
-    expect(
-      assessProviderEgressDisclosure(`${isolationRoot}/apps/desktop/src/main/ipc.ts`, [
-        isolationRoot,
-      ]).classification,
-    ).toBe('safe');
-  });
-
-  it.each([
-    ['the same execution directory named outside the root', `直前の作業: ${worktreeDirectory}`],
-    ['an API key read from a file under the root', `${isolationRoot}/.env\nAPI_KEY=${opaque}`],
-    ['a longer token that merely starts with the root', `${isolationRoot}${opaque}`],
-    ['an opaque descendant of the root', `${isolationRoot}/${opaque}`],
-  ])('still blocks %s', (_label, content) => {
-    const assessment = assessProviderEgressDisclosure(content, [isolationRoot]);
-    expect(assessment.classification).toBe('sensitive');
-    expect(assessment.reasons).toContain('high-entropy-value');
-    expect(assessment.redactedContent).not.toBe(content);
-  });
-});
-
-describe('declared Workspace root label egress classification (issue #849)', () => {
-  const root = '/private/tmp/sprint-coder-labels/workspace';
-  // Long and random-looking enough to clear the 24-character, 4.25-bit entropy test on its own.
-  const randomLabel = 'ws-Q7xK2mZp9LcV4tRb8NfJ3hYd6Wa';
-  const realLabel = 'realai-ws-codex-graph-Hnb2yq';
-  const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
-  const guidance = (label: string) =>
-    JSON.stringify({ workspace: { roots: [{ label, path: root, role: 'primary' }] } });
-
-  it('reads a declared root label in the guidance JSON and the prompt as known structure', () => {
-    for (const label of [randomLabel, realLabel]) {
-      const content = `${guidance(label)}\n隔離root: ${label} = ${root}`;
-      expect(assessProviderEgressDisclosure(content, [root], [label])).toMatchObject({
-        classification: 'safe',
-        reasons: [],
-        redactedContent: content,
-      });
-    }
-    // Without the declaration the random label is what the scan stops on.
-    expect(assessProviderEgressDisclosure(guidance(randomLabel), [root]).reasons).toEqual([
-      'high-entropy-value',
-    ]);
-  });
-
-  it.each([
-    ['a secret beside the label', `${guidance(randomLabel)}\n${opaque}`],
-    ['a secret fused to the label', `${guidance(`${randomLabel}${opaque}`)}`],
-    ['a secret joined to the label by =', `${randomLabel}=${opaque}`],
-    ['a secret under the label as a path', `${randomLabel}/${opaque}`],
-    ['the label with a secret prefix', `${opaque}+${randomLabel}`],
-  ])('still blocks %s', (_case, content) => {
-    const assessment = assessProviderEgressDisclosure(content, [root], [randomLabel]);
-    expect(assessment.classification).toBe('sensitive');
-    expect(assessment.reasons).toContain('high-entropy-value');
-    expect(assessment.redactedContent).not.toContain(opaque);
-  });
-
-  it('exempts only the exact declared value, and never a malformed declaration', () => {
-    expect(
-      assessProviderEgressDisclosure(randomLabel.slice(0, -1), [], [randomLabel]).classification,
-    ).toBe('sensitive');
-    for (const labels of [[undefined as unknown as string], [''], [null as unknown as string]])
-      expect(assessProviderEgressDisclosure(randomLabel, [], labels).classification).toBe(
-        'sensitive',
-      );
-    // A declared label never hides a recognized credential shape.
-    const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz1234';
-    expect(assessProviderEgressDisclosure(token, [], [token]).reasons).toContain(
+    ['an Anthropic key', 'sk-ant-abcdefghijklmnopqrstuvwxyz1234', 'ai-provider-token'],
+    ['an OpenAI key', `key ${'sk-proj-abcdefghijklmnopqrstuvwxyz1234'}`, 'ai-provider-token'],
+    ['a Google API key', 'AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUv', 'ai-provider-token'],
+    [
+      'a Slack token',
+      ['xoxb', '1234567890', 'abcdefghijklmnopqrstuvwxyz'].join('-'),
+      'slack-token',
+    ],
+    ['a GitLab token', 'glpat-abcdefghijklmnopqrstuvwxyz', 'gitlab-token'],
+    ['an AWS access key ID', 'AKIAIOSFODNN7EXAMPLE', 'known-secret-pattern'],
+    ['a GitHub token', `ghp_${'abcdefghijklmnopqrstuvwxyz0123456789'}`, 'known-secret-pattern'],
+    ['a JWT', `token is ${jwt}`, 'known-secret-pattern'],
+    ['a bearer header', `Authorization: Bearer ${opaque}`, 'known-secret-pattern'],
+    ['userinfo in a URL', 'https://alice:correct-horse@example.com/', 'uri-userinfo'],
+    ['a cookie header', `Cookie: session=${opaque}`, 'cookie'],
+    ['a password field', 'password = "correct horse battery staple"', 'credential-field'],
+    [
+      'an access token in a URL query',
+      'https://example.com/callback?access_token=correct-horse',
+      'credential-field',
+    ],
+    [
+      'an API key field under a root',
+      `${isolationRoot}/.env\nAPI_KEY=${opaque}`,
+      'credential-field',
+    ],
+    [
+      'a key inside a root',
+      `/private/tmp/sk-proj-abcdefghijklmnopqrstuvwxyz1234/w`,
       'ai-provider-token',
+    ],
+    ['a PEM block', '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----', 'private-key'],
+    ['a Slack webhook', slackWebhook, 'webhook-url'],
+    ['a Discord webhook', discordWebhook, 'webhook-url'],
+    ['a Telegram bot URL', telegramBot, 'webhook-url'],
+  ])('still stops %s', (_label, content, reason) => {
+    const assessment = assessProviderEgressDisclosure(content);
+    expect(assessment.classification).toBe('sensitive');
+    expect(assessment.reasons).toContain(reason);
+    expect(assessment.reasons).not.toContain('high-entropy-value');
+    expect(assessment.redactedContent).not.toBe(content);
+  });
+
+  it('redacts the secret part of a webhook URL and keeps its host', () => {
+    const assessment = assessProviderEgressDisclosure(`通知先: ${slackWebhook}`);
+    expect(assessment.redactedContent).toBe(
+      '通知先: https://hooks.slack.com/services/[REDACTED_WEBHOOK]',
     );
+    expect(assessment.preview).not.toContain('aB3aB3cD4cD4eF5eF5gH6gH6');
+  });
+
+  it('keeps the entropy guess for file content', () => {
+    // Only the send changed: a file disclosed as context still treats an opaque value as a secret.
+    for (const content of [opaque, `${pullRequest}/${opaque}`])
+      expect(assessProviderDisclosure(content, 'notes.json').reasons).toEqual([
+        'high-entropy-value',
+      ]);
+    expect(assessProviderDisclosure(slackWebhook, 'notes.json').reasons).toContain('webhook-url');
   });
 });
 
@@ -213,9 +140,13 @@ describe('provider disclosure classifier', () => {
       classification: 'safe',
       redactedContent: content,
     });
+    // A file outside a document keeps the entropy guess; the send to a Provider does not.
     expect(assessProviderDisclosure(content).classification).toBe('sensitive');
-    expect(assessProviderEgressDisclosure(content).classification).toBe('sensitive');
     expect(assessProviderDisclosure(content, 'output.json').classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(content)).toMatchObject({
+      classification: 'safe',
+      redactedContent: content,
+    });
   });
   it.each([
     '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',

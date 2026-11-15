@@ -1656,8 +1656,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(knownWorkspaceRoots).toEqual([isolationRoot]);
     expect(prompt).toContain(isolationRoot);
     // The Worker cannot work without naming that directory, so the scan must read it as clean.
-    expect(assessProviderEgressDisclosure(prompt).classification).toBe('sensitive');
-    expect(assessProviderEgressDisclosure(prompt, knownWorkspaceRoots).classification).toBe('safe');
+    expect(assessProviderEgressDisclosure(prompt).classification).toBe('safe');
   });
 
   it.each([
@@ -1711,17 +1710,15 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         readonly string[],
       ];
       expect(payload).toContain('realai-ws-codex-graph-Hnb2yq');
-      expect(assessProviderEgressDisclosure(payload, knownWorkspaceRoots)).toMatchObject({
+      expect(knownWorkspaceRoots).toEqual([isolationRoot]);
+      expect(assessProviderEgressDisclosure(payload)).toMatchObject({
         classification: 'safe',
         reasons: [],
       });
-      // A real secret beside the label is still caught: the root alone is what is exempt.
+      // A real secret beside the label is still caught, by its shape.
       expect(
-        assessProviderEgressDisclosure(
-          `${payload}\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH`,
-          knownWorkspaceRoots,
-        ).reasons,
-      ).toEqual(['high-entropy-value']);
+        assessProviderEgressDisclosure(`${payload}\nsk-ant-abcdefghijklmnopqrstuvwxyz1234`).reasons,
+      ).toContain('ai-provider-token');
       subject.dispose();
     },
   );
@@ -1765,17 +1762,15 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       // The guidance JSON names the label as its own `"label"` value.
       expect(payload).toContain(label);
       expect(knownWorkspaceLabels).toEqual([label]);
+      expect(knownWorkspaceRoots).toEqual([isolationRoot]);
+      expect(assessProviderEgressDisclosure(payload)).toMatchObject({
+        classification: 'safe',
+        reasons: [],
+      });
+      // A real secret beside the label is still caught, by its shape.
       expect(
-        assessProviderEgressDisclosure(payload, knownWorkspaceRoots, knownWorkspaceLabels),
-      ).toMatchObject({ classification: 'safe', reasons: [] });
-      // A real secret beside the label is still caught: only the exact label is exempt.
-      expect(
-        assessProviderEgressDisclosure(
-          `${payload}\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH`,
-          knownWorkspaceRoots,
-          knownWorkspaceLabels,
-        ).reasons,
-      ).toEqual(['high-entropy-value']);
+        assessProviderEgressDisclosure(`${payload}\nsk-ant-abcdefghijklmnopqrstuvwxyz1234`).reasons,
+      ).toContain('ai-provider-token');
       subject.dispose();
     },
   );

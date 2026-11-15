@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { redactSecrets } from './secret-redactor';
 
-export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v5';
+export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v6';
 
 export type ProviderDisclosureClassification = 'safe' | 'sensitive' | 'uncertain';
 
@@ -26,35 +26,41 @@ const PROVIDER_TOKEN =
 const COOKIE_VALUE = /(?<![a-z0-9_-])(?:set-cookie|cookie)\s*[:=]\s*[^\r\n]{8,}/giu;
 const STRUCTURED_CREDENTIAL_FIELD =
   /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|cookie)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]{4,})/giu;
+/**
+ * A URL whose path is itself the credential: anyone holding it can post as the hook or the bot.
+ * Named by its host and path shape, so it is stopped without guessing at how random it looks.
+ */
+const WEBHOOK_URL =
+  /(https?:\/\/(?:hooks\.slack\.com\/(?:services|workflows|triggers)\/|(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/|api\.telegram\.org\/(?:file\/)?bot))[A-Za-z0-9_:/-]{8,}/giu;
 const ENTROPY_CANDIDATE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_+/=-]{24,}(?![A-Za-z0-9_-])/gu;
 
+/**
+ * Classify file content before it is disclosed to a Provider as context. Besides the recognized
+ * credential shapes, a long random-looking value is treated as a possible secret here: a file is
+ * read without the user having typed it, so an unlabeled key in it would otherwise go unnoticed.
+ */
 export function assessProviderDisclosure(
   content: string,
   relativePath?: string,
 ): ProviderDisclosureAssessment {
-  return assessDisclosure(content, relativePath, []);
+  return assessDisclosure(content, relativePath, true);
 }
 
 /**
- * Roots and root labels must come from Main's sealed Turn workspace, never from Provider/Renderer
- * text. A root label is the name Main itself declares for a root to the Provider, so its exact value
- * is known structure, not an opaque secret (issue #849).
+ * Classify what a Turn is about to send to a Provider. Only recognized credential shapes stop the
+ * send. A long random-looking value alone does not: URLs, hashes, IDs and base64 are ordinary in a
+ * conversation, and guessing at them stopped ordinary requests and then every later Turn of the Task
+ * that sent the same conversation again.
  */
-export function assessProviderEgressDisclosure(
-  content: string,
-  knownWorkspaceRoots: readonly string[] = [],
-  knownWorkspaceLabels: readonly string[] = [],
-): ProviderDisclosureAssessment {
-  return assessDisclosure(content, undefined, knownWorkspaceRoots, knownWorkspaceLabels);
+export function assessProviderEgressDisclosure(content: string): ProviderDisclosureAssessment {
+  return assessDisclosure(content, undefined, false);
 }
 
 function assessDisclosure(
   content: string,
   relativePath: string | undefined,
-  knownWorkspaceRoots: readonly string[],
-  knownWorkspaceLabels: readonly string[] = [],
+  scanEntropy: boolean,
 ): ProviderDisclosureAssessment {
-  const labels = declaredLabels(knownWorkspaceLabels);
   const reasons = new Set<string>();
   const baselineRedacted = redactSecrets(content);
   if (relativePath !== undefined && CREDENTIAL_FILENAME.test(basename(relativePath)))
@@ -67,19 +73,15 @@ function assessDisclosure(
     reasons.add('private-key');
   if (matches(COOKIE_VALUE, content)) reasons.add('cookie');
   if (matches(STRUCTURED_CREDENTIAL_FIELD, content)) reasons.add('credential-field');
+  if (matches(WEBHOOK_URL, content)) reasons.add('webhook-url');
   if (baselineRedacted !== content) reasons.add('known-secret-pattern');
 
-  const contentRootSpans = knownRootSpans(content, knownWorkspaceRoots);
   const contentDocumentSpans = ordinaryDocumentSpans(content, relativePath);
-  const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some((match) =>
-    isSensitiveEntropyCandidate(
-      match[0],
-      match.index,
-      contentRootSpans,
-      contentDocumentSpans,
-      labels,
-    ),
-  );
+  const highEntropy =
+    scanEntropy &&
+    [...content.matchAll(ENTROPY_CANDIDATE)].some((match) =>
+      isSensitiveEntropyCandidate(match[0], match.index, contentDocumentSpans),
+    );
   if (highEntropy) reasons.add('high-entropy-value');
 
   const directSensitive = [...reasons].some((reason) => reason !== 'credential-prone-filename');
@@ -97,18 +99,12 @@ function assessDisclosure(
     .replace(STRUCTURED_CREDENTIAL_FIELD, (value) => {
       const separator = value.search(/[:=]/u);
       return separator < 0 ? '[REDACTED_CREDENTIAL]' : `${value.slice(0, separator + 1)}[REDACTED]`;
-    });
+    })
+    .replace(WEBHOOK_URL, '$1[REDACTED_WEBHOOK]');
   if (highEntropy) {
-    const redactedRootSpans = knownRootSpans(redactedContent, knownWorkspaceRoots);
     const redactedDocumentSpans = ordinaryDocumentSpans(redactedContent, relativePath);
     redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate, offset: number) =>
-      isSensitiveEntropyCandidate(
-        candidate,
-        offset,
-        redactedRootSpans,
-        redactedDocumentSpans,
-        labels,
-      )
+      isSensitiveEntropyCandidate(candidate, offset, redactedDocumentSpans)
         ? '[REDACTED_HIGH_ENTROPY]'
         : candidate,
     );
@@ -222,98 +218,15 @@ function ordinaryDocumentSpans(
   return spans;
 }
 
-const ABSOLUTE_ROOT = /^(?:\/|[A-Za-z]:\/)/u;
-/** A root preceded or followed by these is a longer name or another path, not the root itself. */
-const ROOT_PREFIX_CHARACTER = /[A-Za-z0-9_+.~/\\-]/u;
-const ROOT_SUFFIX_CHARACTER = /[A-Za-z0-9_+.~=-]/u;
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-}
-
-/**
- * Locate every occurrence of a Main-issued Workspace root. A Worker cannot work without naming
- * its own isolation worktree, and that directory is generated by Main (or chosen by the operator),
- * so the root path itself is not a secret. Matching stays segment-exact: a root that continues
- * into a longer name, or that appears embedded in a token, yields no span at all.
- */
-function knownRootSpans(
-  content: string,
-  knownWorkspaceRoots: readonly string[],
-): readonly TextSpan[] {
-  const spans: TextSpan[] = [];
-  for (const root of knownWorkspaceRoots) {
-    // A caller may hand over a Workspace root that was never materialized as a path. Exempt only
-    // what is provably a Main-issued root: anything else yields no span, so the scan runs as if
-    // no root had been declared rather than throwing out of the egress gate.
-    if (typeof root !== 'string' || root === '') continue;
-    const normalized = root.replaceAll('\\', '/').replace(/\/+$/u, '');
-    if (!ABSOLUTE_ROOT.test(normalized)) continue;
-    const segments = normalized.split('/');
-    if (segments.slice(1).some((segment) => segment === '' || segment === '.' || segment === '..'))
-      continue;
-    // Accept the same root spelled with POSIX, Windows, or JSON-escaped Windows separators.
-    const pattern = new RegExp(segments.map(escapeRegExp).join('(?:/|\\\\{1,2})'), 'gu');
-    for (const match of content.matchAll(pattern)) {
-      const start = match.index;
-      const end = start + match[0].length;
-      if (start > 0 && ROOT_PREFIX_CHARACTER.test(content.charAt(start - 1))) continue;
-      if (end < content.length && ROOT_SUFFIX_CHARACTER.test(content.charAt(end))) continue;
-      spans.push({ start, end });
-    }
-  }
-  return spans;
-}
-
-/**
- * The root labels a caller declared, kept only when they are usable values. A malformed entry
- * exempts nothing, so the scan stays as strict as if no label had been declared.
- */
-function declaredLabels(knownWorkspaceLabels: readonly string[]): ReadonlySet<string> {
-  return new Set(
-    knownWorkspaceLabels.filter(
-      (label): label is string => typeof label === 'string' && label.trim() !== '',
-    ),
-  );
-}
-
 function isSensitiveEntropyCandidate(
   candidate: string,
   offset: number,
-  rootSpans: readonly TextSpan[],
   documentSpans: readonly TextSpan[],
-  labels: ReadonlySet<string> = new Set(),
 ): boolean {
   if (!isHighEntropyCandidate(candidate)) return false;
-  // A declared root label is exempt only as the whole token: the candidate's boundaries already
-  // stop at quotes, spaces and other separators, so anything fused to the label (`<label>=<x>`,
-  // `<label>/<x>`, `<x>+<label>`) is a different, longer candidate and is scanned in full.
-  if (labels.has(candidate)) return false;
-  if (documentSpans.some((span) => span.start <= offset && span.end >= offset + candidate.length))
-    return false;
-  // Only the bytes of a Main-issued root are exempt. What the candidate adds below the root, and
-  // every high-entropy value outside one, is rescanned exactly as it would be without any root.
-  const end = offset + candidate.length;
-  const covering = rootSpans
-    .filter((span) => span.start < end && span.end > offset)
-    .sort((left, right) => left.start - right.start);
-  if (covering.length === 0) return true;
-  const remainders: string[] = [];
-  let cursor = offset;
-  for (const span of covering) {
-    if (span.start > cursor) remainders.push(candidate.slice(cursor - offset, span.start - offset));
-    cursor = Math.max(cursor, span.end);
-  }
-  if (cursor < end) remainders.push(candidate.slice(cursor - offset));
-  // Each remainder is rescanned on its own, and so is their concatenation: a single secret split
-  // by a root it happens to straddle (`<half>=<root>/<half>`) is under the entropy threshold on
-  // either side alone, but not once the root's own bytes are the only thing removed.
-  return [...remainders, remainders.join('')].some((remainder) => {
-    ENTROPY_CANDIDATE.lastIndex = 0;
-    return [...remainder.matchAll(ENTROPY_CANDIDATE)].some((match) =>
-      isHighEntropyCandidate(match[0]),
-    );
-  });
+  return !documentSpans.some(
+    (span) => span.start <= offset && span.end >= offset + candidate.length,
+  );
 }
 
 function matches(pattern: RegExp, value: string): boolean {

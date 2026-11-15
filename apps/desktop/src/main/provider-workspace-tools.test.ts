@@ -1416,7 +1416,7 @@ describe('Provider workspace read tools', () => {
     expect(disclosureFacts.at(-1)).toMatchObject({
       providerId: 'ollama',
       classification: 'sensitive',
-      classifierVersion: 'provider-disclosure-v5',
+      classifierVersion: 'provider-disclosure-v6',
       canonicalPath: expect.stringContaining('secret-notes.md'),
       sourceDigest: expect.any(String),
       disclosedDigest: expect.any(String),
