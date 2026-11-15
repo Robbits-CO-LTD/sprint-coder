@@ -367,6 +367,7 @@ impl crate::adapter::SystemOps for SuggestingAdapter {
             suggestion: Some("adapter guidance".into()),
             attached: false,
             new_instance: false,
+            handed_off: false,
         })
     }
 }

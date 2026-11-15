@@ -351,7 +351,7 @@ function renderDesktopControl(command: string): string[] {
     '- 結果を確かめる時は -i なしの snapshot を使う（文字や状態も出る）。-i は操作できる部品を探す時だけ。',
     '- 操作は裏だけで行い、利用者のマウス・キーボード・前面の窓を使わない。文字は set-value、選択は select、メニューは expand か click で入れる。前面を使う操作（--headed、focus-window、restore、maximize、press、type、focus など）は利用者がはっきり頼んだ時だけ使う。裏の操作が失敗しても前面の操作で取り返さず、できなかったと報告する。最小化した窓は操作できない（restore は前面を使う）。',
     '- 同じアプリの窓が複数ある時は list-windows で id を調べて --window-id を付け、利用者が元から開いていた窓には触らない。',
-    '- launch の結果の attached が true なら、既に動いていたアプリにつながっただけで、何も起動していない（ブラウザーなど、新しく起動しても動いているアプリに引き渡して終わるアプリも同じ）。その窓は利用者が元から開いていた窓として扱う。new_instance が true の時だけ、結果の window はこの launch で起動した窓。自分用に別に起動したい時は --no-attach を付ける。',
+    '- launch の結果の attached が true なら、既に動いていたアプリにつながっただけで、何も起動していない。その窓は利用者が元から開いていた窓として扱う。結果に window が無ければ、そのアプリは窓を開かずに動いている（裏で動き続けるブラウザー、トレイのアプリなど）。new_instance が true の時だけ、結果の window はこの launch で起動した窓。新しい窓が要る時は --no-attach を付けて 1 回だけ起動し直す。ブラウザーなど、動いているアプリに引き渡して終わるアプリでは、結果に handed_off: true が付き、新しい窓は動いていたアプリが開く（結果の window がそれで、持ち主は window.pid）。handed_off で window が無い時は、新しい窓は確かめられていないので、起動を繰り返さずに list-windows で窓を確かめる。',
     '- launch の結果の窓の id で WINDOW_NOT_FOUND になったら、起動の途中に出た splash の窓が閉じたことがある。list-windows で窓を取り直す。',
     '- 操作の対象は ref か --window-id で指定する。利用者は承認カードで「このアプリは Task 中許可」を選べ、そのアプリへの読み取りと裏の操作は確認なしで進むが、対象を確かめられない実行・前面を使う操作・起動・終了は毎回確認になる。許可の有無で操作の進め方は変えない。',
     '- メニューが click で開かない時は expand を使い、開いた直後の中身は batch で expand と snapshot を続けて読む（batch の引数は [{"command":"expand","args":{"ref_id":"<ref>"}},{"command":"snapshot","args":{"window_id":"<id>"}}] の形）。',

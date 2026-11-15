@@ -93,12 +93,20 @@ observation, actions and capture there fail or return nothing.
 - **Read `attached` and `new_instance` in the `launch` result.** A bare
   `launch` of an app that is already running attaches to it and starts
   nothing (`attached: true`); its windows may be ones the user had open, so do
-  not treat them as yours. `--no-attach`, or any `--arg`, `--env` or `--cwd`,
-  starts a new process instead. A single-instance app (a browser on its
-  default profile, many editors) may pass that new process to the running
-  instance and exit: the result then also says `attached: true`, with no
-  `window`. Only `new_instance: true` proves `window` belongs to a process
-  this launch started.
+  not treat them as yours. With no `window` in that result, the app runs with
+  no window open (a browser kept running in the background, an app in the
+  tray). `--no-attach`, or any `--arg`, `--env` or `--cwd`, starts a new
+  process instead. A single-instance app (a browser on its default profile,
+  many editors) passes that new process to the running instance and exits:
+  the result then says `attached: true` and `handed_off: true`. The running
+  instance opens the new window itself, so when the result has a `window`, it
+  is the window that instance opened after the launch, owned by `window.pid`
+  (the running instance, not the exited `pid`). With no `window`, no new
+  window appeared within a few seconds: run `list-windows --app <app>` before
+  launching again, since a second launch may open a second window. To open a
+  window of such an app when the bare `launch` attached, run `launch
+  --no-attach` once. Only `new_instance: true` proves `window` belongs to a
+  process this launch started.
 - **The `window` a launch returns can be a splash screen** that closes once
   the app's main window opens. When a command on that window id fails with
   `WINDOW_NOT_FOUND`, run `list-windows --app <app>` and use the current id.

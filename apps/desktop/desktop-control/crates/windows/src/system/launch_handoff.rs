@@ -9,8 +9,23 @@
 //! processes it can prove it started: its descendants, linked by parent pid and
 //! creation time while a handle on each parent keeps that pid from being
 //! reused. When none of them is alive, no window can come from the launch, and
-//! it returns at once. A window that merely appeared at the same time is never
-//! taken: timing alone cannot tell it from another app opened by someone else.
+//! it returns at once. A window of another app that merely appeared at the same
+//! time is never taken: timing alone cannot tell it from one opened by someone
+//! else.
+//!
+//! A single-instance app (a browser on its default profile, many editors) is
+//! different: its new process finds the instance of the same executable that
+//! was already running, asks it for a window and exits. That window belongs to
+//! the running instance, so nothing above can find it, and the launch used to
+//! report no window although one opened. When the launched process exited
+//! without a window while such an instance runs ([`Handoff`]), the launch also
+//! watches that instance, for a short while ([`HANDOFF_WINDOW_WAIT`]), for a
+//! top-level window that did not exist before the launch started anything,
+//! and reports it as the running instance's window (`handed_off`), never as a
+//! window of a process the launch started (`new_instance` stays false).
+
+use std::collections::HashSet;
+use std::time::Duration;
 
 use agent_desktop_core::{AdapterError, Deadline, ProcessId, WindowFilter, WindowInfo};
 
@@ -20,6 +35,130 @@ pub(super) const EXITED_WITHOUT_WINDOW: &str = "The launched process exited with
      its own. The app may show its window from another process (for example a packaged app \
      started through the shell). Run `list-windows` to find that window; it was not taken here \
      because nothing ties it to this launch.";
+
+/// How long a launch that was passed to a running instance watches that
+/// instance for the new window it asked for, at most. The launch's own
+/// deadline still bounds it. An instance that shows an existing window
+/// instead opens none, so the watch must not run to the whole deadline.
+pub(super) const HANDOFF_WINDOW_WAIT: Duration = Duration::from_secs(5);
+
+/// A process of the launch target's executable that was running before the
+/// launch started anything, held open so its pid is never mistaken for a
+/// later process that reused it.
+pub(super) struct RunningInstance {
+    pub(super) pid: ProcessId,
+    pub(super) token: Option<String>,
+    pub(super) process: Process,
+}
+
+/// The running instances a launch may be passed to, and the ids of every
+/// top-level window that existed before the launch started its process.
+pub(super) struct Handoff {
+    instances: Vec<RunningInstance>,
+    /// `None` when there is no instance, or the windows could not be read:
+    /// then no window can be told apart as new, and none is ever taken.
+    before: Option<HashSet<String>>,
+}
+
+impl Handoff {
+    /// Reads the windows that exist now; call it before the process starts.
+    pub(super) fn begin(instances: Vec<RunningInstance>) -> Self {
+        let before = if instances.is_empty() {
+            None
+        } else {
+            existing_window_ids()
+        };
+        Self { instances, before }
+    }
+
+    /// Whether an instance that was running before the launch still runs.
+    pub(super) fn any_running(&self) -> bool {
+        self.instances
+            .iter()
+            .any(|instance| !instance.process.has_exited())
+    }
+
+    /// One look for a window of a still-running instance that did not exist
+    /// before the launch.
+    pub(super) fn new_window(
+        &self,
+        deadline: Deadline,
+    ) -> Result<Option<WindowInfo>, AdapterError> {
+        let Some(before) = &self.before else {
+            return Ok(None);
+        };
+        let targets: Vec<(ProcessId, Option<String>)> = self
+            .instances
+            .iter()
+            .filter(|instance| !instance.process.has_exited())
+            .map(|instance| (instance.pid, instance.token.clone()))
+            .collect();
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        let filter = WindowFilter {
+            focused_only: false,
+            app: None,
+        };
+        match super::list_windows_live(&filter, deadline) {
+            Ok(windows) => Ok(new_instance_window(windows, &targets, before)),
+            Err(error) if super::is_unobservable_within_budget(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The first window of one of `targets` (same pid and process instance) whose
+/// id was not among the windows that existed before the launch.
+pub(super) fn new_instance_window(
+    windows: Vec<WindowInfo>,
+    targets: &[(ProcessId, Option<String>)],
+    before: &HashSet<String>,
+) -> Option<WindowInfo> {
+    owned_window(
+        windows
+            .into_iter()
+            .filter(|window| !before.contains(&window.id))
+            .collect(),
+        targets,
+    )
+}
+
+/// What a launch does after the process it started exited without a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AfterExit {
+    Stop,
+    KeepWatching,
+}
+
+/// Passed to a running instance, the launch watches that instance until
+/// [`HANDOFF_WINDOW_WAIT`] is over, even while a descendant lingers without a
+/// window (a crash handler the exited process started would otherwise hold it
+/// to the whole deadline). Otherwise it watches while a descendant lives, as
+/// before, and stops when none does.
+pub(super) fn after_exit(
+    live_descendants: bool,
+    handed_off: bool,
+    handoff_wait_over: bool,
+) -> AfterExit {
+    match (handed_off, handoff_wait_over, live_descendants) {
+        (true, true, _) | (false, _, false) => AfterExit::Stop,
+        _ => AfterExit::KeepWatching,
+    }
+}
+
+/// The ids of every top-level window, shown or not, or `None` when they could
+/// not be enumerated.
+fn existing_window_ids() -> Option<HashSet<String>> {
+    use super::super::window::{window_enum, window_ops};
+    let mut ids = HashSet::new();
+    window_enum::enumerate_top_level(|window| {
+        ids.insert(window_ops::window_id(window.handle));
+        true
+    })
+    .ok()?;
+    Some(ids)
+}
 
 /// The launched process and every descendant proven to be its own.
 pub(super) struct Lineage {

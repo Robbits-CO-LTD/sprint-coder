@@ -68,6 +68,96 @@ fn an_owner_without_an_instance_cannot_be_matched() {
     assert!(owned_window(windows, &owners).is_none());
 }
 
+fn ids(list: &[&str]) -> HashSet<String> {
+    list.iter().map(|id| id.to_string()).collect()
+}
+
+/// A single-instance app's running instance opens the window the launch asked
+/// for: only a window of that instance that did not exist before the launch
+/// is taken, never one it already had (the user's), nor a new window of
+/// another process, nor one whose owner pid now names another process.
+#[test]
+fn a_handoff_takes_only_a_window_the_running_instance_opened_after_the_launch() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let before = ids(&["w-1", "w-2"]);
+    let windows = vec![
+        window("w-1", 20, Some("instance-20")),
+        window("w-3", 30, Some("instance-30")),
+        window("w-4", 20, Some("instance-other")),
+        window("w-5", 20, Some("instance-20")),
+    ];
+
+    let found = new_instance_window(windows, &targets, &before).expect("the new window is found");
+
+    assert_eq!(found.id, "w-5");
+    assert_eq!(found.pid, ProcessId::from(20));
+}
+
+#[test]
+fn a_handoff_with_only_old_windows_takes_none() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let before = ids(&["w-1"]);
+    let windows = vec![
+        window("w-1", 20, Some("instance-20")),
+        window("w-9", 30, Some("instance-30")),
+    ];
+
+    assert!(new_instance_window(windows, &targets, &before).is_none());
+}
+
+/// Passed to a running instance, the launch stops once the short handoff
+/// wait is over, even while a windowless descendant (a crash handler the
+/// exited process started) still runs; before this it waited for that
+/// descendant until the whole deadline.
+#[test]
+fn a_handoff_stops_when_its_short_wait_is_over_even_with_a_lingering_descendant() {
+    assert_eq!(after_exit(true, true, true), AfterExit::Stop);
+    assert_eq!(after_exit(false, true, true), AfterExit::Stop);
+    assert_eq!(after_exit(true, true, false), AfterExit::KeepWatching);
+    assert_eq!(after_exit(false, true, false), AfterExit::KeepWatching);
+}
+
+/// Without a running instance, the watch is as before: it continues while a
+/// descendant lives and stops at once when none does.
+#[test]
+fn without_a_running_instance_only_a_live_descendant_keeps_the_watch() {
+    assert_eq!(after_exit(true, false, false), AfterExit::KeepWatching);
+    assert_eq!(after_exit(true, false, true), AfterExit::KeepWatching);
+    assert_eq!(after_exit(false, false, false), AfterExit::Stop);
+    assert_eq!(after_exit(false, false, true), AfterExit::Stop);
+}
+
+#[test]
+fn the_handoff_wait_is_short_and_bounded() {
+    assert!(HANDOFF_WINDOW_WAIT <= Duration::from_secs(10));
+    assert!(HANDOFF_WINDOW_WAIT >= Duration::from_secs(1));
+}
+
+/// The ids read before a launch are the ids the window inventory reports,
+/// so a window that existed before is recognised as old.
+#[cfg(target_os = "windows")]
+#[test]
+fn the_windows_read_before_a_launch_use_the_inventory_ids() {
+    let before = existing_window_ids().expect("top-level windows can be enumerated");
+    assert!(before.iter().all(|id| id.starts_with("w-")));
+    let deadline = Deadline::after(5_000).expect("deadline");
+    let filter = WindowFilter {
+        focused_only: false,
+        app: None,
+    };
+    let listed = super::super::list_windows_live(&filter, deadline).expect("windows can be listed");
+    let unknown: Vec<&str> = listed
+        .iter()
+        .map(|window| window.id.as_str())
+        .filter(|id| !before.contains(*id))
+        .collect();
+    // A window may open between the two reads; almost all must match.
+    assert!(
+        unknown.len() <= 2,
+        "listed windows missing from the enumeration: {unknown:?}"
+    );
+}
+
 #[cfg(target_os = "windows")]
 fn system_exe(name: &str) -> std::path::PathBuf {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());

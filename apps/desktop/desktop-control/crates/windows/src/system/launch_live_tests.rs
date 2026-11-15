@@ -239,7 +239,10 @@ fn attach_true_windowless_does_not_launch_second_process() {
     )
     .expect("attaching to a windowless process is a successful launch, not a failure");
     assert!(result.attached && !result.new_instance, "{result:?}");
-    assert_eq!(result.suggestion.as_deref(), Some(launch_attach::ATTACHED));
+    assert_eq!(
+        result.suggestion.as_deref(),
+        Some(launch_attach::ATTACHED_WITHOUT_WINDOW)
+    );
     assert!(
         result.window.is_none(),
         "a windowless process reports no window rather than an error: {result:?}"

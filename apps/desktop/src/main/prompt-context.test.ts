@@ -208,6 +208,10 @@ describe('prompt context compiler', () => {
     // A launch that reached the person's running app is not one the agent opened.
     expect(compiled.content).toContain('launch の結果の attached が true なら');
     expect(compiled.content).toContain('new_instance が true の時だけ');
+    // A single-instance app opens the new window in its running process.
+    expect(compiled.content).toContain('--no-attach を付けて 1 回だけ起動し直す');
+    expect(compiled.content).toContain('handed_off: true が付き');
+    expect(compiled.content).toContain('起動を繰り返さずに list-windows で窓を確かめる');
     expect(compiled.content).toContain('list-windows で窓を取り直す');
     // Nothing recommends taking the foreground any more.
     expect(compiled.content).not.toContain('窓を前面に出し');

@@ -12,7 +12,7 @@ use super::super::window::window_enum::EnumeratedWindow;
 use super::super::app_ops::{ProcessRow, process_snapshot};
 use super::super::launch_path::{image_file_name, resolve_executable};
 use super::super::process_identity;
-use super::launch_handoff::Process;
+use super::launch_handoff::{Process, RunningInstance};
 
 /// What a launch knows before it starts anything: the executable it would
 /// start, the running instance it attached to instead (if it did), and the
@@ -21,7 +21,7 @@ use super::launch_handoff::Process;
 pub(super) struct Prepared {
     pub(super) executable: PathBuf,
     pub(super) attached: Option<LaunchResult>,
-    pub(super) running: Vec<Process>,
+    pub(super) running: Vec<RunningInstance>,
 }
 
 /// Whether this launch may attach to a running instance instead of starting
@@ -62,7 +62,17 @@ pub(super) fn prepare(
             attached: None,
             running: exact_matches
                 .into_iter()
-                .filter_map(|(_, process)| process)
+                .filter_map(|(pid, process)| {
+                    // Read while the handle holds the pid, so the token names
+                    // the process that was matched.
+                    let process = process?;
+                    let token = process_identity::token_for_pid(pid).ok().flatten();
+                    Some(RunningInstance {
+                        pid,
+                        token,
+                        process,
+                    })
+                })
                 .collect(),
         });
     }
@@ -108,11 +118,19 @@ pub(super) fn prepare(
             )
         })?;
         // Only the root's own window: a helper process's window (if any) is
-        // not the instance's main window.
-        let window = super::observe_window(root, &token, options, deadline)?;
+        // not the instance's main window. One look, not a wait: nothing was
+        // started, so no window is on its way. Waiting here spent the whole
+        // timeout (30 seconds by default) on every instance that runs with no
+        // window, such as a browser kept running in the background.
+        let window = super::observe_window_once(root, &token, deadline)?;
+        let suggestion = if window.is_some() {
+            ATTACHED
+        } else {
+            ATTACHED_WITHOUT_WINDOW
+        };
         let mut attached = super::launch_result(id, root, token, window);
         attached.attached = true;
-        attached.suggestion = Some(ATTACHED.to_string());
+        attached.suggestion = Some(suggestion.to_string());
         return Ok(Prepared {
             executable,
             attached: Some(attached),
@@ -303,17 +321,39 @@ pub(super) fn ambiguous_instances(instances: &[(ProcessId, Option<String>)]) -> 
 }
 
 /// The guidance a launch reports when it attached to an instance that was
-/// already running instead of starting one.
-pub(super) const ATTACHED: &str = "The app was already running, so nothing was started: this \
-     result names that running instance, whose windows the user may already have open. Pass \
-     --no-attach to start a new instance of your own.";
+/// already running instead of starting one, and that instance shows a window.
+pub(super) const ATTACHED: &str = "Nothing was started: the app was already running, and this \
+     result names that running instance and its window, which the user already had open. If \
+     you need a new window, launch again with --no-attach. A single-instance app (a browser, \
+     many editors) then opens the new window in this same running instance, and the result \
+     says handed_off.";
+
+/// The guidance a launch reports when it attached to a running instance that
+/// shows no window (it runs in the background or in the tray).
+pub(super) const ATTACHED_WITHOUT_WINDOW: &str = "Nothing was started and no window is open: \
+     the app was already running without a window (in the background or in the tray). To open \
+     a window, launch again with --no-attach. A single-instance app (a browser, many editors) \
+     then opens the window in this same running instance, and the result says handed_off.";
+
+/// The guidance a launch reports when the process it started passed the
+/// launch to the running instance, which then opened the reported window.
+pub(super) const HANDED_OFF_NEW_WINDOW: &str = "The launched process passed the launch to the \
+     instance of the same app that was already running and exited (a single-instance app). \
+     That running instance opened `window` after this launch started, so it is most likely the \
+     window this launch asked for. It belongs to the running instance (`window.pid`), not to a \
+     process this launch started, so new_instance is false; the instance's other windows may be \
+     ones the user already had open.";
 
 /// The guidance a launch reports when the process it started exited without
-/// a window of its own while an instance of the same executable was running.
+/// a window of its own while an instance of the same executable was running,
+/// and no new window of that instance was seen.
 pub(super) const HANDED_OFF: &str = "The launched process exited without a window of its own \
      while an instance of the same app was already running: the app most likely passed the \
-     launch to that running instance (a single-instance app). Its windows belong to the running \
-     instance, which the user may already have open; none of them was started by this launch.";
+     launch to that running instance (a single-instance app). No new window of that instance \
+     appeared within a few seconds, so whether it opened one is not confirmed: it may have \
+     brought an existing window forward instead, or may still open one. Run `list-windows` \
+     for the app to see its windows; they belong to the running instance, which the user may \
+     already have open.";
 
 pub(super) fn matching_processes(image: &str) -> Result<Vec<ProcessRow>, AdapterError> {
     Ok(process_snapshot()?
