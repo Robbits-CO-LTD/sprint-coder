@@ -178,8 +178,11 @@ observation, actions and capture there fail or return nothing.
 - **Sprint Coder's own windows are never operated.** Reading them works, but every
   operation on them (or on whatever the pointer or keys would reach there) returns
   `POLICY_DENIED`, `details.kind: "own_window_refused"`, with nothing sent, whatever
-  permission or approval the run has. Do not retry by another route: permissions and
-  approvals in Sprint Coder are the user's to change on screen.
+  permission or approval the run has. While Sprint Coder is in front, a wheel, a click with
+  modifiers, and a click on a window that does not take the foreground (an on-screen
+  keyboard) are refused too (`details.target: "foreground"`); scroll a window behind it with
+  `scroll` on a ref. Do not retry by another route: permissions and approvals in Sprint
+  Coder are the user's to change on screen.
 
 ## What differs on Windows
 

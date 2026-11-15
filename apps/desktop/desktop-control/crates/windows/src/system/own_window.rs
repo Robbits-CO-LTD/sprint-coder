@@ -122,8 +122,106 @@ impl RefusedWindowOwner {
             return Ok(());
         }
         let owners = owners();
-        refusal(operation, self.judge(&owners, current_instance)).map_or(Ok(()), Err)
+        refusal(operation, self.judge(&owners, current_instance), None).map_or(Ok(()), Err)
     }
+
+    /// Refuses a pointer operation at `points`: by the window at each point, and, when the input
+    /// may reach the window in front rather than the one at the point, by the window in front.
+    ///
+    /// The window in front is read when `reaches_front` says so (a wheel, which reaches the
+    /// focused window when scrolling inactive windows is off; modifier keys, which go to the
+    /// focused window), or when the window at a point may not take the foreground when clicked
+    /// (`point_may_not_take_foreground`): a click there leaves the window in front where it is,
+    /// so what the click makes (an on-screen keyboard's keys, an IME candidate) reaches it. A
+    /// click on an ordinary window takes the foreground first, so it is judged by the point alone.
+    pub(crate) fn check_pointer(
+        &self,
+        operation: &'static str,
+        points: &[&agent_desktop_core::Point],
+        reaches_front: bool,
+    ) -> Result<(), AdapterError> {
+        if !self.is_active() {
+            return Ok(());
+        }
+        let mut owners = Vec::new();
+        for point in points {
+            let at = point_owners(point);
+            // Unread at any point is unread for the whole operation.
+            if at.iter().all(Option::is_none) {
+                owners.clear();
+                break;
+            }
+            owners.extend(at);
+        }
+        if let Some(error) = refusal(
+            operation,
+            self.judge(&owners, current_instance),
+            Some("point"),
+        ) {
+            return Err(error);
+        }
+        if reaches_front
+            || points
+                .iter()
+                .any(|point| point_may_not_take_foreground(point))
+        {
+            let front = foreground_owners();
+            if let Some(error) = refusal(
+                operation,
+                self.judge(&front, current_instance),
+                Some("foreground"),
+            ) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The styles of one window that decide whether a click on it takes the foreground.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WindowStyles {
+    pub(crate) style: u32,
+    pub(crate) ex_style: u32,
+}
+
+const WS_DISABLED: u32 = 0x0800_0000;
+const WS_EX_TOPMOST: u32 = 0x0000_0008;
+const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+const WS_EX_LAYERED: u32 = 0x0008_0000;
+const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+
+/// The windows a click at a point lands on: the window there, its root and its root owner
+/// (`None` for one whose styles could not be read; the root owner is absent when it is the root).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClickedWindows {
+    pub(crate) leaf: Option<WindowStyles>,
+    pub(crate) root: Option<WindowStyles>,
+    pub(crate) root_owner: Option<Option<WindowStyles>>,
+}
+
+/// Whether a click on these windows may leave the window in front where it is. Narrow on doubt:
+/// a style that cannot be read counts as may. An ordinary window takes the foreground when
+/// clicked; one that says it does not (`WS_EX_NOACTIVATE` on any of them: on-screen and touch
+/// keyboards, IME candidate windows, floating palettes), a tool window, a disabled root (a
+/// modal's owner) and a layered topmost root (overlays, input panels) may not.
+pub(crate) fn may_not_take_foreground(windows: &ClickedWindows) -> bool {
+    let (Some(leaf), Some(root)) = (windows.leaf, windows.root) else {
+        return true;
+    };
+    let owner = match windows.root_owner {
+        Some(None) => return true,
+        Some(Some(owner)) => Some(owner),
+        None => None,
+    };
+    let no_activate = [Some(leaf), Some(root), owner]
+        .into_iter()
+        .flatten()
+        .any(|window| window.ex_style & WS_EX_NOACTIVATE != 0);
+    no_activate
+        || root.ex_style & WS_EX_TOOLWINDOW != 0
+        || root.style & WS_DISABLED != 0
+        || (root.ex_style & WS_EX_TOPMOST != 0 && root.ex_style & WS_EX_LAYERED != 0)
 }
 
 fn current_instance(pid: u32) -> Option<String> {
@@ -133,9 +231,19 @@ fn current_instance(pid: u32) -> Option<String> {
 }
 
 /// The error a refused operation returns: nothing was sent, and asking again does not help.
-pub(crate) fn refusal(operation: &'static str, verdict: Verdict) -> Option<AdapterError> {
+/// `target` says, for a pointer operation, which window refused it: the one at the point, or the
+/// one in front that the input would reach instead.
+pub(crate) fn refusal(
+    operation: &'static str,
+    verdict: Verdict,
+    target: Option<&'static str>,
+) -> Option<AdapterError> {
     let (kind, message) = match verdict {
         Verdict::Allowed => return None,
+        Verdict::Own if target == Some("foreground") => (
+            "own_window_refused",
+            "Sprint Coder itself is the window in front, and this input could reach it instead of the window at the point; desktop control never operates Sprint Coder (with any permission or approval), so nothing was sent. Permissions and approvals in Sprint Coder are changed only by the user, on screen. To scroll a window behind it, use 'scroll' on a ref.",
+        ),
         Verdict::Own => (
             "own_window_refused",
             "This window belongs to Sprint Coder itself, which desktop control never operates (with any permission or approval); nothing was sent. Permissions and approvals in Sprint Coder are changed only by the user, on screen.",
@@ -149,14 +257,18 @@ pub(crate) fn refusal(operation: &'static str, verdict: Verdict) -> Option<Adapt
             "SPRINT_CODER_DESKTOP_REFUSED_WINDOW_OWNER cannot be read, so no operation runs; nothing was sent.",
         ),
     };
+    let mut details = json!({
+        "kind": kind,
+        "operation": operation,
+        "physical_delivery_started": false,
+        "retryable": false,
+    });
+    if let Some(target) = target {
+        details["target"] = json!(target);
+    }
     Some(
         AdapterError::new(ErrorCode::PolicyDenied, message)
-            .with_details(json!({
-                "kind": kind,
-                "operation": operation,
-                "physical_delivery_started": false,
-                "retryable": false,
-            }))
+            .with_details(details)
             .with_suggestion(
                 "Do not try Sprint Coder's own windows again, by any route. If something there needs doing (a permission, an approval), ask the user to do it.",
             )
@@ -232,6 +344,61 @@ mod facts {
         hwnd_owners(unsafe { GetForegroundWindow() } as isize)
     }
 
+    fn styles(window: HWND) -> Option<super::WindowStyles> {
+        use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, IsWindow,
+        };
+        if window.is_null() || unsafe { IsWindow(window) } == 0 {
+            return None;
+        }
+        let read = |index| {
+            unsafe { SetLastError(0) };
+            let value = unsafe { GetWindowLongPtrW(window, index) };
+            (value != 0 || unsafe { GetLastError() } == 0).then_some(value as u32)
+        };
+        Some(super::WindowStyles {
+            style: read(GWL_STYLE)?,
+            ex_style: read(GWL_EXSTYLE)?,
+        })
+    }
+
+    /// Whether a click at `point` may leave the window in front where it is
+    /// (`super::may_not_take_foreground`), at the pixel the point falls in and at the one it
+    /// rounds to; true when there is no window there to read.
+    pub(crate) fn point_may_not_take_foreground(point: &Point) -> bool {
+        [
+            (point.x.floor(), point.y.floor()),
+            (point.x.round(), point.y.round()),
+        ]
+        .into_iter()
+        .any(|(x, y)| {
+            let leaf = unsafe {
+                WindowFromPoint(POINT {
+                    x: coordinate(x),
+                    y: coordinate(y),
+                })
+            };
+            hwnd_may_not_take_foreground(leaf as isize)
+        })
+    }
+
+    /// The same for a click on this window: read from it, its root and its root owner.
+    pub(crate) fn hwnd_may_not_take_foreground(hwnd: isize) -> bool {
+        let leaf = hwnd as HWND;
+        if leaf.is_null() {
+            return true;
+        }
+        let root = unsafe { GetAncestor(leaf, GA_ROOT) };
+        let root = if root.is_null() { leaf } else { root };
+        let owner = unsafe { GetAncestor(leaf, GA_ROOTOWNER) };
+        super::may_not_take_foreground(&super::ClickedWindows {
+            leaf: styles(leaf),
+            root: styles(root),
+            root_owner: (!owner.is_null() && owner != root).then(|| styles(owner)),
+        })
+    }
+
     /// The owners of a listed window: the pid it was listed with and the live owner of its handle.
     pub(crate) fn window_owners(window: &WindowInfo) -> Vec<Option<u32>> {
         let mut owners = vec![Some(u32::from(window.pid))];
@@ -280,6 +447,10 @@ mod facts {
         Vec::new()
     }
 
+    pub(crate) fn point_may_not_take_foreground(_point: &Point) -> bool {
+        true
+    }
+
     pub(crate) fn window_owners(window: &WindowInfo) -> Vec<Option<u32>> {
         vec![Some(u32::from(window.pid))]
     }
@@ -289,9 +460,70 @@ mod facts {
     }
 }
 
+pub(crate) use facts::{element_owners, window_owners};
 #[cfg(all(test, target_os = "windows"))]
-pub(crate) use facts::hwnd_owners;
-pub(crate) use facts::{element_owners, foreground_owners, point_owners, window_owners};
+pub(crate) use facts::{hwnd_may_not_take_foreground, hwnd_owners};
+
+/// The facts a test puts in place of the desktop's for pointer operations on this thread.
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct PointerFacts {
+        pub(crate) point: Vec<Option<u32>>,
+        pub(crate) foreground: Vec<Option<u32>>,
+        pub(crate) may_not_take_foreground: bool,
+    }
+
+    thread_local! {
+        static FACTS: RefCell<Option<PointerFacts>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `body` with `facts` in place of the desktop's.
+    pub(crate) fn with<T>(facts: PointerFacts, body: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FACTS.with(|cell| *cell.borrow_mut() = None);
+            }
+        }
+        FACTS.with(|cell| *cell.borrow_mut() = Some(facts));
+        let _reset = Reset;
+        body()
+    }
+
+    pub(crate) fn get() -> Option<PointerFacts> {
+        FACTS.with(|cell| cell.borrow().clone())
+    }
+}
+
+/// The owners of the window a pointer event at `point` reaches.
+pub(crate) fn point_owners(point: &agent_desktop_core::Point) -> Vec<Option<u32>> {
+    #[cfg(test)]
+    if let Some(facts) = fake::get() {
+        return facts.point;
+    }
+    facts::point_owners(point)
+}
+
+/// The owners of the window in front.
+pub(crate) fn foreground_owners() -> Vec<Option<u32>> {
+    #[cfg(test)]
+    if let Some(facts) = fake::get() {
+        return facts.foreground;
+    }
+    facts::foreground_owners()
+}
+
+/// Whether a click at `point` may leave the window in front where it is.
+pub(crate) fn point_may_not_take_foreground(point: &agent_desktop_core::Point) -> bool {
+    #[cfg(test)]
+    if let Some(facts) = fake::get() {
+        return facts.may_not_take_foreground;
+    }
+    facts::point_may_not_take_foreground(point)
+}
 
 /// The owners of what a handle names: the part, or for the empty handle (keys sent without a
 /// part) the window in front. `None` for a handle that is not a part at all, which the action

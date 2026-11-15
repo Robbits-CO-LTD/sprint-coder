@@ -108,13 +108,13 @@ fn nothing_is_read_when_nothing_is_refused() {
 
 #[test]
 fn a_refusal_says_nothing_was_sent_and_offers_no_retry() {
-    assert!(refusal("click", Verdict::Allowed).is_none());
+    assert!(refusal("click", Verdict::Allowed, None).is_none());
     for (verdict, kind) in [
         (Verdict::Own, "own_window_refused"),
         (Verdict::Unconfirmed, "own_window_unconfirmed"),
         (Verdict::Unreadable, "own_window_variable_unreadable"),
     ] {
-        let error = refusal("click", verdict).expect("refused");
+        let error = refusal("click", verdict, None).expect("refused");
         assert_eq!(error.code, ErrorCode::PolicyDenied);
         assert_eq!(
             error.disposition.delivery(),
@@ -132,7 +132,7 @@ fn a_refusal_says_nothing_was_sent_and_offers_no_retry() {
             error.message
         );
     }
-    let own = refusal("click", Verdict::Own).expect("refused");
+    let own = refusal("click", Verdict::Own, None).expect("refused");
     assert!(own.message.contains("only by the user"), "{}", own.message);
 }
 
@@ -265,6 +265,253 @@ fn every_operation_that_acts_is_refused_when_the_variable_cannot_be_read() {
         )),
         unreadable
     );
+    let menu_item: agent_desktop_core::RefEntry = serde_json::from_value(serde_json::json!({
+        "pid": u32::from(window.pid),
+        "process_instance": window.process_instance,
+        "role": "menuitem",
+        "name": "Save",
+        "proven_in_menu": {
+            "steps": [
+                { "name": "File", "position": 0, "submenu": true },
+                { "name": "Save", "position": 1, "submenu": false },
+            ],
+            "command_id": 1002,
+        },
+        "bounds_hash": null,
+        "available_actions": ["click"],
+        "source_app": window.app,
+        "source_window_id": window.id,
+        "source_surface": "menubar",
+    }))
+    .expect("a menu item ref");
+    assert_eq!(
+        refused_kind(adapter.run_menu_command(
+            &menu_item,
+            &window,
+            Deadline::standard().unwrap(),
+            &lease(),
+        )),
+        unreadable
+    );
+    // The default `press_key_for_window` reaches `press_key_for_app` only for the window in
+    // front, so it is given that one (key input in a test build is recorded, never sent).
+    if let Some(front) = adapter
+        .focused_window(Deadline::standard().unwrap())
+        .unwrap()
+        .filter(|front| front.process_instance.is_some())
+    {
+        assert_eq!(
+            refused_kind(adapter.press_key_for_window(
+                &front,
+                &key,
+                InteractionPolicy::headless(),
+                &lease(),
+            )),
+            unreadable
+        );
+    }
+}
+
+fn pointer_facts(
+    point: Option<u32>,
+    foreground: Option<u32>,
+    may_not_take_foreground: bool,
+) -> fake::PointerFacts {
+    fake::PointerFacts {
+        point: point.into_iter().map(Some).collect(),
+        foreground: foreground.into_iter().map(Some).collect(),
+        may_not_take_foreground,
+    }
+}
+
+/// `None` when it was not refused for its own window; otherwise which window refused it.
+fn own_refusal_target(result: Result<impl std::fmt::Debug, AdapterError>) -> Option<String> {
+    let error = result.err()?;
+    let details = error.details.as_ref()?;
+    details["kind"]
+        .as_str()
+        .filter(|kind| kind.starts_with("own_window"))?;
+    Some(details["target"].as_str().unwrap_or("none").to_string())
+}
+
+#[test]
+fn may_not_take_the_foreground_reads_the_styles_narrowly() {
+    let plain = WindowStyles {
+        style: 0x10CF_0000, // WS_OVERLAPPEDWINDOW | WS_VISIBLE
+        ex_style: 0x0000_0100,
+    };
+    let with = |ex: u32| WindowStyles {
+        style: plain.style,
+        ex_style: plain.ex_style | ex,
+    };
+    let ordinary = ClickedWindows {
+        leaf: Some(plain),
+        root: Some(plain),
+        root_owner: None,
+    };
+    assert!(!may_not_take_foreground(&ordinary));
+    // A topmost window alone, or a layered one alone, still takes the foreground.
+    for ex in [WS_EX_TOPMOST, WS_EX_LAYERED] {
+        assert!(!may_not_take_foreground(&ClickedWindows {
+            root: Some(with(ex)),
+            ..ordinary
+        }));
+    }
+    let no_activate = with(WS_EX_NOACTIVATE);
+    for windows in [
+        ClickedWindows {
+            leaf: Some(no_activate),
+            ..ordinary
+        },
+        ClickedWindows {
+            root: Some(no_activate),
+            ..ordinary
+        },
+        ClickedWindows {
+            root_owner: Some(Some(no_activate)),
+            ..ordinary
+        },
+        ClickedWindows {
+            root: Some(with(WS_EX_TOOLWINDOW)),
+            ..ordinary
+        },
+        ClickedWindows {
+            root: Some(with(WS_EX_TOPMOST | WS_EX_LAYERED)),
+            ..ordinary
+        },
+        ClickedWindows {
+            root: Some(WindowStyles {
+                style: plain.style | WS_DISABLED,
+                ex_style: plain.ex_style,
+            }),
+            ..ordinary
+        },
+        // Styles that cannot be read.
+        ClickedWindows {
+            leaf: None,
+            ..ordinary
+        },
+        ClickedWindows {
+            root: None,
+            ..ordinary
+        },
+        ClickedWindows {
+            root_owner: Some(None),
+            ..ordinary
+        },
+    ] {
+        assert!(may_not_take_foreground(&windows), "{windows:?}");
+    }
+}
+
+#[test]
+fn pointer_input_that_can_reach_the_window_in_front_is_judged_by_it_too() {
+    let own = 500;
+    let other = 7;
+    let adapter = WindowsAdapter::new().refusing_windows_of(process(own, None));
+    let event = |kind: MouseEventKind, modifiers: Vec<agent_desktop_core::Modifier>| MouseEvent {
+        kind,
+        point: Point { x: 5.0, y: 5.0 },
+        button: MouseButton::Left,
+        modifiers,
+    };
+    let click = || MouseEventKind::Click { count: 1 };
+    let wheel = || MouseEventKind::Wheel {
+        delta_x: 0.0,
+        delta_y: -1.0,
+    };
+    let drag = || DragParams {
+        from: Point { x: 5.0, y: 5.0 },
+        to: Point { x: 9.0, y: 9.0 },
+        duration_ms: None,
+        drop_delay_ms: None,
+    };
+    let mouse = |facts, kind, modifiers| {
+        fake::with(facts, || {
+            own_refusal_target(adapter.mouse_event(event(kind, modifiers), &lease()))
+        })
+    };
+    let dragged = |facts| fake::with(facts, || own_refusal_target(adapter.drag(drag(), &lease())));
+    let front = Some("foreground".to_string());
+
+    // A wheel over another app while Sprint Coder is in front is refused; with another in front not.
+    assert_eq!(
+        mouse(
+            pointer_facts(Some(other), Some(own), false),
+            wheel(),
+            vec![]
+        ),
+        front
+    );
+    assert_eq!(
+        mouse(
+            pointer_facts(Some(other), Some(other), false),
+            wheel(),
+            vec![]
+        ),
+        None
+    );
+    // A click on a window that may not take the foreground (an on-screen keyboard's key).
+    assert_eq!(
+        mouse(pointer_facts(Some(other), Some(own), true), click(), vec![]),
+        front
+    );
+    assert_eq!(
+        mouse(
+            pointer_facts(Some(other), Some(other), true),
+            click(),
+            vec![]
+        ),
+        None
+    );
+    // A click on an ordinary window takes the foreground first: allowed with Sprint Coder in front.
+    assert_eq!(
+        mouse(
+            pointer_facts(Some(other), Some(own), false),
+            click(),
+            vec![]
+        ),
+        None
+    );
+    // Except with modifier keys, which go to the window in front.
+    assert_eq!(
+        mouse(
+            pointer_facts(Some(other), Some(own), false),
+            click(),
+            vec![agent_desktop_core::Modifier::Ctrl]
+        ),
+        front
+    );
+    // A move makes no input for the window in front.
+    assert_eq!(
+        mouse(
+            pointer_facts(Some(other), Some(own), true),
+            MouseEventKind::Move,
+            vec![]
+        ),
+        None
+    );
+    // The window in front unread, when it decides: refused (narrow side).
+    assert_eq!(
+        mouse(pointer_facts(Some(other), None, true), click(), vec![]),
+        front
+    );
+    // The window at the point is Sprint Coder's: refused by it.
+    assert_eq!(
+        mouse(
+            pointer_facts(Some(own), Some(other), false),
+            click(),
+            vec![]
+        ),
+        Some("point".to_string())
+    );
+    // A drag: either end that may not take the foreground brings in the window in front.
+    assert_eq!(dragged(pointer_facts(Some(other), Some(own), true)), front);
+    assert_eq!(dragged(pointer_facts(Some(other), Some(own), false)), None);
+    assert_eq!(
+        dragged(pointer_facts(Some(own), Some(other), false)),
+        Some("point".to_string())
+    );
 }
 
 #[test]
@@ -353,6 +600,11 @@ mod hidden_window {
     }
 
     pub(super) fn spawn() -> Window {
+        spawn_with(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+    }
+
+    /// With these extended styles (never shown either way).
+    pub(super) fn spawn_with(ex_style: u32) -> Window {
         let (tx, rx) = std::sync::mpsc::channel();
         let join = std::thread::spawn(move || {
             let class: Vec<u16> = "SprintCoderOwnWindowTest\0".encode_utf16().collect();
@@ -363,7 +615,7 @@ mod hidden_window {
             // No WS_VISIBLE, and never shown.
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    ex_style,
                     class.as_ptr(),
                     class.as_ptr(),
                     WS_OVERLAPPEDWINDOW,
@@ -493,4 +745,23 @@ fn a_part_of_a_window_of_the_refused_process_is_refused() {
         "own_window_refused"
     );
     assert!(!window.visible(), "the window was never shown");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn the_styles_of_a_real_window_decide_whether_a_click_may_leave_the_front_alone() {
+    // Read from live windows of this process, never shown and never clicked.
+    let ordinary = hidden_window::spawn_with(0);
+    assert!(!hwnd_may_not_take_foreground(ordinary.hwnd));
+    for ex_style in [
+        WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_LAYERED,
+    ] {
+        let window = hidden_window::spawn_with(ex_style);
+        assert!(hwnd_may_not_take_foreground(window.hwnd), "{ex_style:#x}");
+    }
+    // A handle that names no window.
+    assert!(hwnd_may_not_take_foreground(0));
+    assert!(!ordinary.visible());
 }

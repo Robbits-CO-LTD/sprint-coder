@@ -2,9 +2,9 @@
 use agent_desktop_core::{
     AccessibilityNode, ActionOps, AdapterError, AppInfo, ClipboardContent, ClipboardFormat,
     Deadline, DragParams, ElementState, InputOps, InteractionLease, KeyCombo, LiveElement,
-    MouseEvent, NativeHandle, ObservationOps, ObservationRequest, ObservationRoot, OperationReport,
-    ProcessIdentity, Rect, RefEntry, SnapshotSurface, SurfaceInfo, TreeOptions, WindowFilter,
-    WindowInfo,
+    MouseEvent, MouseEventKind, NativeHandle, ObservationOps, ObservationRequest, ObservationRoot,
+    OperationReport, ProcessIdentity, Rect, RefEntry, SnapshotSurface, SurfaceInfo, TreeOptions,
+    WindowFilter, WindowInfo,
 };
 use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -359,7 +359,29 @@ impl InputOps for WindowsAdapter {
         event: MouseEvent,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
-        self.refuse_own_window("mouse_event", || own_window::point_owners(&event.point))?;
+        match event.kind {
+            // A move makes no key, button or wheel input, only the hover the window at the point
+            // sees, so that window alone decides.
+            MouseEventKind::Move => {
+                self.refuse_own_window("mouse_event", || own_window::point_owners(&event.point))?;
+            }
+            // A wheel can reach the focused window instead of the one at the point (when
+            // scrolling inactive windows is off), so the window in front decides too.
+            MouseEventKind::Wheel { .. } => {
+                self.refused_owner
+                    .check_pointer("mouse_event", &[&event.point], true)?;
+            }
+            // A click: the window in front decides too when its modifier keys (which go to the
+            // focused window) come with it, or when the window at the point may not take the
+            // foreground (`own_window::may_not_take_foreground`).
+            _ => {
+                self.refused_owner.check_pointer(
+                    "mouse_event",
+                    &[&event.point],
+                    !event.modifiers.is_empty(),
+                )?;
+            }
+        }
         let report = OperationReport::pointer_dispatched(&event, false);
         crate::input::mouse::synthesize_mouse(event, lease.deadline())?;
         Ok(report)
@@ -383,17 +405,10 @@ impl InputOps for WindowsAdapter {
         params: DragParams,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
-        // Where it picks up and where it drops: either one on a Sprint Coder window refuses it.
-        self.refuse_own_window("drag", || {
-            let mut owners = own_window::point_owners(&params.from);
-            let dropped = own_window::point_owners(&params.to);
-            // Unread at either end is unread for the whole drag.
-            if owners.iter().all(Option::is_none) || dropped.iter().all(Option::is_none) {
-                return Vec::new();
-            }
-            owners.extend(dropped);
-            owners
-        })?;
+        // Where it picks up and where it drops: either one on a Sprint Coder window refuses it,
+        // and so does Sprint Coder in front when either end may not take the foreground.
+        self.refused_owner
+            .check_pointer("drag", &[&params.from, &params.to], false)?;
         let report = OperationReport::drag_dispatched(&params);
         crate::input::drag::synthesize_drag(params, lease.deadline())?;
         Ok(report)
