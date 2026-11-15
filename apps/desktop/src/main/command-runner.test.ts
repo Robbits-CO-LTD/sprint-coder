@@ -2258,8 +2258,8 @@ describe('desktop control outside the command sandbox', () => {
         "const { spawn } = require('node:child_process');",
         "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
         'child.unref();',
-        'const { PATH: path, SPRINT_CODER_DESKTOP_CONTROL_IMAGE: image, SPRINT_CODER_DESKTOP_HOST_PID: host } = process.env;',
-        'process.stdout.write(JSON.stringify({ pid: child.pid, path, image, host }));',
+        'const { PATH: path, SPRINT_CODER_DESKTOP_CONTROL_IMAGE: image, SPRINT_CODER_DESKTOP_HOST_PID: host, SPRINT_CODER_DESKTOP_REFUSED_WINDOW_OWNER: refused } = process.env;',
+        'process.stdout.write(JSON.stringify({ pid: child.pid, path, image, host, refused }));',
       ].join('\n');
       const prepare = () =>
         prepareTestExecutionSpec({
@@ -2273,6 +2273,7 @@ describe('desktop control outside the command sandbox', () => {
           path: string;
           image?: string;
           host?: string;
+          refused?: string;
         };
       const judge = vi
         .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
@@ -2303,6 +2304,9 @@ describe('desktop control outside the command sandbox', () => {
         // starts from, and ends with this process.
         expect(desktop.image).toBe(desktopSpec.absoluteExecutable);
         expect(desktop.host).toBe(String(process.pid));
+        // Sprint Coder's own Main, whose windows no operation may act on, in every run.
+        expect(desktop.refused).toBe(desktopControlModule.desktopControlOwnWindowOwner());
+        expect(desktop.refused?.split(':')[0]).toBe(String(process.pid));
         await new Promise((resolve) => setTimeout(resolve, 1_000));
         expect(() => process.kill(desktop.pid, 0)).not.toThrow();
 
@@ -2321,6 +2325,7 @@ describe('desktop control outside the command sandbox', () => {
         expect(plain.path.toLowerCase()).toContain(insideFolder.toLowerCase());
         expect(plain.image).toBeUndefined();
         expect(plain.host).toBeUndefined();
+        expect(plain.refused).toBeUndefined();
         await expectProcessDead(plain.pid);
       } finally {
         for (const pid of started) {

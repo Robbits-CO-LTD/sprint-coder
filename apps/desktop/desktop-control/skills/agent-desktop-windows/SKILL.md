@@ -175,6 +175,11 @@ observation, actions and capture there fail or return nothing.
   readback differs: read `details.post_state` and do not retry. A `set-value`
   the app reformats reads as failed. See `references/troubleshooting.md`.
 - **Unsigned binary warnings are expected.** See `references/troubleshooting.md`.
+- **Sprint Coder's own windows are never operated.** Reading them works, but every
+  operation on them (or on whatever the pointer or keys would reach there) returns
+  `POLICY_DENIED`, `details.kind: "own_window_refused"`, with nothing sent, whatever
+  permission or approval the run has. Do not retry by another route: permissions and
+  approvals in Sprint Coder are the user's to change on screen.
 
 ## What differs on Windows
 

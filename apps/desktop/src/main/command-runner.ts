@@ -31,6 +31,7 @@ import {
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
+  desktopControlOwnWindowOwner,
   desktopControlScopeOptionRefusal,
   runsOutsideCommandSandbox,
   type DesktopControlSessionVariables,
@@ -919,6 +920,8 @@ export class CommandRunner {
             options.desktopControlExpectedWindowOwner,
             { image: spec.absoluteExecutable, hostPid: process.pid },
             options.desktopControlSession,
+            // Every run: no operation may act on Sprint Coder's own windows.
+            desktopControlOwnWindowOwner(),
           )
         : spec.envDelta;
       const commandEnvironment =

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod actions;
@@ -8,6 +9,7 @@ mod system;
 pub mod tree;
 
 pub use adapter::WindowsAdapter;
+pub use system::own_window::{REFUSED_WINDOW_OWNER_VARIABLE, RefusedWindowOwner};
 #[cfg(target_os = "windows")]
 pub use system::private_file::WindowsPrivateFile;
 #[cfg(target_os = "windows")]

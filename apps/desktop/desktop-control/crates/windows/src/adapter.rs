@@ -9,6 +9,8 @@ use agent_desktop_core::{
 use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::system::own_window::{self, RefusedWindowOwner};
+
 /// The Windows adapter.
 ///
 /// Carries the renderer-activation state the observation loop needs: which
@@ -20,14 +22,53 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// state is keyed per process, not a single flag: an adapter instance is
 /// reused across a batch or an FFI session, so one process settling must
 /// never suppress another process's activation.
+///
+/// It also carries whose windows no operation may act on
+/// (`system::own_window`): every method that acts on a window, a part or the
+/// pointer and keyboard reads, before sending anything, who owns what it is
+/// about to act on.
 pub struct WindowsAdapter {
     renderer_activation_attempted: Mutex<HashSet<ProcessIdentity>>,
+    refused_owner: RefusedWindowOwner,
 }
 
 impl WindowsAdapter {
     pub fn new() -> Self {
         Self {
             renderer_activation_attempted: Mutex::new(HashSet::new()),
+            refused_owner: RefusedWindowOwner::Nobody,
+        }
+    }
+
+    /// The adapter refusing every operation on the windows of `owner`.
+    pub fn refusing_windows_of(mut self, owner: RefusedWindowOwner) -> Self {
+        self.refused_owner = owner;
+        self
+    }
+
+    /// Refuses `operation` when what `owners` reads belongs to the refused process.
+    pub(crate) fn refuse_own_window(
+        &self,
+        operation: &'static str,
+        owners: impl FnOnce() -> Vec<Option<u32>>,
+    ) -> Result<(), AdapterError> {
+        self.refused_owner.check(operation, owners)
+    }
+
+    /// The same for an operation on what a handle names (`own_window::handle_owners`).
+    fn refuse_own_handle(
+        &self,
+        operation: &'static str,
+        handle: &NativeHandle,
+        deadline: Deadline,
+    ) -> Result<(), AdapterError> {
+        if !self.refused_owner.is_active() {
+            return Ok(());
+        }
+        match own_window::handle_owners(handle, deadline) {
+            Some(owners) => self.refuse_own_window(operation, || owners),
+            // Not a part at all: the action refuses it without sending anything.
+            None => Ok(()),
         }
     }
 
@@ -289,6 +330,7 @@ impl ActionOps for WindowsAdapter {
         deadline: Deadline,
         lease: &InteractionLease,
     ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
+        self.refuse_own_window("run_menu_command", || own_window::window_owners(window))?;
         crate::actions::win32_menu::run_menu_command(entry, window, deadline, lease)
     }
 
@@ -298,6 +340,7 @@ impl ActionOps for WindowsAdapter {
         request: agent_desktop_core::actions::action_request::ActionRequest,
         lease: &InteractionLease,
     ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
+        self.refuse_own_handle("execute_action", handle, lease.deadline())?;
         crate::actions::dispatch::execute_action_impl(handle, request, lease)
     }
 
@@ -306,6 +349,7 @@ impl ActionOps for WindowsAdapter {
         handle: &NativeHandle,
         lease: &InteractionLease,
     ) -> Result<(), AdapterError> {
+        self.refuse_own_handle("scroll_into_view", handle, lease.deadline())?;
         crate::actions::scroll_into_view::scroll_into_view_impl(handle, lease)
     }
 }
@@ -315,6 +359,7 @@ impl InputOps for WindowsAdapter {
         event: MouseEvent,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        self.refuse_own_window("mouse_event", || own_window::point_owners(&event.point))?;
         let report = OperationReport::pointer_dispatched(&event, false);
         crate::input::mouse::synthesize_mouse(event, lease.deadline())?;
         Ok(report)
@@ -338,6 +383,17 @@ impl InputOps for WindowsAdapter {
         params: DragParams,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        // Where it picks up and where it drops: either one on a Sprint Coder window refuses it.
+        self.refuse_own_window("drag", || {
+            let mut owners = own_window::point_owners(&params.from);
+            let dropped = own_window::point_owners(&params.to);
+            // Unread at either end is unread for the whole drag.
+            if owners.iter().all(Option::is_none) || dropped.iter().all(Option::is_none) {
+                return Vec::new();
+            }
+            owners.extend(dropped);
+            owners
+        })?;
         let report = OperationReport::drag_dispatched(&params);
         crate::input::drag::synthesize_drag(params, lease.deadline())?;
         Ok(report)
