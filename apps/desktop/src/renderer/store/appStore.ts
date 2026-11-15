@@ -217,6 +217,11 @@ type AppState = {
   turnDiffByTask: Record<string, TurnDiff | undefined>;
   /** Turns a restart closed as interrupted, from the task snapshot (issue #842). */
   interruptedTurnIdsByTask: Record<string, readonly string[]>;
+  /**
+   * Turns that ended `canceled` (stopped) with a card withdrawn unanswered, from the snapshot and
+   * live `turn.completed` (issue #1285). Their withdrawn cards are not marked in the history.
+   */
+  canceledTurnIdsByTask: Record<string, readonly string[]>;
   /** Images generated per task, oldest first (issue #11). Metadata only — bytes are fetched by the
    * card that displays them, so switching tasks never drags base64 through the store. */
   imagesByTask: Record<string, GeneratedImage[]>;
@@ -875,8 +880,10 @@ export function handleTurnEvent(
           ...state.approvalsByTask,
           [taskId]: (state.approvalsByTask[taskId] ?? []).filter(({ id }) => id !== ev.approvalId),
         },
+        // A card withdrawn without an answer stays in the history too (issue #1285), so the Turn
+        // can say what was left unanswered and not run.
         approvalHistoryByTask:
-          ev.type === 'approval.resolved'
+          ev.type === 'approval.resolved' || ev.type === 'approval.canceled'
             ? {
                 ...state.approvalHistoryByTask,
                 [taskId]: upsertApprovalHistory(
@@ -1004,6 +1011,20 @@ export function handleTurnEvent(
                   ...state.interruptedTurnIdsByTask,
                   [taskId]: [
                     ...(state.interruptedTurnIdsByTask[taskId] ?? []).filter(
+                      (turnId) => turnId !== ev.turnId,
+                    ),
+                    ev.turnId,
+                  ],
+                },
+              }
+            : {}),
+          // A stopped Turn's withdrawn cards stay unmarked (issue #1285): the stop says why.
+          ...(ev.state === 'canceled'
+            ? {
+                canceledTurnIdsByTask: {
+                  ...state.canceledTurnIdsByTask,
+                  [taskId]: [
+                    ...(state.canceledTurnIdsByTask[taskId] ?? []).filter(
                       (turnId) => turnId !== ev.turnId,
                     ),
                     ev.turnId,
@@ -1291,6 +1312,7 @@ export const useAppStore = create<AppState>((set, get) => {
     commandsByTask: {},
     turnDiffByTask: {},
     interruptedTurnIdsByTask: {},
+    canceledTurnIdsByTask: {},
     imagesByTask: {},
     fileChangesByTask: {},
     liveEditTaskId: null,
@@ -1886,7 +1908,7 @@ export const useAppStore = create<AppState>((set, get) => {
           approvalHistoryByTask: {
             ...state.approvalHistoryByTask,
             [taskId]: approvalHistoryResult.approvals.filter(
-              (approval) => approval.state === 'resolved',
+              (approval) => approval.state === 'resolved' || approval.state === 'canceled',
             ),
           },
         }));
@@ -1944,6 +1966,10 @@ export const useAppStore = create<AppState>((set, get) => {
           interruptedTurnIdsByTask: {
             ...state.interruptedTurnIdsByTask,
             [taskId]: snapshot.interruptedTurnIds ?? [],
+          },
+          canceledTurnIdsByTask: {
+            ...state.canceledTurnIdsByTask,
+            [taskId]: snapshot.canceledTurnIds ?? [],
           },
         }));
       }

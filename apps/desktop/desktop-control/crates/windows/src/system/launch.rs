@@ -40,10 +40,20 @@ pub(crate) fn launch_app_impl(
     // Read before anything starts, so a window the running instance opens
     // for this launch can be told apart from the ones it already had.
     let handoff = launch_handoff::Handoff::begin(prepared.running);
-    let guard = ForegroundGuard::begin(options.activate);
+    let input_clock = input_clock_now();
+    // One clock for the watch and the guard, so both read the same input.
+    let guard = ForegroundGuard::begin(options.activate, input_clock);
     let (pid, token, process) = create_process(&prepared.executable, options, deadline)?;
     let lineage = launch_handoff::Lineage::new(pid, &token, process);
-    let observed = observe_launched_window(pid, &token, lineage, &handoff, options, deadline)?;
+    let observed = observe_launched_window(
+        pid,
+        &token,
+        lineage,
+        &handoff,
+        options,
+        deadline,
+        input_clock,
+    )?;
     let mut left_for_user = false;
     if let Some(guard) = guard {
         let settle = (observed.handed_off && observed.window.is_some()).then_some(HandoffSettle {
@@ -255,6 +265,108 @@ fn launch_window_existing_in_grace(exited_at: std::time::Instant) -> bool {
 fn counts_as_raised(within_grace_of_exit: bool, in_front_before_exit: bool) -> bool {
     within_grace_of_exit && !in_front_before_exit
 }
+
+/// How a window the instance already had, found in front after the launched
+/// process exited (`HandoffRead::raised`), is taken (#1297).
+///
+/// Which window came forward and who brought it forward are two questions.
+/// The first is a fact the watch saw: a window of the instance that was not
+/// in front when the launch began is in front now. The second decides only
+/// whether the foreground is handed back. Chrome brings its profile picker
+/// forward while its launcher still runs (about a second before it exits),
+/// so a window that came forward before the exit or later than the grace is
+/// not proof that the user picked it: without the user's input since the
+/// launch began, nobody but the app can have moved it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RaisedTake {
+    /// Within the grace of the exit, and not in front before it: the app's
+    /// move even with input, timed from the exit (`ExistingWindow::Raised`).
+    InGrace,
+    /// No input since the launch began: the app's move, taken at once and
+    /// handed back by the no-input rule (`ExistingWindow::Raised`, no grace).
+    WithoutInput,
+    /// With input, the user may have picked it: it is kept as the answer
+    /// only if no new window appears before the watch ends, and never handed
+    /// back nor restacked while the input says it may be the user's
+    /// (`ExistingWindow::CameForward`).
+    MaybeUser,
+}
+
+fn raised_take(
+    within_grace_of_exit: bool,
+    in_front_before_exit: bool,
+    user_input: bool,
+) -> RaisedTake {
+    if counts_as_raised(within_grace_of_exit, in_front_before_exit) {
+        RaisedTake::InGrace
+    } else if !user_input {
+        RaisedTake::WithoutInput
+    } else {
+        RaisedTake::MaybeUser
+    }
+}
+
+/// What a watch that ends without a new window names, for a launch passed to
+/// the running instance: a window of the instance that came to the front
+/// during the launch (with input: it may be the user's pick), else the
+/// instance's only visible window, else none.
+fn existing_at_the_end(
+    lineage: &launch_handoff::Lineage,
+    came_forward: Option<WindowInfo>,
+    only_existing: Option<WindowInfo>,
+) -> Option<LaunchObservation> {
+    if let Some(window) = came_forward {
+        return Some(existing_window_observation(
+            lineage,
+            window,
+            None,
+            launch_attach::ExistingWindow::CameForward,
+        ));
+    }
+    // Not seen to move for the launch: no grace, so with the user's input
+    // its being in front is left alone.
+    only_existing.map(|window| {
+        existing_window_observation(lineage, window, None, launch_attach::ExistingWindow::Only)
+    })
+}
+
+/// A window kept as `came_forward` stays a candidate only while the latest
+/// read still shows it for the same process instance: one closed during the
+/// wait, or whose instance ended (`read` is `None`), is dropped, so the end
+/// of the watch never names a window that is gone (it falls back to the
+/// latest `only_existing`, else to no window).
+fn came_forward_after_read(
+    kept: Option<WindowInfo>,
+    read: Option<&launch_handoff::HandoffRead>,
+) -> Option<WindowInfo> {
+    kept.filter(|window| read.is_some_and(|read| read.still_shows(window)))
+}
+
+/// `GetTickCount` now, to tell the user's input after the launch began;
+/// `None` where it cannot be read, which counts as input.
+#[cfg(target_os = "windows")]
+fn input_clock_now() -> Option<u32> {
+    Some(unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn input_clock_now() -> Option<u32> {
+    None
+}
+
+/// Whether the user gave input since `started` (see `user_input_since`);
+/// unknown reads as input, the side that leaves the foreground alone.
+fn input_since(started: Option<u32>) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        started.is_none_or(user_input_since)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = started;
+        true
+    }
+}
 /// Watches a process this launch created for its window. While the process
 /// runs, only its own window counts, exactly as before. Once it has exited, a
 /// window of a live descendant counts instead (see `launch_handoff`), and a
@@ -271,10 +383,14 @@ fn observe_launched_window(
     handoff: &launch_handoff::Handoff,
     options: &LaunchOptions,
     deadline: Deadline,
+    input_clock: Option<u32>,
 ) -> Result<LaunchObservation, AdapterError> {
     let mut poll_interval = Duration::from_millis(50);
     let mut handoff_deadline: Option<Deadline> = None;
     let mut exited_at: Option<std::time::Instant> = None;
+    // A window of the instance that came to the front during the launch
+    // while the user gave input: named only if no new window appears.
+    let mut came_forward: Option<WindowInfo> = None;
     loop {
         if let Some(window) = observe_window_once(pid, process_instance, deadline)? {
             return Ok(LaunchObservation {
@@ -322,6 +438,7 @@ fn observe_launched_window(
             let instance_runs = handoff.any_running();
             if instance_runs {
                 let read = handoff.read(deadline).map_err(after_launch)?;
+                came_forward = came_forward_after_read(came_forward, Some(&read));
                 match read.look {
                     launch_handoff::HandoffLook::One(window) => {
                         let mut owners = lineage.pids();
@@ -354,23 +471,32 @@ fn observe_launched_window(
                     }
                     launch_handoff::HandoffLook::None => {}
                 }
-                // A window the instance already had, brought to the front just
-                // as the launch was handed over: the app used it instead of
-                // opening one. Later, it may be the user's doing.
-                // One that came to the front while the launched process still
-                // ran may be the user's pick, and is never taken as raised.
-                if let Some(window) = read.raised
-                    && counts_as_raised(
+                // A window the instance already had, now in front though it
+                // was not when the launch began: the app used it instead of
+                // opening one (see `RaisedTake`). Just as the launch was
+                // handed over, or with no input since the launch began, it is
+                // the app's move. Otherwise (it came forward while the
+                // launched process still ran, or later, and the user gave
+                // input) it may be the user's pick: it is named only when no
+                // new window appears, and left where it is.
+                if let Some(window) = read.raised {
+                    let take = raised_take(
                         launch_window_existing_in_grace(exited_at),
                         handoff.was_in_front_before_exit(&window.id),
-                    )
-                {
-                    return Ok(existing_window_observation(
-                        &lineage,
-                        window,
-                        Some(exited_at),
-                        launch_attach::ExistingWindow::Raised,
-                    ));
+                        input_since(input_clock),
+                    );
+                    match take {
+                        RaisedTake::InGrace | RaisedTake::WithoutInput => {
+                            let shown_at = (take == RaisedTake::InGrace).then_some(exited_at);
+                            return Ok(existing_window_observation(
+                                &lineage,
+                                window,
+                                shown_at,
+                                launch_attach::ExistingWindow::Raised,
+                            ));
+                        }
+                        RaisedTake::MaybeUser => came_forward = Some(window),
+                    }
                 }
                 only_existing = read.only_existing;
                 let handoff_until = *handoff_deadline
@@ -381,20 +507,19 @@ fn observe_launched_window(
                 if !descendants_alive {
                     wait_until = handoff_until;
                 }
+            } else {
+                // The instance ended: its window is gone with it.
+                came_forward = came_forward_after_read(came_forward, None);
             }
             let wait_over = wait_until.remaining().is_zero();
             if launch_handoff::after_exit(descendants_alive, instance_runs, wait_over)
                 == launch_handoff::AfterExit::Stop
             {
-                if !descendants_alive && let Some(window) = only_existing {
-                    // Not seen to move for the launch: no grace, so with the
-                    // user's input its being in front is left alone.
-                    return Ok(existing_window_observation(
-                        &lineage,
-                        window,
-                        None,
-                        launch_attach::ExistingWindow::Only,
-                    ));
+                if !descendants_alive
+                    && let Some(observation) =
+                        existing_at_the_end(&lineage, came_forward.take(), only_existing.take())
+                {
+                    return Ok(observation);
                 }
                 return Ok(LaunchObservation {
                     descendants_alive,
@@ -407,14 +532,10 @@ fn observe_launched_window(
         {
             if exited
                 && !descendants_alive
-                && let Some(window) = only_existing
+                && let Some(observation) =
+                    existing_at_the_end(&lineage, came_forward.take(), only_existing.take())
             {
-                return Ok(existing_window_observation(
-                    &lineage,
-                    window,
-                    None,
-                    launch_attach::ExistingWindow::Only,
-                ));
+                return Ok(observation);
             }
             return Ok(LaunchObservation {
                 descendants_alive,
@@ -462,14 +583,17 @@ struct ForegroundGuard {
 
 #[cfg(target_os = "windows")]
 impl ForegroundGuard {
-    fn begin(activate: bool) -> Option<Self> {
+    /// `started` is the launch's input clock (`input_clock_now`).
+    fn begin(activate: bool, started: Option<u32>) -> Option<Self> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetForegroundWindow, LSFW_LOCK, LockSetForegroundWindow,
         };
         if activate {
             return None;
         }
-        let started = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+        let started = started.unwrap_or_else(|| unsafe {
+            windows_sys::Win32::System::SystemInformation::GetTickCount()
+        });
         let prior = unsafe { GetForegroundWindow() };
         let locked = unsafe { LockSetForegroundWindow(LSFW_LOCK) } != 0;
         Some(Self {
@@ -895,7 +1019,7 @@ struct ForegroundGuard;
 
 #[cfg(not(target_os = "windows"))]
 impl ForegroundGuard {
-    fn begin(_activate: bool) -> Option<Self> {
+    fn begin(_activate: bool, _started: Option<u32>) -> Option<Self> {
         None
     }
 
@@ -1535,6 +1659,181 @@ mod foreground_guard_tests {
         assert!(!super::counts_as_raised(true, true));
         assert!(super::counts_as_raised(true, false));
         assert!(!super::counts_as_raised(false, false));
+    }
+
+    // raised_take(within grace of the exit, in front before the exit, input)
+
+    /// #1297: Chrome brought its profile picker forward about a second
+    /// before its launcher exited, with nobody at the keyboard. Without the
+    /// user's input since the launch began, a window of the instance that
+    /// came forward before the exit, or later than the grace, is the app's
+    /// move: it is the launch's window, and is handed back (no grace needed:
+    /// `foreground_step` hands back without input at any time).
+    #[test]
+    fn without_input_a_window_brought_forward_before_or_long_after_the_exit_is_taken() {
+        use super::{RaisedTake, raised_take};
+        assert_eq!(raised_take(true, true, false), RaisedTake::WithoutInput);
+        assert_eq!(raised_take(false, true, false), RaisedTake::WithoutInput);
+        assert_eq!(raised_take(false, false, false), RaisedTake::WithoutInput);
+        assert_eq!(
+            foreground_step(
+                false,
+                false,
+                true,
+                false,
+                within_grace(None, Instant::now())
+            ),
+            ForegroundStep::Restore
+        );
+    }
+
+    /// With input, the same windows may be the user's pick (#1288's review:
+    /// a window of the same process the user picked is never undone). They
+    /// are only named when no new window appears, and never handed back nor
+    /// restacked: with input and no grace the watch leaves them alone.
+    #[test]
+    fn with_input_a_window_in_front_before_the_exit_or_after_the_grace_is_left_to_the_user() {
+        use super::{RaisedTake, raised_take};
+        assert_eq!(raised_take(true, true, true), RaisedTake::MaybeUser);
+        assert_eq!(raised_take(false, true, true), RaisedTake::MaybeUser);
+        assert_eq!(raised_take(false, false, true), RaisedTake::MaybeUser);
+        assert_eq!(
+            foreground_step(false, false, true, true, within_grace(None, Instant::now())),
+            ForegroundStep::LeftAlone
+        );
+        assert_eq!(
+            drive(&[(Front::Handed, true, false)]),
+            [WatchAction::StopForUser],
+            "left for the user, so no note says the app took the front"
+        );
+    }
+
+    /// Just as the launch was handed over (within the grace of the exit, and
+    /// not in front before it), it is the app's move even with input, timed
+    /// from the exit, as before.
+    #[test]
+    fn a_window_brought_forward_right_after_the_exit_is_taken_with_or_without_input() {
+        use super::{RaisedTake, raised_take};
+        assert_eq!(raised_take(true, false, true), RaisedTake::InGrace);
+        assert_eq!(raised_take(true, false, false), RaisedTake::InGrace);
+    }
+
+    /// A window that came forward while the user gave input is named only
+    /// when the watch ends without a new window, ahead of the instance's
+    /// only window, and says it may be the user's pick.
+    #[test]
+    fn a_window_that_came_forward_is_named_at_the_end_with_its_own_guidance() {
+        let guidance =
+            launch_attach::existing_window_guidance(launch_attach::ExistingWindow::CameForward);
+        assert!(
+            guidance.contains("came to the front during the launch"),
+            "{guidance}"
+        );
+        assert!(guidance.contains("may have picked it"), "{guidance}");
+        assert!(guidance.contains("existing_window"), "{guidance}");
+        assert!(
+            guidance
+                .to_lowercase()
+                .contains("do not repeat --no-attach"),
+            "{guidance}"
+        );
+        let raised = launch_attach::existing_window_guidance(launch_attach::ExistingWindow::Raised);
+        assert!(raised.contains("profile picker"), "{raised}");
+        assert!(!raised.contains("likely keeps one window"), "{raised}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_end_of_the_watch_names_the_window_that_came_forward_before_the_only_one() {
+        use super::launch_handoff::{Lineage, Process};
+        let me = ProcessId::from(std::process::id());
+        let lineage = || Lineage::new(me, "me:1", Process::open(me).expect("own process"));
+        let window = |id: &str| WindowInfo {
+            id: id.into(),
+            title: String::new(),
+            app: "app.exe".into(),
+            pid: ProcessId::from(8),
+            process_instance: Some("8:1".into()),
+            bounds: None,
+            state: WindowState::default(),
+        };
+        let both = super::existing_at_the_end(&lineage(), Some(window("w-2")), Some(window("w-1")))
+            .expect("a window");
+        assert_eq!(both.window.as_ref().map(|w| w.id.as_str()), Some("w-2"));
+        assert_eq!(
+            both.existing,
+            Some(launch_attach::ExistingWindow::CameForward)
+        );
+        assert!(both.handed_off && both.shown_at.is_none());
+        assert!(both.owners.contains(&ProcessId::from(8)));
+        let only = super::existing_at_the_end(&lineage(), None, Some(window("w-1")))
+            .expect("the only window");
+        assert_eq!(only.existing, Some(launch_attach::ExistingWindow::Only));
+        assert!(super::existing_at_the_end(&lineage(), None, None).is_none());
+    }
+
+    /// #1299's review: a window kept as `came_forward` (`MaybeUser`) that is
+    /// closed during the wait, or whose instance ends, is not named at the
+    /// end: the latest read's only window, or no window, is.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_window_that_came_forward_and_closed_during_the_wait_is_not_named() {
+        use super::came_forward_after_read;
+        use super::launch_handoff::{HandoffLook, HandoffRead, Lineage, Process};
+        let me = ProcessId::from(std::process::id());
+        let lineage = || Lineage::new(me, "me:1", Process::open(me).expect("own process"));
+        let window = |id: &str, instance: &str| WindowInfo {
+            id: id.into(),
+            title: String::new(),
+            app: "app.exe".into(),
+            pid: ProcessId::from(8),
+            process_instance: Some(instance.into()),
+            bounds: None,
+            state: WindowState::default(),
+        };
+        let read = |shown: &[&str], only: Option<WindowInfo>| HandoffRead {
+            look: HandoffLook::None,
+            raised: None,
+            only_existing: only,
+            shown: shown
+                .iter()
+                .map(|id| ((*id).to_string(), Some("8:1".to_string())))
+                .collect(),
+        };
+        let picker = window("w-picker", "8:1");
+
+        // Still shown by the same instance: kept, and named at the end.
+        let kept = came_forward_after_read(
+            Some(picker.clone()),
+            Some(&read(&["w-picker", "w-browser"], None)),
+        );
+        assert_eq!(kept.as_ref().map(|w| w.id.as_str()), Some("w-picker"));
+
+        // Closed during the wait: the latest read names the browser as the
+        // only window, and that is what the end of the watch returns.
+        let later = read(&["w-browser"], Some(window("w-browser", "8:1")));
+        let kept = came_forward_after_read(kept, Some(&later));
+        assert!(kept.is_none());
+        let end = super::existing_at_the_end(&lineage(), kept, later.only_existing.clone())
+            .expect("the only window");
+        assert_eq!(
+            end.window.as_ref().map(|w| w.id.as_str()),
+            Some("w-browser")
+        );
+        assert_eq!(end.existing, Some(launch_attach::ExistingWindow::Only));
+
+        // Closed, and no only window: no window at all.
+        let kept = came_forward_after_read(Some(picker.clone()), Some(&read(&[], None)));
+        assert!(super::existing_at_the_end(&lineage(), kept, None).is_none());
+
+        // The same handle now of another instance (reused), and an instance
+        // that ended: both drop it.
+        let reused = HandoffRead {
+            shown: vec![("w-picker".to_string(), Some("8:2".to_string()))],
+            ..read(&[], None)
+        };
+        assert!(came_forward_after_read(Some(picker.clone()), Some(&reused)).is_none());
+        assert!(came_forward_after_read(Some(picker), None).is_none());
     }
     #[test]
     fn a_foreground_that_stayed_on_the_prior_window_is_restored() {

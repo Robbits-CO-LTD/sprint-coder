@@ -204,6 +204,17 @@ describe('prompt context compiler', () => {
     expect(compiled.content).toContain('利用者がはっきり頼んだ時だけ使う');
     expect(compiled.content).toContain('裏の操作が失敗しても前面の操作で取り返さず');
     expect(compiled.content).toContain('最小化した窓は操作できない');
+    // A browser's address bar is confirmed through its suggestion list, never with Enter.
+    expect(compiled.content).toContain(
+      'ブラウザーのアドレス欄は、set-value で URL を入れただけでは移らない（Enter は使わない）',
+    );
+    expect(compiled.content).toContain('post_state.states に focused がある時');
+    expect(compiled.content).toContain(
+      'find --window-id <窓の id> --role option で窓の全体から探し',
+    );
+    expect(compiled.content).toContain('名前が入れた URL で始まる行を選ぶ');
+    expect(compiled.content).toContain('focused が無い時');
+    expect(compiled.content).toContain('裏では確定できない');
     // The front is used only when the person asks to open an app for their own use.
     expect(compiled.content).toContain(
       '--activate は、利用者が自分で見る・使うためにアプリを開いてほしいと頼んだ時だけ付ける',

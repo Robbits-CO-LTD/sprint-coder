@@ -1,6 +1,10 @@
 import { redactSecrets } from './secret-redactor';
 import { assessProviderDisclosure } from './provider-disclosure-classifier';
-import { ToolAuthorizationDeniedError, ToolInputSchemaMismatchError } from './tool-broker';
+import {
+  describeToolDenial,
+  ToolAuthorizationDeniedError,
+  ToolInputSchemaMismatchError,
+} from './tool-broker';
 import { WorkspaceToolRejection } from './provider-workspace-tools';
 import { WorkspacePatchRejection } from './workspace-patch-tool';
 import { CommandRunnerError } from './command-runner';
@@ -91,7 +95,10 @@ export function providerWorkspaceToolFailure(error: unknown): string {
       },
     });
   if (error instanceof ToolAuthorizationDeniedError)
-    return providerToolErrorContent('PERMISSION_DENIED', error.authorization.reason);
+    return providerToolErrorContent(
+      'PERMISSION_DENIED',
+      describeToolDenial(error.authorization.reason),
+    );
   // The schema hint names paths, types and keys but never input values, so the model can fix the
   // call instead of seeing an opaque failure (issue #870).
   if (error instanceof ToolInputSchemaMismatchError)
