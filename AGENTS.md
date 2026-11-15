@@ -44,9 +44,9 @@ Sprint Coderは、Electron、React、TypeScriptで構成されたlocal-firstのA
   3. CI が赤のもの、BOT の Critical、要塞レビューの HIGH 以上
 - **検証は軽く**:
   - 途中の検証は、変えたファイルの近くの試験、型検査、lint に絞る。
-  - PR の CI は静的な検査だけ（typecheck・lint・package の試験。Rust を変えた時は Windows での compile）。試験は PR では走らない。
-  - 全 OS の試験は main に入った直後に全部走る。落ちたら `bug` の Issue が自動で立つので、それを直す。
-  - release（tag の push）は、その commit の main の CI が通っていないと止まる。
+  - PR の CI と main への push の CI は、同じ静的な検査だけ（typecheck・lint・package の試験・Website の検査。Rust を変えた時は Windows での compile）。試験は走らない。main で落ちたら `bug` の Issue が自動で立つので、それを直す。
+  - 全 OS の試験と配布物の smoke は、release の前だけ走る。release（tag の push）の workflow が、その commit で `ci.yml` の全部の試験を呼び、通らないと署名・公開の前で止まる。
+  - tag を打つ前に確かめたい時は、`gh workflow run ci.yml --ref main` で、同じ全部の試験を手で回せる。
 - **少しずつ完璧にする**:
   - 記録した残りは、基本が動いた後の段階で、影響の大きいものから順に片付ける。
   - 「後で」は「やらない」ではない。残りの一覧は必ず保つ。

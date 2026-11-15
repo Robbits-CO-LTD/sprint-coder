@@ -1,11 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync(
   resolve(__dirname, '../../.github/workflows/release-beta.yml'),
   'utf8',
 );
+const ciWorkflow = readFileSync(resolve(__dirname, '../../.github/workflows/ci.yml'), 'utf8');
 const unsignedWindowsVerifier = readFileSync(
   resolve(__dirname, 'scripts/verify-unsigned-windows-release.ps1'),
   'utf8',
@@ -16,13 +18,10 @@ const signedWindowsRelease = readFileSync(
 );
 
 describe('release signing and notarization', () => {
-  it('parallelizes validation while keeping signed builds and draft publication behind every gate', () => {
-    expect(workflow).toContain(
-      'needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests]',
-    );
+  it('keeps signed builds and draft publication behind the full test run of the tagged commit', () => {
+    expect(workflow).toContain('needs: [metadata, tests]');
     expect(workflow).toMatch(/ {2}make:\n(?:.|\n)*? {4}needs: release-validation/);
     expect(workflow).toContain('needs: [metadata, release-validation, make]');
-    expect(workflow).toContain('shard: [1/3, 2/3, 3/3]');
   });
 
   it('always rebuilds distributable native binaries instead of consuming CI caches', () => {
@@ -44,20 +43,40 @@ describe('release signing and notarization', () => {
     expect(makeJob).not.toContain('actions/cache');
   });
 
-  it('prepares the Linux sandbox before desktop validation tests probe command execution', () => {
-    const desktopValidation = workflow.slice(
-      workflow.indexOf('\n  validate-desktop-tests:'),
-      workflow.indexOf('\n  release-validation:'),
+  it('runs the full CI test set on the tagged commit before any build (owner rule, 2026-11-15)', () => {
+    // PRs and main pushes run static checks only, so this call is where every test runs.
+    const release = parse(workflow) as {
+      jobs: Record<string, Record<string, unknown>>;
+    };
+    const tests = release.jobs.tests!;
+    expect(tests.uses).toBe('./.github/workflows/ci.yml');
+    expect(tests.with).toEqual({ full: true });
+    expect(tests.needs).toBe('metadata');
+    // No `if` on the gate chain: the tests can never be silently bypassed.
+    expect(tests.if).toBeUndefined();
+    expect(tests.secrets).toBeUndefined();
+    // GitHub refuses a call whose nested jobs ask for more than this (ci.yml's Issue report).
+    expect(tests.permissions).toEqual({ actions: 'read', contents: 'read', issues: 'write' });
+    expect(release.jobs['release-validation']!.needs).toEqual(['metadata', 'tests']);
+    expect(release.jobs['release-validation']!.if).toBeUndefined();
+    expect(release.jobs.make!.needs).toBe('release-validation');
+    expect(release.jobs.make!.if).toBeUndefined();
+    // The tests are defined once, in ci.yml; the release keeps no copy of its own.
+    expect(Object.keys(release.jobs).sort()).toEqual(
+      ['make', 'metadata', 'release', 'release-validation', 'tests'].sort(),
     );
-    const dependency = desktopValidation.indexOf(
-      'sudo apt-get update && sudo apt-get install -y bubblewrap',
-    );
-    const sandbox = desktopValidation.indexOf('uses: ./.github/actions/prepare-sandbox');
-    const tests = desktopValidation.indexOf('run: npx vitest run --shard=${{ matrix.shard }}');
+    expect(workflow).not.toContain('npx vitest');
+    // The earlier gate looked up a main CI run; main no longer runs every test.
+    expect(workflow).not.toContain('actions/workflows/ci.yml/runs');
+    expect(release.jobs.metadata!.permissions).toEqual({ contents: 'read' });
 
-    expect(dependency).toBeGreaterThan(-1);
-    expect(sandbox).toBeGreaterThan(dependency);
-    expect(tests).toBeGreaterThan(sandbox);
+    const ci = parse(ciWorkflow) as {
+      on: { workflow_call: { inputs: Record<string, { type: string; required: boolean }> } };
+      jobs: Record<string, { if?: string }>;
+    };
+    expect(ci.on.workflow_call.inputs.full).toMatchObject({ type: 'boolean', required: true });
+    // `CI required` runs even when selected jobs fail or are skipped, and then fails the call.
+    expect(ci.jobs.required!.if).toBe('always()');
   });
 
   it('accepts stable and beta tags while keeping releases as drafts', () => {
@@ -76,25 +95,6 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain('signing_temp_dir="${RUNNER_TEMP}/sprint-coder-signing-');
     expect(initializePaths).toBeGreaterThan(-1);
     expect(signingSecrets).toBeGreaterThan(initializePaths);
-  });
-
-  it('requires a successful main CI run for the release commit before any build', () => {
-    // PRs run static checks only, so the full test matrix of main CI is the release's test gate.
-    const metadata = workflow.slice(
-      workflow.indexOf('\n  metadata:'),
-      workflow.indexOf('\n  validate-quality:'),
-    );
-    const check = metadata.indexOf('Verify main CI passed for the release commit');
-    expect(check).toBeGreaterThan(metadata.indexOf('git merge-base --is-ancestor'));
-    expect(metadata).toMatch(/permissions:\n {6}actions: read\n {6}contents: read\n/u);
-    const step = metadata.slice(check);
-    expect(step).toContain('commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"');
-    expect(step).toContain('actions/workflows/ci.yml/runs');
-    expect(step).toContain('-f head_sha="${commit}" -f branch=main -f status=success');
-    expect(step).toContain('select(.event == "push" or .event == "workflow_dispatch")');
-    expect(step).toContain('exit 1');
-    // Every later job, signing included, waits for metadata through release-validation.
-    expect(workflow).toMatch(/ {2}make:\n(?:.|\n)*? {4}needs: release-validation/);
   });
 
   it('gates signing secrets behind an environment and a main-reachability check', () => {

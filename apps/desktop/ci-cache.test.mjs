@@ -446,7 +446,7 @@ describe('CI scope wiring', () => {
   it.each([
     ['README.md', ['classify', 'required']],
     ['website/index.html', ['classify', 'website', 'required']],
-    // PRs run static checks only; tests and package smokes first run on main.
+    // PRs run static checks only; tests and package smokes run only before a release.
     ['apps/desktop/src/renderer/lib/format.ts', ['classify', 'quality', 'required']],
     ['apps/desktop/src/renderer/components/RunCard.tsx', ['classify', 'quality', 'required']],
     ['apps/desktop/src/main/persistence.ts', ['classify', 'quality', 'required']],
@@ -455,8 +455,17 @@ describe('CI scope wiring', () => {
       'apps/desktop/desktop-control/crates/windows/src/lib.rs',
       ['classify', 'quality', 'sandbox-rust-windows', 'required'],
     ],
+    // A push to main runs the same static checks as a PR.
+    ['apps/desktop/forge.config.ts', ['classify', 'quality', 'package-tests', 'required'], 'push'],
+    ['README.md', ['classify', 'required'], 'push'],
     [
-      'apps/desktop/forge.config.ts',
+      'apps/desktop/desktop-control/crates/windows/src/lib.rs',
+      ['classify', 'quality', 'sandbox-rust-windows', 'required'],
+      'push',
+    ],
+    // Every test and package smoke: manual CI, and the release call (a tag push with full: true).
+    ...['workflow_dispatch', 'release'].map((event) => [
+      'README.md',
       [
         'classify',
         'quality',
@@ -473,28 +482,14 @@ describe('CI scope wiring', () => {
         'website',
         'required',
       ],
-      'push',
-    ],
-    [
-      'README.md',
-      [
-        'classify',
-        'quality',
-        'package-tests',
-        'sandbox-rust-windows',
-        'test-macos',
-        'platform-tests',
-        'electron-bridges',
-        'renderer-tests',
-        'website',
-        'required',
-      ],
-      'push',
-    ],
+      event,
+    ]),
   ])(
-    'selects only the planned workflow jobs for %s',
-    (path, expected, eventName = 'pull_request') => {
-      const scope = classifyChanges([{ path, status: 'M' }], { eventName });
+    'selects only the planned workflow jobs for %s (%#)',
+    (path, expected, event = 'pull_request') => {
+      const release = event === 'release';
+      const eventName = release ? 'push' : event;
+      const scope = classifyChanges([{ path, status: 'M' }], { eventName, fullTests: release });
       const outputs = scopeOutputs(scope);
       const selected = Object.entries(workflow.jobs)
         .filter(([, job]) => {
@@ -506,8 +501,9 @@ describe('CI scope wiring', () => {
               JSON.stringify(value),
             );
           // The selected jobs pass, so the main failure report stays out of every selection.
+          const ref = release ? 'refs/tags/v1.0.0' : 'refs/heads/main';
           const context = {
-            github: { event_name: eventName, ref: 'refs/heads/main' },
+            github: { event_name: eventName, ref },
             needs: { required: { result: 'success' } },
           };
           return runInNewContext(expression, context, { timeout: 100 });
@@ -532,6 +528,7 @@ describe('CI scope wiring', () => {
     );
     const scope = classifyChanges([{ path: 'apps/desktop/forge.config.ts', status: 'M' }], {
       eventName: 'push',
+      fullTests: true,
     });
     const results = Object.fromEntries(workflow.jobs.required.needs.map((id) => [id, 'success']));
     for (const job of ['package-windows-build', 'website']) {
@@ -574,6 +571,8 @@ describe('CI scope wiring', () => {
       ['pull_request', 'failure'],
       ['workflow_dispatch', 'failure'],
       ['push', 'failure', 'refs/heads/other'],
+      // The release call keeps the tag push event; its failure stops the release instead.
+      ['push', 'failure', 'refs/tags/v1.0.0'],
     ])
       expect(runs(event, result, ref)).toBe(false);
     const script = report.steps[0].run;
@@ -585,6 +584,33 @@ describe('CI scope wiring', () => {
     expect(script.indexOf('gh issue list --state open')).toBeLessThan(
       script.indexOf('gh issue create'),
     );
+  });
+
+  it('runs the full set only when the release workflow asks for it through workflow_call', () => {
+    expect(Object.keys(workflow.on).sort()).toEqual(
+      ['pull_request', 'push', 'workflow_call', 'workflow_dispatch'].sort(),
+    );
+    expect(workflow.on.push).toEqual({ branches: ['main'] });
+    expect(workflow.on.workflow_call.inputs).toEqual({
+      full: expect.objectContaining({ type: 'boolean', required: true }),
+    });
+    // The called workflow needs no secrets; GitHub would reject a call that passed none it requires.
+    expect(workflow.on.workflow_call.secrets).toBeUndefined();
+    const classifier = workflow.jobs.classify.steps.find((step) => step.id === 'scope');
+    const flag = (inputs) =>
+      runInNewContext(classifier.env.CI_FULL_TESTS.slice(3, -2), { inputs }, { timeout: 100 });
+    expect(flag({ full: true })).toBe('true');
+    for (const inputs of [{ full: false }, {}]) expect(flag(inputs)).toBe('false');
+    const docs = workflow.jobs.classify.steps.find(
+      (step) => step.name === 'Check documentation whitespace',
+    );
+    expect(docs.env.CI_DIFF_HEAD).toBe('${{ steps.scope.outputs.diff_head }}');
+    expect(workflow.jobs.classify.outputs.diff_head).toBe('${{ steps.scope.outputs.diff_head }}');
+    // A called run takes the caller's name and tag ref, so it never shares the main or PR group.
+    expect(workflow.concurrency).toEqual({
+      group: 'ci-${{ github.workflow }}-${{ github.ref }}',
+      'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
+    });
   });
 });
 
@@ -816,7 +842,8 @@ describe('full CI partition contract', () => {
       );
     }
     const required = workflow.jobs.required;
-    const scope = classifyChanges([], { eventName: 'push' });
+    // The release call: a tag push event with full: true.
+    const scope = classifyChanges([], { eventName: 'push', fullTests: true });
     const successful = Object.fromEntries(required.needs.map((id) => [id, 'success']));
     expect(() => verifyRequiredJobs(scope, successful)).not.toThrow();
     for (const dependency of ['sandbox-rust-windows', 'test-macos', 'electron-bridges']) {

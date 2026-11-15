@@ -17,7 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      actions: read
       contents: read
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
@@ -62,23 +61,6 @@ jobs:
             exit 1
           fi
 
-      # Pull requests run static checks only; the full test matrix first runs on main.
-      - name: Verify main CI passed for the release commit
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          passed="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-            -f head_sha="${commit}" -f branch=main -f status=success -f per_page=100 \
-            --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch") | .html_url] | first // empty')"
-          if [[ -z "${passed}" ]]; then
-            echo "::error::Main CI has not passed for release commit ${commit}. Wait for the main CI run of this commit to succeed (or tag a commit whose main CI passed), then re-run this workflow."
-            exit 1
-          fi
-          echo "Main CI passed for ${commit}: ${passed}"
-
       - name: Verify embedded client version
         shell: bash
         run: |
@@ -92,110 +74,25 @@ jobs:
           }
           NODE
 
-  validate-quality:
-    name: Validate ${{ matrix.label }}
+  # Pull requests and main pushes run static checks only, so every test suite and package smoke
+  # runs here, on the tagged commit, before anything is signed or published. The tests are
+  # defined once, in ci.yml; its `CI required` job fails this call when any selected job fails.
+  tests:
+    name: Full tests
     needs: metadata
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # A called workflow cannot exceed these. Its Issue-writing job runs only for pushes to main
+    # (never for a tag), but GitHub checks every nested job's permissions before starting.
     permissions:
+      actions: read
       contents: read
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - label: typecheck
-            command: typecheck
-          - label: lint
-            command: lint
-          - label: format
-            command: format:check
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.23.3
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Run ${{ matrix.label }}
-        run: npm run ${{ matrix.command }}
-
-  validate-package-tests:
-    name: Validate package tests
-    needs: metadata
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.23.3
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Test contracts and domain packages
-        run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
-
-  validate-desktop-tests:
-    name: Validate desktop test shard ${{ matrix.shard }}
-    needs: metadata
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: true
-      matrix:
-        shard: [1/3, 2/3, 3/3]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.23.3
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Electron binary
-        uses: ./.github/actions/install-electron
-      - name: Install Linux sandbox dependency
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - name: Build managed sandbox runner
-        uses: ./.github/actions/prepare-sandbox
-      - name: Restore better-sqlite3 Electron ABI binary
-        id: better-sqlite-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
-          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
-      - name: Rebuild better-sqlite3 for Electron ABI
-        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
-        working-directory: apps/desktop
-        run: node ../../build-better-sqlite3.mjs
-      - name: Restore NativeSafeFs Electron ABI binary
-        id: native-safe-fs-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
-          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
-      - name: Build NativeSafeFs for Electron ABI
-        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
-        run: npm run build:native-safe-fs
-      - name: Test desktop shard ${{ matrix.shard }}
-        working-directory: apps/desktop
-        run: npx vitest run --shard=${{ matrix.shard }}
+      issues: write
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
 
   release-validation:
     name: Validate release
-    needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests]
+    needs: [metadata, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
