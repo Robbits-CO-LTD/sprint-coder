@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE,
@@ -1376,7 +1376,8 @@ describe('desktop control on Apple silicon macOS', () => {
             [place.applications, place.system].flatMap((folder) =>
               readdirSync(folder)
                 .filter((file) => ids[file]?.toLowerCase() === id.toLowerCase())
-                .map((file) => join(folder, file)),
+                // As the lookup joins a folder and its entry, on every OS the test runs on.
+                .map((file) => posix.join(folder, file)),
             ),
         };
         const launch = (argv: string[]) => desktopControlLaunchByName(argv, [], lookup);
@@ -1431,10 +1432,11 @@ describe('desktop control on Apple silicon macOS', () => {
     it('looks a bundle id up once and confirms only the bundles the lookup names', () => {
       const place = folders();
       try {
-        const textEdit = join(place.system, 'TextEdit.app');
-        const terminal = join(place.system, 'Terminal.app');
-        const outside = join(place.base, 'Elsewhere', 'TextEdit.app');
-        const nested = join(place.applications, 'Utility.app', 'Contents', 'TextEdit.app');
+        // Bundle paths as the lookup joins a folder and its entry, on every OS the test runs on.
+        const textEdit = posix.join(place.system, 'TextEdit.app');
+        const terminal = posix.join(place.system, 'Terminal.app');
+        const outside = posix.join(join(place.base, 'Elsewhere'), 'TextEdit.app');
+        const nested = posix.join(place.applications, 'Utility.app', 'Contents', 'TextEdit.app');
         // Terminal.app under an id the name check alone lets through: refused by its file name.
         const local: Record<string, string> = { ...ids, 'Terminal.app': 'com.example.shell' };
         const identifier = vi.fn((bundle: string) => local[bundle.split('/').pop()!] ?? null);
@@ -1460,9 +1462,9 @@ describe('desktop control on Apple silicon macOS', () => {
         expect(run('com.apple.TextEdit', [outside, nested])).toEqual(notFound);
         expect(identifier).not.toHaveBeenCalled();
         // A stale index naming a bundle whose bundle id is another: not found.
-        expect(run('com.apple.TextEdit', [join(place.applications, 'TextEdit Copy.app')])).toEqual(
-          notFound,
-        );
+        expect(
+          run('com.apple.TextEdit', [posix.join(place.applications, 'TextEdit Copy.app')]),
+        ).toEqual(notFound);
         // Nothing from the lookup (no index, an error, the time limit): not found, and no other
         // bundle is read.
         for (const hinted of [null, []]) {
@@ -1474,7 +1476,7 @@ describe('desktop control on Apple silicon macOS', () => {
           refusal: expect.stringContaining('com.example.shell は起動できない'),
         });
         expect(
-          run('com.example.sprint-coder', [join(place.applications, 'Sprint Coder.app')]),
+          run('com.example.sprint-coder', [posix.join(place.applications, 'Sprint Coder.app')]),
         ).toMatchObject({ refusal: expect.stringContaining('Sprint Coder 自身は起動できない') });
       } finally {
         place.remove();
