@@ -28,6 +28,7 @@ jobs:
       quality_required: ${{ steps.scope.outputs.quality_required }}
       shared_required: ${{ steps.scope.outputs.shared_required }}
       windows_rust_required: ${{ steps.scope.outputs.windows_rust_required }}
+      desktop_control_rust_required: ${{ steps.scope.outputs.desktop_control_rust_required }}
       platform_required: ${{ steps.scope.outputs.platform_required }}
       platform_matrix: ${{ steps.scope.outputs.platform_matrix }}
       distribution_required: ${{ steps.scope.outputs.distribution_required }}
@@ -137,9 +138,10 @@ jobs:
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
 
   sandbox-rust-windows:
+    # PRs run no tests, so this job is where a PR proves its Rust still compiles.
     name: Rust Windows build
     needs: classify
-    if: needs.classify.outputs.windows_rust_required == 'true'
+    if: needs.classify.outputs.windows_rust_required == 'true' || needs.classify.outputs.desktop_control_rust_required == 'true'
     runs-on: ${{ fromJSON(needs.classify.outputs.rust_runner) }}
     timeout-minutes: 15
     permissions:
@@ -161,12 +163,17 @@ jobs:
         with:
           arch: x64
       - name: Build Windows sandbox and compile its integration tests
+        if: needs.classify.outputs.windows_rust_required == 'true'
         shell: pwsh
         run: |
           cargo build --release --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --no-run --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml
           exit $LASTEXITCODE
+      # The same cached release build that the Windows test shards use on main.
+      - name: Build Windows desktop control
+        if: needs.classify.outputs.desktop_control_rust_required == 'true'
+        uses: ./.github/actions/prepare-desktop-control
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
@@ -794,3 +801,45 @@ jobs:
           CI_SCOPE_JSON: ${{ needs.classify.outputs.scope_json }}
           CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
         run: node ci-scope.mjs gate
+
+  # Main is the first place every test runs, so a failed main run opens (or extends) a bug Issue.
+  report-main-failure:
+    name: Report main CI failure
+    needs: required
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.required.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: Open or update the failure Issue for this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          export ISSUE_TITLE="[bug] main の CI が失敗しました (${GITHUB_SHA:0:7})"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          failed="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name')"
+          body="${RUNNER_TEMP}/main-ci-failure.md"
+          {
+            echo "main の CI（push）が失敗しました。"
+            echo
+            echo "- commit: ${GITHUB_SHA}"
+            echo "- 実行: ${run_url}"
+            echo
+            echo "落ちた job:"
+            echo
+            echo "${failed:-- （一覧を取得できませんでした。実行の画面を見てください）}"
+          } > "${body}"
+          existing="$(gh issue list --state open --limit 500 --json number,title \
+            --jq 'map(select(.title == env.ISSUE_TITLE)) | first | .number // empty')"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --body-file "${body}"
+          else
+            gh issue create --title "${ISSUE_TITLE}" --label bug --body-file "${body}"
+          fi

@@ -8,12 +8,16 @@ import {
   STARTUP_FONT_WAIT_MS,
   waitForFonts,
 } from './lib/fonts';
+import { installDesktopControlDropGuard } from './lib/desktop-control-drop-guard';
 
 const root = document.getElementById('root');
 if (root === null) throw new Error('Renderer root element is missing');
 
 const platform = window.sprintCoder?.windowControls?.platform;
 applyPlatformClass(document.documentElement, platform);
+
+// Before anything renders, so no drop can reach an input while a desktop-control run is going.
+installDesktopControlDropGuard(window, window.sprintCoder?.desktopControl?.subscribeActivity);
 
 // The faces use `font-display: block`, so text is never drawn in another font first. Waiting for
 // them here (briefly) also keeps the first frame from being blank text.

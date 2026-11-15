@@ -5,6 +5,7 @@ import { join, posix, resolve, win32 } from 'node:path';
 import { DESKTOP_CONTROL_EXECUTABLE, desktopControlSupported } from './desktop-control-build';
 import { startMenuShortcuts, type StartMenuShortcut } from './desktop-control-start-menu';
 import { applyWindowsAcl } from './native-file-publication';
+import { queryNativeProcessIdentity } from './native-process-identity';
 import { secureLogger } from './secure-logger';
 
 /**
@@ -39,6 +40,8 @@ export type DesktopControlLookup = Readonly<{
   isFile?: (path: string) => boolean;
   /** The environment the paths of shortcuts and the system folders are read with. */
   environment?: Readonly<Record<string, string | undefined>>;
+  /** Sprint Coder's own executable, which `launch` refuses (`process.execPath` by default). */
+  ownExecutable?: string;
 }>;
 
 /**
@@ -198,6 +201,7 @@ export function desktopControlEnvironment(
   expectedWindowOwner?: string,
   cursorRenderer?: DesktopControlCursorRenderer,
   session?: DesktopControlSessionVariables,
+  refusedWindowOwner?: string,
 ): Readonly<Record<string, string>> {
   const windows = (lookup.platform ?? process.platform) === 'win32';
   const paths = windows ? win32 : posix;
@@ -213,9 +217,13 @@ export function desktopControlEnvironment(
   // The cursor renderer's image and host are set by Main alone too (`cursorRenderer`).
   // So are the session and agent id of a run in Main's own session (`session`); without one, those
   // variables are left exactly as they were.
+  // The process whose windows no operation may act on (`refusedWindowOwner`, Sprint Coder's own
+  // Main, which the runner always gives) is set by Main alone too: one the caller chose, in any
+  // letter case, is always dropped, so it can be neither removed nor replaced.
   const owned = [
     DESKTOP_CONTROL_STATE_VARIABLE,
     DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE,
+    DESKTOP_CONTROL_REFUSED_WINDOW_OWNER_VARIABLE,
     DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE,
     DESKTOP_CONTROL_HOST_PID_VARIABLE,
     ...(session === undefined
@@ -233,6 +241,8 @@ export function desktopControlEnvironment(
   filtered.push([DESKTOP_CONTROL_STATE_VARIABLE, desktopControlStateFolder()]);
   if (expectedWindowOwner !== undefined)
     filtered.push([DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE, expectedWindowOwner]);
+  if (refusedWindowOwner !== undefined)
+    filtered.push([DESKTOP_CONTROL_REFUSED_WINDOW_OWNER_VARIABLE, refusedWindowOwner]);
   if (cursorRenderer !== undefined) {
     filtered.push([DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE, cursorRenderer.image]);
     filtered.push([DESKTOP_CONTROL_HOST_PID_VARIABLE, String(cursorRenderer.hostPid)]);
@@ -318,6 +328,47 @@ export type DesktopControlSessionVariables = Readonly<{
   /** Whose cursor the run moves. */
   agentId: string;
 }>;
+
+/**
+ * The variable the shipped executable reads the process from whose windows no operation may act on
+ * (`crates/windows/src/system/own_window.rs`), as `<pid>` or `<pid>:<process instance>`. Main
+ * gives its own process for every run it starts: the windows of Sprint Coder (its approval cards,
+ * the access chip, the Team's cards) are the person's, whatever permission or approval the run
+ * had. Before acting on a window, a part, or the pointer or keys, the executable reads who owns
+ * what it is about to act on at that moment, and refuses without sending anything when it is that
+ * process. Reading (lists, snapshots, screenshots) is not refused.
+ */
+export const DESKTOP_CONTROL_REFUSED_WINDOW_OWNER_VARIABLE =
+  'SPRINT_CODER_DESKTOP_REFUSED_WINDOW_OWNER';
+
+/**
+ * That variable's value for a process: with its process instance (`windows-proc-v1:<seconds>:<rest>`,
+ * from the creation time in `win32:<FILETIME ticks>`, the form `native-process-identity` reads)
+ * when it is known, so a pid reused after Sprint Coder ended is not refused; the pid alone
+ * otherwise, which refuses every window of that pid. `null` for a pid that cannot be one.
+ */
+export function desktopControlRefusedWindowOwner(
+  pid: number,
+  startIdentity: string | null,
+): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffff_ffff) return null;
+  const ticks = /^win32:([1-9][0-9]{0,19})$/u.exec(startIdentity ?? '')?.[1];
+  if (ticks === undefined || BigInt(ticks) > 0xffff_ffff_ffff_ffffn) return String(pid);
+  const value = BigInt(ticks);
+  return `${pid}:windows-proc-v1:${value / 10_000_000n}:${value % 10_000_000n}`;
+}
+
+let ownWindowOwner: string | undefined;
+
+/** Sprint Coder's own Main (whose process owns its windows) as that variable's value. */
+export function desktopControlOwnWindowOwner(): string {
+  ownWindowOwner ??=
+    desktopControlRefusedWindowOwner(
+      process.pid,
+      queryNativeProcessIdentity(process.pid)?.startIdentity ?? null,
+    ) ?? String(process.pid);
+  return ownWindowOwner;
+}
 
 /** That variable's value for a process, or `null` when it cannot be written in that form. */
 export function desktopControlExpectedWindowOwner(owner: {
@@ -1216,8 +1267,19 @@ function launchTargetRefusal(
     if (!outsideWorkspaceRoots(app, workspaceRoots, lookup))
       return refusal('launch で Workspace の中の実行ファイルは起動できない');
   }
-  // A convenience for an obvious mistake, not a boundary: the card is.
   const base = app.split(/[\\/]/u).pop() ?? '';
+  // Starting Sprint Coder again brings its window to the front (one instance runs at a time), so
+  // it is refused whatever was allowed: by the same file (letter case, links) or by its name.
+  const own = lookup.ownExecutable ?? process.execPath;
+  const ownBase = paths.basename(own);
+  if (
+    (platform === 'win32'
+      ? base.toLocaleLowerCase('en-US') === ownBase.toLocaleLowerCase('en-US')
+      : base === ownBase) ||
+    (/[\\/]/u.test(app) && comparisonKey(app, lookup) === comparisonKey(own, lookup))
+  )
+    return refusal('launch で Sprint Coder 自身は起動できない（Sprint Coder の窓は操作できない）');
+  // A convenience for an obvious mistake, not a boundary: the card is.
   if (desktopControlNamesTool(base))
     return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
   return null;

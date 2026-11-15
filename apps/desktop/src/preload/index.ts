@@ -107,6 +107,7 @@ import {
   runtimeStatusSchema,
   updateCheckResultSchema,
   updateHealthSchema,
+  desktopControlActivitySchema,
   runtimeFailureDiagnosticQuerySchema,
   runtimeFailureDiagnosticExportSchema,
   fileChangeRecordSchema,
@@ -805,6 +806,17 @@ const api: SprintCoderApi = {
       updateCheckResultSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.updateCheckNow)),
     openManualUpdate: () => ipcRenderer.send(IPC_CHANNELS.updateOpenManual),
     openUpdateLog: () => ipcRenderer.send(IPC_CHANNELS.updateOpenLog),
+  },
+  desktopControl: {
+    // Push-only, like `updates.subscribeHealth`: Main sends each change, unknown payloads are dropped.
+    subscribeActivity: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = desktopControlActivitySchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.desktopControlActivityEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.desktopControlActivityEvent, handler);
+    },
   },
   fileEdits: {
     // Push-only, mirroring `reasoning` above: the frame carries its own taskId/turnId and the store

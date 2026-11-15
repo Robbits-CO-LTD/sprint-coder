@@ -357,3 +357,82 @@ mod owner_reads {
         );
     }
 }
+
+fn root(pid: u32, shows: Option<bool>) -> (ProcessId, Option<bool>) {
+    (ProcessId::from(pid), shows)
+}
+
+/// The user's choice of a running app: a window they see or can bring back
+/// (minimized) keeps the launch attached; a window on another virtual desktop
+/// (cloaked), a tool window, a hidden or zero-sized one does not.
+#[test]
+fn only_a_shown_or_minimized_window_counts_as_showing_a_window() {
+    let pid = ProcessId::from(300);
+    assert!(shows_a_window(pid, &[top(300, true, false, false, false)]));
+    assert!(
+        shows_a_window(pid, &[top(300, true, false, true, false)]),
+        "minimized"
+    );
+    assert!(
+        !shows_a_window(pid, &[top(300, true, true, false, false)]),
+        "cloaked"
+    );
+    assert!(
+        !shows_a_window(pid, &[top(300, true, false, false, true)]),
+        "tool window"
+    );
+    assert!(
+        !shows_a_window(pid, &[top(300, false, false, false, false)]),
+        "hidden"
+    );
+    assert!(
+        !shows_a_window(pid, &[top(301, true, false, false, false)]),
+        "another process's window"
+    );
+    let mut zero = top(300, true, false, false, false);
+    zero.window.rect.width = 0.0;
+    assert!(!shows_a_window(pid, &[zero]), "zero-sized");
+}
+
+/// One instance with a window: attach, start nothing (as before).
+#[test]
+fn an_instance_with_a_window_is_attached_to() {
+    assert_eq!(
+        attach_decision(&[root(10, Some(true))]),
+        AttachDecision::Attach(ProcessId::from(10))
+    );
+}
+
+/// An app running with no window (a tray app, a browser kept in the
+/// background) is started, as a double click on its icon would.
+#[test]
+fn an_instance_with_no_window_is_started_beside() {
+    assert_eq!(
+        attach_decision(&[root(10, Some(false))]),
+        AttachDecision::StartBesideWindowless
+    );
+    assert_eq!(
+        attach_decision(&[root(10, Some(false)), root(11, Some(false))]),
+        AttachDecision::StartBesideWindowless,
+        "several windowless instances: no window of the user's can be confused"
+    );
+}
+
+/// Doubt keeps the old answers: windows that could not be read count as
+/// shown, so one instance is attached to and several are ambiguous.
+#[test]
+fn unreadable_windows_keep_the_old_answers() {
+    assert_eq!(
+        attach_decision(&[root(10, None)]),
+        AttachDecision::Attach(ProcessId::from(10))
+    );
+    assert_eq!(
+        attach_decision(&[root(10, None), root(11, Some(false))]),
+        AttachDecision::Ambiguous
+    );
+    assert_eq!(
+        attach_decision(&[root(10, Some(true)), root(11, Some(false))]),
+        AttachDecision::Ambiguous
+    );
+    assert_eq!(attach_decision(&[]), AttachDecision::Start);
+}

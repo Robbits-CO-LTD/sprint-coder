@@ -204,15 +204,29 @@ describe('prompt context compiler', () => {
     expect(compiled.content).toContain('利用者がはっきり頼んだ時だけ使う');
     expect(compiled.content).toContain('裏の操作が失敗しても前面の操作で取り返さず');
     expect(compiled.content).toContain('最小化した窓は操作できない');
-    expect(compiled.content).toContain('（--activate は付けない）');
+    // The front is used only when the person asks to open an app for their own use.
+    expect(compiled.content).toContain(
+      '--activate は、利用者が自分で見る・使うためにアプリを開いてほしいと頼んだ時だけ付ける',
+    );
+    expect(compiled.content).toContain('自分が続けて裏で操作するための起動には付けない');
+    expect(compiled.content).toContain(
+      '迷ったら付けずに開き、「後ろに開きました」と利用者に伝える',
+    );
     // A launch that reached the person's running app is not one the agent opened.
-    expect(compiled.content).toContain('launch の結果の attached が true なら');
+    expect(compiled.content).toContain(
+      'launch は、アプリが窓を出して動いていればそれにつなぎ（attached が true。何も起動していない',
+    );
     expect(compiled.content).toContain('new_instance が true の時だけ');
+    // A single-instance app opens the new window in its running process.
+    expect(compiled.content).toContain('窓を出さずに動いている時');
+    expect(compiled.content).toContain('running_without_window が true');
+    expect(compiled.content).toContain('--no-attach を付けて 1 回だけ起動し直す');
+    expect(compiled.content).toContain('handed_off: true が付き');
+    expect(compiled.content).toContain('起動を繰り返さずに list-windows で窓を確かめる');
     expect(compiled.content).toContain('list-windows で窓を取り直す');
-    // Nothing recommends taking the foreground any more.
+    // Nothing else recommends taking the foreground.
     expect(compiled.content).not.toContain('窓を前面に出し');
     expect(compiled.content).not.toContain('--headed type');
-    expect(compiled.content).not.toContain('--activate・');
     expect(compiled.content).toContain('list-windows で id を調べて --window-id を付け');
     expect(compiled.content).toContain('同じ Task で既に読んでいれば読み直さない');
     // The guides and status checks need no card, which the agent can count on.

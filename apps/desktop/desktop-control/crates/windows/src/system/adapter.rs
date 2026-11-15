@@ -10,6 +10,7 @@ use agent_desktop_core::{
 
 use crate::adapter::WindowsAdapter;
 use crate::system::close_outcome::CloseOutcome;
+use crate::system::own_window;
 
 #[cfg(target_os = "windows")]
 #[path = "tcp_listener.rs"]
@@ -204,6 +205,7 @@ impl SystemOps for WindowsAdapter {
         force: bool,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        self.refuse_own_window("close_app", || vec![Some(u32::from(app.pid))])?;
         let dispatched = crate::system::close::close_app_impl(app, force, lease.deadline())
             .map(|outcome| outcome == CloseOutcome::Exited);
         OperationReport::from_close_dispatch(app, dispatched)
@@ -217,6 +219,7 @@ impl SystemOps for WindowsAdapter {
         op: WindowOp,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        self.refuse_own_window("window_op", || own_window::window_owners(win))?;
         let readback = crate::system::window::window_op_readback::window_readback(&op);
         let dispatched =
             crate::system::window::window_op::window_op_impl(win, op.clone(), lease.deadline());
@@ -232,6 +235,7 @@ impl SystemOps for WindowsAdapter {
     }
 
     fn focus_window(&self, win: &WindowInfo, lease: &InteractionLease) -> Result<(), AdapterError> {
+        self.refuse_own_window("focus_window", || own_window::window_owners(win))?;
         crate::system::window::window_activate::focus_window(win, lease)
     }
 
@@ -267,6 +271,9 @@ impl SystemOps for WindowsAdapter {
         policy: InteractionPolicy,
         lease: &InteractionLease,
     ) -> Result<ActionResult, AdapterError> {
+        // The keys go to this process's window in front, which `press_for_app_impl` confirms
+        // just before sending; so naming any other process can never reach Sprint Coder's.
+        self.refuse_own_window("press_key_for_app", || vec![Some(u32::from(process.pid))])?;
         crate::system::key_dispatch::press_for_app_impl(process, combo, policy, lease.deadline())
     }
 

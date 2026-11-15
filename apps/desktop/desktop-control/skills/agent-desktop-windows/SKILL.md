@@ -91,14 +91,30 @@ observation, actions and capture there fail or return nothing.
   Windows directory, with or without `.exe` (`notepad` or `notepad.exe`), not
   a display name. Use `list-apps` to find a running app.
 - **Read `attached` and `new_instance` in the `launch` result.** A bare
-  `launch` of an app that is already running attaches to it and starts
-  nothing (`attached: true`); its windows may be ones the user had open, so do
-  not treat them as yours. `--no-attach`, or any `--arg`, `--env` or `--cwd`,
-  starts a new process instead. A single-instance app (a browser on its
-  default profile, many editors) may pass that new process to the running
-  instance and exit: the result then also says `attached: true`, with no
-  `window`. Only `new_instance: true` proves `window` belongs to a process
-  this launch started.
+  `launch` of an app that is already running with a window shown (minimized
+  counts) attaches to it and starts nothing (`attached: true`); its windows
+  may be ones the user had open, so do not treat them as yours. When the app
+  runs with no window shown (a browser kept running in the background, an app
+  in the tray), a bare `launch` starts it, as a double click on its icon
+  would (`running_without_window: true`). `--no-attach`, or any `--arg`,
+  `--env` or `--cwd`, always starts a new process. A single-instance app (a
+  browser on its default profile, many editors, most tray apps) passes that
+  new process to the running instance and exits: the result then says
+  `attached: true` and `handed_off: true`. The running instance shows the
+  window itself, so when the result has a `window`, it is the one that
+  instance showed after the launch, owned by `window.pid` (the running
+  instance, not the exited `pid`). With no `window`, which window it showed
+  is not confirmed (none appeared within a few seconds, or several did): run
+  `list-windows --app <app>` before launching again, since a second launch may
+  open a second window. Only `new_instance: true` proves `window` belongs to a
+  process this launch started.
+- **`launch` keeps the window it opens behind the window in front,** for
+  work you do yourself in the background. When the user asks you to open an
+  app for them to look at or use, pass `--activate`: the window is brought to
+  the front, and `activated` in the result says whether Windows allowed it.
+  When `activated` is `false`, or you launched without `--activate`, tell the
+  user the window opened behind their other windows. When unsure, launch
+  without `--activate` and say so.
 - **The `window` a launch returns can be a splash screen** that closes once
   the app's main window opens. When a command on that window id fails with
   `WINDOW_NOT_FOUND`, run `list-windows --app <app>` and use the current id.
@@ -175,6 +191,18 @@ observation, actions and capture there fail or return nothing.
   readback differs: read `details.post_state` and do not retry. A `set-value`
   the app reformats reads as failed. See `references/troubleshooting.md`.
 - **Unsigned binary warnings are expected.** See `references/troubleshooting.md`.
+- **Sprint Coder's own windows are never operated.** Reading them works, but every
+  operation on them (or on whatever the pointer or keys would reach there) returns
+  `POLICY_DENIED`, `details.kind: "own_window_refused"`, with nothing sent, whatever
+  permission or approval the run has. While Sprint Coder is in front, a wheel, a click with
+  modifiers, and a click on (or a ref action on a part of) a window that never takes the
+  foreground (an on-screen keyboard) are refused too (`details.target: "foreground"`);
+  scroll a window behind it with `scroll` on a ref. A `--headed` drag whose drop point has
+  become Sprint Coder by the time the button is let go is refused there and the button is let
+  go back at the origin: `details.dropped` is `false` only when the origin was read as another
+  app's window, otherwise `null` (see `details.origin_is_sprint_coder`); Sprint Coder itself
+  accepts no drop from outside while desktop control runs. Do not retry by another route:
+  permissions and approvals in Sprint Coder are the user's to change on screen.
 
 ## What differs on Windows
 

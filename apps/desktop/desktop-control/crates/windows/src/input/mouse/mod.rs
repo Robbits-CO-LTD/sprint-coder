@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! `InputOps::mouse_event`: `SendInput` mouse synthesis.
 //!
 //! Bare-coordinate path: `hover`/`mouse-move`/`mouse-click`/
@@ -80,9 +81,20 @@ fn dispatch_click(event: &MouseEvent, count: u32, deadline: Deadline) -> Result<
     deadline.ensure_remaining()?;
     let normalized = mouse_coord::normalize_point(&event.point);
     let mut modifiers = press_modifiers(&event.modifiers);
-    let result = post_click_sequence(&event.button, normalized, count, deadline);
+    let next = NextClick {
+        point: &event.point,
+        reaches_front: !event.modifiers.is_empty(),
+    };
+    let result = post_click_sequence(&event.button, normalized, count, deadline, &next);
     modifiers.release();
     result
+}
+
+/// Where each later click of a sequence lands, judged again just before it is sent
+/// (`own_window::recheck_pointer`), with what reaches the window in front (held modifiers).
+struct NextClick<'a> {
+    point: &'a agent_desktop_core::Point,
+    reaches_front: bool,
 }
 
 /// Delivery accounting spans the whole sequence while cleanup stays per
@@ -95,6 +107,7 @@ fn post_click_sequence(
     normalized: NormalizedPoint,
     count: u32,
     deadline: Deadline,
+    next: &NextClick<'_>,
 ) -> Result<(), AdapterError> {
     post_mouse_inputs(&[move_input(normalized)]);
     let (down_flag, up_flag) = button_flags(button);
@@ -102,6 +115,21 @@ fn post_click_sequence(
     for click_index in 0..count {
         if let Err(error) = deadline.ensure_remaining() {
             return Err(sequence.enrich_error(error, CLICK_SUGGESTION));
+        }
+        // An earlier click can close or move the window that was at the point, so each later
+        // one is judged again by what is there now; refused, none of the rest is sent.
+        if click_index > 0
+            && let Err(error) =
+                crate::system::own_window::recheck_pointer(next.point, next.reaches_front)
+        {
+            let error = crate::system::own_window::refused_part_way(
+                error,
+                "clicks_sent",
+                click_index as usize,
+            );
+            return Err(
+                sequence.enrich_error(error, crate::system::own_window::OWN_WINDOW_SUGGESTION)
+            );
         }
         let mut guard = ClickReleaseGuard::new(up_flag);
         let outcome = click_once(down_flag, up_flag, &mut guard, &mut sequence, deadline);
@@ -153,7 +181,7 @@ fn dispatch_wheel(
     let normalized = mouse_coord::normalize_point(&event.point);
     post_mouse_inputs(&[move_input(normalized)]);
     let mut modifiers = press_modifiers(&event.modifiers);
-    let result = post_wheel_chunks(y_chunks, x_chunks, deadline);
+    let result = post_wheel_chunks(y_chunks, x_chunks, deadline, &event.point);
     modifiers.release();
     result
 }
@@ -167,6 +195,7 @@ fn post_wheel_chunks(
     y_chunks: Vec<i32>,
     x_chunks: Vec<i32>,
     deadline: Deadline,
+    point: &agent_desktop_core::Point,
 ) -> Result<(), AdapterError> {
     let mut delivered = ReleaseState::default();
     for (flag, chunks) in [
@@ -176,6 +205,20 @@ fn post_wheel_chunks(
         for lines in chunks {
             if let Err(error) = deadline.ensure_remaining() {
                 return Err(delivered.enrich_error(error, WHEEL_SUGGESTION));
+            }
+            // Each later wheel event is judged again, as the first was (a wheel reaches the
+            // window in front when scrolling inactive windows is off).
+            if delivered.delivered_units() > 0
+                && let Err(error) = crate::system::own_window::recheck_pointer(point, true)
+            {
+                let error = crate::system::own_window::refused_part_way(
+                    error,
+                    "wheel_events_sent",
+                    delivered.delivered_units(),
+                );
+                return Err(
+                    delivered.enrich_error(error, crate::system::own_window::OWN_WINDOW_SUGGESTION)
+                );
             }
             post_mouse_inputs(&[wheel_input(flag, lines)]);
             delivered.mark_delivered();

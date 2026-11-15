@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: read
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
@@ -60,6 +61,23 @@ jobs:
             echo "::error::Release commit ${GITHUB_SHA} is not reachable from main."
             exit 1
           fi
+
+      # Pull requests run static checks only; the full test matrix first runs on main.
+      - name: Verify main CI passed for the release commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          passed="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f head_sha="${commit}" -f branch=main -f status=success -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch") | .html_url] | first // empty')"
+          if [[ -z "${passed}" ]]; then
+            echo "::error::Main CI has not passed for release commit ${commit}. Wait for the main CI run of this commit to succeed (or tag a commit whose main CI passed), then re-run this workflow."
+            exit 1
+          fi
+          echo "Main CI passed for ${commit}: ${passed}"
 
       - name: Verify embedded client version
         shell: bash

@@ -220,8 +220,13 @@ fn a_started_process_that_exits_beside_a_running_one_is_reported_attached() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A bare launch of an app that runs with no window shown starts it, as a
+/// double click on its icon would, instead of attaching to it. Here the
+/// started process (`ping` with no arguments) prints its usage and exits; the
+/// running one shows no window, so the result says the launch was passed on
+/// and that no window was seen.
 #[test]
-fn attach_true_windowless_does_not_launch_second_process() {
+fn a_bare_launch_beside_a_windowless_instance_starts_the_app() {
     let dir = scratch_dir("windowless");
     let probe = copy_system_exe("ping.exe", &dir, "launchprobe_ping.exe");
     let image = "launchprobe_ping.exe";
@@ -232,30 +237,18 @@ fn attach_true_windowless_does_not_launch_second_process() {
         probe.to_str().expect("utf8 path"),
         &LaunchOptions {
             attach_if_running: true,
-            timeout_ms: 300,
+            timeout_ms: 8_000,
             ..Default::default()
         },
-        Deadline::after(1_000).expect("deadline"),
+        Deadline::after(10_000).expect("deadline"),
     )
-    .expect("attaching to a windowless process is a successful launch, not a failure");
-    assert!(result.attached && !result.new_instance, "{result:?}");
-    assert_eq!(result.suggestion.as_deref(), Some(launch_attach::ATTACHED));
-    assert!(
-        result.window.is_none(),
-        "a windowless process reports no window rather than an error: {result:?}"
-    );
-    assert_eq!(
-        result.pid, running[0],
-        "attach returns the already-running process rather than starting one"
-    );
-    assert_eq!(
-        matching_pids(image).len(),
-        1,
-        "attach must not spawn a second process"
-    );
+    .expect("starting beside a windowless process is a successful launch");
+    assert!(result.running_without_window, "{result:?}");
+    assert_ne!(result.pid, running[0], "a process was started: {result:?}");
+    assert!(result.handed_off && result.window.is_none(), "{result:?}");
+    assert!(!result.new_instance, "{result:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
-
 #[test]
 fn two_matches_are_ambiguous_before_launch() {
     let _lock = NOTEPAD_LAUNCH_LOCK.lock().expect("notepad lock");
