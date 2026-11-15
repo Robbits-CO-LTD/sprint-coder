@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
-import { redactSecrets } from './secret-redactor';
+import { PRIVATE_KEY_BEGIN, redactSecrets } from './secret-redactor';
 
 export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v6';
 
@@ -28,10 +28,22 @@ const STRUCTURED_CREDENTIAL_FIELD =
   /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|cookie)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]{4,})/giu;
 /**
  * A URL whose path is itself the credential: anyone holding it can post as the hook or the bot.
- * Named by its host and path shape, so it is stopped without guessing at how random it looks.
+ * Named by its host and path shape, so it is stopped without guessing at how random it looks. The
+ * scheme is optional (a bare `hooks.slack.com/services/…` works just as well), but the host must
+ * start the token. A placeholder such as `{webhook.token}` or `bot<token>` is too short to match.
  */
 const WEBHOOK_URL =
-  /(https?:\/\/(?:hooks\.slack\.com\/(?:services|workflows|triggers)\/|(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/|api\.telegram\.org\/(?:file\/)?bot))[A-Za-z0-9_:/-]{8,}/giu;
+  /(?<![A-Za-z0-9.-])((?:https?:\/\/)?(?:hooks\.slack\.com\/(?:services|workflows|triggers)\/|(?:(?:www|canary|ptb)\.)?discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/|api\.telegram\.org\/(?:file\/)?bot))[A-Za-z0-9_:/-]{8,}/giu;
+/** An HTTP Basic credential in a header: the base64 after `Basic` is `user:password`. */
+const BASIC_AUTHORIZATION =
+  /(?<![A-Za-z0-9_-])(authorization\s*[:=]\s*["']?basic\s+)[A-Za-z0-9+/]{8,}={0,2}/giu;
+/**
+ * Service tokens identified by their own prefix and length: npm, Hugging Face, SendGrid, a Google
+ * OAuth access token, and Stripe live secret and restricted keys. The lengths keep ordinary words
+ * that share a prefix (`npm_config_cache`, `hf_hub_download`, `SG.` abbreviations) out.
+ */
+const SERVICE_TOKEN =
+  /\b(?:npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}|ya29\.[A-Za-z0-9_-]{20,}|(?:sk|rk)_live_[A-Za-z0-9]{16,})(?![A-Za-z0-9_-])/gu;
 const ENTROPY_CANDIDATE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_+/=-]{24,}(?![A-Za-z0-9_-])/gu;
 
 /**
@@ -69,11 +81,12 @@ function assessDisclosure(
   if (matches(PROVIDER_TOKEN, content)) reasons.add('ai-provider-token');
   if (matches(SLACK_TOKEN, content)) reasons.add('slack-token');
   if (matches(GITLAB_TOKEN, content)) reasons.add('gitlab-token');
-  if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/iu.test(content))
-    reasons.add('private-key');
+  if (PRIVATE_KEY_BEGIN.test(content)) reasons.add('private-key');
   if (matches(COOKIE_VALUE, content)) reasons.add('cookie');
   if (matches(STRUCTURED_CREDENTIAL_FIELD, content)) reasons.add('credential-field');
   if (matches(WEBHOOK_URL, content)) reasons.add('webhook-url');
+  if (matches(BASIC_AUTHORIZATION, content)) reasons.add('authorization-header');
+  if (matches(SERVICE_TOKEN, content)) reasons.add('service-token');
   if (baselineRedacted !== content) reasons.add('known-secret-pattern');
 
   const contentDocumentSpans = ordinaryDocumentSpans(content, relativePath);
@@ -100,7 +113,9 @@ function assessDisclosure(
       const separator = value.search(/[:=]/u);
       return separator < 0 ? '[REDACTED_CREDENTIAL]' : `${value.slice(0, separator + 1)}[REDACTED]`;
     })
-    .replace(WEBHOOK_URL, '$1[REDACTED_WEBHOOK]');
+    .replace(WEBHOOK_URL, '$1[REDACTED_WEBHOOK]')
+    .replace(BASIC_AUTHORIZATION, '$1[REDACTED]')
+    .replace(SERVICE_TOKEN, '[REDACTED_TOKEN]');
   if (highEntropy) {
     const redactedDocumentSpans = ordinaryDocumentSpans(redactedContent, relativePath);
     redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate, offset: number) =>

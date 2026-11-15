@@ -4,8 +4,12 @@ export type StreamingSecretRedactor = {
 };
 
 const CARRY_CHARACTERS = 4_096;
-const PRIVATE_KEY_BEGIN = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i;
-const PRIVATE_KEY_END = /-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i;
+// Any armored private key: PKCS#8 (`PRIVATE KEY`), `ENCRYPTED`, `RSA`, `EC`, `DSA`, `OPENSSH`, and
+// the PGP `PRIVATE KEY BLOCK`. A public key or a certificate has no `PRIVATE` and is left alone.
+export const PRIVATE_KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/i;
+const PRIVATE_KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/i;
+const PRIVATE_KEY_BLOCK =
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/gi;
 
 class Redactor implements StreamingSecretRedactor {
   private pending = '';
@@ -66,10 +70,7 @@ class Redactor implements StreamingSecretRedactor {
 export function redactSecrets(input: string): string {
   return (
     input
-      .replace(
-        /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
-        '[REDACTED_PRIVATE_KEY]',
-      )
+      .replace(PRIVATE_KEY_BLOCK, '[REDACTED_PRIVATE_KEY]')
       .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [REDACTED]')
       // AWS long-term/temporary access key IDs are self-identifying by prefix and fixed length,
       // so this catches one embedded inline in output with no surrounding `KEY=` label at all.

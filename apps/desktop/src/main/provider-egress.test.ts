@@ -779,6 +779,8 @@ if (runsWithElectronAbi)
       );
       const every = describeProviderEgressDenial([
         'ai-provider-token',
+        'authorization-header',
+        'service-token',
         'cookie',
         'credential-field',
         'credential-prone-filename',

@@ -126,6 +126,106 @@ describe('Provider send (egress) classification', () => {
       ]);
     expect(assessProviderDisclosure(slackWebhook, 'notes.json').reasons).toContain('webhook-url');
   });
+
+  it.each([
+    'PRIVATE KEY',
+    'RSA PRIVATE KEY',
+    'EC PRIVATE KEY',
+    'OPENSSH PRIVATE KEY',
+    'ENCRYPTED PRIVATE KEY',
+    'DSA PRIVATE KEY',
+    'PGP PRIVATE KEY BLOCK',
+  ])('stops an armored %s, with or without its body and end', (kind) => {
+    const body = 'MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA';
+    const block = `-----BEGIN ${kind}-----\n${body}\n-----END ${kind}-----`;
+    for (const content of [
+      `鍵: ${block}`,
+      `-----BEGIN ${kind}-----`,
+      `-----BEGIN ${kind}-----\n${body}`,
+    ]) {
+      const assessment = assessProviderEgressDisclosure(content);
+      expect(assessment.classification).toBe('sensitive');
+      expect(assessment.reasons).toContain('private-key');
+    }
+    expect(assessProviderEgressDisclosure(`鍵: ${block}`).redactedContent).toBe(
+      '鍵: [REDACTED_PRIVATE_KEY]',
+    );
+  });
+
+  it.each(['PUBLIC KEY', 'RSA PUBLIC KEY', 'CERTIFICATE', 'PGP PUBLIC KEY BLOCK'])(
+    'lets an armored %s through',
+    (kind) => {
+      const content = `-----BEGIN ${kind}-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END ${kind}-----`;
+      expect(assessProviderEgressDisclosure(content)).toMatchObject({
+        classification: 'safe',
+        redactedContent: content,
+      });
+    },
+  );
+
+  // Assembled at run time so the source holds no literal token.
+  const alnum = (length: number) =>
+    'Zx8Kp2Qm7Lw4Nv9Rt3Ys6Hb1Jd5Fg0CaQw7Er4Ty1Ui8Op5As2Df9Gh6'.repeat(2).slice(0, length);
+  it.each([
+    ['an npm token', `//registry.npmjs.org/:_authToken=${['npm', alnum(36)].join('_')}`],
+    ['a Hugging Face token', `HF ${['hf', alnum(34)].join('_')}`],
+    ['a SendGrid key', ['SG', alnum(22), alnum(43)].join('.')],
+    ['a Google OAuth token', `token ${['ya29', `a0${alnum(40)}`].join('.')}`],
+    ['a Stripe live secret key', ['sk', 'live', alnum(24)].join('_')],
+    ['a Stripe restricted key', ['rk', 'live', alnum(24)].join('_')],
+  ])('stops %s by its prefix', (_label, content) => {
+    const assessment = assessProviderEgressDisclosure(content);
+    expect(assessment.classification).toBe('sensitive');
+    expect(assessment.reasons).toContain('service-token');
+    expect(assessment.redactedContent).not.toContain(alnum(20));
+  });
+
+  it.each([
+    'curl -H "Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l" https://example.com/',
+    'authorization: basic dXNlcjpwYXNzd29yZA==',
+  ])('stops an HTTP Basic credential in a header (%#)', (content) => {
+    const assessment = assessProviderEgressDisclosure(content);
+    expect(assessment.reasons).toContain('authorization-header');
+    expect(assessment.redactedContent).not.toMatch(/YWxhZGRpbjpvcGVuc2VzYW1l|dXNlcjpwYXNzd29yZA/u);
+  });
+
+  it.each([
+    'npm_config_cache=/tmp/npm',
+    'npm_modules',
+    'from huggingface_hub import hf_hub_download',
+    'SG.Corp and SG.example.com',
+    'ya29 is the prefix of a Google token',
+    'sk_live_ is the prefix of a Stripe key',
+    'Basic authentication is required',
+    'Authorization: Basic',
+  ])('lets a word that only shares a prefix through (%#)', (content) => {
+    expect(assessProviderEgressDisclosure(content)).toMatchObject({
+      classification: 'safe',
+      reasons: [],
+    });
+  });
+
+  it.each([
+    ['hooks.slack.com/services', 'T024BE7LD', 'B01ABCDEF12', 'aB3aB3cD4cD4eF5eF5gH6gH6'],
+    ['www.discord.com/api/webhooks', '123456789012345678', alnum(68)],
+    ['discordapp.com/api/v10/webhooks', '123456789012345678', alnum(68)],
+  ])('stops a webhook URL written without its scheme (%#)', (...parts) => {
+    const assessment = assessProviderEgressDisclosure(`通知先は ${parts.join('/')} です`);
+    expect(assessment.reasons).toContain('webhook-url');
+    expect(assessment.redactedContent).toContain('[REDACTED_WEBHOOK]');
+  });
+
+  it.each([
+    'https://discord.com/api/webhooks/{webhook.id}/{webhook.token}',
+    'https://api.telegram.org/bot<token>/sendMessage',
+    'https://api.slack.com/messaging/webhooks',
+    'See notahooks.slack.com/services/T024BE7LD/B01ABCDEF12',
+  ])('lets documentation of a webhook through (%#)', (content) => {
+    expect(assessProviderEgressDisclosure(content)).toMatchObject({
+      classification: 'safe',
+      reasons: [],
+    });
+  });
 });
 
 describe('provider disclosure classifier', () => {

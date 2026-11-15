@@ -21,6 +21,8 @@ export type ProviderEgressDecision = Readonly<{
 const DISCLOSURE_REASON_WORDS: Readonly<Record<string, string>> = {
   'uri-userinfo': 'ユーザー名やパスワードの入った URL',
   'webhook-url': 'Webhook の URL',
+  'authorization-header': '認証の header（Authorization: Basic）',
+  'service-token': 'サービスの token',
   'ai-provider-token': 'API key',
   'slack-token': 'Slack の token',
   'gitlab-token': 'GitLab の token',
