@@ -3,6 +3,9 @@ use super::{
     ButtonRead, HoldReport, LOCK_UNAVAILABLE, SETTLE_INCOMPLETE, SETTLE_NO_WINDOW, Settle,
     TARGET_IN_FRONT, lock_needed, lock_unavailable_refusal, note_report, target_came_forward,
 };
+use crate::actions::foreground_return::{
+    HAND_BACK_FAILED, HANDED_BACK, HandBackOutcome, LEFT_FOR_USER,
+};
 use agent_desktop_core::{ActionResult, AdapterError, ErrorCode, InteractionPolicy};
 
 fn report(locked: bool, settle: Settle, came_forward: bool) -> HoldReport {
@@ -10,7 +13,44 @@ fn report(locked: bool, settle: Settle, came_forward: bool) -> HoldReport {
         locked,
         settle,
         came_forward,
+        hand_back: HandBackOutcome::None,
     }
+}
+
+/// A hand-back that worked says so; a target left in front says why it was
+/// not handed back, beside `target_in_front`; nothing else adds a word.
+#[test]
+fn the_hand_back_is_named_beside_the_foreground() {
+    let with = |came_forward: bool, hand_back: HandBackOutcome| {
+        HoldReport {
+            hand_back,
+            ..report(true, Settle::Settled, came_forward)
+        }
+        .entries()
+    };
+    assert_eq!(
+        with(false, HandBackOutcome::HandedBack),
+        [("foreground", HANDED_BACK)]
+    );
+    assert_eq!(
+        with(true, HandBackOutcome::Failed),
+        [
+            ("foreground", TARGET_IN_FRONT),
+            ("foreground_hand_back", HAND_BACK_FAILED)
+        ]
+    );
+    assert_eq!(
+        with(true, HandBackOutcome::LeftForUser),
+        [
+            ("foreground", TARGET_IN_FRONT),
+            ("foreground_hand_back", LEFT_FOR_USER)
+        ]
+    );
+    assert_eq!(
+        with(true, HandBackOutcome::None),
+        [("foreground", TARGET_IN_FRONT)]
+    );
+    assert!(with(false, HandBackOutcome::None).is_empty());
 }
 
 #[test]
