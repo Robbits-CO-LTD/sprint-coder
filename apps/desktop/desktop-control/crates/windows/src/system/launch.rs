@@ -330,6 +330,18 @@ fn existing_at_the_end(
     })
 }
 
+/// A window kept as `came_forward` stays a candidate only while the latest
+/// read still shows it for the same process instance: one closed during the
+/// wait, or whose instance ended (`read` is `None`), is dropped, so the end
+/// of the watch never names a window that is gone (it falls back to the
+/// latest `only_existing`, else to no window).
+fn came_forward_after_read(
+    kept: Option<WindowInfo>,
+    read: Option<&launch_handoff::HandoffRead>,
+) -> Option<WindowInfo> {
+    kept.filter(|window| read.is_some_and(|read| read.still_shows(window)))
+}
+
 /// `GetTickCount` now, to tell the user's input after the launch began;
 /// `None` where it cannot be read, which counts as input.
 #[cfg(target_os = "windows")]
@@ -426,6 +438,7 @@ fn observe_launched_window(
             let instance_runs = handoff.any_running();
             if instance_runs {
                 let read = handoff.read(deadline).map_err(after_launch)?;
+                came_forward = came_forward_after_read(came_forward, Some(&read));
                 match read.look {
                     launch_handoff::HandoffLook::One(window) => {
                         let mut owners = lineage.pids();
@@ -494,6 +507,9 @@ fn observe_launched_window(
                 if !descendants_alive {
                     wait_until = handoff_until;
                 }
+            } else {
+                // The instance ended: its window is gone with it.
+                came_forward = came_forward_after_read(came_forward, None);
             }
             let wait_over = wait_until.remaining().is_zero();
             if launch_handoff::after_exit(descendants_alive, instance_runs, wait_over)
@@ -1754,6 +1770,70 @@ mod foreground_guard_tests {
             .expect("the only window");
         assert_eq!(only.existing, Some(launch_attach::ExistingWindow::Only));
         assert!(super::existing_at_the_end(&lineage(), None, None).is_none());
+    }
+
+    /// #1299's review: a window kept as `came_forward` (`MaybeUser`) that is
+    /// closed during the wait, or whose instance ends, is not named at the
+    /// end: the latest read's only window, or no window, is.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_window_that_came_forward_and_closed_during_the_wait_is_not_named() {
+        use super::came_forward_after_read;
+        use super::launch_handoff::{HandoffLook, HandoffRead, Lineage, Process};
+        let me = ProcessId::from(std::process::id());
+        let lineage = || Lineage::new(me, "me:1", Process::open(me).expect("own process"));
+        let window = |id: &str, instance: &str| WindowInfo {
+            id: id.into(),
+            title: String::new(),
+            app: "app.exe".into(),
+            pid: ProcessId::from(8),
+            process_instance: Some(instance.into()),
+            bounds: None,
+            state: WindowState::default(),
+        };
+        let read = |shown: &[&str], only: Option<WindowInfo>| HandoffRead {
+            look: HandoffLook::None,
+            raised: None,
+            only_existing: only,
+            shown: shown
+                .iter()
+                .map(|id| ((*id).to_string(), Some("8:1".to_string())))
+                .collect(),
+        };
+        let picker = window("w-picker", "8:1");
+
+        // Still shown by the same instance: kept, and named at the end.
+        let kept = came_forward_after_read(
+            Some(picker.clone()),
+            Some(&read(&["w-picker", "w-browser"], None)),
+        );
+        assert_eq!(kept.as_ref().map(|w| w.id.as_str()), Some("w-picker"));
+
+        // Closed during the wait: the latest read names the browser as the
+        // only window, and that is what the end of the watch returns.
+        let later = read(&["w-browser"], Some(window("w-browser", "8:1")));
+        let kept = came_forward_after_read(kept, Some(&later));
+        assert!(kept.is_none());
+        let end = super::existing_at_the_end(&lineage(), kept, later.only_existing.clone())
+            .expect("the only window");
+        assert_eq!(
+            end.window.as_ref().map(|w| w.id.as_str()),
+            Some("w-browser")
+        );
+        assert_eq!(end.existing, Some(launch_attach::ExistingWindow::Only));
+
+        // Closed, and no only window: no window at all.
+        let kept = came_forward_after_read(Some(picker.clone()), Some(&read(&[], None)));
+        assert!(super::existing_at_the_end(&lineage(), kept, None).is_none());
+
+        // The same handle now of another instance (reused), and an instance
+        // that ended: both drop it.
+        let reused = HandoffRead {
+            shown: vec![("w-picker".to_string(), Some("8:2".to_string()))],
+            ..read(&[], None)
+        };
+        assert!(came_forward_after_read(Some(picker.clone()), Some(&reused)).is_none());
+        assert!(came_forward_after_read(Some(picker), None).is_none());
     }
     #[test]
     fn a_foreground_that_stayed_on_the_prior_window_is_restored() {
