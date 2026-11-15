@@ -112,6 +112,14 @@ function windowsNativePath(path) {
   );
 }
 
+// Inputs of the desktop-control release build (build-desktop-control.mjs). TypeScript callers
+// under src/main are not compiled by Cargo, so they do not select this build.
+function desktopControlRustPath(path) {
+  return /^(?:build-desktop-control\.mjs|\.github\/actions\/prepare-desktop-control\/|apps\/desktop\/desktop-control\/)/u.test(
+    path,
+  );
+}
+
 function sandboxPath(path) {
   return /^(?:apps\/desktop\/(?:sandbox-runner\/|resources\/sandbox|src\/main\/sandbox)|build-sandbox-runner\.mjs|\.github\/actions\/prepare-sandbox\/)/u.test(
     path,
@@ -185,10 +193,17 @@ function websiteCheckPath(path) {
 }
 
 /**
+ * Pull requests run static checks only: typecheck, lint, package tests, the website checks and,
+ * for Rust changes, a Windows compile. Every test suite and package smoke first runs on main after
+ * the merge, and a release requires that main run to have passed (release-beta.yml).
+ * `pullRequestTests` restores the earlier PR selection of related tests and package smokes.
  * @param {Change[]} changes The complete PR or push diff.
- * @param {{eventName?: string}} [options]
+ * @param {{eventName?: string, pullRequestTests?: boolean}} [options]
  */
-export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
+export function classifyChanges(
+  changes,
+  { eventName = 'pull_request', pullRequestTests = false } = {},
+) {
   if (!Array.isArray(changes)) throw new Error('Changes must be an array');
   for (const change of changes) {
     if (
@@ -233,27 +248,28 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
         ? [...(windowsOnly ? [] : ['linux']), ...(windows ? ['windows'] : [])]
         : [];
   const rendererOnly = desktop.length > 0 && desktop.every(({ path }) => path.startsWith(RENDERER));
+  const prTests = mode === 'pr' && pullRequestTests;
+  const rustCompile = (rustPath) =>
+    mode === 'pr' && desktop.some(({ path }) => rustPath(path) || (broad && ciPath(path)));
   return {
     mode,
     shared:
       full ||
       (mode === 'pr' && (broad || desktop.some(({ path }) => path.startsWith('packages/')))),
-    platforms,
-    native: full || (mode === 'pr' && (!rendererOnly || allRelatedPlatforms)),
-    windowsRust:
-      full ||
-      (mode === 'pr' &&
-        (desktop.some(({ path }) => sandboxPath(path)) ||
-          (broad && desktop.some(({ path }) => ciPath(path))))),
-    distribution,
+    platforms: full || prTests ? platforms : [],
+    native: full || (prTests && (!rendererOnly || allRelatedPlatforms)),
+    windowsRust: full || rustCompile(sandboxPath),
+    // Main builds desktop control in every full Windows test shard; a PR only compiles it.
+    desktopControlRust: rustCompile(desktopControlRustPath),
+    distribution: (full || prTests) && distribution,
     websiteRequired,
     // Boundary and dependency changes reach most of the suite through imports or Vitest's
     // rerun triggers; CI-only and native-source changes select only their boundary specs.
     splitRelated:
-      mode === 'pr' &&
+      prTests &&
       allRelatedPlatforms &&
       desktop.some(({ path, status }) => !['A', 'M'].includes(status) || !lightRelatedPath(path)),
-    specs: mode === 'pr' ? boundarySpecs(desktop, broad, distribution) : [],
+    specs: prTests ? boundarySpecs(desktop, broad, distribution) : [],
   };
 }
 
@@ -262,10 +278,16 @@ function validateScope(scope) {
     scope === null ||
     typeof scope !== 'object' ||
     !['docs', 'website', 'pr', 'full'].includes(scope.mode) ||
-    !['native', 'shared', 'windowsRust', 'distribution', 'websiteRequired', 'splitRelated'].every(
-      (key) => typeof scope[key] === 'boolean',
-    ) ||
-    (scope.mode !== 'pr' && scope.splitRelated) ||
+    ![
+      'native',
+      'shared',
+      'windowsRust',
+      'desktopControlRust',
+      'distribution',
+      'websiteRequired',
+      'splitRelated',
+    ].every((key) => typeof scope[key] === 'boolean') ||
+    (scope.mode !== 'pr' && (scope.splitRelated || scope.desktopControlRust)) ||
     !Array.isArray(scope.specs) ||
     !scope.specs.every((spec) => safePath(spec) && /\.test\.(?:mjs|ts|tsx)$/u.test(spec)) ||
     !Array.isArray(scope.platforms) ||
@@ -277,7 +299,9 @@ function validateScope(scope) {
         !scope.shared ||
         !scope.windowsRust ||
         !scope.websiteRequired)) ||
-    (scope.mode === 'pr' && scope.platforms.length === 0) ||
+    // Related tests and their native builds need at least one platform to run on.
+    (scope.platforms.length === 0 &&
+      (scope.native || scope.splitRelated || scope.specs.length > 0)) ||
     (['docs', 'website'].includes(scope.mode) &&
       (scope.platforms.length !== 0 ||
         scope.native ||
@@ -317,6 +341,7 @@ export function scopeOutputs(scope) {
     boundary_specs: JSON.stringify(scope.specs),
     shared_required: String(scope.shared),
     windows_rust_required: String(scope.windowsRust),
+    desktop_control_rust_required: String(scope.desktopControlRust),
     full_matrix: String(full),
     platform_required: String(platformRows.length > 0),
     platform_matrix: JSON.stringify({ include: platformRows }),
@@ -338,7 +363,7 @@ export function verifyRequiredJobs(scope, results) {
   const required = new Set(['classify']);
   if (output.quality_required === 'true') required.add('quality');
   if (scope.shared) required.add('package-tests');
-  if (scope.windowsRust) required.add('sandbox-rust-windows');
+  if (scope.windowsRust || scope.desktopControlRust) required.add('sandbox-rust-windows');
   if (output.platform_required === 'true') required.add('platform-tests');
   if (scope.mode === 'full') {
     required.add('renderer-tests');
