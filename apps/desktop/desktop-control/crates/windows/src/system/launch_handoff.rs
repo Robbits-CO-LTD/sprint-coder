@@ -25,8 +25,9 @@
 //! now), and reports it as the running instance's window (`handed_off`), never as a
 //! window of a process the launch started (`new_instance` stays false).
 
-use std::collections::HashSet;
-use std::time::Duration;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use agent_desktop_core::{AdapterError, Deadline, ProcessId, WindowFilter, WindowInfo};
 
@@ -62,6 +63,11 @@ pub(super) struct Handoff {
     /// Whether several of the instances already showed windows (see
     /// [`several_instances_show_windows`]).
     several_instances: bool,
+    /// When each window an instance showed after the launch started was first
+    /// seen, read while the launched process still runs too (`note`), so the
+    /// time since a window appeared is known when the launch is found to have
+    /// been passed on, however long the launched process took to exit.
+    first_seen: RefCell<HashMap<String, Instant>>,
 }
 
 impl Handoff {
@@ -80,6 +86,7 @@ impl Handoff {
             instances,
             before: shown.map(|(ids, _)| ids),
             several_instances,
+            first_seen: RefCell::new(HashMap::new()),
         }
     }
 
@@ -90,7 +97,19 @@ impl Handoff {
             .any(|instance| !instance.process.has_exited())
     }
 
+    /// One read of the windows, only to record when each window an instance
+    /// showed after the launch started was first seen.
+    pub(super) fn note(&self, deadline: Deadline) -> Result<(), AdapterError> {
+        self.look(deadline).map(|_| ())
+    }
+
+    /// When the window `id` was first seen by `note` or `look`, if it was.
+    pub(super) fn first_seen(&self, id: &str) -> Option<Instant> {
+        self.first_seen.borrow().get(id).copied()
+    }
+
     /// One look for the window a still-running instance showed for the launch.
+    /// Every such window seen is recorded with the time it was first seen.
     pub(super) fn look(&self, deadline: Deadline) -> Result<HandoffLook, AdapterError> {
         let Some(before) = &self.before else {
             return Ok(HandoffLook::None);
@@ -109,18 +128,49 @@ impl Handoff {
             app: None,
         };
         match super::list_windows_live(&filter, deadline) {
-            Ok(windows) => Ok(pick_handoff_window(
-                windows,
-                &targets,
-                before,
-                self.several_instances,
-            )),
+            Ok(windows) => Ok({
+                record_first_seen(
+                    &mut self.first_seen.borrow_mut(),
+                    fresh_window_ids(&windows, &targets, before),
+                    Instant::now(),
+                );
+                pick_handoff_window(windows, &targets, before, self.several_instances)
+            }),
             Err(error) if super::is_unobservable_within_budget(&error) => Ok(HandoffLook::None),
             Err(error) => Err(error),
         }
     }
 }
 
+/// The ids of the windows of `targets` (same pid and process instance) that
+/// were not shown before the launch.
+pub(super) fn fresh_window_ids<'a>(
+    windows: &'a [WindowInfo],
+    targets: &[(ProcessId, Option<String>)],
+    before: &HashSet<String>,
+) -> Vec<&'a str> {
+    windows
+        .iter()
+        .filter(|window| !before.contains(&window.id))
+        .filter(|window| {
+            targets.iter().any(|(pid, token)| {
+                window.pid == *pid && token.is_some() && window.process_instance == *token
+            })
+        })
+        .map(|window| window.id.as_str())
+        .collect()
+}
+
+/// Records `now` for each id not recorded yet: the first time it was seen.
+pub(super) fn record_first_seen(
+    first_seen: &mut HashMap<String, Instant>,
+    ids: Vec<&str>,
+    now: Instant,
+) {
+    for id in ids {
+        first_seen.entry(id.to_string()).or_insert(now);
+    }
+}
 /// What a launch does after the process it started exited without a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AfterExit {

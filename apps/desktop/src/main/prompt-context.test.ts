@@ -210,7 +210,11 @@ describe('prompt context compiler', () => {
     );
     expect(compiled.content).toContain('自分が続けて裏で操作するための起動には付けない');
     expect(compiled.content).toContain(
-      '迷ったら付けずに開き、「後ろに開きました」と利用者に伝える',
+      '迷ったら付けずに開く。付けずに開いた時は、結果の window.is_focused で利用者に伝える: false なら「後ろに開きました」',
+    );
+    expect(compiled.content).toContain('注記があれば「前面に開きました」');
+    expect(compiled.content).toContain(
+      'true で注記が無ければ「後ろに開いた」とも誰が前に出したかとも言わず「窓は開いていて、今は前面にあります」とだけ伝える',
     );
     // A launch that reached the person's running app is not one the agent opened.
     expect(compiled.content).toContain(

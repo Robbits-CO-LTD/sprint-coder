@@ -426,6 +426,12 @@ pub(super) const HANDED_OFF_NEW_WINDOW: &str = "The launched process passed the 
      process this launch started, so new_instance is false; the instance's other windows may be \
      ones the user already had open.";
 
+/// Added to the guidance when, without `--activate`, the window a running
+/// instance showed stayed in front: the app took the foreground and it could
+/// not be handed back.
+pub(super) const HANDED_OFF_LEFT_IN_FRONT: &str = "That window took the front on its own and \
+     could not be put back behind the window that was in front before the launch \
+     (`window.is_focused` is true): tell the user it opened in front of their windows.";
 /// The guidance a launch reports when it was passed to a running instance
 /// but cannot tell which window that instance showed for it.
 pub(super) const HANDED_OFF_AMBIGUOUS: &str = "The launched process passed the launch to an \
