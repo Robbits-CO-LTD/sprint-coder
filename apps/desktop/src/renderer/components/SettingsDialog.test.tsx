@@ -80,6 +80,7 @@ describe('which body the flag selects', () => {
       'replies',
       'team',
       'skills',
+      'appearance',
       'advanced',
     ]);
     for (const html of [workspace(), legacy()]) {
@@ -126,6 +127,30 @@ describe('which body the flag selects', () => {
     expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
     expect(html).toMatch(/data-testid="settings-page-team"[^>]*hidden=""/);
     expect(html).not.toContain('data-testid="settings-nav-general"');
+  });
+
+  it('offers the theme on its own 見た目 page, and in the single-column layout too', () => {
+    stubBridge();
+    const html = workspace();
+    const page = html.slice(html.indexOf('data-testid="settings-page-appearance"'));
+    expect(page.indexOf('data-testid="settings-theme"')).toBeGreaterThan(0);
+    expect(page.indexOf('data-testid="settings-theme"')).toBeLessThan(
+      page.indexOf('data-testid="settings-page-advanced"'),
+    );
+    expect(html.indexOf('settings-nav-skills')).toBeLessThan(
+      html.indexOf('settings-nav-appearance'),
+    );
+    expect(html.indexOf('settings-nav-appearance')).toBeLessThan(
+      html.indexOf('settings-nav-advanced'),
+    );
+    for (const body of [html, legacy()]) {
+      for (const id of ['black', 'gray', 'white'])
+        expect(body).toContain(`data-testid="settings-theme-${id}"`);
+    }
+    // Settings shows its own theme even where its surroundings are held to another (the Setup).
+    expect(renderToStaticMarkup(<SettingsDialog open onClose={() => {}} />)).toMatch(
+      /<dialog[^>]*data-theme="black"/,
+    );
   });
 
   it('adds the 返事の仕方 page between モデルと接続 and Team in both layouts', () => {

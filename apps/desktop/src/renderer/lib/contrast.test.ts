@@ -7,10 +7,12 @@ import {
   findSelectorOpacity,
   parseHexColor,
   parseRootCustomProperties,
+  parseThemeCustomProperties,
   WCAG_AA_LARGE_TEXT_OR_UI,
   WCAG_AA_NORMAL_TEXT,
 } from './contrast';
 import type { RGB } from './contrast';
+import { DEFAULT_THEME, THEMES } from '../../window-theme';
 
 // NFR-A11Y-01 (docs/PRODUCT_AND_TECHNICAL_DESIGN.md): "WCAG 2.2 AA相当のcontrastを満たす". This
 // audits every design token used as text/UI colour against the backgrounds it actually appears on
@@ -20,19 +22,38 @@ import type { RGB } from './contrast';
 // The current GitHub Dark-inspired palette keeps the workspace neutral while retaining the expanded
 // surface/foreground system introduced later. Each group states which contrast bar it is held to,
 // so visual direction changes cannot silently weaken readability.
+//
+// Every theme is held to the same bars. A theme's tokens are the default theme's (the first block
+// of index.css) with the theme's own block of themes.css laid over them, which is what
+// `<html data-theme>` resolves to. The list of themes is window-theme.ts's, so a theme added there
+// is audited from the moment it exists.
 
 const cssPath = join(__dirname, '..', 'index.css');
 const css = readFileSync(cssPath, 'utf8');
-const tokens = parseRootCustomProperties(css);
+const themesCss = readFileSync(join(__dirname, '..', 'themes.css'), 'utf8');
+const defaultTokens = parseRootCustomProperties(css);
 // The Task history panel's own rules live beside index.css; they use the same tokens.
 const sidebarCss = readFileSync(join(__dirname, '..', 'sidebar.css'), 'utf8');
 
-function tokenRgb(name: string): RGB {
-  const value = tokens.get(name);
-  if (!value) throw new Error(`Token --${name} not found in index.css`);
-  const rgb = parseHexColor(value);
-  if (!rgb) throw new Error(`Token --${name} (${value}) is not a plain hex color`);
-  return rgb;
+const THEME_IDS = THEMES.map(({ id }) => id);
+
+function tokensOf(theme: string): Map<string, string> {
+  if (theme === DEFAULT_THEME) return defaultTokens;
+  const own = parseThemeCustomProperties(themesCss, theme);
+  if (own === null) throw new Error(`Theme ${theme} has no block in themes.css`);
+  return new Map([...defaultTokens, ...own]);
+}
+
+/** Reads one theme's tokens as colours. */
+function tokenReader(theme: string): (name: string) => RGB {
+  const tokens = tokensOf(theme);
+  return (name) => {
+    const value = tokens.get(name);
+    if (!value) throw new Error(`Token --${name} not found for theme ${theme}`);
+    const rgb = parseHexColor(value);
+    if (!rgb) throw new Error(`Token --${name} (${value}) is not a plain hex color`);
+    return rgb;
+  };
 }
 
 /**
@@ -76,7 +97,9 @@ const TEXT_TOKENS = [
   'ai-accent',
 ] as const;
 
-describe('design-token contrast audit (WCAG 2.2 AA)', () => {
+describe.each(THEME_IDS)('design-token contrast audit (WCAG 2.2 AA), theme %s', (theme) => {
+  const tokenRgb = tokenReader(theme);
+
   it('every surface token is actually opaque (parseable as hex)', () => {
     for (const bg of [...CONTENT_SURFACES, 'accent-muted']) {
       expect(() => tokenRgb(bg)).not.toThrow();
@@ -167,7 +190,9 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
 // surface the pill sits on is what makes "readable at every phase of the sweep" a checked property
 // rather than a hope — a gradient is exactly the kind of thing that looks fine in the frame someone
 // screenshots and fails in the frames they do not.
-describe('thinking pill sheen gradient (issue #17)', () => {
+describe.each(THEME_IDS)('thinking pill sheen gradient (issue #17), theme %s', (theme) => {
+  const tokenRgb = tokenReader(theme);
+
   it.each(['text-secondary', 'text-primary'] as const)(
     'stop --%s stays readable on the timeline background',
     (stop) => {
@@ -202,7 +227,9 @@ describe('thinking pill sheen gradient (issue #17)', () => {
   });
 });
 
-describe('opacity-dimmed text usages (real text, not decorative)', () => {
+describe.each(THEME_IDS)('opacity-dimmed text usages (real text), theme %s', (theme) => {
+  const tokenRgb = tokenReader(theme);
+
   // Placeholder text and de-emphasized list metadata are real, readable content (not disabled or
   // decorative) — WCAG's contrast SC still applies, even though the visual design intentionally
   // dims them below full --text-secondary strength via `opacity`.
@@ -215,6 +242,14 @@ describe('opacity-dimmed text usages (real text, not decorative)', () => {
       selector: '.sb-search input::placeholder',
       bg: 'bg-app',
       label: 'Sidebar search placeholder',
+      source: sidebarCss,
+    },
+    {
+      // In a light theme the sidebar is the darker of the two, so the same field is checked
+      // against the sidebar itself as well: whichever way a theme orders them, both ends hold.
+      selector: '.sb-search input::placeholder',
+      bg: 'bg-sidebar',
+      label: 'Sidebar search placeholder (over the sidebar)',
       source: sidebarCss,
     },
     // The hint now sits on its own --bg-panel plate rather than on a near-transparent tint of the

@@ -63,18 +63,38 @@ export function compositeOver(fg: RGB, bg: RGB, alpha: number): RGB {
 export const WCAG_AA_NORMAL_TEXT = 4.5;
 export const WCAG_AA_LARGE_TEXT_OR_UI = 3.0;
 
-/** Parses every `--name: value;` declaration out of the first `:root { ... }` block in a CSS
- * source string. Only used for the small, closed set of tokens this app defines — not a general
- * CSS parser (doesn't handle nested rules, comments inside the block, or multi-value shorthands). */
-export function parseRootCustomProperties(css: string): Map<string, string> {
-  const match = /:root\s*\{([^}]*)\}/.exec(css);
-  const body = match?.[1] ?? '';
+function customPropertiesOf(body: string): Map<string, string> {
   const props = new Map<string, string>();
   const re = /--([a-zA-Z0-9-]+)\s*:\s*([^;]+);/g;
   for (const m of body.matchAll(re)) {
     props.set(m[1]!.trim(), m[2]!.trim());
   }
   return props;
+}
+
+/** Parses every `--name: value;` declaration out of the first `:root { ... }` block in a CSS
+ * source string (the block may be shared with other selectors, as index.css's is with the default
+ * theme's own name). Only used for the small, closed set of tokens this app defines — not a general
+ * CSS parser (doesn't handle nested rules, comments inside the block, or multi-value shorthands). */
+export function parseRootCustomProperties(css: string): Map<string, string> {
+  const match = /:root\s*(?:,[^{]*)?\{([^}]*)\}/.exec(css);
+  return customPropertiesOf(match?.[1] ?? '');
+}
+
+/** The declarations of one theme's own block, `[data-theme='<id>'] { ... }`, in a stylesheet where
+ * that selector stands alone (themes.css). `null` when the stylesheet has no such block. */
+export function parseThemeCustomProperties(css: string, theme: string): Map<string, string> | null {
+  const match = new RegExp(`(?:^|\\})\\s*\\[data-theme='${theme}'\\]\\s*\\{([^}]*)\\}`).exec(
+    css.replace(/\/\*[\s\S]*?\*\//g, ''),
+  );
+  return match ? customPropertiesOf(match[1]!) : null;
+}
+
+/** The ids of the themes a stylesheet gives a block of their own (themes.css). */
+export function themeBlockIds(css: string): string[] {
+  return [
+    ...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\[data-theme='([a-z0-9-]+)'\]\s*\{/g),
+  ].map((m) => m[1]!);
 }
 
 /** Reads the numeric `opacity:` value declared for a given CSS selector block. Returns null if the

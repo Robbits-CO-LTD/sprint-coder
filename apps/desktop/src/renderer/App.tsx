@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import './index.css';
+import './themes.css';
 import './sidebar.css';
 import './setup.css';
 import { useAppStore } from './store/appStore';
@@ -463,6 +464,9 @@ export default function App() {
     <TaskBoundaryProvider value={{ selectTask: selectTaskFromUi, createTask: createTaskFromUi }}>
       <div
         className="app-frame"
+        // A Setup holds the whole window, title bar included, and its stage stays 黒 under every
+        // theme; the chosen theme takes the window back as the Setup lets go of it.
+        data-theme={showSetupWizard || setupReplayOpen || launchReplayOpen ? 'black' : undefined}
         style={{ '--sidebar-width': `${paintedSidebarWidth}px` } as CSSProperties}
       >
         <AppTitlebar />
