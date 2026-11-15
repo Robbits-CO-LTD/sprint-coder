@@ -287,7 +287,14 @@ import {
   isTeamContinuationInput,
   isTeamScenarioInput,
 } from './team-tools';
-import type { LiveState } from './context-reminder';
+import {
+  formatWithdrawnApprovalsReminder,
+  MAX_WITHDRAWN_APPROVALS,
+  WITHDRAWN_APPROVALS_FRAGMENT_ID_PREFIX,
+  withdrawnApprovalSubject,
+  type LiveState,
+  type WithdrawnApproval,
+} from './context-reminder';
 import { deriveLiveState } from './live-state';
 import { redactSecrets } from './secret-redactor';
 import { deriveTaskTitle } from './task-title';
@@ -20815,19 +20822,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
         });
       }
     }
+    const withdrawnFragment = this.withdrawnApprovalsFragment(taskId, turnId);
+    const noticeFragments = withdrawnFragment === null ? [] : [withdrawnFragment];
     const prepared = this.contextLedger.prepare(
       taskId,
       turnId,
       reservedTokens +
         settingsFragments.reduce((total, fragment) => total + fragment.tokenEstimate, 0) +
+        noticeFragments.reduce((total, fragment) => total + fragment.tokenEstimate, 0) +
         skillFragments.reduce((total, fragment) => total + fragment.tokenEstimate, 0),
     );
-    if (skillFragments.length === 0 && settingsFragments.length === 0) return prepared;
+    if (
+      skillFragments.length === 0 &&
+      settingsFragments.length === 0 &&
+      noticeFragments.length === 0
+    )
+      return prepared;
     const [systemFragment, ...remainingFragments] = prepared.fragments;
     const fragments = [
       ...(systemFragment === undefined ? [] : [systemFragment]),
       ...settingsFragments,
       ...remainingFragments,
+      // After the history it is about, so it reads as what became of the previous Turn's calls.
+      ...noticeFragments,
       ...skillFragments,
     ];
     return {
@@ -20857,6 +20874,79 @@ export class SqlitePersistenceClient implements PersistenceClient {
       taskId,
       source: 'system',
       trust: 'system',
+      tokenEstimate: estimateTokens(content),
+      content,
+      createdAt: new Date().toISOString(),
+      messageId: null,
+    };
+  }
+
+  /**
+   * The calls the previous Turn of this Task left waiting on their cards, which were withdrawn
+   * unanswered (issue #1303), as one notice for this Turn, or null when there were none. A Runtime
+   * that ended its Turn while a card waited never received the denial, so this is the only way the
+   * agent learns the calls did not run.
+   *
+   * The previous Turn is the one the user started just before this one; a Team Mission's session
+   * Turn has no user message of its own and is never it. A Turn the user stopped is left out, as
+   * its history row is (`canceledTurnIds`): its cards were withdrawn because the user stopped it.
+   * Only the Turn right before is read, so the notice is given once, to the next Turn alone. A
+   * Team Worker's card belongs to the Leader's Turn it ran under, so the notice reaches the Leader;
+   * `applyWorkerContextInheritance` keeps it from the Workers.
+   */
+  private withdrawnApprovalsFragment(taskId: string, turnId: string): ContextFragment | null {
+    const previous = this.db
+      .prepare(
+        `SELECT t.id, t.state FROM turns AS t
+         JOIN messages AS m ON m.id = t.user_message_id AND m.author = 'user'
+         WHERE t.task_id = ? AND t.id <> ?
+         ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1`,
+      )
+      .get(taskId, turnId) as { id: string; state: string } | undefined;
+    if (
+      previous === undefined ||
+      (previous.state !== 'completed' &&
+        previous.state !== 'failed' &&
+        previous.state !== 'interrupted')
+    )
+      return null;
+    const { count } = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM approvals
+         WHERE task_id = ? AND turn_id = ? AND state = 'canceled'`,
+      )
+      .get(taskId, previous.id) as { count: number };
+    if (count === 0) return null;
+    const rows = this.db
+      .prepare(
+        `SELECT provider_name, display_json FROM approvals
+         WHERE task_id = ? AND turn_id = ? AND state = 'canceled'
+         ORDER BY requested_at, rowid LIMIT ?`,
+      )
+      .all(taskId, previous.id, MAX_WITHDRAWN_APPROVALS) as {
+      provider_name: string;
+      display_json: string;
+    }[];
+    const entries: WithdrawnApproval[] = rows.map((row) => {
+      let display: ApprovalDisplay | null = null;
+      try {
+        display = parseApprovalDisplay(row.display_json);
+      } catch {
+        // A card whose display no longer reads is still named by its tool.
+      }
+      return {
+        tool: row.provider_name,
+        ...(display === null ? {} : { subject: redactSecrets(withdrawnApprovalSubject(display)) }),
+        ...(display?.requester === undefined ? {} : { requester: display.requester.label }),
+      };
+    });
+    const content = formatWithdrawnApprovalsReminder(entries, count);
+    if (content === null) return null;
+    return {
+      id: `${WITHDRAWN_APPROVALS_FRAGMENT_ID_PREFIX}${previous.id}`,
+      taskId,
+      source: 'background',
+      trust: 'assistant',
       tokenEstimate: estimateTokens(content),
       content,
       createdAt: new Date().toISOString(),

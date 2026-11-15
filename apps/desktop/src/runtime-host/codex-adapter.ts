@@ -111,7 +111,13 @@ For an authorized edit or command, invoke the corresponding host tool; do not in
 unavailable from the native sandbox. Respect any denial or failure the host returns. Never use
 native filesystem or shell operations to bypass the host. After each successful edit, use read_file
 to read back the changed file before finishing; the host requires that evidence even when a test
-command succeeds. Also run the verification commands requested by the user.`;
+command succeeds. Also run the verification commands requested by the user.
+A host call that needs the user's approval does not return until the user answers its approval
+card, which can take minutes. While a host call has not returned, do not end the turn and do not
+finish by saying its result has not come back yet: the host withdraws an unanswered card when the
+turn ends, and the call never runs. If exec returns "Script running with cell ID ..." while a host
+call inside it waits, call wait with that cell ID until the script completes, then continue from
+its result.`;
 const unknownCapability = { value: null, source: 'unknown' as const };
 const codexRuntimeCapability = (value: boolean, sourceReference: string) => ({
   value,

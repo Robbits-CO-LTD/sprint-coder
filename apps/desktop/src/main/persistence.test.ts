@@ -29,6 +29,7 @@ import {
 } from '@sprint-coder/contracts';
 import { assistantPreferencesPromptContent } from './assistant-preferences-prompt';
 import { applyWorkerContextInheritance } from './team-worker-runtime';
+import { WITHDRAWN_APPROVALS_FRAGMENT_ID_PREFIX } from './context-reminder';
 import {
   isExistingTeamFollowupInput,
   isTeamScenarioInput,
@@ -9848,6 +9849,143 @@ if (runsWithElectronAbi)
       expect(persistence.getApproval(task.id, card.id)).toMatchObject({ state: 'canceled' });
       expect(persistence.snapshot(task.id).canceledTurnIds).toEqual([turn.turnId]);
       persistence.close();
+    });
+
+    describe('the next Turn learns which calls were withdrawn unanswered (issue #1303)', () => {
+      const notices = (persistence: SqlitePersistenceClient, taskId: string, turnId: string) =>
+        persistence
+          .prepareContext(taskId, turnId)
+          .fragments.filter(({ id }) => id.startsWith(WITHDRAWN_APPROVALS_FRAGMENT_ID_PREFIX));
+      /** A Turn that ends on its own after its cards were withdrawn, as the CLI's end does. */
+      const turnWithWithdrawnCards = (
+        persistence: SqlitePersistenceClient,
+        taskId: string,
+        cards: readonly Record<string, unknown>[],
+      ) => {
+        const turn = startExecutingTurn(persistence, taskId);
+        for (const card of cards) {
+          const request = approvalRequest(taskId, turn.turnId, card);
+          persistence.requestApproval(request);
+          persistence.cancelPendingApprovalForCall({
+            taskId,
+            turnId: turn.turnId,
+            approvalId: request.id,
+            callId: request.callId,
+            canceledAt: '2026-07-22T12:01:00.000Z',
+          });
+        }
+        persistence.changeStage(taskId, turn.turnId, 'synthesizing');
+        persistence.completeTurn(taskId, turn.turnId, 'completed');
+        return turn;
+      };
+
+      it('names the withdrawn calls once, in the next Turn only, and whose Worker asked', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const first = turnWithWithdrawnCards(persistence, task.id, [
+          {},
+          {
+            id: 'approval-2',
+            callId: 'call-2',
+            challenge: 'challenge-2',
+            display: {
+              target: '/workspace/worker.txt',
+              impact: 'Writes one workspace file',
+              execution: 'Write /workspace/worker.txt',
+              requester: { label: 'backend' },
+            },
+          },
+        ]);
+
+        const second = persistence.startTurn(task.id, 'next');
+        const [notice, ...others] = notices(persistence, task.id, second.turnId);
+        expect(others).toEqual([]);
+        expect(notice).toMatchObject({
+          id: `${WITHDRAWN_APPROVALS_FRAGMENT_ID_PREFIX}${first.turnId}`,
+          source: 'background',
+          trust: 'assistant',
+          messageId: null,
+        });
+        expect(notice?.content).toContain('In the previous Turn, these calls were NOT run');
+        expect(notice?.content).toContain('- "write_file" on "/workspace/file.txt"\n');
+        expect(notice?.content).toContain(
+          '- "write_file" on "/workspace/worker.txt" (asked by the Worker "backend")\n',
+        );
+        // Sealed with the Turn: read again, it is the same notice.
+        expect(notices(persistence, task.id, second.turnId)).toEqual([notice]);
+
+        finishTurn(persistence, task.id, second.turnId);
+        const third = persistence.startTurn(task.id, 'and then');
+        expect(notices(persistence, task.id, third.turnId)).toEqual([]);
+        persistence.close();
+      });
+
+      it('says nothing of the cards of a Turn the user stopped', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+        persistence.cancelTurn(task.id, turn.turnId);
+        expect(persistence.getApproval(task.id, 'approval-1')).toMatchObject({ state: 'canceled' });
+
+        const next = persistence.startTurn(task.id, 'next');
+        expect(notices(persistence, task.id, next.turnId)).toEqual([]);
+        persistence.close();
+      });
+
+      it('names at most five calls and counts the rest', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        turnWithWithdrawnCards(
+          persistence,
+          task.id,
+          Array.from({ length: 7 }, (_, index) => ({
+            id: `approval-${index + 1}`,
+            callId: `call-${index + 1}`,
+            challenge: `challenge-${index + 1}`,
+            requestedAt: `2026-07-22T12:00:0${index}.000Z`,
+            display: {
+              target: `/workspace/${index + 1}.txt`,
+              impact: 'Writes one workspace file',
+              execution: `Write /workspace/${index + 1}.txt`,
+            },
+          })),
+        );
+
+        const next = persistence.startTurn(task.id, 'next');
+        const content = notices(persistence, task.id, next.turnId)[0]?.content ?? '';
+        for (const index of [1, 2, 3, 4, 5]) expect(content).toContain(`/workspace/${index}.txt`);
+        expect(content).not.toContain('/workspace/6.txt');
+        expect(content).toContain('- …and 2 more');
+        persistence.close();
+      });
+
+      it('adds nothing when the previous Turn withdrew no card', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        // Answered, not withdrawn.
+        const request = approvalRequest(task.id, turn.turnId);
+        const card = persistence.requestApproval(request);
+        persistence.resolveApproval({
+          taskId: task.id,
+          approvalId: card.approval.id,
+          expectedTurnId: turn.turnId,
+          expectedRevision: 0,
+          challenge: request.challenge,
+          decision: 'deny',
+          decidedAt: '2026-07-22T12:01:00.000Z',
+          operationId: 'operation-1',
+        });
+        persistence.changeStage(task.id, turn.turnId, 'synthesizing');
+        persistence.completeTurn(task.id, turn.turnId, 'completed');
+
+        const next = persistence.startTurn(task.id, 'next');
+        const fragments = persistence.prepareContext(task.id, next.turnId).fragments;
+        expect(fragments.map(({ source }) => source)).not.toContain('background');
+        expect(notices(persistence, task.id, next.turnId)).toEqual([]);
+        persistence.close();
+      });
     });
 
     it('keeps the card pending and refuses a late allow when the cancellation cannot be saved', async () => {
