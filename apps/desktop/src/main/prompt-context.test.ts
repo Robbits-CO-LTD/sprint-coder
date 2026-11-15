@@ -218,16 +218,65 @@ describe('prompt context compiler', () => {
     );
     // A launch that reached the person's running app is not one the agent opened.
     expect(compiled.content).toContain(
-      'launch は、アプリが窓を出して動いていればそれにつなぎ（attached が true。何も起動していない',
+      'launch は、アプリが窓を出して動いていればそれにつなぎ（attached が true。何も起動していない）',
     );
-    expect(compiled.content).toContain('new_instance が true の時だけ');
     // A single-instance app opens the new window in its running process.
     expect(compiled.content).toContain('窓を出さずに動いている時');
     expect(compiled.content).toContain('running_without_window が true');
-    expect(compiled.content).toContain('--no-attach を付けて 1 回だけ起動し直す');
     expect(compiled.content).toContain('handed_off: true が付き');
     expect(compiled.content).toContain('起動を繰り返さずに list-windows で窓を確かめる');
     expect(compiled.content).toContain('list-windows で窓を取り直す');
+  });
+
+  it('lets the agent use the window its launch opened, and a one-window app the person asked about', () => {
+    const compiled = compilePromptGuidance({
+      workspace,
+      toolCatalog: catalog([]),
+      workspaceRules: [],
+      vcs: [],
+      desktopControlCommand: 'C:\\Sprint Coder\\sprint-coder-desktop-control.exe',
+    });
+    const text = compiled.content;
+    // A handed-off window is this launch's window, though an older process owns it.
+    expect(text).toContain(
+      '結果に window があり、new_instance が true か、handed_off が true で existing_window が無いなら、その窓はこの launch が開いた窓で、自分の作業に使ってよい（持ち主が前から動いていたプロセスでも同じ）',
+    );
+    // A window without a launch result is not guessed at.
+    expect(text).toContain(
+      'handed_off で window が無い時は、どの窓が出たかは確かめられていないので、起動を繰り返さずに list-windows で窓を確かめる',
+    );
+    // Attached only: the person's own window.
+    expect(text).toContain(
+      'attached が true で、handed_off も new_instance も true でない時の窓は、利用者が元から開いていた窓',
+    );
+    // An app that can open another window gets one --no-attach, and the person's window is kept.
+    expect(text).toContain('--no-attach を付けて 1 回だけ起動し直し、新しく開いた窓で作業する');
+    expect(text).toContain('利用者の窓の中身、開いているタブや書きかけは変えない');
+    // A one-window app: the existing window, within what was asked, without repeating --no-attach.
+    // The executable marks a window the instance had before the launch with existing_window.
+    expect(text).toContain(
+      '結果に existing_window: true が付いた時（--no-attach でも新しい窓が出なかった、またはトレイのアプリが隠していた窓を出し直した。window は起動の前からあった窓。メールやチャットのように窓が 1 つのアプリ）',
+    );
+    expect(text).not.toContain('reused_window');
+    expect(text).toContain(
+      '--no-attach を繰り返さず、利用者が頼んだ作業の範囲でその窓を使ってよい',
+    );
+    expect(text).toContain(
+      '読むのが目的なら読むだけにし、開いている画面・書きかけ・設定を変えず、閉じない',
+    );
+    expect(text).toContain('利用者が「今開いている〇〇の窓で」と頼んだ時は、その窓を使う');
+    expect(text.match(/--no-attach を付けて/gu)).toHaveLength(1);
+    // The old rules that left the agents with no window to use are gone.
+    expect(text).not.toContain('new_instance が true の時だけ');
+    expect(text).not.toContain('利用者が元から開いていた窓には触らない');
+    expect(text).not.toContain('元から開いていた窓として扱う');
+    expect(text).not.toContain('別の新しい窓が要る時だけ');
+  });
+
+  it('keeps the rest of the desktop control guidance', () => {
+    const base = { workspace, toolCatalog: catalog([]), workspaceRules: [], vcs: [] };
+    const command = 'C:\\Program Files\\Sprint Coder\\resources\\sprint-coder-desktop-control.exe';
+    const compiled = compilePromptGuidance({ ...base, desktopControlCommand: command });
     // Nothing else recommends taking the foreground.
     expect(compiled.content).not.toContain('窓を前面に出し');
     expect(compiled.content).not.toContain('--headed type');

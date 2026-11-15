@@ -1568,8 +1568,9 @@ export const WORKER_DESKTOP_CONTROL_PROMPT = `
 - 結果の disposition.delivery が delivered_unverified なら、操作は届いています（結果を自動では確かめていないだけで、失敗ではありません）。止まらずに -i なしの snapshot（文字や状態も出ます）で結果を確かめます。-i は操作できる部品を探す時だけ使います。
 - delivered_verified は届いて確かめ済み、not_delivered は何も送っていない、delivery_uncertain・unknown は届いたか分からない、です。届いた・分からない操作は、確かめる前に繰り返しません（2 回届きます）。
 - 割り当てられたアプリ／窓だけを操作し、ほかの Worker の窓には触りません。
+- 自分専用の新しい窓を作れないことを理由に、作業を止めません。launch が開いた窓（new_instance か、existing_window の無い handed_off で返った窓）か、新しい窓が出ないアプリ（existing_window が付く。メールなど窓が 1 つのアプリ）なら頼まれた作業の範囲で既存の窓を使って進めます。止めて Leader に戻すのは、同じ 1 つの窓をほかの Worker と同時に使うことになる時だけです。
 `;
-export const LEADER_DESKTOP_CONTROL_GUIDANCE = `デスクトップ操作をWorkerに任せる場合は、team_hire_workerでagentKind: "worker"とdesktopControl: trueを指定します。そのWorkerはデスクトップ操作の実行ファイルだけを実行できます。Worker 1人に1つのアプリ／窓を割り当て、同時にデスクトップ操作を任せるのは${DESKTOP_CONTROL_WORKERS_DEFAULT}人までにします。結果のdesktopControlがfalseなら、そのWorkerには任せられません。`;
+export const LEADER_DESKTOP_CONTROL_GUIDANCE = `デスクトップ操作をWorkerに任せる場合は、team_hire_workerでagentKind: "worker"とdesktopControl: trueを指定します。そのWorkerはデスクトップ操作の実行ファイルだけを実行できます。Worker 1人に1つのアプリ／窓を割り当て、同時にデスクトップ操作を任せるのは${DESKTOP_CONTROL_WORKERS_DEFAULT}人までにします。専用の新しい窓を作れないことを理由に作業を止めず、launch が開いた窓か、窓が1つのアプリ（メールなど）なら頼まれた作業の範囲で既存の窓を割り当てて進めます。同じ1つの窓を2人のWorkerに同時に割り当てません。Workerへの指示に「利用者の既存の窓を操作しない」のような、デスクトップ操作の決まりより厳しい制約を足しません。結果のdesktopControlがfalseなら、そのWorkerには任せられません。`;
 
 /**
  * The Leader's guidance on desktop Workers, for a Team Turn: only with the Team's desktop cursors

@@ -425,4 +425,46 @@ describe('the Leader’s desktop mark on a hire', () => {
     expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain('desktopControl: true');
     expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain('3人まで');
   });
+
+  it('does not let the Leader or a Worker stop only because no window of its own can be made', () => {
+    // The Worker keeps to its own app/window and works on a window its launch opened, or on a
+    // one-window app's existing window within what was asked; it stops only to share one window.
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain(
+      '割り当てられたアプリ／窓だけを操作し、ほかの Worker の窓には触りません',
+    );
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain(
+      '自分専用の新しい窓を作れないことを理由に、作業を止めません',
+    );
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain(
+      'launch が開いた窓（new_instance か、existing_window の無い handed_off で返った窓）',
+    );
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain(
+      '新しい窓が出ないアプリ（existing_window が付く',
+    );
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain('頼まれた作業の範囲で既存の窓を使って進めます');
+    expect(WORKER_DESKTOP_CONTROL_PROMPT).toContain(
+      '止めて Leader に戻すのは、同じ 1 つの窓をほかの Worker と同時に使うことになる時だけです',
+    );
+    // The Leader still gives each Worker one app/window, assigns a usable one instead of stopping,
+    // and adds no rule stricter than the desktop guidance.
+    expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain('Worker 1人に1つのアプリ／窓を割り当て');
+    expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain(
+      '専用の新しい窓を作れないことを理由に作業を止めず',
+    );
+    expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain(
+      '頼まれた作業の範囲で既存の窓を割り当てて進めます',
+    );
+    expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain(
+      '同じ1つの窓を2人のWorkerに同時に割り当てません',
+    );
+    expect(LEADER_DESKTOP_CONTROL_GUIDANCE).toContain(
+      '「利用者の既存の窓を操作しない」のような、デスクトップ操作の決まりより厳しい制約を足しません',
+    );
+    const hire = teamMcpDesktopHireProperty(true);
+    expect(hire).toContain('Give each such worker its own app/window');
+    expect(hire).toContain('Do not stop because no new window of its own can be made');
+    expect(hire).toContain('never give one window to two workers at once');
+    // The description sits in a single-quoted string of the generated server source.
+    expect(hire.match(/'/gu)).toHaveLength(4);
+  });
 });
