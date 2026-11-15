@@ -30,14 +30,16 @@ describe('release signing and notarization', () => {
     const macPackaging = makeJob.indexOf('npx electron-forge package');
 
     const desktopControlBuild = makeJob.indexOf('npm run build:desktop-control');
-    const otherMake = makeJob.indexOf('run: npx electron-forge make');
+    const macMake = makeJob.indexOf('npx electron-forge make --skip-package');
+    const windowsMake = makeJob.indexOf('npm run make:windows');
 
     expect(sandboxBuild).toBeGreaterThan(-1);
     expect(macPackaging).toBeGreaterThan(sandboxBuild);
     // Every target runs it; it builds only where desktop control ships (Windows x64, macOS arm64).
     expect(desktopControlBuild).toBeGreaterThan(sandboxBuild);
     expect(macPackaging).toBeGreaterThan(desktopControlBuild);
-    expect(otherMake).toBeGreaterThan(desktopControlBuild);
+    expect(macMake).toBeGreaterThan(desktopControlBuild);
+    expect(windowsMake).toBeGreaterThan(desktopControlBuild);
     expect(makeJob).toContain('node ../../build-better-sqlite3.mjs');
     expect(makeJob).toContain('npm run build:native-safe-fs');
     expect(makeJob).not.toContain('actions/cache');
@@ -83,6 +85,21 @@ describe('release signing and notarization', () => {
     expect(ci.on.workflow_call.inputs.full).toMatchObject({ type: 'boolean', required: true });
     // `CI required` runs even when selected jobs fail or are skipped, and then fails the call.
     expect(ci.jobs.required!.if).toBe('always()');
+  });
+
+  it('builds and publishes only macOS and Windows assets (owner decision, 2026-11-16)', () => {
+    const make = (
+      parse(workflow) as {
+        jobs: { make: { strategy: { matrix: { include: { os: string }[] } } } };
+      }
+    ).jobs.make;
+    expect(make.strategy.matrix.include.map((row) => row.os)).toEqual([
+      'macos-latest',
+      'windows-2022',
+    ]);
+    // A stray Linux ZIP would make the asset count 7, so the draft is never prepared with it.
+    expect(workflow).toContain('${#assets[@]} != 6');
+    expect(workflow).not.toMatch(/linux/iu);
   });
 
   it('accepts stable and beta tags while keeping releases as drafts', () => {
@@ -199,7 +216,6 @@ describe('release signing and notarization', () => {
   it('normalizes cross-platform asset names before creating manifests and uploading drafts', () => {
     expect(workflow).toContain('Sprint-Coder-${RELEASE_VERSION}-arm64.dmg');
     expect(workflow).toContain('Sprint-Coder-darwin-arm64-${RELEASE_VERSION}.zip');
-    expect(workflow).toContain('Sprint-Coder-linux-x64-${RELEASE_VERSION}.zip');
     expect(workflow).toContain('--json assets');
     expect(workflow).not.toContain('releases/tags/${RELEASE_TAG}');
   });

@@ -29,23 +29,18 @@ describe('CI change boundaries', () => {
   it.each([
     [['README.md', 'docs/maintenance.md'], 'docs', [], false],
     [['website/index.html', 'docs/maintenance.md'], 'website', [], false],
-    [['website/index.html', `${renderer}components/RunCard.tsx`], 'pr', ['linux'], false],
-    [[`${renderer}components/TeamUsageModeSetting.tsx`], 'pr', ['linux'], false],
-    [['apps/desktop/src/main/task-title.ts'], 'pr', ['linux'], true],
+    [['website/index.html', `${renderer}components/RunCard.tsx`], 'pr', ['windows'], false],
+    [[`${renderer}components/TeamUsageModeSetting.tsx`], 'pr', ['windows'], false],
+    [['apps/desktop/src/main/task-title.ts'], 'pr', ['windows'], true],
     [['apps/desktop/desktop-control/crates/windows/src/lib.rs'], 'pr', ['windows'], true],
-    [['apps/desktop/src/main/persistence.ts'], 'pr', ['linux', 'macos', 'windows'], true],
-    [['apps/desktop/src/main/permission-broker.ts'], 'pr', ['linux', 'macos', 'windows'], true],
-    [['apps/desktop/src/main/provider-egress.ts'], 'pr', ['linux', 'macos', 'windows'], true],
-    [['apps/desktop/src/preload/index.ts'], 'pr', ['linux', 'macos', 'windows'], true],
-    [['packages/contracts/src/index.ts'], 'pr', ['linux', 'macos', 'windows'], true],
-    [
-      ['apps/desktop/src/runtime-host/fixtures/grok-acp.cjs'],
-      'pr',
-      ['linux', 'macos', 'windows'],
-      true,
-    ],
-    [['unclassified/new.ts'], 'pr', ['linux', 'macos', 'windows'], true],
-    [[], 'pr', ['linux', 'macos', 'windows'], true],
+    [['apps/desktop/src/main/persistence.ts'], 'pr', ['macos', 'windows'], true],
+    [['apps/desktop/src/main/permission-broker.ts'], 'pr', ['macos', 'windows'], true],
+    [['apps/desktop/src/main/provider-egress.ts'], 'pr', ['macos', 'windows'], true],
+    [['apps/desktop/src/preload/index.ts'], 'pr', ['macos', 'windows'], true],
+    [['packages/contracts/src/index.ts'], 'pr', ['macos', 'windows'], true],
+    [['apps/desktop/src/runtime-host/fixtures/grok-acp.cjs'], 'pr', ['macos', 'windows'], true],
+    [['unclassified/new.ts'], 'pr', ['macos', 'windows'], true],
+    [[], 'pr', ['macos', 'windows'], true],
   ])('selects bounded platform coverage for %j', (paths, mode, platforms, native) => {
     expect(classifyChanges(changes(...paths), withPrTests)).toMatchObject({
       mode,
@@ -123,11 +118,12 @@ describe('CI change boundaries', () => {
       const scope = classifyChanges(changes('README.md'), options);
       expect(scope).toMatchObject({
         mode: 'full',
-        platforms: ['linux', 'macos', 'windows'],
+        platforms: ['macos', 'windows'],
         websiteRequired: true,
         distribution: true,
       });
-      expect(JSON.parse(scopeOutputs(scope).platform_matrix).include).toHaveLength(8);
+      const rows = JSON.parse(scopeOutputs(scope).platform_matrix).include;
+      expect(rows.map((row) => row.os)).toEqual(Array(5).fill('windows-2022'));
       expect(scopeOutputs(scope)).toMatchObject({
         full_matrix: 'true',
         distribution_required: 'true',
@@ -137,6 +133,10 @@ describe('CI change boundaries', () => {
     expect(() => classifyChanges([], { fullTests: 'true' })).toThrow('fullTests');
     const full = classifyChanges([], { eventName: 'workflow_dispatch' });
     expect(() => scopeOutputs({ ...full, distribution: false })).toThrow('Invalid CI scope');
+    // Linux is no longer a CI platform (owner decision, 2026-11-16).
+    expect(() => scopeOutputs({ ...full, platforms: ['linux', 'macos', 'windows'] })).toThrow(
+      'Invalid CI scope',
+    );
   });
 
   it.each([
@@ -299,11 +299,10 @@ describe('CI change boundaries', () => {
     if (split)
       expect(windows).toEqual(['related 1/4', 'related 2/4', 'related 3/4', 'related 4/4']);
     else expect(windows.every((shard) => shard === 'related')).toBe(true);
-    // Linux and macOS keep one related job; narrow PRs keep their previous job count.
-    for (const label of ['Linux', 'macOS'])
-      expect(rows.filter((row) => row.label === label).map((row) => row.shard)).toEqual(
-        scope.platforms.includes(label.toLowerCase()) ? ['related'] : [],
-      );
+    // macOS keeps one related job; narrow PRs keep their previous job count.
+    expect(rows.filter((row) => row.label === 'macOS').map((row) => row.shard)).toEqual(
+      scope.platforms.includes('macos') ? ['related'] : [],
+    );
     if (!split) expect(rows).toHaveLength(scope.platforms.length);
   });
 
@@ -330,7 +329,7 @@ describe('CI change boundaries', () => {
   it.each(['D', 'R100', 'T', 'U', '?'])('widens coverage for status %s', (status) => {
     expect(classifyChanges([{ path: 'website/index.html', status }], withPrTests)).toMatchObject({
       mode: 'pr',
-      platforms: ['linux', 'macos', 'windows'],
+      platforms: ['macos', 'windows'],
       websiteRequired: true,
     });
   });
@@ -390,8 +389,8 @@ describe('required CI result aggregation', () => {
   it('rejects an unknown job and failures from jobs that were not selected', () => {
     const scope = classifyChanges(changes('README.md'));
     expect(() =>
-      verifyRequiredJobs(scope, { classify: 'success', 'package-linux': 'failure' }),
-    ).toThrow('package-linux: failure');
+      verifyRequiredJobs(scope, { classify: 'success', 'package-macos': 'failure' }),
+    ).toThrow('package-macos: failure');
     expect(() => verifyRequiredJobs(scope, { classify: 'success', typo: 'success' })).toThrow(
       'unknown job',
     );

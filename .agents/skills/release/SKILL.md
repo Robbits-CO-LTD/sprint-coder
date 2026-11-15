@@ -54,7 +54,7 @@ betaでは先に上記でstableの目標base versionを決め、そのbaseにbet
 リリースtagやActionsを起動する前に、ユーザーの明示指示を確認する。
 
 - ユーザーが「Windowsコードサイニングあり」と明示した場合だけsigned Windows releaseを選ぶ。
-- signed Windows releaseでは、GitHub Actionsの配布buildはmacOSだけにする。WindowsとLinuxの配布buildをActionsで実行しない。品質検証jobは必要な範囲で実行してよい。
+- signed Windows releaseでは、GitHub Actionsの配布buildはmacOSだけにする。Windowsの配布buildをActionsで実行しない。品質検証jobは必要な範囲で実行してよい。
 - signed Windows成果物は証明書を利用できるWindows環境で [scripts/release-windows.ps1](scripts/release-windows.ps1) を使ってbuild・検証・Draftへ登録する。
 - 現行workflowがtag pushでWindows buildも起動する構成なら、そのままtagをpushしない。platform選択をfail-closedで強制するrelease/build変更を別PRまたは同じrelease PRに含め、CI green後に進む。
 - 明示がなければWindows署名を推測しない。現在のrelease仕様に沿うunsigned Windows方針を報告し、署名済みと表記しない。

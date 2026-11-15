@@ -7,7 +7,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const DESKTOP = 'apps/desktop/';
 const RENDERER = `${DESKTOP}src/renderer/`;
 const PLATFORM_ROWS = {
-  linux: { os: 'ubuntu-latest', label: 'Linux' },
   macos: { os: 'macos-latest', label: 'macOS' },
   windows: { os: 'windows-2022', label: 'Windows' },
 };
@@ -38,9 +37,9 @@ const ELECTRON_BRIDGE_SPECS = [
 const ELECTRON_BRIDGE_GROUPS = 4;
 // A wide PR can select nearly the whole suite. Windows runs it with one worker (vitest.config.ts),
 // which needs about 30 minutes, so only that platform is split; each shard takes one bridge group.
-const RELATED_SHARDS = { linux: 1, macos: 1, windows: 4 };
+const RELATED_SHARDS = { macos: 1, windows: 4 };
 const RELATED_BATCH = 100;
-const PACKAGE_JOBS = ['package-linux', 'package-macos', 'package-windows-build', 'package-windows'];
+const PACKAGE_JOBS = ['package-macos', 'package-windows-build', 'package-windows'];
 const KNOWN_JOBS = new Set([
   'classify',
   'quality',
@@ -243,13 +242,12 @@ export function classifyChanges(
     );
   const allRelatedPlatforms =
     broad || desktop.some(({ path }) => boundaryPath(path) || sandboxPath(path));
-  const windows = desktop.some(({ path }) => windowsNativePath(path));
-  const windowsOnly = desktop.length > 0 && desktop.every(({ path }) => windowsNativePath(path));
+  // Narrow related runs use Windows, the main distribution target (Linux is not distributed).
   const platforms =
     full || (mode === 'pr' && allRelatedPlatforms)
       ? [...PLATFORMS]
       : mode === 'pr'
-        ? [...(windowsOnly ? [] : ['linux']), ...(windows ? ['windows'] : [])]
+        ? ['windows']
         : [];
   const rendererOnly = desktop.length > 0 && desktop.every(({ path }) => path.startsWith(RENDERER));
   const prTests = mode === 'pr' && pullRequestTests;
@@ -323,10 +321,7 @@ export function scopeOutputs(scope) {
   validateScope(scope);
   const full = scope.mode === 'full';
   const platformRows = full
-    ? [
-        ['linux', 3],
-        ['windows', 5],
-      ].flatMap(([platform, count]) =>
+    ? [['windows', 5]].flatMap(([platform, count]) =>
         Array.from({ length: count }, (_, i) => ({
           ...PLATFORM_ROWS[platform],
           shard: `${i + 1}/${count}`,

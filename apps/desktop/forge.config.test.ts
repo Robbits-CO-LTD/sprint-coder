@@ -661,7 +661,7 @@ describe('macOS postPackage desktop-control sealing', () => {
 });
 
 describe('release artifacts', () => {
-  it('builds macOS, Ubuntu, and explicitly unsigned Windows artifacts in Actions', () => {
+  it('builds macOS and explicitly unsigned Windows artifacts in Actions', () => {
     const workflow = readFileSync(
       resolve(__dirname, '../../.github/workflows/release-beta.yml'),
       'utf8',
@@ -680,13 +680,13 @@ describe('release artifacts', () => {
 
     expect(workflow).toContain('apps/desktop/out/make/**/*.zip');
     expect(workflow).toContain('os: macos-latest');
-    expect(workflow).toContain('os: ubuntu-latest');
+    expect(workflow).not.toContain('os: ubuntu-latest');
     expect(workflow).toContain('os: windows-2022');
     expect(workflow).toContain("SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'");
     expect(workflow).toContain('mac_zip_count != 1');
-    expect(workflow).toContain('linux_zip_count != 1');
+    expect(workflow).not.toContain('linux_zip_count');
     expect(workflow).toContain('release-assets/RELEASES.json');
-    expect(workflow).toContain('${#assets[@]} != 7');
+    expect(workflow).toContain('${#assets[@]} != 6');
     expect(workflow).toContain('--prerelease="${RELEASE_PRERELEASE}"');
     expect(workflow).toContain('--draft');
     expect(readFileSync(resolve(__dirname, 'forge.config.ts'), 'utf8')).toContain(
