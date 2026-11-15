@@ -507,15 +507,17 @@ function resolvedPath(path: string, lookup: DesktopControlLookup): string {
   return path;
 }
 
-// The arguments are what the agent chose. The safety boundary is that the person allows every
-// desktop-control run that reads or operates the desktop on its own approval card (only the
-// closed list in `desktopControlArgvIsInert` runs without one); nothing here makes operating the desktop safe,
-// since keystrokes reach whatever window has focus. This check only drops the plainly dangerous forms
-// before a card exists: an option or command it does not know, a file path to read or write, the
-// clipboard's contents, a long-lived server (`mcp`), a launch that passes arguments, environment
-// or a working directory to the app, keys or text sent without naming the window or part they go
-// to (they would reach whatever is in front), and — as a convenience, never a boundary — launching a
-// terminal, shell, script host or settings tool by name.
+// The arguments are what the agent chose. The safety boundary is the Task's access preset: under
+// ask and auto the person allows every desktop-control run that reads or operates the desktop on
+// its own approval card (only the closed list in `desktopControlArgvIsInert` runs without one), and
+// under Full access the person chose, by choosing the preset, to let every such run go without a
+// card (the owner's decision of 2026-11-15). Nothing here makes operating the desktop safe, since
+// keystrokes reach whatever window has focus. This check only drops the plainly dangerous forms,
+// under every preset and before any card: an option or command it does not know, a file path to
+// read or write, the clipboard's contents, a long-lived server (`mcp`), a launch that passes
+// arguments, environment or a working directory to the app, keys or text sent without naming the
+// window or part they go to (they would reach whatever is in front), and — as a convenience, never
+// a boundary — launching a terminal, shell, script host or settings tool by name.
 const GLOBAL_OPTIONS =
   '--session= --agent-id= -w= --wait-for= --wait-for-gone= --wait-timeout= -v --verbose --headed';
 const HELP_OPTIONS = new Set(['-h', '--help', '-V', '--version']);

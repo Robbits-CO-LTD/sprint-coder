@@ -96,8 +96,8 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
     writeCapable: { type: 'boolean' },
     // Offered only when Sprint Coder started with the Team's desktop cursors on (the default), so
     // with them off the Leader's tool is exactly as it was. True gives the leaf Worker the command
-    // tool, for the shipped desktop-control executable only; the cards and the app-wide grant stay
-    // the boundary.
+    // tool, for the shipped desktop-control executable only; the Task's access preset (the cards
+    // and the app-wide grant, or under Full access no card) stays the boundary.
     ...(DESKTOP_CONTROL_TEAM_CURSORS_AT_START ? { desktopControl: { type: 'boolean' } } : {}),
     modelSelection: {
       type: 'object',

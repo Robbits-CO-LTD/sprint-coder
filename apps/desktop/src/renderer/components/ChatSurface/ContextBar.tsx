@@ -54,7 +54,7 @@ const PRESET_LABEL: Record<AccessPreset, string> = {
 const PRESET_DESC: Record<AccessPreset, string> = {
   ask: 'Workspace内のファイルの読み取りも含め、権限が必要な操作は実行前に確認します',
   auto: 'Workspace内のファイル作成・編集は自動許可し、コマンドは実行前に確認します。その他は自動レビューで安全なものだけ自動許可し、残りは確認します',
-  full: '広い操作を許可しますが、管理denyと秘密保護は維持します',
+  full: '広い操作を許可し、デスクトップ操作（ほかのアプリの窓を読む・押す・入力する・アプリの起動）も確認なしで実行します。管理denyと秘密保護はファイル・コマンド・ネットワークの道具に効き、デスクトップ操作には効きません',
 };
 
 export function PermissionChip({ taskId }: { taskId: string }) {
@@ -85,7 +85,8 @@ export function PermissionChip({ taskId }: { taskId: string }) {
   }, [open]);
 
   function choose(preset: AccessPreset) {
-    if (preset === 'full' && permission.preset !== 'full') {
+    // Full access chosen again shows what it does too, and lets Main ask its confirmation again.
+    if (preset === 'full') {
       setConfirmingFull(true);
       return;
     }
@@ -147,9 +148,14 @@ export function PermissionChip({ taskId }: { taskId: string }) {
               <span className="runtime-menu-desc">
                 Workspace操作、Shell、Networkなどをpolicy上は許可します。実際の書込み・コマンド実行は
                 安全な実行境界が完成した機能だけ利用でき、コマンド実行と実行中コマンドへの標準入力書き込みは
-                都度の承認なしで実行します。Workspace内ファイルの読み取りは、秘密情報を
+                都度の承認なしで実行します。デスクトップ操作（ほかのアプリの窓を読む・押す・入力する、
+                アプリの起動。ログイン済みのブラウザーやメールのアプリも含む）も、確認なしで実行します。
+                Workspace内ファイルの読み取りは、秘密情報を
                 含む可能性があるものもredact済みの本文をProviderへ都度確認なしで渡します。管理deny、
-                秘密情報、provider egress、Renderer非特権は常に維持されます。
+                秘密情報、provider
+                egress、Renderer非特権は常に維持されます。ただし、これらはファイル・
+                コマンド・ネットワークの道具に効く保護で、デスクトップ操作が開いている窓（端末、
+                エクスプローラー、パスワード管理のアプリ、ブラウザーなど）を読んだり入力したりすることは止めません。
               </span>
               <button
                 data-testid="access-full-confirm"

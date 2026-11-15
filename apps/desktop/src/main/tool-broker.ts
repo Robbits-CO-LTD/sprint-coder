@@ -71,6 +71,10 @@ export type ToolAuthorizationDecision = Readonly<{
   userInputSelection?: number;
   /** See `ToolExecutionControl.desktopControlExpectedWindowOwner`. */
   desktopControlExpectedWindowOwner?: string;
+  /** See `ToolExecutionControl.desktopControlAuthority`. */
+  desktopControlAuthority?: 'access_preset_full';
+  /** See `ToolExecutionControl.desktopControlAuthorityValid`. */
+  desktopControlAuthorityValid?: () => boolean;
 }>;
 export type ToolAuthorizer = (
   request: ToolAuthorizationRequest,
@@ -432,6 +436,14 @@ export class ToolBroker {
             ? {}
             : {
                 desktopControlExpectedWindowOwner: authorization.desktopControlExpectedWindowOwner,
+              }),
+          ...(authorization.desktopControlAuthority === undefined
+            ? {}
+            : {
+                desktopControlAuthority: authorization.desktopControlAuthority,
+                // Without a check of its own, the allow cannot be judged again: never valid.
+                desktopControlAuthorityValid:
+                  authorization.desktopControlAuthorityValid ?? (() => false),
               }),
           ...(entry.supportsBackground
             ? { onBackgroundCompletion: observeBackgroundCompletion }

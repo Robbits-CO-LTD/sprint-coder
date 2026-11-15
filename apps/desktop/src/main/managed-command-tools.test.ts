@@ -297,7 +297,7 @@ describe('managed command root selection (issue #840)', () => {
 });
 
 describe('desktop control Workspace roots', () => {
-  it('hands the Turn roots to the runner only for desktop control allowed on its card or touching no other app', async () => {
+  it('hands the Turn roots to the runner only for desktop control allowed on its card, by Full access or touching no other app', async () => {
     const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-a-'));
     const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-b-'));
     roots.push(primary, secondary);
@@ -330,6 +330,8 @@ describe('desktop control Workspace roots', () => {
     const sessions = new ManagedCommandSessions(managedRunner);
     // What the person chose on the card; `undefined` is a preset or policy allow with no card.
     let approvalDecision: 'allow_once' | 'allow_task' | undefined = 'allow_once';
+    // Set by the ApprovalCoordinator for a desktop-control run the Full access preset allowed.
+    let fullAccess = false;
     const broker = new ToolBroker(
       registry,
       () => 1,
@@ -338,6 +340,7 @@ describe('desktop control Workspace roots', () => {
         reason: 'test',
         beforeExecute: () => true,
         ...(approvalDecision === undefined ? {} : { approvalDecision }),
+        ...(fullAccess ? { desktopControlAuthority: 'access_preset_full' as const } : {}),
       }),
     );
     registerCommandRunnerTool(broker, managedRunner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions);
@@ -386,13 +389,22 @@ describe('desktop control Workspace roots', () => {
       await dispatchAll('task');
       expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
 
-      // A preset or policy allow never lets a command out of the sandbox.
+      // Any other preset or policy allow never lets a command out of the sandbox.
       approvalDecision = undefined;
       managedRun.mockClear();
       directRun.mockClear();
       await dispatchAll('preset');
       for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
         expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
+
+      // The Full access preset's allow of a desktop-control run does, with no card.
+      fullAccess = true;
+      managedRun.mockClear();
+      directRun.mockClear();
+      await dispatchAll('full');
+      expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
+      expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+      fullAccess = false;
 
       // A run that only prints the guides or the status needs no card, and runs outside the
       // sandbox with the roots, judged again on the sealed argv.
@@ -408,8 +420,9 @@ describe('desktop control Workspace roots', () => {
       // Any other command never gets the roots, even when the person allowed it on its card, or
       // when it has the same arguments as a desktop-control status check.
       desktop.mockReturnValue(false);
-      for (const decision of ['allow_once', 'allow_task', undefined] as const) {
-        approvalDecision = decision;
+      for (const decision of ['allow_once', 'allow_task', undefined, 'full'] as const) {
+        approvalDecision = decision === 'full' ? undefined : decision;
+        fullAccess = decision === 'full';
         managedRun.mockClear();
         directRun.mockClear();
         await dispatchAll(`ordinary-${decision ?? 'preset'}`);
@@ -2340,3 +2353,204 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
     });
   },
 );
+
+describe('a desktop-control run the Full access preset allowed, judged again as its process starts', () => {
+  const result: CommandResult = {
+    executionId: 'execution',
+    exitCode: 0,
+    signal: null,
+    canceled: false,
+    termination: 'natural',
+    durationMs: 1,
+    outputBytes: 0,
+    truncated: false,
+  };
+
+  function deferred() {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  }
+
+  /**
+   * A broker with the command tool and a runner that does what the real one does before a process
+   * exists: it calls `beforeSpawn`, and only then counts the run as spawned. A run whose argv is a
+   * key of `hold` is held until released: Main's session start before `beforeSpawn` (the session
+   * being prepared), any other run after it (a long run holding the Task's turn).
+   */
+  async function setup(
+    providerName: 'run_command' | 'exec_command',
+    taskId: string,
+    hold: Map<string, Promise<void>>,
+  ) {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-full-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    const definition =
+      providerName === 'run_command' ? COMMAND_RUNNER_TOOL : MANAGED_EXEC_COMMAND_TOOL;
+    registry.register(definition);
+    const { boundary, commandRows } = createCommandBoundary(workspace);
+    const runner = new CommandRunner({ sandboxed: true });
+    const spawned: string[] = [];
+    // The signal that the runner was handed a run (`called`) or let it start (`spawned`), so the
+    // test goes on when the run gets there, however long the preparation before it takes (each
+    // run's ExecutionSpec seals the whole executable image first).
+    const signals = new Map<string, ReturnType<typeof deferred>>();
+    const signal = (name: string) => {
+      let entry = signals.get(name);
+      if (entry === undefined) {
+        entry = deferred();
+        signals.set(name, entry);
+      }
+      return entry;
+    };
+    const reached = (stage: 'called' | 'spawned', key: string) => signal(`${stage}:${key}`).promise;
+    const run = vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+      const key = spec.argv.join(' ');
+      signal(`called:${key}`).release();
+      const held = hold.get(key);
+      if (held !== undefined && spec.argv[0] === 'session') await held;
+      options.beforeSpawn?.();
+      spawned.push(key);
+      signal(`spawned:${key}`).release();
+      if (held !== undefined && spec.argv[0] !== 'session') await held;
+      if (spec.argv[0] === 'session' && spec.argv[1] === 'start')
+        await options.onBatch?.([
+          {
+            seq: 0,
+            stream: 'stdout',
+            text: JSON.stringify({ ok: true, data: { session_id: `run-${taskId}` } }),
+            byteLength: 1,
+          },
+        ]);
+      return result;
+    });
+    const sessions =
+      providerName === 'exec_command' ? new ManagedCommandSessions(runner) : undefined;
+    // The stored preset the Full access allow is judged against, as the ApprovalCoordinator does.
+    const state: { preset: 'ask' | 'auto' | 'full' } = { preset: 'full' };
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      (request) =>
+        request.callId.startsWith('card-')
+          ? {
+              decision: 'allow' as const,
+              reason: 'approval_allow_once',
+              beforeExecute: () => true,
+              approvalDecision: 'allow_once' as const,
+            }
+          : {
+              decision: 'allow' as const,
+              reason: 'all_capabilities_allowed',
+              beforeExecute: () => state.preset === 'full',
+              desktopControlAuthority: 'access_preset_full' as const,
+              desktopControlAuthorityValid: () => state.preset === 'full',
+            },
+    );
+    registerCommandRunnerTool(broker, runner, boundary, definition, sessions);
+    const owner = {
+      taskId,
+      turnId: `turn-${taskId}`,
+      workspaceId: `ws-${taskId}`,
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    const dispatch = (callId: string, argv: string[]) =>
+      broker.dispatch({
+        ...owner,
+        callId,
+        providerName,
+        input: { executable: process.execPath, argv, purpose: 'desktop full access' },
+      });
+    const cleanup = async () => {
+      run.mockRestore();
+      await broker.dispose();
+      await sessions?.dispose();
+    };
+    return { dispatch, reached, spawned, state, commandRows, cleanup };
+  }
+
+  const sessionStart = 'session start --name sprint-coder --cursor --multi-agent --no-trace';
+
+  it.each(['run_command', 'exec_command'] as const)(
+    'does not start a run whose Task left Full access while its session was being prepared (%s)',
+    async (providerName) => {
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      configureDesktopControlTeamCursors(true);
+      const preparing = deferred();
+      const t = await setup(
+        providerName,
+        `task-full-session-${providerName}`,
+        new Map([[sessionStart, preparing.promise]]),
+      );
+      try {
+        // Allowed by Full access, then held while the Task's session is prepared.
+        const typing = t.dispatch('full-type', ['type', '@s1:e1', 'ABC']);
+        // Held there: Main's session start was handed to the runner and waits to be released.
+        await t.reached('called', sessionStart);
+        // Back to ask while it waits; then the session is ready.
+        t.state.preset = 'ask';
+        preparing.release();
+        await expect(typing).rejects.toThrow('フルアクセスでなくなった');
+        // Main's own session runs went ahead; the operation's process never started.
+        expect(t.spawned).toContain(sessionStart);
+        expect(t.spawned).not.toContain('type @s1:e1 ABC');
+        expect([...t.commandRows.values()].at(-1)?.state).toBe('failed');
+
+        // Back on Full access, the same run starts.
+        t.state.preset = 'full';
+        await t.dispatch('full-type-again', ['type', '@s1:e1', 'ABC']);
+        expect(t.spawned).toContain('type @s1:e1 ABC');
+      } finally {
+        desktop.mockRestore();
+        resetDesktopControlSessions();
+        await t.cleanup();
+      }
+    },
+  );
+
+  it('does not start a run whose Task left Full access while it waited for its turn in the Task’s order', async () => {
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    configureDesktopControlTeamCursors(true);
+    const longRun = deferred();
+    const t = await setup(
+      'run_command',
+      'task-full-queue',
+      new Map([['wait --text Done', longRun.promise]]),
+    );
+    try {
+      // The session is there, and a long run allowed on its card holds the Task's turn.
+      await t.dispatch('full-first', ['list-windows']);
+      const long = t.dispatch('card-long', ['wait', '--text', 'Done']);
+      await t.reached('spawned', 'wait --text Done');
+      // Behind it wait a run Full access allowed and one the person allowed on its card.
+      const typing = t.dispatch('full-type', ['type', '@s1:e1', 'ABC']);
+      const carded = t.dispatch('card-click', ['click', '@s1:e1']);
+      // The Task's order has no signal of its own: its state is read until both wait in it. Each
+      // gets there only after its ExecutionSpec sealed the whole executable, so the bound is the
+      // test's, not a guess of how long that takes.
+      await vi.waitFor(() => expect(desktopControlQueueState('task-full-queue').waiting).toBe(2), {
+        timeout: 15_000,
+      });
+      t.state.preset = 'ask';
+      longRun.release();
+      await long;
+      await expect(typing).rejects.toThrow('フルアクセスでなくなった');
+      // The card's run was decided by the person on its own card, and goes on as before.
+      await carded;
+      expect(t.spawned).not.toContain('type @s1:e1 ABC');
+      expect(t.spawned).toContain('click @s1:e1');
+    } finally {
+      desktop.mockRestore();
+      resetDesktopControlSessions();
+      await t.cleanup();
+    }
+  });
+});

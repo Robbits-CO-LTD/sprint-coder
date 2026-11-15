@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ApprovalDecision, ApprovalRequester } from '@sprint-coder/contracts';
 import type {
+  AccessPreset,
   Capability,
   PermissionOperation,
   PermissionResource,
@@ -8,6 +9,7 @@ import type {
   ExecutionSpec,
 } from '@sprint-coder/domain';
 import {
+  FULL_PRESET_AUDIT_REASON,
   PROJECT_MEMORY_RESOURCE_PREFIX,
   SKILL_DRAFT_RESOURCE_PREFIX,
   executionSpecDigest,
@@ -158,6 +160,10 @@ type DesktopAppGrant = Readonly<{
   expiresAt: string;
 }>;
 const DESKTOP_APP_GRANT_TASKS = 50;
+/** As many notes as a desktop-control card carries (`desktopApprovalActionSchema`). */
+const DESKTOP_APPROVAL_MAX_NOTES = 6;
+export const FULL_ACCESS_RECONFIRM_NOTE =
+  'フルアクセスでこの確認を省くには、権限でフルアクセスを選び直して、説明を確認してください。';
 
 /** Keep the sandbox profile recorded by an approval identical to the profile used by permission
  * evaluation and execution revalidation. A write recorded as read-only can be approved by the
@@ -219,6 +225,18 @@ export class ApprovalCoordinator {
         capability: Capability;
         request: ToolAuthorizationRequest;
       }) => boolean;
+      /**
+       * The Task's access preset as it is stored now. A desktop-control run is allowed without a
+       * card under the Full preset only when this says `'full'`, when it is judged and again just
+       * before it runs; without it, no desktop-control run is allowed by a preset.
+       */
+      accessPresetFor?: (taskId: string) => AccessPreset;
+      /**
+       * Whether the person accepted Full access on the confirmation that names desktop control
+       * (`FULL_ACCESS_RISK_ACKNOWLEDGEMENT_VERSION`). Until then a desktop-control run is asked on
+       * its card under Full access too, as before; without it, it always is.
+       */
+      fullAccessDesktopControlAcknowledged?: () => boolean;
       publish: {
         bivarianceHack(approval: ApprovalLike, event?: unknown): void;
       }['bivarianceHack'];
@@ -288,17 +306,27 @@ export class ApprovalCoordinator {
     let approvalDecision: ToolAuthorizationDecision['approvalDecision'];
     let userInputSelection: number | undefined;
     let expectedWindowOwner: string | undefined;
+    let desktopControlAuthority: ToolAuthorizationDecision['desktopControlAuthority'];
+    const fullAccessRevalidators: (() => boolean)[] = [];
     const desktopControl = isDesktopControlCall(request);
-    // A desktop-control run that takes the foreground, the cursor or the keyboard is decided on its
-    // own card every time: no Task grant covers it, including one given before this rule.
+    // A desktop-control run that takes the foreground, the cursor or the keyboard is never covered
+    // by a Task grant, including one given before this rule: outside the Full preset it is decided
+    // on its own card every time.
     const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
     for (const evaluation of evaluations) {
       // The policy engine never allows a per-call capability, and if it ever did, the person would
       // still be asked: only their decision on this call's card covers this call.
-      // The bundled desktop-control binary runs outside the command sandbox, so it is never
-      // covered by a preset or policy allow either: the person decides it on its own card. The one
-      // allow that is their decision is the Task grant they gave on such a card, which the policy
-      // engine matches only for the exact same ExecutionSpec (executable identity, argv, cwd, env).
+      // The bundled desktop-control binary runs outside the command sandbox, so a policy allow does
+      // not cover it by itself. Two allows do, and nothing else:
+      // - the person's 「Task中許可」: the Task grant they gave on such a card, which the policy
+      //   engine matches only for the exact same ExecutionSpec (executable identity, argv, cwd,
+      //   env), reported as `remembered_grant`;
+      // - the Full preset (フルアクセス), reported as its own audit reason while the Task's stored
+      //   preset is `full` and the person accepted Full access on the confirmation that names
+      //   desktop control (an acceptance from before then does not count). The owner decided on 2026-11-15 that under Full access every desktop-
+      //   control run the person would have been asked about runs without a card: reads, background
+      //   and foreground operations, menu items, browser windows and launches, the Leader's and the
+      //   Team Workers' alike. A deny (above, or from the executable's own refusals) still refuses.
       const desktopTaskGrant =
         desktopControl &&
         !desktopForeground &&
@@ -307,6 +335,13 @@ export class ApprovalCoordinator {
         // Judged again on this run: one naming a standard menu item, or a part Main cannot tell,
         // is asked on its card instead.
         this.desktopTaskGrantAllowed(request);
+      const desktopFullAccessPreset =
+        desktopControl &&
+        !desktopTaskGrant &&
+        !requiresPerCallHumanApproval(evaluation.capability) &&
+        evaluation.decision.decision === 'allow' &&
+        evaluation.decision.reason === FULL_PRESET_AUDIT_REASON &&
+        this.fullAccessPresetIsCurrent(request);
       // A desktop-control run that only prints the bundled guides, help, the version or its own
       // status touches no other app, window or file, so it runs without a card wherever the policy
       // allows or would ask; a deny was returned above. Judged on the sealed argv, as the run is.
@@ -323,6 +358,28 @@ export class ApprovalCoordinator {
               request.context.policyEpoch &&
             (policyCheck?.() ?? true),
         );
+        continue;
+      }
+      if (desktopFullAccessPreset) {
+        // Judged again before the execution starts (ToolBroker) and once more just before the
+        // process starts (`desktopControlAuthorityValid`, from the runner's `beforeSpawn`, after
+        // the Task's session is prepared and the run's turn in the Task's order came): the policy's
+        // own check (the preset's allow under the current policy and epoch), and that the Turn is
+        // live, the epoch is the one this call was judged under, the Task is still on Full access
+        // and that Full access was accepted with desktop control named. Back to ask or auto, even
+        // within the Turn and while the run waits, and its process does not start.
+        const policyCheck = evaluation.decision.beforeExecute;
+        const stillAllowed = (): boolean =>
+          this.options.isTurnActive(request.context.taskId, request.context.turnId) &&
+          this.options.getCurrentPolicyEpoch(request.context.taskId) ===
+            request.context.policyEpoch &&
+          this.fullAccessPresetIsCurrent(request) &&
+          (policyCheck?.() ?? false);
+        revalidators.push(stillAllowed);
+        fullAccessRevalidators.push(stillAllowed);
+        // Recorded as the preset's allow (the policy audit keeps `preset_full`, as for any command
+        // under Full access), never as a decision of the person on a card.
+        desktopControlAuthority = 'access_preset_full';
         continue;
       }
       if (
@@ -374,7 +431,42 @@ export class ApprovalCoordinator {
       ...(expectedWindowOwner === undefined
         ? {}
         : { desktopControlExpectedWindowOwner: expectedWindowOwner }),
+      ...(desktopControlAuthority === undefined
+        ? {}
+        : {
+            desktopControlAuthority,
+            desktopControlAuthorityValid: () =>
+              fullAccessRevalidators.every((revalidate) => revalidate()),
+          }),
     };
+  }
+
+  /**
+   * A desktop-control card raised while the Task is on Full access only because Full access was
+   * accepted before its confirmation named desktop control says how to skip it, when room is left
+   * among the card's notes (none of them is dropped for it). Display only.
+   */
+  private withFullAccessReconfirmNote(
+    request: ToolAuthorizationRequest,
+    notes: readonly string[],
+  ): string[] {
+    const unacknowledgedFull =
+      this.options.accessPresetFor?.(request.context.taskId) === 'full' &&
+      this.options.fullAccessDesktopControlAcknowledged?.() !== true;
+    return unacknowledgedFull && notes.length < DESKTOP_APPROVAL_MAX_NOTES
+      ? [...notes, FULL_ACCESS_RECONFIRM_NOTE]
+      : [...notes];
+  }
+
+  /**
+   * Whether the Task's stored access preset is Full access now, accepted on the confirmation that
+   * names desktop control. Unknown counts as not.
+   */
+  private fullAccessPresetIsCurrent(request: ToolAuthorizationRequest): boolean {
+    return (
+      this.options.accessPresetFor?.(request.context.taskId) === 'full' &&
+      this.options.fullAccessDesktopControlAcknowledged?.() === true
+    );
   }
 
   private async requestCapabilityApproval(
@@ -551,6 +643,7 @@ export class ApprovalCoordinator {
           : {
               desktopAction: {
                 ...desktopAction,
+                notes: this.withFullAccessReconfirmNote(request, desktopAction.notes),
                 ...(desktopAppGrant === null ? {} : { appGrant: { app: desktopAppGrant.label } }),
                 ...(requester === undefined ? {} : { requester }),
               },
@@ -1322,7 +1415,8 @@ function desktopAppGrantEnvironmentAllows(spec: ExecutionSpec): boolean {
 /**
  * Whether this desktop-control call takes the foreground, the cursor or the keyboard, or may close
  * an app (see `desktopControlArgvMode`), judged on the argv sealed into its ExecutionSpec. Such a
- * run is decided on its own card every time.
+ * run is never covered by a Task grant: outside the Full preset it is decided on its own card
+ * every time.
  */
 function isForegroundDesktopControlCall(request: ToolAuthorizationRequest): boolean {
   return (

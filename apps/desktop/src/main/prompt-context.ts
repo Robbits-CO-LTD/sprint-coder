@@ -353,7 +353,7 @@ function renderDesktopControl(command: string): string[] {
     '- 同じアプリの窓が複数ある時は list-windows で id を調べて --window-id を付け、利用者が元から開いていた窓には触らない。',
     '- launch は、アプリが窓を出して動いていればそれにつなぎ（attached が true。何も起動していない。その窓は利用者が元から開いていた窓として扱う）、窓を出さずに動いている時（裏で動き続けるブラウザー、トレイのアプリなど）は、アイコンを開いた時と同じように起動する（running_without_window が true）。new_instance が true の時だけ、結果の window はこの launch で起動した窓。窓が既にあるアプリで別の新しい窓が要る時だけ、--no-attach を付けて 1 回だけ起動し直す。ブラウザーやトレイのアプリなど、動いているアプリに引き渡して終わるアプリでは、結果に handed_off: true が付き、窓は動いていたアプリが出す（結果の window がそれで、持ち主は window.pid）。handed_off で window が無い時は、どの窓が出たかは確かめられていないので、起動を繰り返さずに list-windows で窓を確かめる。',
     '- launch の結果の窓の id で WINDOW_NOT_FOUND になったら、起動の途中に出た splash の窓が閉じたことがある。list-windows で窓を取り直す。',
-    '- 操作の対象は ref か --window-id で指定する。利用者は承認カードで「このアプリは Task 中許可」を選べ、そのアプリへの読み取りと裏の操作は確認なしで進むが、対象を確かめられない実行・前面を使う操作・起動・終了は毎回確認になる。許可の有無で操作の進め方は変えない。',
+    '- 操作の対象は ref か --window-id で指定する。利用者は承認カードで「このアプリは Task 中許可」を選べ、そのアプリへの読み取りと裏の操作は確認なしで進むが、対象を確かめられない実行・前面を使う操作・起動・終了は毎回確認になる。Task の権限がフルアクセスの時は、確認のカードは出ず、どの操作も確認なしで実行される（拒否される形は拒否のまま）。確認があるかどうかは権限の設定による。許可の有無で操作の進め方は変えない。',
     '- メニューが click で開かない時は expand を使い、開いた直後の中身は batch で expand と snapshot を続けて読む（batch の引数は [{"command":"expand","args":{"ref_id":"<ref>"}},{"command":"snapshot","args":{"window_id":"<id>"}}] の形）。',
     '- 端末（cmd・PowerShell・Windows Terminal・Terminal など）の窓を開くこと・操作すること、OS の設定アプリ、UAC・ログイン・パスワードの画面や欄、Sprint Coder 自身の窓の操作はしない。頼まれても断る。',
     '- コマンドの実行が目的なら、端末の窓を開かずに通常のコマンドの道具で実行する。',

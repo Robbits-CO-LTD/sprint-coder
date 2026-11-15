@@ -80,6 +80,28 @@ describe('access preset errors', () => {
   });
 });
 
+describe('Full access chosen again', () => {
+  it('still reaches Main, which may ask its confirmation again, and keeps the same policy', async () => {
+    const full = { preset: 'full' as const, policyEpoch: 4 };
+    useAppStore.setState({ permissionByTask: { [taskId]: full } });
+    const set = vi.fn().mockResolvedValue(full);
+    vi.stubGlobal('window', {
+      localStorage: null,
+      sprintCoder: { permissions: { set, get: vi.fn().mockResolvedValue(full) } },
+    });
+    await useAppStore.getState().setAccessPreset(taskId, 'full');
+    expect(set).toHaveBeenCalledExactlyOnceWith(taskId, 'full', 4);
+    expect(useAppStore.getState().permissionByTask[taskId]).toEqual(full);
+    expect(useAppStore.getState().permissionChangeByTask[taskId]).toBeUndefined();
+
+    // Any other preset chosen again is nothing to do, as before.
+    set.mockClear();
+    useAppStore.setState({ permissionByTask: { [taskId]: askPermission } });
+    await useAppStore.getState().setAccessPreset(taskId, 'ask');
+    expect(set).not.toHaveBeenCalled();
+  });
+});
+
 describe('pending permission changes', () => {
   function deferredPermission() {
     let resolve!: (permission: PermissionSettings) => void;

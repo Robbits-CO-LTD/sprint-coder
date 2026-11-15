@@ -1669,6 +1669,8 @@ export class IpcRouter {
         this.evaluateToolPermission(request, capability),
       revalidateTaskGrant: ({ capability, request }) =>
         this.revalidateApprovedTaskGrant(request, capability),
+      accessPresetFor: (taskId) => this.persistence.getPermissionPolicy(taskId).preset,
+      fullAccessDesktopControlAcknowledged: () => this.persistence.hasAcknowledgedFullAccessRisk(),
       publish: (_approval, event) => {
         const parsed = turnEventSchema.safeParse(event);
         if (parsed.success) this.publish(parsed.data);
@@ -3131,7 +3133,8 @@ export class IpcRouter {
                 type: 'warning',
                 title: 'フルアクセスを有効にしますか？',
                 message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
-                detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
+                detail:
+                  'コマンドと、デスクトップ操作（ほかのアプリの窓を読む・押す・入力する、アプリの起動。ログイン済みのブラウザーやメールのアプリも含む）を、確認なしで実行します。管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。ただし、これらはファイル・コマンド・ネットワークの道具に効く保護で、デスクトップ操作が開いている窓（端末、エクスプローラー、パスワード管理のアプリ、ブラウザーなど）を読んだり入力したりすることは止めません。',
                 buttons: ['キャンセル', 'フルアクセスを有効化'],
                 defaultId: 0,
                 cancelId: 0,
@@ -3141,8 +3144,13 @@ export class IpcRouter {
             }),
           );
         }
-        if (this.permissionBroker.getPolicy(input.taskId).policyEpoch !== input.expectedPolicyEpoch)
+        const confirmed = this.permissionBroker.getPolicy(input.taskId);
+        if (confirmed.policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
+        // Full access chosen again on a Task already on it: only to accept the confirmation of the
+        // current version (above), so nothing about the policy changes and its epoch stays.
+        if (input.preset === 'full' && confirmed.preset === 'full')
+          return { preset: confirmed.preset, policyEpoch: confirmed.policyEpoch };
         const value = this.persistence.executeOperation(
           principal,
           input.taskId,
@@ -5375,7 +5383,8 @@ export class IpcRouter {
           beforeExecute: disclosureBoundBeforeExecute,
         };
       // The person's own Task grant for this exact desktop-control command, given on its card. The
-      // ApprovalCoordinator accepts no other allow for it, so it is kept instead of asking again.
+      // ApprovalCoordinator accepts no other allow for it but the Full preset's own, so it is kept
+      // instead of asking again.
       if (evaluation.reason === 'remembered_grant' && isDesktopControlCall(request))
         return {
           decision: 'allow' as const,

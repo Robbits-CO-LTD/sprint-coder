@@ -86,6 +86,7 @@ import {
   validateCanvasCamera,
   validateCanvasNodePositions,
   __persistenceRecoveryTestables,
+  FULL_ACCESS_RISK_ACKNOWLEDGEMENT_VERSION,
 } from './persistence';
 import { loadNativeSafeFs, nativeSafeFsAddonPath, NativeSafeFsError } from './native-safe-fs';
 import { currentWorkspaceRootIdentityDigest } from './path-guard';
@@ -8620,6 +8621,36 @@ if (runsWithElectronAbi)
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.hasAcknowledgedFullAccessRisk()).toBe(true);
       reopened.close();
+    });
+
+    it('asks again when Full Access was accepted before its confirmation named desktop control', () => {
+      const { persistence, path } = createPersistence();
+      persistence.close();
+      // What a build before 2026-11-15 recorded on accepting the confirmation.
+      const raw = new Database(path);
+      raw
+        .prepare(
+          `INSERT INTO settings(key, value, updated_at)
+           VALUES ('permissions.full-access-risk-acknowledged', '1', ?)`,
+        )
+        .run(new Date().toISOString());
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.hasAcknowledgedFullAccessRisk()).toBe(false);
+      // Accepting the current confirmation records its version over the old one.
+      reopened.acknowledgeFullAccessRisk();
+      expect(reopened.hasAcknowledgedFullAccessRisk()).toBe(true);
+      reopened.close();
+      const check = new Database(path, { readonly: true });
+      expect(
+        check
+          .prepare(
+            "SELECT value FROM settings WHERE key = 'permissions.full-access-risk-acknowledged'",
+          )
+          .get(),
+      ).toEqual({ value: FULL_ACCESS_RISK_ACKNOWLEDGEMENT_VERSION });
+      check.close();
     });
 
     // Adding a rule to an Access preset changes what `expandAccessPreset` produces, so every
