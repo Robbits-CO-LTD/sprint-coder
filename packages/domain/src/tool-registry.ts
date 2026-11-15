@@ -127,6 +127,12 @@ export type ToolExecutionControl = Readonly<{
    * never carried as `authorizationDecision`.
    */
   desktopControlAuthority?: 'access_preset_full';
+  /**
+   * Given with `desktopControlAuthority`: judges that allow again (the Turn, the policy epoch and
+   * the Full preset still current). The runner asks it once more just before it starts the process,
+   * after every wait inside the execution (the Task's session being prepared, the Task's order).
+   */
+  desktopControlAuthorityValid?: () => boolean;
 }>;
 
 export type ToolResourceClaim = Readonly<{

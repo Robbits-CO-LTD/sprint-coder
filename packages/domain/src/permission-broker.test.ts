@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON,
+  FULL_PRESET_AUDIT_REASON,
   PermissionBroker,
   createSessionGrant,
   evaluatePermissionPolicy,
@@ -985,6 +986,31 @@ describe('access preset expansion', () => {
           now: NOW,
         }),
       ).toMatchObject({ decision: 'allow', reason: 'preset_full' });
+    });
+
+    it('allows a command, as the desktop-control executable is run, only under Full and as its own reason', () => {
+      // Main lets a desktop-control run go without a card on this reason alone (with the stored
+      // preset `full`), so no other preset may ever allow a command with it.
+      const shell = {
+        ...workspaceWriteRequest,
+        capability: 'shell.execute',
+        operation: 'execute',
+      } as const satisfies PermissionRequest;
+      expect(
+        evaluatePermissionPolicy({ request: shell, policy: policyFor('full'), now: NOW }),
+      ).toMatchObject({ decision: 'allow', reason: FULL_PRESET_AUDIT_REASON });
+      for (const preset of ['ask', 'auto'] as const) {
+        const evaluated = evaluatePermissionPolicy({
+          request: shell,
+          policy: policyFor(preset),
+          now: NOW,
+        });
+        expect(evaluated.decision, preset).toBe('approval_required');
+        expect(evaluated.reason, preset).not.toBe(FULL_PRESET_AUDIT_REASON);
+      }
+      for (const preset of ['ask', 'auto', 'full'] as const)
+        for (const rule of expandAccessPreset(preset).allowRules)
+          if (rule.auditReason === FULL_PRESET_AUDIT_REASON) expect(preset).toBe('full');
     });
   });
 

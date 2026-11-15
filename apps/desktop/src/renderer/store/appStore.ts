@@ -1669,7 +1669,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!window.sprintCoder || typeof window.sprintCoder.permissions?.set !== 'function') return;
       if (get().permissionChangeByTask[taskId] !== undefined) return;
       const previous = get().permissionByTask[taskId] ?? { preset: 'ask', policyEpoch: 0 };
-      if (previous.preset === preset) return;
+      // Full access chosen again still reaches Main, which then asks its confirmation once more if
+      // the one accepted earlier did not name desktop control; the policy itself does not change.
+      if (previous.preset === preset && preset !== 'full') return;
       set((state) => ({
         permissionChangeByTask: { ...state.permissionChangeByTask, [taskId]: preset },
       }));

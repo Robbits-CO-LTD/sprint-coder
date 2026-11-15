@@ -14,6 +14,7 @@ import {
 } from '@sprint-coder/domain';
 import {
   ApprovalCoordinator,
+  FULL_ACCESS_RECONFIRM_NOTE,
   approvalFactsForTool,
   approvalWorkerRequester,
   sandboxProfileForToolAuthorization,
@@ -299,11 +300,17 @@ function createHarness(input?: {
   ) => Readonly<{ label: string; colorIndex?: number }> | undefined;
   /** The Task's stored access preset. Omitted, the coordinator is told none, as a fail-closed Main. */
   accessPreset?: AccessPreset;
+  /**
+   * Whether Full access was accepted on the confirmation that names desktop control. Defaults to
+   * true wherever a preset is given.
+   */
+  fullAccessAcknowledged?: boolean;
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
   let policyEpoch = 7;
   let accessPreset = input?.accessPreset;
+  let fullAccessAcknowledged = input?.fullAccessAcknowledged ?? true;
   const activeTurns = new Set(['task-1\0turn-1', 'task-1\0turn-2', 'task-1\0turn-3']);
   const coordinator = new ApprovalCoordinator({
     persistence,
@@ -323,7 +330,10 @@ function createHarness(input?: {
       : { workerRequesterFor: input.workerRequesterFor }),
     ...(accessPreset === undefined
       ? {}
-      : { accessPresetFor: () => accessPreset ?? ('ask' as const) }),
+      : {
+          accessPresetFor: () => accessPreset ?? ('ask' as const),
+          fullAccessDesktopControlAcknowledged: () => fullAccessAcknowledged,
+        }),
     publish: (approval: StoredApproval) => {
       persistence.timeline.push(`published:${approval.id}`);
       published.push(approval);
@@ -338,6 +348,9 @@ function createHarness(input?: {
     },
     setAccessPreset: (preset: AccessPreset) => {
       accessPreset = preset;
+    },
+    setFullAccessAcknowledged: (acknowledged: boolean) => {
+      fullAccessAcknowledged = acknowledged;
     },
     endTurn: (turnId: string) => activeTurns.delete(`task-1\0${turnId}`),
   };
@@ -2569,6 +2582,89 @@ describe('ApprovalCoordinator desktop control card', () => {
           expect(again.beforeExecute?.()).toBe(true);
           harness.endTurn('turn-1');
           expect(again.beforeExecute?.()).toBe(false);
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    });
+
+    it('hands the runner the same check, to judge the allow again as the process starts', async () => {
+      const harness = createHarness({ evaluatePermission: policyAllow, accessPreset: 'full' });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          const allowed = await harness.coordinator.authorizeTool(
+            request(await prepare(['type', '@s1:e1', 'ABC']), 'full-spawn'),
+          );
+          expect(allowed.desktopControlAuthorityValid?.()).toBe(true);
+          harness.setAccessPreset('auto');
+          expect(allowed.desktopControlAuthorityValid?.()).toBe(false);
+          harness.setAccessPreset('full');
+          harness.setPolicyEpoch(8);
+          expect(allowed.desktopControlAuthorityValid?.()).toBe(false);
+          harness.setPolicyEpoch(7);
+          expect(allowed.desktopControlAuthorityValid?.()).toBe(true);
+          // A run allowed on its card carries no such check: its card decided it.
+          harness.setAccessPreset('ask');
+          const asked = harness.coordinator.authorizeTool(
+            request(await prepare(['type', '@s1:e1', 'ABC']), 'card-spawn'),
+          );
+          harness.coordinator.resolve(
+            resolveCommand(await waitForPublished(harness), 'allow_once'),
+          );
+          const carded = await asked;
+          expect(carded).not.toHaveProperty('desktopControlAuthority');
+          expect(carded).not.toHaveProperty('desktopControlAuthorityValid');
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    });
+
+    it('asks on the card, saying how to skip it, until Full access is accepted with desktop control named', async () => {
+      // Full access accepted before its confirmation named desktop control (an older version).
+      const harness = createHarness({
+        evaluatePermission: policyAllow,
+        accessPreset: 'full',
+        fullAccessAcknowledged: false,
+      });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          const spec = await prepare(['click', '@s1:e1']);
+          const asked = harness.coordinator.authorizeTool(request(spec, 'old-ack'));
+          const approval = await waitForPublished(harness);
+          const notes = (approval as unknown as { display: { desktopAction: { notes: string[] } } })
+            .display.desktopAction.notes;
+          expect(notes).toContain(FULL_ACCESS_RECONFIRM_NOTE);
+          // The card's contract still holds it.
+          expect(FULL_ACCESS_RECONFIRM_NOTE.length).toBeLessThanOrEqual(200);
+          harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+          await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+
+          // Accepted again on the current confirmation: the next run needs no card.
+          harness.setFullAccessAcknowledged(true);
+          harness.published.length = 0;
+          await expect(
+            harness.coordinator.authorizeTool(request(spec, 'new-ack')),
+          ).resolves.toMatchObject({ desktopControlAuthority: 'access_preset_full' });
+          expect(harness.published).toHaveLength(0);
+
+          // Outside Full access no card says so.
+          harness.setAccessPreset('ask');
+          harness.setFullAccessAcknowledged(false);
+          const plain = harness.coordinator.authorizeTool(request(spec, 'ask-card'));
+          const askCard = await waitForPublished(harness);
+          expect(
+            (askCard as unknown as { display: { desktopAction: { notes: string[] } } }).display
+              .desktopAction.notes,
+          ).not.toContain(FULL_ACCESS_RECONFIRM_NOTE);
+          harness.coordinator.resolve(resolveCommand(askCard, 'deny'));
+          await plain;
         });
       } finally {
         desktop.mockRestore();

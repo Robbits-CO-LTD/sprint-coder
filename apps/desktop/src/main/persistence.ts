@@ -519,6 +519,14 @@ const MAX_GENERATED_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_VERIFIABLE_POST_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /**
+ * The version of the Full access confirmation the person accepted, as kept in `settings`. `'1'`
+ * was a confirmation that did not name desktop control; `'2'` names it (desktop control runs
+ * without a card under Full access, the owner's decision of 2026-11-15). Only the current version
+ * counts as accepted.
+ */
+export const FULL_ACCESS_RISK_ACKNOWLEDGEMENT_VERSION = '2';
+
+/**
  * The 8-byte PNG signature.
  *
  * Checked because the extension of a file in a directory the CLI owns proves nothing about its
@@ -15788,21 +15796,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(effort, new Date().toISOString());
   }
 
+  /**
+   * Whether the person accepted Full access on the confirmation of the current version
+   * (`FULL_ACCESS_RISK_ACKNOWLEDGEMENT_VERSION`). An acceptance recorded before (`'1'`, given on a
+   * confirmation that did not name desktop control) reads as not accepted, so it is asked again.
+   */
   hasAcknowledgedFullAccessRisk(): boolean {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'permissions.full-access-risk-acknowledged'")
       .get() as { value: string } | undefined;
-    return row?.value === '1';
+    return row?.value === FULL_ACCESS_RISK_ACKNOWLEDGEMENT_VERSION;
   }
 
   acknowledgeFullAccessRisk(): void {
     this.db
       .prepare(
         `INSERT INTO settings(key, value, updated_at)
-         VALUES ('permissions.full-access-risk-acknowledged', '1', ?)
+         VALUES ('permissions.full-access-risk-acknowledged', ?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
-      .run(new Date().toISOString());
+      .run(FULL_ACCESS_RISK_ACKNOWLEDGEMENT_VERSION, new Date().toISOString());
   }
 
   getTeamModelResearchBeforeHiring(): boolean {

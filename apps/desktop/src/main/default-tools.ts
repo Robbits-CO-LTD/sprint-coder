@@ -843,6 +843,18 @@ export function registerCommandRunnerTool(
           : { desktopControlExpectedWindowOwner: control.desktopControlExpectedWindowOwner }),
         ...(desktopSession === undefined ? {} : { desktopControlSession: desktopSession }),
         beforeSpawn: () => {
+          // A run the Full access preset allowed without a card is judged again here, just before
+          // its process starts: after the Task's session was prepared and its turn in the Task's
+          // order came, both of which can take long. Back to ask or auto meanwhile (or a Turn that
+          // ended, a policy epoch that moved), and nothing starts; the run is recorded as failed.
+          if (
+            control.desktopControlAuthority === 'access_preset_full' &&
+            control.desktopControlAuthorityValid?.() !== true
+          )
+            throw new CommandRunnerError(
+              'EXECUTION_SPEC_INVALID',
+              '権限がフルアクセスでなくなったため、このデスクトップ操作は実行しなかった（操作は届いていない）。',
+            );
           command.persistence.beginCommand(
             commandId,
             roots === undefined ? undefined : desktopControlRunAction(_context.taskId, spec.argv),
