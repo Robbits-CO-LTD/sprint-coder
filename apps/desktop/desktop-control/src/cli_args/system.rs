@@ -62,6 +62,14 @@ pub(crate) struct LaunchArgs {
     )]
     #[serde(default)]
     pub cdp: Option<u16>,
+    #[arg(
+        long,
+        value_name = "URL",
+        help = "Open this http or https URL in a new window of a known browser (Chromium-based or \
+                Firefox): the browser's new-window switch and the URL are all that is passed"
+    )]
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Parser, Debug, Deserialize)]

@@ -3,6 +3,11 @@ import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
 import { DESKTOP_CONTROL_EXECUTABLE, desktopControlSupported } from './desktop-control-build';
+import {
+  DESKTOP_CONTROL_URL_BROWSERS,
+  desktopControlLaunchUrl,
+  desktopControlUrlBrowser,
+} from './desktop-control-launch-url';
 import { startMenuShortcuts, type StartMenuShortcut } from './desktop-control-start-menu';
 import { applyWindowsAcl } from './native-file-publication';
 import { queryNativeProcessIdentity } from './native-process-identity';
@@ -567,7 +572,8 @@ const COMMAND_OPTIONS: Readonly<Record<string, string>> = {
   'mouse-down': BUTTONS,
   'mouse-up': BUTTONS,
   'mouse-wheel': '--x= --y= --dy= --dx= --modifiers=',
-  launch: '--timeout= --no-attach --activate',
+  // `--url` is Sprint Coder's own (`launchUrlRefusal`).
+  launch: '--timeout= --no-attach --activate --url=',
   'close-app': '',
   'list-windows': `--app= ${REF}`,
   'list-displays': '',
@@ -612,7 +618,7 @@ const WITH_SUBCOMMANDS = new Set(['skills', 'session', 'cursor-overlay']);
 const REFUSED_BATCH_KEYS = new Set(
   [...REFUSED_OPTIONS, '--path'].map((option) => option.slice(2).replace(/-/gu, '')),
 );
-const BATCH_LAUNCH_KEYS = new Set(['app', 'timeout', 'no_attach', 'activate']);
+const BATCH_LAUNCH_KEYS = new Set(['app', 'timeout', 'no_attach', 'activate', 'url']);
 const REFUSED_LAUNCH_NAMES = new Set(
   [
     'cmd powershell powershellise pwsh wt windowsterminal conhost openconsole bash sh zsh fish',
@@ -663,6 +669,10 @@ type ReadArgv = Readonly<{
   positionalIndexes: readonly number[];
   /** Every option given, by name, with its value (`''` for a flag); a repeated one keeps the last. */
   options: ReadonlyMap<string, string>;
+  /** How many times each option was given, by name. */
+  counts: ReadonlyMap<string, number>;
+  /** Where the value of each option that takes one sits in the argv (its own token for `--x=v`). */
+  valueIndexes: ReadonlyMap<string, number>;
 }>;
 
 const GLOBAL_OPTION_NAMES = new Set(
@@ -680,6 +690,8 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
   const positionals: string[] = [];
   const positionalIndexes: number[] = [];
   const given = new Map<string, string>();
+  const counts = new Map<string, number>();
+  const valueIndexes = new Map<string, number>();
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]!;
     if (separated) {
@@ -696,11 +708,13 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
       const name = optionName(token);
       if (REFUSED_OPTIONS.has(name)) return refusal(`${name} は使えない`);
       if (GLOBAL_OPTION_NAMES.has(name)) global = true;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
       if (HELP_OPTIONS.has(name) && name === token) help.push(name);
       else if (options.values.has(name)) {
         if (!token.includes('=') && (index += 1) >= argv.length)
           return refusal(`${name} に値が無い`);
         given.set(name, token.includes('=') ? token.slice(name.length + 1) : argv[index]!);
+        valueIndexes.set(name, index);
         continue;
       } else if (!options.flags.has(token))
         return refusal(
@@ -727,7 +741,18 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
     if (spec === undefined) return refusal(`${key} を判定できない`);
     options = parseOptions(spec);
   }
-  return { command, key, help, global, separated, positionals, positionalIndexes, options: given };
+  return {
+    command,
+    key,
+    help,
+    global,
+    separated,
+    positionals,
+    positionalIndexes,
+    options: given,
+    counts,
+    valueIndexes,
+  };
 }
 
 // Commands that only print what is compiled into the binary or its own state, and touch no other
@@ -1077,10 +1102,15 @@ export function desktopControlArgvRefusal(
   if (read.help.length > 0 || key === undefined) return null;
   if (key === 'screenshot' && positionals.length > 0)
     return refusal('screenshot の保存先は指定できない');
-  if (key === 'launch')
-    return positionals.length === 1
-      ? launchTargetRefusal(positionals[0]!, workspaceRoots, lookup)
-      : refusal('launch に渡せるのはアプリ名か Workspace の外の絶対パス 1 つだけ');
+  if (key === 'launch') {
+    if (positionals.length !== 1)
+      return refusal('launch に渡せるのはアプリ名か Workspace の外の絶対パス 1 つだけ');
+    if ((read.counts.get('--url') ?? 0) > 1) return refusal('launch の --url は 1 つだけ');
+    return (
+      launchTargetRefusal(positionals[0]!, workspaceRoots, lookup) ??
+      launchUrlRefusal(positionals[0]!, read.options.get('--url'))
+    );
+  }
   if (key === 'batch')
     return positionals.length === 1
       ? batchRefusal(positionals[0]!, workspaceRoots, lookup)
@@ -1286,6 +1316,21 @@ function launchTargetRefusal(
 }
 
 /**
+ * Why `launch <app> --url <url>` may not run, or `null` (also `null` without `--url`): only a known
+ * browser (`desktopControlUrlBrowser`) and an http or https URL Main can seal in its canonical form
+ * (`desktopControlLaunchUrl`). The executable takes nothing else with it, and checks both again.
+ */
+function launchUrlRefusal(app: string, url: string | undefined): string | null {
+  if (url === undefined) return null;
+  if (!desktopControlUrlBrowser(app))
+    return refusal(
+      `launch の --url は、知っているブラウザー（${DESKTOP_CONTROL_URL_BROWSERS.join('・')}）にだけ付けられる`,
+    );
+  const read = desktopControlLaunchUrl(url);
+  return 'refusal' in read ? refusal(read.refusal) : null;
+}
+
+/**
  * Whether an app or file name (no folder) names a terminal, shell, script host or settings tool,
  * the kind `launch` refuses by name. Also used to keep such an app out of an app-wide Task grant.
  */
@@ -1331,7 +1376,11 @@ function batchRefusal(
       if (unknown !== undefined) return refusal(`batch の中の launch の ${unknown} は使えない`);
       if (typeof fields['app'] !== 'string')
         return refusal('batch の launch の app を判定できない');
-      const reason = launchTargetRefusal(fields['app'], workspaceRoots, lookup);
+      if (fields['url'] !== undefined && typeof fields['url'] !== 'string')
+        return refusal('batch の launch の url を判定できない');
+      const reason =
+        launchTargetRefusal(fields['app'], workspaceRoots, lookup) ??
+        launchUrlRefusal(fields['app'], fields['url']);
       if (reason !== null) return reason;
     }
     const keyRefusal = refusedBatchKey(fields);
@@ -1367,21 +1416,38 @@ function batchRefusal(
  * name (with similar names to try), shortcuts to different executables, or a target that the
  * checks of an absolute path refuse. Only a shortcut without arguments to an existing `.exe` at an
  * absolute path counts, so a shortcut cannot pass what `--arg` may not.
+ *
+ * A `--url` (`url` in a batch) is replaced by its canonical form the same way, on any platform
+ * (`desktopControlLaunchUrl`), so the card shows and the browser gets that exact string.
  */
 export function desktopControlLaunchByName(
   argv: readonly string[],
   workspaceRoots: readonly string[],
   lookup: DesktopControlLookup = {},
 ): { argv: readonly string[] } | { refusal: string } | null {
-  if ((lookup.platform ?? process.platform) !== 'win32') return null;
+  const byName = (lookup.platform ?? process.platform) === 'win32';
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string' || read.help.length > 0 || read.positionals.length !== 1)
     return null;
   const index = read.positionalIndexes[0]!;
   if (read.key === 'launch') {
-    const found = launchNameTarget(read.positionals[0]!, workspaceRoots, lookup);
-    if (found === null || 'refusal' in found) return found;
-    return { argv: argv.map((token, at) => (at === index ? found.path : token)) };
+    const found = byName ? launchNameTarget(read.positionals[0]!, workspaceRoots, lookup) : null;
+    if (found !== null && 'refusal' in found) return found;
+    const url = canonicalLaunchUrl(read.options.get('--url'));
+    if (url !== undefined && typeof url !== 'string') return url;
+    const urlIndex = read.valueIndexes.get('--url');
+    const urlToken =
+      url === undefined || urlIndex === undefined
+        ? undefined
+        : argv[urlIndex]!.startsWith('--url=')
+          ? `--url=${url}`
+          : url;
+    if (found === null && (urlToken === undefined || urlToken === argv[urlIndex!])) return null;
+    return {
+      argv: argv.map((token, at) =>
+        at === index && found !== null ? found.path : at === urlIndex ? (urlToken ?? token) : token,
+      ),
+    };
   }
   if (read.key !== 'batch') return null;
   const entries = readBatchEntries(read.positionals);
@@ -1394,14 +1460,35 @@ export function desktopControlLaunchByName(
       next.push(entry);
       continue;
     }
-    const found = launchNameTarget(app, workspaceRoots, lookup);
+    const found = byName ? launchNameTarget(app, workspaceRoots, lookup) : null;
     if (found !== null && 'refusal' in found) return found;
-    if (found !== null) replaced = true;
-    next.push(found === null ? entry : { ...entry, args: { ...entry.args, app: found.path } });
+    const given = entry.args['url'];
+    const url = canonicalLaunchUrl(typeof given === 'string' ? given : undefined);
+    if (url !== undefined && typeof url !== 'string') return url;
+    if (found === null && (url === undefined || url === given)) {
+      next.push(entry);
+      continue;
+    }
+    replaced = true;
+    next.push({
+      ...entry,
+      args: {
+        ...entry.args,
+        ...(found === null ? {} : { app: found.path }),
+        ...(url === undefined ? {} : { url }),
+      },
+    });
   }
   if (!replaced) return null;
   const json = JSON.stringify(next);
   return { argv: argv.map((token, at) => (at === index ? json : token)) };
+}
+
+/** The canonical form of a `--url`, `undefined` without one, or why it is refused. */
+function canonicalLaunchUrl(url: string | undefined): string | { refusal: string } | undefined {
+  if (url === undefined) return undefined;
+  const read = desktopControlLaunchUrl(url);
+  return 'url' in read ? read.url : { refusal: refusal(read.refusal) };
 }
 
 /** Up to how many similar names or executables a refusal lists. */

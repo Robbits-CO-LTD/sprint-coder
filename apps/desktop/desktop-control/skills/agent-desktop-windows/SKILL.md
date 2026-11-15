@@ -100,6 +100,16 @@ observation, actions and capture there fail or return nothing.
 - **`launch` takes an absolute path or a bare name** under System32 or the
   Windows directory, with or without `.exe` (`notepad` or `notepad.exe`), not
   a display name. Use `list-apps` to find a running app.
+- **`launch <browser> --url <URL>` opens one http or https page in a new
+  window** of a Chromium-based browser or Firefox (by its executable name:
+  chrome, msedge, brave, vivaldi, opera, chromium, thorium, firefox, librewolf,
+  waterfox), with nothing else passed; it never attaches, and a running browser
+  takes the page into a new window of its own (`handed_off`). It is the way to
+  open a page from the background: the address bar confirms a typed URL only
+  while its window is in front with the keyboard focus. The URL must be in its
+  canonical form (lower-case `http://` or `https://` and host, punycode,
+  percent-encoded, a path), with no user name or password and no IPv6 host;
+  `--arg`, `--env`, `--cwd` and `--cdp` are refused beside it.
 - **Read `attached`, `new_instance`, `handed_off` and `existing_window` in
   the `launch` result.** A bare `launch` of an app that is already running
   with a window shown (minimized counts) attaches to it and starts nothing

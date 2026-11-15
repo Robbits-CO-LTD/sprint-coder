@@ -1,0 +1,23 @@
+[
+  {"app":"chrome","browser":true},
+  {"app":"chrome.exe","browser":true},
+  {"app":"CHROME.EXE","browser":true},
+  {"app":"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe","browser":true},
+  {"app":"C:/x/msedge.exe","browser":true},
+  {"app":"opera.exe","browser":true},
+  {"app":"firefox","browser":true},
+  {"app":"C:\\Mozilla Firefox\\waterfox.exe","browser":true},
+  {"app":"chrome.exe ","browser":false},
+  {"app":"chrome.exe\t","browser":false},
+  {"app":" chrome.exe","browser":false},
+  {"app":"C:\\x\\chrome.exe\\","browser":false},
+  {"app":"C:\\x\\chrome.exe ","browser":false},
+  {"app":"chrome.bat","browser":false},
+  {"app":"chrome.exe.lnk","browser":false},
+  {"app":"launcher.exe","browser":false},
+  {"app":"msedgewebview2.exe","browser":false},
+  {"app":"notepad","browser":false},
+  {"app":"ＣＨＲＯＭＥ.exe","browser":false},
+  {"app":"C:\\chrome\\evil.exe","browser":false},
+  {"app":"","browser":false}
+]
