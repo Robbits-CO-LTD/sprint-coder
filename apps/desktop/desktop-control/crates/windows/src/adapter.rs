@@ -348,7 +348,11 @@ impl ActionOps for WindowsAdapter {
         lease: &InteractionLease,
     ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
         self.refuse_own_handle("execute_action", handle, lease.deadline())?;
-        crate::actions::dispatch::execute_action_impl(handle, request, lease)
+        // A physical double- or triple-click judges each later click again
+        // (`own_window::recheck_pointer`).
+        own_window::while_acting(&self.refused_owner, "execute_action", || {
+            crate::actions::dispatch::execute_action_impl(handle, request, lease)
+        })
     }
 
     fn scroll_into_view(
@@ -390,7 +394,11 @@ impl InputOps for WindowsAdapter {
             }
         }
         let report = OperationReport::pointer_dispatched(&event, false);
-        crate::input::mouse::synthesize_mouse(event, lease.deadline())?;
+        // Each later click of a `--count` and each later wheel event is judged again just
+        // before it is sent (`own_window::recheck_pointer`).
+        own_window::while_acting(&self.refused_owner, "mouse_event", || {
+            crate::input::mouse::synthesize_mouse(event, lease.deadline())
+        })?;
         Ok(report)
     }
 
@@ -417,7 +425,10 @@ impl InputOps for WindowsAdapter {
         self.refused_owner
             .check_pointer("drag", &[&params.from, &params.to], false)?;
         let report = OperationReport::drag_dispatched(&params);
-        crate::input::drag::synthesize_drag(params, lease.deadline())?;
+        // The drop is judged again just before the button is let go.
+        own_window::while_acting(&self.refused_owner, "drag", || {
+            crate::input::drag::synthesize_drag(params, lease.deadline())
+        })?;
         Ok(report)
     }
 

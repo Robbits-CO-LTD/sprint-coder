@@ -321,6 +321,7 @@ fn pointer_facts(
         point: point.into_iter().map(Some).collect(),
         foreground: foreground.into_iter().map(Some).collect(),
         may_not_take_foreground,
+        later_points: Vec::new(),
     }
 }
 
@@ -920,4 +921,231 @@ fn a_ref_in_a_window_that_never_takes_the_front_is_refused_while_sprint_coder_is
         assert!(!window.visible());
     }
     assert!(!keyboard.visible());
+}
+
+/// What the mouse seam recorded (a test build records, never sends) while `body` ran.
+#[cfg(target_os = "windows")]
+fn recorded_mouse<T>(body: impl FnOnce() -> T) -> (T, Vec<u32>) {
+    use crate::input::mouse::mouse_send::mouse_send_fake_sink as sink;
+    sink::reset();
+    let result = body();
+    let flags = sink::recorded()
+        .into_iter()
+        .map(|event| event.flags)
+        .collect();
+    sink::reset();
+    (result, flags)
+}
+
+#[cfg(target_os = "windows")]
+fn count_flag(flags: &[u32], flag: u32) -> usize {
+    flags
+        .iter()
+        .filter(|recorded| **recorded & flag != 0)
+        .count()
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_later_click_of_a_sequence_is_judged_again_and_the_rest_is_not_sent() {
+    use crate::input::mouse::mouse_send::{MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+    use agent_desktop_core::DeliveryDisposition;
+
+    let own = 500;
+    let other = 7;
+    let adapter = WindowsAdapter::new().refusing_windows_of(process(own, None));
+    let clicks = |count: u32, later: Vec<Vec<Option<u32>>>| {
+        let facts = fake::PointerFacts {
+            point: vec![Some(other)],
+            foreground: vec![Some(other)],
+            later_points: later,
+            ..Default::default()
+        };
+        recorded_mouse(|| {
+            fake::with(facts, || {
+                adapter.mouse_event(
+                    MouseEvent {
+                        kind: MouseEventKind::Click { count },
+                        point: Point { x: 5.0, y: 5.0 },
+                        button: MouseButton::Left,
+                        modifiers: Vec::new(),
+                    },
+                    &lease(),
+                )
+            })
+        })
+    };
+
+    // The first click closes the window at the point, and Sprint Coder is there for the second.
+    let (result, flags) = clicks(2, vec![vec![Some(own)]]);
+    let error = result.expect_err("the second click is refused");
+    assert_eq!(error.code, ErrorCode::PolicyDenied);
+    let details = error.details.as_ref().expect("details");
+    assert_eq!(details["kind"], "own_window_refused");
+    assert_eq!(details["target"], "point");
+    assert_eq!(details["clicks_sent"], 1);
+    assert_eq!(details["physical_delivery_started"], true);
+    assert!(
+        details["delivered_events"].as_u64().unwrap_or(0) > 0,
+        "{details}"
+    );
+    assert_eq!(
+        error.disposition.delivery(),
+        DeliveryDisposition::DeliveredUnverified
+    );
+    assert!(!error.permits_retry_by_default());
+    assert!(
+        error.message.contains("before this one were sent"),
+        "{}",
+        error.message
+    );
+    // One click went (a down and an up), and nothing after it.
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 1);
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
+
+    // The third of three.
+    let (result, flags) = clicks(3, vec![vec![Some(other)], vec![Some(own)]]);
+    assert_eq!(
+        result.expect_err("refused").details.unwrap()["clicks_sent"],
+        2
+    );
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 2);
+
+    // Nothing changes: every click goes, as before.
+    let (result, flags) = clicks(3, Vec::new());
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 3);
+    // A single click is judged once, before anything is sent.
+    let (result, flags) = clicks(1, vec![vec![Some(own)]]);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 1);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_later_wheel_event_is_judged_again() {
+    use crate::input::mouse::mouse_send::MOUSEEVENTF_WHEEL;
+
+    let own = 500;
+    let other = 7;
+    let adapter = WindowsAdapter::new().refusing_windows_of(process(own, None));
+    let facts = fake::PointerFacts {
+        point: vec![Some(other)],
+        foreground: vec![Some(other)],
+        // The first read is the check before anything; the second is before the second event.
+        later_points: vec![vec![Some(own)]],
+        ..Default::default()
+    };
+    let (result, flags) = recorded_mouse(|| {
+        fake::with(facts, || {
+            adapter.mouse_event(
+                MouseEvent {
+                    // 25 lines go as 10, 10 and 5.
+                    kind: MouseEventKind::Wheel {
+                        delta_x: 0.0,
+                        delta_y: -25.0,
+                    },
+                    point: Point { x: 5.0, y: 5.0 },
+                    button: MouseButton::Left,
+                    modifiers: Vec::new(),
+                },
+                &lease(),
+            )
+        })
+    });
+    let error = result.expect_err("the second wheel event is refused");
+    assert_eq!(error.details.as_ref().unwrap()["wheel_events_sent"], 1);
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_WHEEL), 1);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_drop_on_a_window_that_became_sprint_coder_is_not_made() {
+    use crate::input::mouse::mouse_send::{MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+
+    let own = 500;
+    let other = 7;
+    let adapter = WindowsAdapter::new().refusing_windows_of(process(own, None));
+    let drag = |later: Vec<Vec<Option<u32>>>| {
+        // Reads: the origin and the destination before anything, then the destination again
+        // just before the button is let go.
+        let facts = fake::PointerFacts {
+            point: vec![Some(other)],
+            foreground: vec![Some(other)],
+            later_points: later,
+            ..Default::default()
+        };
+        recorded_mouse(|| {
+            fake::with(facts, || {
+                adapter.drag(
+                    DragParams {
+                        from: Point { x: 5.0, y: 5.0 },
+                        to: Point { x: 9.0, y: 9.0 },
+                        duration_ms: Some(16),
+                        drop_delay_ms: Some(16),
+                    },
+                    &lease(),
+                )
+            })
+        })
+    };
+    let (result, flags) = drag(vec![vec![Some(other)], vec![Some(own)]]);
+    let error = result.expect_err("the drop is refused");
+    let details = error.details.as_ref().expect("details");
+    assert_eq!(details["kind"], "own_window_refused");
+    assert_eq!(details["dropped"], false);
+    assert_eq!(details["button_released_at"], "origin");
+    assert_eq!(details["physical_delivery_started"], true);
+    assert_eq!(details["emergency_release_posted"], true);
+    // The button went down once and was let go once, by the release back at the origin: the
+    // flags just before it are the move back there.
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 1);
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
+    assert_eq!(flags.last().copied(), Some(MOUSEEVENTF_LEFTUP));
+    // Unchanged, the drop is made.
+    let (result, flags) = drag(Vec::new());
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_later_click_of_a_physical_ref_click_is_judged_again_too() {
+    use crate::input::mouse::mouse_send::MOUSEEVENTF_LEFTDOWN;
+
+    // `double-click` and `triple-click` on a ref send their clicks through the same sequence
+    // (`physical_click::click_from_gate` -> `synthesize_mouse`), inside `execute_action`.
+    let own = 500;
+    let other = 7;
+    let facts = fake::PointerFacts {
+        point: vec![Some(other)],
+        foreground: vec![Some(other)],
+        later_points: vec![vec![Some(own)]],
+        ..Default::default()
+    };
+    let (result, flags) = recorded_mouse(|| {
+        fake::with(facts, || {
+            // The part was judged by its owners; the point is read first here, before the
+            // second click.
+            let _ = fake::point(&fake::get().unwrap());
+            while_acting(&process(own, None), "execute_action", || {
+                crate::input::mouse::synthesize_mouse(
+                    MouseEvent {
+                        kind: MouseEventKind::Click { count: 2 },
+                        point: Point { x: 5.0, y: 5.0 },
+                        button: MouseButton::Left,
+                        modifiers: Vec::new(),
+                    },
+                    Deadline::standard().unwrap(),
+                )
+            })
+        })
+    });
+    let error = result.expect_err("refused");
+    let details = error.details.as_ref().unwrap();
+    assert_eq!(details["operation"], "execute_action");
+    assert_eq!(details["clicks_sent"], 1);
+    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 1);
+    // Outside an operation of the adapter nothing is judged.
+    assert!(recheck_pointer(&Point { x: 5.0, y: 5.0 }, true).is_ok());
 }

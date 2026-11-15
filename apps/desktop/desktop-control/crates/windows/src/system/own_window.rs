@@ -294,11 +294,36 @@ pub(crate) fn refusal(
     Some(
         AdapterError::new(ErrorCode::PolicyDenied, message)
             .with_details(details)
-            .with_suggestion(
-                "Do not try Sprint Coder's own windows again, by any route. If something there needs doing (a permission, an approval), ask the user to do it.",
-            )
+            .with_suggestion(OWN_WINDOW_SUGGESTION)
             .with_disposition(DeliverySemantics::not_delivered()),
     )
+}
+
+/// The suggestion of a refusal, also of one made part-way through a sequence.
+pub(crate) const OWN_WINDOW_SUGGESTION: &str = "Do not try Sprint Coder's own windows again, by any route. If something there needs doing (a permission, an approval), ask the user to do it.";
+
+/// Whether an error is one of these refusals.
+pub(crate) fn is_own_window_refusal(error: &AdapterError) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details["kind"].as_str())
+        .is_some_and(|kind| kind.starts_with("own_window"))
+}
+
+/// A refusal made part-way through a sequence of inputs: those already sent (`sent` of them,
+/// under `key`) went, so physical delivery had started; nothing after them is sent. The caller
+/// folds in its delivery evidence (`ReleaseState::enrich_error`: delivered, unverified).
+pub(crate) fn refused_part_way(mut error: AdapterError, key: &str, sent: usize) -> AdapterError {
+    error.message = error.message.replace(
+        "nothing was sent",
+        "the inputs before this one were sent and nothing after them",
+    );
+    if let Some(details) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
+        details.insert("physical_delivery_started".into(), true.into());
+        details.insert(key.into(), sent.into());
+    }
+    error
 }
 
 #[cfg(target_os = "windows")]
@@ -523,10 +548,15 @@ pub(crate) mod fake {
         pub(crate) point: Vec<Option<u32>>,
         pub(crate) foreground: Vec<Option<u32>>,
         pub(crate) may_not_take_foreground: bool,
+        /// What the window at the point reads on the second, third... read (the first is
+        /// `point`); past its end, the last of them (or `point`). A window that changes part-way
+        /// through a sequence of inputs.
+        pub(crate) later_points: Vec<Vec<Option<u32>>>,
     }
 
     thread_local! {
         static FACTS: RefCell<Option<PointerFacts>> = const { RefCell::new(None) };
+        static POINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     /// Runs `body` with `facts` in place of the desktop's.
@@ -538,6 +568,7 @@ pub(crate) mod fake {
             }
         }
         FACTS.with(|cell| *cell.borrow_mut() = Some(facts));
+        POINT_READS.with(|reads| reads.set(0));
         let _reset = Reset;
         body()
     }
@@ -545,15 +576,78 @@ pub(crate) mod fake {
     pub(crate) fn get() -> Option<PointerFacts> {
         FACTS.with(|cell| cell.borrow().clone())
     }
+
+    /// The window at the point for this read.
+    pub(crate) fn point(facts: &PointerFacts) -> Vec<Option<u32>> {
+        let read = POINT_READS.with(|reads| reads.replace(reads.get() + 1));
+        if read == 0 || facts.later_points.is_empty() {
+            return facts.point.clone();
+        }
+        facts.later_points[(read - 1).min(facts.later_points.len() - 1)].clone()
+    }
 }
 
 /// The owners of the window a pointer event at `point` reaches.
 pub(crate) fn point_owners(point: &agent_desktop_core::Point) -> Vec<Option<u32>> {
     #[cfg(test)]
     if let Some(facts) = fake::get() {
-        return facts.point;
+        return fake::point(&facts);
     }
     facts::point_owners(point)
+}
+
+/// What the adapter is doing on this thread while one of its operations sends a sequence of
+/// inputs, so the sequence judges each later input again (`recheck_pointer`).
+struct Acting {
+    owner: RefusedWindowOwner,
+    operation: &'static str,
+}
+
+thread_local! {
+    static ACTING: std::cell::RefCell<Option<Acting>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `body` (one operation of the adapter) with `owner` and `operation` in place for
+/// `recheck_pointer`, and puts back what was there before.
+pub(crate) fn while_acting<T>(
+    owner: &RefusedWindowOwner,
+    operation: &'static str,
+    body: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Acting>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            ACTING.with(|cell| *cell.borrow_mut() = previous);
+        }
+    }
+    let previous = ACTING.with(|cell| {
+        cell.borrow_mut().replace(Acting {
+            owner: owner.clone(),
+            operation,
+        })
+    });
+    let _restore = Restore(previous);
+    body()
+}
+
+/// Judges a later input of a sequence at `point` the way the operation's first input was judged
+/// (`RefusedWindowOwner::check_pointer`), just before it is sent: an earlier input can change what
+/// is there (a click that closes the window at the point leaves the one behind it there). Nothing
+/// is refused outside an operation of the adapter.
+pub(crate) fn recheck_pointer(
+    point: &agent_desktop_core::Point,
+    reaches_front: bool,
+) -> Result<(), AdapterError> {
+    let acting = ACTING.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|acting| (acting.owner.clone(), acting.operation))
+    });
+    match acting {
+        Some((owner, operation)) => owner.check_pointer(operation, &[point], reaches_front),
+        None => Ok(()),
+    }
 }
 
 /// The owners of the window in front.

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! `InputOps::drag`: `SendInput` drag synthesis with a release guard.
 //!
 //! Bare-coordinate path like `mouse_event` - no window-identity gate,
@@ -74,6 +75,17 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
         dwell_over_destination(destination, drop_delay_ms, deadline, &mut guard)?;
 
         deadline.ensure_remaining()?;
+        // The drop is judged again just before the button is let go: the window at the
+        // destination can have changed while the button was down. Refused, the button is not
+        // let go there; the guard lets it go back at the origin (`DragReleaseGuard`).
+        crate::system::own_window::recheck_pointer(&params.to, false).map_err(|error| {
+            let mut error = crate::system::own_window::refused_part_way(error, "drops_sent", 0);
+            if let Some(details) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
+                details.insert("dropped".into(), false.into());
+                details.insert("button_released_at".into(), "origin".into());
+            }
+            error
+        })?;
         post_mouse_inputs(&[move_input(destination)]);
         guard.mark_delivered();
         post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTUP)]);
@@ -82,7 +94,15 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
         deadline.ensure_remaining()
     })();
 
-    outcome.map_err(|error| guard.enrich_error(error))
+    outcome.map_err(|error| {
+        let own = crate::system::own_window::is_own_window_refusal(&error);
+        let error = guard.enrich_error(error);
+        if own {
+            error.with_suggestion(crate::system::own_window::OWN_WINDOW_SUGGESTION)
+        } else {
+            error
+        }
+    })
 }
 
 fn dwell_over_destination(
