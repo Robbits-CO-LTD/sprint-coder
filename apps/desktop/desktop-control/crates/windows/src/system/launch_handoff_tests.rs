@@ -72,12 +72,20 @@ fn ids(list: &[&str]) -> HashSet<String> {
     list.iter().map(|id| id.to_string()).collect()
 }
 
-/// A single-instance app's running instance opens the window the launch asked
-/// for: only a window of that instance that did not exist before the launch
-/// is taken, never one it already had (the user's), nor a new window of
-/// another process, nor one whose owner pid now names another process.
+fn one(found: HandoffLook) -> WindowInfo {
+    match found {
+        HandoffLook::One(window) => window,
+        other => panic!("expected one window, got {other:?}"),
+    }
+}
+
+/// A single-instance app's running instance shows the window the launch asked
+/// for: only a window of that instance that was not shown before the launch
+/// (new, or hidden until now) is taken, never one it already showed (the
+/// user's), nor a new window of another process, nor one whose owner pid now
+/// names another process.
 #[test]
-fn a_handoff_takes_only_a_window_the_running_instance_opened_after_the_launch() {
+fn a_handoff_takes_only_a_window_the_running_instance_showed_after_the_launch() {
     let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
     let before = ids(&["w-1", "w-2"]);
     let windows = vec![
@@ -87,7 +95,7 @@ fn a_handoff_takes_only_a_window_the_running_instance_opened_after_the_launch() 
         window("w-5", 20, Some("instance-20")),
     ];
 
-    let found = new_instance_window(windows, &targets, &before).expect("the new window is found");
+    let found = one(pick_handoff_window(windows, &targets, &before, false));
 
     assert_eq!(found.id, "w-5");
     assert_eq!(found.pid, ProcessId::from(20));
@@ -102,31 +110,87 @@ fn a_handoff_with_only_old_windows_takes_none() {
         window("w-9", 30, Some("instance-30")),
     ];
 
-    assert!(new_instance_window(windows, &targets, &before).is_none());
+    assert_eq!(
+        pick_handoff_window(windows, &targets, &before, false),
+        HandoffLook::None
+    );
 }
 
-/// Passed to a running instance, the launch stops once the short handoff
-/// wait is over, even while a windowless descendant (a crash handler the
-/// exited process started) still runs; before this it waited for that
-/// descendant until the whole deadline.
+/// Two windows the running instances showed after the launch (the launch's
+/// and one the user opened in another profile at the same time) cannot be
+/// told apart, so neither is taken (and neither is restacked).
 #[test]
-fn a_handoff_stops_when_its_short_wait_is_over_even_with_a_lingering_descendant() {
-    assert_eq!(after_exit(true, true, true), AfterExit::Stop);
-    assert_eq!(after_exit(false, true, true), AfterExit::Stop);
+fn two_new_windows_are_not_taken() {
+    let targets = vec![
+        (ProcessId::from(20), Some("instance-20".to_string())),
+        (ProcessId::from(21), Some("instance-21".to_string())),
+    ];
+    let before = ids(&[]);
+    let same_instance = vec![
+        window("w-5", 20, Some("instance-20")),
+        window("w-6", 20, Some("instance-20")),
+    ];
+    assert_eq!(
+        pick_handoff_window(same_instance, &targets, &before, false),
+        HandoffLook::Several
+    );
+    let two_instances = vec![
+        window("w-5", 20, Some("instance-20")),
+        window("w-7", 21, Some("instance-21")),
+    ];
+    assert_eq!(
+        pick_handoff_window(two_instances, &targets, &before, false),
+        HandoffLook::Several
+    );
+}
+
+/// When several instances already showed windows (two browser profiles),
+/// even a single new window cannot be tied to this launch.
+#[test]
+fn a_new_window_beside_several_instances_with_windows_is_not_taken() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let windows = vec![window("w-5", 20, Some("instance-20"))];
+    assert_eq!(
+        pick_handoff_window(windows, &targets, &ids(&[]), true),
+        HandoffLook::Several
+    );
+}
+
+#[test]
+fn several_instances_are_counted_only_among_the_targets_with_shown_windows() {
+    let owners: HashSet<ProcessId> = [20, 21, 99].into_iter().map(ProcessId::from).collect();
+    let pid = |n: u32| ProcessId::from(n);
+    assert!(several_instances_show_windows(&owners, &[pid(20), pid(21)]));
+    assert!(!several_instances_show_windows(
+        &owners,
+        &[pid(20), pid(22)]
+    ));
+    assert!(
+        !several_instances_show_windows(&owners, &[pid(20)]),
+        "one browser process with its helpers is one instance"
+    );
+}
+
+/// A live descendant is waited for until the deadline, even while an
+/// instance of the same executable runs: a launcher whose GUI child is slow
+/// to show its window still gets that window as its own (`new_instance`).
+#[test]
+fn a_running_descendant_keeps_the_watch_until_the_deadline() {
+    assert_eq!(after_exit(true, true, true), AfterExit::KeepWatching);
     assert_eq!(after_exit(true, true, false), AfterExit::KeepWatching);
-    assert_eq!(after_exit(false, true, false), AfterExit::KeepWatching);
-}
-
-/// Without a running instance, the watch is as before: it continues while a
-/// descendant lives and stops at once when none does.
-#[test]
-fn without_a_running_instance_only_a_live_descendant_keeps_the_watch() {
     assert_eq!(after_exit(true, false, false), AfterExit::KeepWatching);
     assert_eq!(after_exit(true, false, true), AfterExit::KeepWatching);
+}
+
+/// Without a live descendant, a running instance is watched only for the
+/// short handoff wait, and with neither the watch stops at once.
+#[test]
+fn without_a_running_descendant_the_handoff_wait_bounds_the_watch() {
+    assert_eq!(after_exit(false, true, false), AfterExit::KeepWatching);
+    assert_eq!(after_exit(false, true, true), AfterExit::Stop);
     assert_eq!(after_exit(false, false, false), AfterExit::Stop);
     assert_eq!(after_exit(false, false, true), AfterExit::Stop);
 }
-
 #[test]
 fn the_handoff_wait_is_short_and_bounded() {
     assert!(HANDOFF_WINDOW_WAIT <= Duration::from_secs(10));
@@ -134,11 +198,12 @@ fn the_handoff_wait_is_short_and_bounded() {
 }
 
 /// The ids read before a launch are the ids the window inventory reports,
-/// so a window that existed before is recognised as old.
+/// so a window that was shown before is recognised as old: every listed
+/// window is among them, and they are no more than the listed ones.
 #[cfg(target_os = "windows")]
 #[test]
 fn the_windows_read_before_a_launch_use_the_inventory_ids() {
-    let before = existing_window_ids().expect("top-level windows can be enumerated");
+    let (before, _) = shown_windows().expect("top-level windows can be enumerated");
     assert!(before.iter().all(|id| id.starts_with("w-")));
     let deadline = Deadline::after(5_000).expect("deadline");
     let filter = WindowFilter {
@@ -151,10 +216,16 @@ fn the_windows_read_before_a_launch_use_the_inventory_ids() {
         .map(|window| window.id.as_str())
         .filter(|id| !before.contains(*id))
         .collect();
-    // A window may open between the two reads; almost all must match.
+    // A window may open or close between the two reads; almost all match.
     assert!(
         unknown.len() <= 2,
         "listed windows missing from the enumeration: {unknown:?}"
+    );
+    assert!(
+        before.len() <= listed.len() + 2,
+        "only shown windows are read: {} read, {} listed",
+        before.len(),
+        listed.len()
     );
 }
 

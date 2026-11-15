@@ -20,8 +20,9 @@
 //! report no window although one opened. When the launched process exited
 //! without a window while such an instance runs ([`Handoff`]), the launch also
 //! watches that instance, for a short while ([`HANDOFF_WINDOW_WAIT`]), for a
-//! top-level window that did not exist before the launch started anything,
-//! and reports it as the running instance's window (`handed_off`), never as a
+//! top-level window that was not shown before the launch started anything (a
+//! new window, or a hidden one such as a tray app's main window that it shows
+//! now), and reports it as the running instance's window (`handed_off`), never as a
 //! window of a process the launch started (`new_instance` stays false).
 
 use std::collections::HashSet;
@@ -52,23 +53,34 @@ pub(super) struct RunningInstance {
 }
 
 /// The running instances a launch may be passed to, and the ids of every
-/// top-level window that existed before the launch started its process.
+/// top-level window that was shown before the launch started its process.
 pub(super) struct Handoff {
     instances: Vec<RunningInstance>,
     /// `None` when there is no instance, or the windows could not be read:
-    /// then no window can be told apart as new, and none is ever taken.
+    /// then no window can be told apart as newly shown, and none is taken.
     before: Option<HashSet<String>>,
+    /// Whether several of the instances already showed windows (see
+    /// [`several_instances_show_windows`]).
+    several_instances: bool,
 }
 
 impl Handoff {
-    /// Reads the windows that exist now; call it before the process starts.
+    /// Reads the windows shown now; call it before the process starts.
     pub(super) fn begin(instances: Vec<RunningInstance>) -> Self {
-        let before = if instances.is_empty() {
+        let shown = if instances.is_empty() {
             None
         } else {
-            existing_window_ids()
+            shown_windows()
         };
-        Self { instances, before }
+        let pids: Vec<ProcessId> = instances.iter().map(|instance| instance.pid).collect();
+        let several_instances = shown
+            .as_ref()
+            .is_some_and(|(_, owners)| several_instances_show_windows(owners, &pids));
+        Self {
+            instances,
+            before: shown.map(|(ids, _)| ids),
+            several_instances,
+        }
     }
 
     /// Whether an instance that was running before the launch still runs.
@@ -78,14 +90,10 @@ impl Handoff {
             .any(|instance| !instance.process.has_exited())
     }
 
-    /// One look for a window of a still-running instance that did not exist
-    /// before the launch.
-    pub(super) fn new_window(
-        &self,
-        deadline: Deadline,
-    ) -> Result<Option<WindowInfo>, AdapterError> {
+    /// One look for the window a still-running instance showed for the launch.
+    pub(super) fn look(&self, deadline: Deadline) -> Result<HandoffLook, AdapterError> {
         let Some(before) = &self.before else {
-            return Ok(None);
+            return Ok(HandoffLook::None);
         };
         let targets: Vec<(ProcessId, Option<String>)> = self
             .instances
@@ -94,34 +102,23 @@ impl Handoff {
             .map(|instance| (instance.pid, instance.token.clone()))
             .collect();
         if targets.is_empty() {
-            return Ok(None);
+            return Ok(HandoffLook::None);
         }
         let filter = WindowFilter {
             focused_only: false,
             app: None,
         };
         match super::list_windows_live(&filter, deadline) {
-            Ok(windows) => Ok(new_instance_window(windows, &targets, before)),
-            Err(error) if super::is_unobservable_within_budget(&error) => Ok(None),
+            Ok(windows) => Ok(pick_handoff_window(
+                windows,
+                &targets,
+                before,
+                self.several_instances,
+            )),
+            Err(error) if super::is_unobservable_within_budget(&error) => Ok(HandoffLook::None),
             Err(error) => Err(error),
         }
     }
-}
-
-/// The first window of one of `targets` (same pid and process instance) whose
-/// id was not among the windows that existed before the launch.
-pub(super) fn new_instance_window(
-    windows: Vec<WindowInfo>,
-    targets: &[(ProcessId, Option<String>)],
-    before: &HashSet<String>,
-) -> Option<WindowInfo> {
-    owned_window(
-        windows
-            .into_iter()
-            .filter(|window| !before.contains(&window.id))
-            .collect(),
-        targets,
-    )
 }
 
 /// What a launch does after the process it started exited without a window.
@@ -131,33 +128,108 @@ pub(super) enum AfterExit {
     KeepWatching,
 }
 
-/// Passed to a running instance, the launch watches that instance until
-/// [`HANDOFF_WINDOW_WAIT`] is over, even while a descendant lingers without a
-/// window (a crash handler the exited process started would otherwise hold it
-/// to the whole deadline). Otherwise it watches while a descendant lives, as
-/// before, and stops when none does.
+/// A live descendant is watched until the deadline, as before, whether or not
+/// an instance of the same executable runs: a launcher whose GUI child is
+/// slow to show its window must still get that window as its own. While one
+/// is watched, a window a running instance showed still ends the watch at
+/// once (the launch was passed on). Without a live descendant, a running
+/// instance is watched until [`HANDOFF_WINDOW_WAIT`] is over, and with
+/// neither the watch stops.
 pub(super) fn after_exit(
     live_descendants: bool,
-    handed_off: bool,
+    instance_runs: bool,
     handoff_wait_over: bool,
 ) -> AfterExit {
-    match (handed_off, handoff_wait_over, live_descendants) {
-        (true, true, _) | (false, _, false) => AfterExit::Stop,
-        _ => AfterExit::KeepWatching,
+    match (live_descendants, instance_runs, handoff_wait_over) {
+        (true, _, _) | (false, true, false) => AfterExit::KeepWatching,
+        _ => AfterExit::Stop,
     }
 }
 
-/// The ids of every top-level window, shown or not, or `None` when they could
-/// not be enumerated.
-fn existing_window_ids() -> Option<HashSet<String>> {
-    use super::super::window::{window_enum, window_ops};
+/// What one look at a running instance's windows found.
+#[derive(Debug, Clone)]
+pub(super) enum HandoffLook {
+    /// No window the instances showed after the launch started.
+    None,
+    /// Exactly one, which is taken as the window the launch asked for.
+    One(WindowInfo),
+    /// More than one, or the instances are several with windows of their own
+    /// (several profiles of a browser): which one the launch reached cannot
+    /// be told, so none is taken.
+    Several,
+}
+
+/// Two looks are equal when they found the same window, by id.
+impl PartialEq for HandoffLook {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::None, Self::None) | (Self::Several, Self::Several) => true,
+            (Self::One(a), Self::One(b)) => a.id == b.id,
+            _ => false,
+        }
+    }
+}
+
+/// Picks the window a launch was passed to: only when exactly one window of
+/// `targets` was not shown before the launch, and the targets do not include
+/// several instances that already showed windows (`several_instances`).
+pub(super) fn pick_handoff_window(
+    windows: Vec<WindowInfo>,
+    targets: &[(ProcessId, Option<String>)],
+    before: &HashSet<String>,
+    several_instances: bool,
+) -> HandoffLook {
+    let mut fresh: Vec<WindowInfo> = windows
+        .into_iter()
+        .filter(|window| !before.contains(&window.id))
+        .filter(|window| {
+            targets.iter().any(|(pid, token)| {
+                window.pid == *pid && token.is_some() && window.process_instance == *token
+            })
+        })
+        .collect();
+    match (fresh.len(), several_instances) {
+        (0, _) => HandoffLook::None,
+        (1, false) => HandoffLook::One(fresh.remove(0)),
+        _ => HandoffLook::Several,
+    }
+}
+
+/// Whether more than one of `targets` already showed a window before the
+/// launch: then each may be the instance the launch is passed to (a browser
+/// with two profiles open), and a window either of them shows cannot be tied
+/// to this launch.
+pub(super) fn several_instances_show_windows(
+    shown_owners: &HashSet<ProcessId>,
+    targets: &[ProcessId],
+) -> bool {
+    targets
+        .iter()
+        .filter(|pid| shown_owners.contains(pid))
+        .count()
+        > 1
+}
+
+/// The ids of every top-level window the window inventory would list now
+/// or a minimized one (`launch_attach::is_shown`), or `None` when they could
+/// not be enumerated. A
+/// window that was hidden (a tray app's main window) is left out, so the
+/// instance showing it for the launch counts as showing a window. Beside the
+/// ids, the processes that own those windows (or the app a shell frame hosts).
+fn shown_windows() -> Option<(HashSet<String>, HashSet<ProcessId>)> {
+    use super::super::window::{frame_identity, window_enum, window_identity, window_ops};
     let mut ids = HashSet::new();
+    let mut owners = HashSet::new();
     window_enum::enumerate_top_level(|window| {
-        ids.insert(window_ops::window_id(window.handle));
+        if super::launch_attach::is_shown(&window) {
+            ids.insert(window_ops::window_id(window.handle));
+            owners.extend(window_identity::live_window_owner(window.handle));
+            owners.extend(frame_identity::hosted_application_pid(window.handle));
+        }
         true
     })
     .ok()?;
-    Some(ids)
+    Some((ids, owners))
 }
 
 /// The launched process and every descendant proven to be its own.

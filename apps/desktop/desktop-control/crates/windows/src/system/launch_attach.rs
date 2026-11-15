@@ -22,6 +22,75 @@ pub(super) struct Prepared {
     pub(super) executable: PathBuf,
     pub(super) attached: Option<LaunchResult>,
     pub(super) running: Vec<RunningInstance>,
+    /// `true` when a bare launch found the app running with no window shown
+    /// and so starts it instead of attaching (see [`AttachDecision`]).
+    pub(super) running_without_window: bool,
+}
+
+/// What a bare launch does about the instances already running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttachDecision {
+    /// Nothing runs: start the app.
+    Start,
+    /// One instance runs and shows a window (or its windows could not be
+    /// read): attach to it, start nothing.
+    Attach(ProcessId),
+    /// Every running instance shows no window: start the app as a double
+    /// click on its icon would, so a single-instance app opens a window.
+    StartBesideWindowless,
+    /// Several instances run and at least one may show a window.
+    Ambiguous,
+}
+
+/// Decides from the instance roots and whether each shows a window (`None`
+/// when the windows could not be read, which counts as showing one, so doubt
+/// keeps the old answer: attach, or refuse as ambiguous).
+pub(super) fn attach_decision(roots: &[(ProcessId, Option<bool>)]) -> AttachDecision {
+    if roots.is_empty() {
+        return AttachDecision::Start;
+    }
+    if roots.iter().all(|&(_, shows)| shows == Some(false)) {
+        return AttachDecision::StartBesideWindowless;
+    }
+    match roots {
+        [(root, _)] => AttachDecision::Attach(*root),
+        _ => AttachDecision::Ambiguous,
+    }
+}
+
+/// Whether `pid` shows a window the user can see or bring back (see
+/// [`is_shown`]).
+pub(super) fn shows_a_window(pid: ProcessId, windows: &[TopWindow]) -> bool {
+    windows
+        .iter()
+        .any(|top| is_shown(&top.window) && top.belongs_to(pid))
+}
+
+/// A window the user can see or bring back: the window inventory's filter
+/// (`passes_filter`: shown, with a size, not cloaked, not a tool window), and
+/// a minimized window whatever its rect. A window cloaked on another virtual
+/// desktop, a tool window, a hidden or zero-sized one is not, nor a
+/// message-only window (`EnumWindows` never lists one).
+pub(super) fn is_shown(window: &EnumeratedWindow) -> bool {
+    super::super::window::window_ops::passes_filter(window)
+        || (window.visible && window.iconic && !window.cloaked && !window.tool)
+}
+
+fn running_instances(exact_matches: Vec<(ProcessId, Option<Process>)>) -> Vec<RunningInstance> {
+    exact_matches
+        .into_iter()
+        .filter_map(|(pid, process)| {
+            // Read while the handle holds the pid, so the token names the
+            // process that was matched.
+            let process = process?;
+            let token = process_identity::token_for_pid(pid).ok().flatten();
+            Some(RunningInstance {
+                pid,
+                token,
+                process,
+            })
+        })
+        .collect()
 }
 
 /// Whether this launch may attach to a running instance instead of starting
@@ -60,20 +129,8 @@ pub(super) fn prepare(
         return Ok(Prepared {
             executable,
             attached: None,
-            running: exact_matches
-                .into_iter()
-                .filter_map(|(pid, process)| {
-                    // Read while the handle holds the pid, so the token names
-                    // the process that was matched.
-                    let process = process?;
-                    let token = process_identity::token_for_pid(pid).ok().flatten();
-                    Some(RunningInstance {
-                        pid,
-                        token,
-                        process,
-                    })
-                })
-                .collect(),
+            running: running_instances(exact_matches),
+            running_without_window: false,
         });
     }
     // Read while every match is held open, so a pid here still names the
@@ -85,12 +142,13 @@ pub(super) fn prepare(
         .filter(|(_, process)| !process.as_ref().is_some_and(Process::has_exited))
         .map(|(pid, process)| (*pid, process.as_ref().and_then(Process::created)))
         .collect();
-    // Only several processes need telling apart, and only then are the
-    // top-level windows read: a failed read leaves every window unknown.
-    let windows = if live.len() > 1 {
-        top_level_windows()
-    } else {
+    // Read whenever something runs: several processes need telling apart,
+    // and whether an instance shows a window decides between attaching and
+    // starting. A failed read leaves every window unknown.
+    let windows = if live.is_empty() {
         None
+    } else {
+        top_level_windows()
     };
     let candidates: Vec<Candidate> = live
         .iter()
@@ -104,11 +162,33 @@ pub(super) fn prepare(
         })
         .collect();
     let roots = instance_roots(&candidates);
-    if roots.len() > 1 {
-        return Err(ambiguous_instances(&with_titles(
-            &roots,
-            windows.as_deref().unwrap_or_default(),
-        )));
+    let shown: Vec<(ProcessId, Option<bool>)> = roots
+        .iter()
+        .map(|&pid| {
+            (
+                pid,
+                windows
+                    .as_deref()
+                    .map(|windows| shows_a_window(pid, windows)),
+            )
+        })
+        .collect();
+    match attach_decision(&shown) {
+        AttachDecision::Ambiguous => {
+            return Err(ambiguous_instances(&with_titles(
+                &roots,
+                windows.as_deref().unwrap_or_default(),
+            )));
+        }
+        AttachDecision::StartBesideWindowless => {
+            return Ok(Prepared {
+                executable,
+                attached: None,
+                running: running_instances(exact_matches),
+                running_without_window: true,
+            });
+        }
+        AttachDecision::Start | AttachDecision::Attach(_) => {}
     }
     if let Some(&root) = roots.first() {
         let token = process_identity::token_for_pid(root)?.ok_or_else(|| {
@@ -135,12 +215,14 @@ pub(super) fn prepare(
             executable,
             attached: Some(attached),
             running: Vec::new(),
+            running_without_window: false,
         });
     }
     Ok(Prepared {
         executable,
         attached: None,
         running: Vec::new(),
+        running_without_window: false,
     })
 }
 
@@ -339,10 +421,20 @@ pub(super) const ATTACHED_WITHOUT_WINDOW: &str = "Nothing was started and no win
 /// launch to the running instance, which then opened the reported window.
 pub(super) const HANDED_OFF_NEW_WINDOW: &str = "The launched process passed the launch to the \
      instance of the same app that was already running and exited (a single-instance app). \
-     That running instance opened `window` after this launch started, so it is most likely the \
-     window this launch asked for. It belongs to the running instance (`window.pid`), not to a \
+     That running instance showed `window` after this launch started (a new window, or one it \
+     had kept hidden), so it is most likely the window this launch asked for. It belongs to the running instance (`window.pid`), not to a \
      process this launch started, so new_instance is false; the instance's other windows may be \
      ones the user already had open.";
+
+/// The guidance a launch reports when it was passed to a running instance
+/// but cannot tell which window that instance showed for it.
+pub(super) const HANDED_OFF_AMBIGUOUS: &str = "The launched process passed the launch to an \
+     instance of the same app that was already running and exited (a single-instance app). \
+     Several windows of the running instances appeared, or several instances already had \
+     windows open (a browser with more than one profile), so which window this launch opened \
+     is not confirmed and none is named here. Run `list-windows` for the app and pick the \
+     window by its title; they belong to the running instances, which the user may already \
+     have open.";
 
 /// The guidance a launch reports when the process it started exited without
 /// a window of its own while an instance of the same executable was running,

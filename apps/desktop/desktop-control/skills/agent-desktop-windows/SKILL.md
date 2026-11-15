@@ -91,22 +91,30 @@ observation, actions and capture there fail or return nothing.
   Windows directory, with or without `.exe` (`notepad` or `notepad.exe`), not
   a display name. Use `list-apps` to find a running app.
 - **Read `attached` and `new_instance` in the `launch` result.** A bare
-  `launch` of an app that is already running attaches to it and starts
-  nothing (`attached: true`); its windows may be ones the user had open, so do
-  not treat them as yours. With no `window` in that result, the app runs with
-  no window open (a browser kept running in the background, an app in the
-  tray). `--no-attach`, or any `--arg`, `--env` or `--cwd`, starts a new
-  process instead. A single-instance app (a browser on its default profile,
-  many editors) passes that new process to the running instance and exits:
-  the result then says `attached: true` and `handed_off: true`. The running
-  instance opens the new window itself, so when the result has a `window`, it
-  is the window that instance opened after the launch, owned by `window.pid`
-  (the running instance, not the exited `pid`). With no `window`, no new
-  window appeared within a few seconds: run `list-windows --app <app>` before
-  launching again, since a second launch may open a second window. To open a
-  window of such an app when the bare `launch` attached, run `launch
-  --no-attach` once. Only `new_instance: true` proves `window` belongs to a
+  `launch` of an app that is already running with a window shown (minimized
+  counts) attaches to it and starts nothing (`attached: true`); its windows
+  may be ones the user had open, so do not treat them as yours. When the app
+  runs with no window shown (a browser kept running in the background, an app
+  in the tray), a bare `launch` starts it, as a double click on its icon
+  would (`running_without_window: true`). `--no-attach`, or any `--arg`,
+  `--env` or `--cwd`, always starts a new process. A single-instance app (a
+  browser on its default profile, many editors, most tray apps) passes that
+  new process to the running instance and exits: the result then says
+  `attached: true` and `handed_off: true`. The running instance shows the
+  window itself, so when the result has a `window`, it is the one that
+  instance showed after the launch, owned by `window.pid` (the running
+  instance, not the exited `pid`). With no `window`, which window it showed
+  is not confirmed (none appeared within a few seconds, or several did): run
+  `list-windows --app <app>` before launching again, since a second launch may
+  open a second window. Only `new_instance: true` proves `window` belongs to a
   process this launch started.
+- **`launch` keeps the window it opens behind the window in front,** for
+  work you do yourself in the background. When the user asks you to open an
+  app for them to look at or use, pass `--activate`: the window is brought to
+  the front, and `activated` in the result says whether Windows allowed it.
+  When `activated` is `false`, or you launched without `--activate`, tell the
+  user the window opened behind their other windows. When unsure, launch
+  without `--activate` and say so.
 - **The `window` a launch returns can be a splash screen** that closes once
   the app's main window opens. When a command on that window id fails with
   `WINDOW_NOT_FOUND`, run `list-windows --app <app>` and use the current id.

@@ -134,6 +134,23 @@ fn a_result_is_neither_attached_nor_new_until_proven() {
     assert_eq!(wire["attached"], false);
     assert_eq!(wire["new_instance"], false);
     assert!(wire.get("handed_off").is_none(), "left out unless true");
+    assert!(wire.get("running_without_window").is_none());
+    assert!(wire.get("activated").is_none(), "only with --activate");
+}
+
+/// `--activate` always says whether the window ended in front; with no
+/// window it cannot be, and nothing is tried without `--activate`.
+#[test]
+fn activate_reports_whether_the_window_is_in_front() {
+    let deadline = Deadline::after(1_000).expect("deadline");
+    let mut plain = launch_result("app.exe", ProcessId::from(7), "7:1".to_string(), None);
+    bring_forward_if_asked(&mut plain, false, deadline);
+    assert_eq!(plain.activated, None);
+    let mut asked = launch_result("app.exe", ProcessId::from(7), "7:1".to_string(), None);
+    bring_forward_if_asked(&mut asked, true, deadline);
+    assert_eq!(asked.activated, Some(false));
+    let wire = serde_json::to_value(&asked).expect("serializes");
+    assert_eq!(wire["activated"], false);
 }
 
 /// A launch passed to a running instance says so, and a window that instance
@@ -167,6 +184,8 @@ fn the_attach_guidance_says_nothing_started_and_how_to_get_a_new_window() {
     assert!(launch_attach::ATTACHED_WITHOUT_WINDOW.contains("no window is open"));
     assert!(launch_attach::HANDED_OFF.contains("not confirmed"));
     assert!(launch_attach::HANDED_OFF_NEW_WINDOW.contains("new_instance is false"));
+    assert!(launch_attach::HANDED_OFF_AMBIGUOUS.contains("not confirmed"));
+    assert!(launch_attach::HANDED_OFF_AMBIGUOUS.contains("none is named"));
 }
 
 #[test]
