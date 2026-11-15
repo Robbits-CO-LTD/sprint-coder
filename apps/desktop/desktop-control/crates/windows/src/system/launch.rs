@@ -49,6 +49,9 @@ pub(crate) fn launch_app_impl(
         let settle = (observed.handed_off && observed.window.is_some()).then_some(HandoffSettle {
             deadline,
             shown_at: observed.shown_at,
+            // The instance's one visible window, not seen to move: it is left
+            // where it is in the window order.
+            restack: observed.existing != Some(false),
         });
         left_for_user = guard.finish(&observed.owners, observed.window.as_ref(), settle);
     }
@@ -68,15 +71,18 @@ pub(crate) fn launch_app_impl(
                 result.window.is_some(),
                 observed.handoff_ambiguous,
             ) {
-                (true, true, _) => launch_attach::HANDED_OFF_NEW_WINDOW,
-                (true, false, true) => launch_attach::HANDED_OFF_AMBIGUOUS,
-                (true, false, false) => launch_attach::HANDED_OFF,
-                (false, _, _) => launch_handoff::EXITED_WITHOUT_WINDOW,
-            }
-            .to_string(),
+                (true, true, _) => match observed.existing {
+                    Some(raised) => launch_attach::existing_window_guidance(raised),
+                    None => launch_attach::HANDED_OFF_NEW_WINDOW.to_string(),
+                },
+                (true, false, true) => launch_attach::HANDED_OFF_AMBIGUOUS.to_string(),
+                (true, false, false) => launch_attach::HANDED_OFF.to_string(),
+                (false, _, _) => launch_handoff::EXITED_WITHOUT_WINDOW.to_string(),
+            },
         );
     }
     result.running_without_window = prepared.running_without_window;
+    result.existing_window = observed.existing.is_some() && result.window.is_some();
     bring_forward_if_asked(&mut result, options.activate, deadline);
     report_foreground(&mut result, options.activate, left_for_user);
     Ok(result)
@@ -187,8 +193,14 @@ struct LaunchObservation {
     handoff_ambiguous: bool,
     descendants_alive: bool,
     /// For a handed-off window: when it was first seen (see
-    /// `Handoff::note`), the start of [`HANDOFF_APP_ACTIVATION_GRACE`].
+    /// `Handoff::note`), the start of [`HANDOFF_APP_ACTIVATION_GRACE`]. For
+    /// a window the instance already had: when the launched process was seen
+    /// to have exited (it hands the launch over just before).
     shown_at: Option<std::time::Instant>,
+    /// `Some` when the window is one the instance already showed before the
+    /// launch (`existing_window`): `true` when the instance brought it to the
+    /// front, `false` when it is only the instance's one visible window.
+    existing: Option<bool>,
 }
 
 impl LaunchObservation {
@@ -201,8 +213,38 @@ impl LaunchObservation {
             handoff_ambiguous: false,
             descendants_alive: false,
             shown_at: None,
+            existing: None,
         }
     }
+}
+
+/// The observation for a window the running instance already showed before
+/// the launch (see `LaunchObservation::existing`).
+fn existing_window_observation(
+    lineage: &launch_handoff::Lineage,
+    window: WindowInfo,
+    exited_at: std::time::Instant,
+    raised: bool,
+) -> LaunchObservation {
+    let mut owners = lineage.pids();
+    owners.push(window.pid);
+    LaunchObservation {
+        window: Some(window),
+        owners,
+        exited_without_window: true,
+        handed_off: true,
+        handoff_ambiguous: false,
+        descendants_alive: false,
+        shown_at: Some(exited_at),
+        existing: Some(raised),
+    }
+}
+
+/// Whether a window the instance already had, now in front, came forward
+/// within [`HANDOFF_APP_ACTIVATION_GRACE`] of the launched process being
+/// seen to exit: soon enough to be the instance answering the hand-over.
+fn launch_window_existing_in_grace(exited_at: std::time::Instant) -> bool {
+    within_grace(Some(exited_at), std::time::Instant::now())
 }
 
 /// Watches a process this launch created for its window. While the process
@@ -224,6 +266,7 @@ fn observe_launched_window(
 ) -> Result<LaunchObservation, AdapterError> {
     let mut poll_interval = Duration::from_millis(50);
     let mut handoff_deadline: Option<Deadline> = None;
+    let mut exited_at: Option<std::time::Instant> = None;
     loop {
         if let Some(window) = observe_window_once(pid, process_instance, deadline)? {
             return Ok(LaunchObservation {
@@ -234,6 +277,7 @@ fn observe_launched_window(
                 handoff_ambiguous: false,
                 descendants_alive: false,
                 shown_at: None,
+                existing: None,
             });
         }
         let exited = lineage.launched_has_exited();
@@ -245,7 +289,9 @@ fn observe_launched_window(
         }
         let mut wait_until = deadline;
         let mut descendants_alive = false;
+        let mut only_existing = None;
         if exited {
+            let exited_at = *exited_at.get_or_insert_with(std::time::Instant::now);
             lineage.refresh();
             let live = lineage.live_descendants();
             descendants_alive = !live.is_empty();
@@ -261,12 +307,14 @@ fn observe_launched_window(
                         handoff_ambiguous: false,
                         descendants_alive: false,
                         shown_at: None,
+                        existing: None,
                     });
                 }
             }
             let instance_runs = handoff.any_running();
             if instance_runs {
-                match handoff.look(deadline).map_err(after_launch)? {
+                let read = handoff.read(deadline).map_err(after_launch)?;
+                match read.look {
                     launch_handoff::HandoffLook::One(window) => {
                         let mut owners = lineage.pids();
                         owners.push(window.pid);
@@ -279,6 +327,7 @@ fn observe_launched_window(
                             handoff_ambiguous: false,
                             descendants_alive: false,
                             shown_at,
+                            existing: None,
                         });
                     }
                     // Several candidates: none is taken, nor restacked.
@@ -291,6 +340,17 @@ fn observe_launched_window(
                     }
                     launch_handoff::HandoffLook::None => {}
                 }
+                // A window the instance already had, brought to the front just
+                // as the launch was handed over: the app used it instead of
+                // opening one. Later, it may be the user's doing.
+                if let Some(window) = read.raised
+                    && launch_window_existing_in_grace(exited_at)
+                {
+                    return Ok(existing_window_observation(
+                        &lineage, window, exited_at, true,
+                    ));
+                }
+                only_existing = read.only_existing.map(|window| (window, exited_at));
                 let handoff_until = *handoff_deadline
                     .get_or_insert_with(|| deadline.capped(launch_handoff::HANDOFF_WINDOW_WAIT));
                 // A live descendant keeps the whole deadline (a launcher whose
@@ -304,6 +364,11 @@ fn observe_launched_window(
             if launch_handoff::after_exit(descendants_alive, instance_runs, wait_over)
                 == launch_handoff::AfterExit::Stop
             {
+                if !descendants_alive && let Some((window, exited_at)) = only_existing {
+                    return Ok(existing_window_observation(
+                        &lineage, window, exited_at, false,
+                    ));
+                }
                 return Ok(LaunchObservation {
                     descendants_alive,
                     ..LaunchObservation::none(&lineage, true)
@@ -313,6 +378,14 @@ fn observe_launched_window(
         if !should_poll_after_first_observation(options.timeout_ms)
             || wait_until.remaining().is_zero()
         {
+            if exited
+                && !descendants_alive
+                && let Some((window, exited_at)) = only_existing
+            {
+                return Ok(existing_window_observation(
+                    &lineage, window, exited_at, false,
+                ));
+            }
             return Ok(LaunchObservation {
                 descendants_alive,
                 ..LaunchObservation::none(&lineage, exited)
@@ -468,7 +541,8 @@ impl ForegroundGuard {
             // hidden behind the desktop: it stays where it is, behind the
             // foreground handed back to the desktop.
             let prior_is_desktop = prior == unsafe { GetShellWindow() };
-            if !handle.is_null()
+            if settle.is_none_or(|settle| settle.restack)
+                && !handle.is_null()
                 && handle != prior
                 && !prior_is_topmost
                 && !prior_is_desktop
@@ -553,6 +627,8 @@ const HANDOFF_APP_ACTIVATION_GRACE: Duration = Duration::from_millis(300);
 struct HandoffSettle {
     deadline: Deadline,
     shown_at: Option<std::time::Instant>,
+    /// Whether the window may be put back below the window that was in front.
+    restack: bool,
 }
 
 /// Whether `now` is within [`HANDOFF_APP_ACTIVATION_GRACE`] of when the
@@ -821,6 +897,7 @@ fn launch_result(
         new_instance: false,
         handed_off: false,
         running_without_window: false,
+        existing_window: false,
         activated: None,
     }
 }

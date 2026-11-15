@@ -333,3 +333,73 @@ fn only_windows_of_the_targets_not_shown_before_are_noted() {
         vec!["w-5"]
     );
 }
+
+fn focused(mut window: WindowInfo) -> WindowInfo {
+    window.state.is_focused = true;
+    window
+}
+
+/// An app with one window answers the hand-over by bringing that window,
+/// which it had before the launch, to the front: it is read as raised. A
+/// window that was already in front when the launch began is not.
+#[test]
+fn a_window_the_instance_had_and_brought_to_the_front_is_read_as_raised() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let before = ids(&["w-1"]);
+    let windows = vec![focused(window("w-1", 20, Some("instance-20")))];
+    let (raised, only) = read_existing(&windows, &targets, &before, Some("w-99"), false);
+    assert_eq!(raised.map(|window| window.id), Some("w-1".to_string()));
+    assert_eq!(only.map(|window| window.id), Some("w-1".to_string()));
+    let (raised, _) = read_existing(&windows, &targets, &before, Some("w-1"), false);
+    assert!(raised.is_none(), "already in front when the launch began");
+}
+
+/// The instance's one visible window, shown before the launch, is named as
+/// such even when it did not move (the browser that opened nothing).
+#[test]
+fn the_only_window_of_the_instance_is_named_only_when_it_is_the_only_one() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let before = ids(&["w-1", "w-2"]);
+    let one = vec![window("w-1", 20, Some("instance-20"))];
+    let (raised, only) = read_existing(&one, &targets, &before, None, false);
+    assert!(raised.is_none(), "not in front, so not brought forward");
+    assert_eq!(only.map(|window| window.id), Some("w-1".to_string()));
+    let two = vec![
+        window("w-1", 20, Some("instance-20")),
+        window("w-2", 20, Some("instance-20")),
+    ];
+    assert!(
+        read_existing(&two, &targets, &before, None, false)
+            .1
+            .is_none()
+    );
+    let another_process = vec![
+        window("w-1", 20, Some("instance-20")),
+        window("w-9", 30, Some("instance-30")),
+    ];
+    assert_eq!(
+        read_existing(&another_process, &targets, &before, None, false)
+            .1
+            .map(|window| window.id),
+        Some("w-1".to_string()),
+        "another app's windows do not count"
+    );
+}
+
+#[test]
+fn a_window_not_shown_before_or_beside_several_instances_is_not_an_existing_one() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let fresh = vec![focused(window("w-5", 20, Some("instance-20")))];
+    assert!(
+        matches!(
+            read_existing(&fresh, &targets, &ids(&[]), None, false),
+            (None, None)
+        ),
+        "a new window is a handed-off window, not an existing one"
+    );
+    let shown = vec![focused(window("w-1", 20, Some("instance-20")))];
+    assert!(matches!(
+        read_existing(&shown, &targets, &ids(&["w-1"]), None, true),
+        (None, None)
+    ));
+}

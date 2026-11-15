@@ -62,6 +62,14 @@ pub struct LaunchResult {
     /// say what the start did. Left out when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub running_without_window: bool,
+    /// `true` with `handed_off` when `window` is one the running instance
+    /// already showed before the launch, not a new one: no new window
+    /// appeared, and either the instance brought this window to the front as
+    /// the launch was handed over (an app with one window uses it), or it is
+    /// the instance's only visible window. `suggestion` says which. Left out
+    /// when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub existing_window: bool,
     /// Present only with `--activate`: whether `window` was in front when the
     /// launch returned. `false` when there is no window, or Windows refused
     /// the foreground; the window is then open behind others.

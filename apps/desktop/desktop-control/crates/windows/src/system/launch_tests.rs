@@ -135,6 +135,10 @@ fn a_result_is_neither_attached_nor_new_until_proven() {
     assert_eq!(wire["new_instance"], false);
     assert!(wire.get("handed_off").is_none(), "left out unless true");
     assert!(wire.get("running_without_window").is_none());
+    assert!(
+        wire.get("existing_window").is_none(),
+        "left out unless true"
+    );
     assert!(wire.get("activated").is_none(), "only with --activate");
 }
 
@@ -185,6 +189,32 @@ fn the_attach_guidance_says_nothing_started_and_how_to_get_a_new_window() {
     assert!(launch_attach::HANDED_OFF.contains("not confirmed"));
     assert!(launch_attach::HANDED_OFF_NEW_WINDOW.contains("new_instance is false"));
     assert!(launch_attach::HANDED_OFF_AMBIGUOUS.contains("not confirmed"));
+    for raised in [true, false] {
+        let text = launch_attach::existing_window_guidance(raised);
+        assert!(text.contains("existing_window"), "{text}");
+        assert!(
+            text.to_lowercase().contains("do not repeat --no-attach"),
+            "{text}"
+        );
+        assert!(
+            text.contains("You may use this window for what the user asked"),
+            "{text}"
+        );
+        assert!(text.contains("do not close it"), "{text}");
+    }
+    assert!(launch_attach::existing_window_guidance(true).contains("brought `window`"));
+    assert!(launch_attach::existing_window_guidance(false).contains("cannot be told"));
+    let attached = launch_attach::attached_guidance();
+    assert!(attached.starts_with(launch_attach::ATTACHED));
+    assert!(attached.contains("You may use this window for what the user asked"));
+    assert!(launch_attach::HANDED_OFF_NEW_WINDOW.contains("use it for the task"));
+    for text in [
+        launch_attach::HANDED_OFF_NEW_WINDOW,
+        launch_attach::HANDED_OFF_AMBIGUOUS,
+        launch_attach::HANDED_OFF,
+    ] {
+        assert!(!text.contains("already had open"), "{text}");
+    }
     assert!(launch_attach::HANDED_OFF_AMBIGUOUS.contains("none is named"));
 }
 

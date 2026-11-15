@@ -90,25 +90,38 @@ observation, actions and capture there fail or return nothing.
 - **`launch` takes an absolute path or a bare name** under System32 or the
   Windows directory, with or without `.exe` (`notepad` or `notepad.exe`), not
   a display name. Use `list-apps` to find a running app.
-- **Read `attached` and `new_instance` in the `launch` result.** A bare
-  `launch` of an app that is already running with a window shown (minimized
-  counts) attaches to it and starts nothing (`attached: true`); its windows
-  may be ones the user had open, so do not treat them as yours. When the app
-  runs with no window shown (a browser kept running in the background, an app
-  in the tray), a bare `launch` starts it, as a double click on its icon
-  would (`running_without_window: true`). `--no-attach`, or any `--arg`,
-  `--env` or `--cwd`, always starts a new process. A single-instance app (a
-  browser on its default profile, many editors, most tray apps) passes that
-  new process to the running instance and exits: the result then says
-  `attached: true` and `handed_off: true`. The running instance shows the
-  window itself, so when the result has a `window`, it is the one that
-  instance showed after the launch, owned by `window.pid` (the running
-  instance, not the exited `pid`). With no `window`, which window it showed
-  is not confirmed (none appeared within a few seconds, or several did): run
-  `list-windows --app <app>` before launching again, since a second launch may
-  open a second window. Only `new_instance: true` proves `window` belongs to a
-  process this launch started.
-- **`launch` keeps the window it opens behind the window in front,** for
+- **Read `attached`, `new_instance`, `handed_off` and `existing_window` in
+  the `launch` result.** A bare `launch` of an app that is already running
+  with a window shown (minimized counts) attaches to it and starts nothing
+  (`attached: true` alone); `window` is then a window the user had open. When
+  the app runs with no window shown (a browser kept running in the
+  background, an app in the tray), a bare `launch` starts it, as a double
+  click on its icon would (`running_without_window: true`). `--no-attach`, or
+  any `--arg`, `--env` or `--cwd`, always starts a new process. A
+  single-instance app (a browser on its default profile, many editors, most
+  tray apps) passes that new process to the running instance and exits: the
+  result then says `attached: true` and `handed_off: true`, and `window`, when
+  there is one, is owned by the running instance (`window.pid`, not the
+  exited `pid`).
+  - `new_instance: true`, or `handed_off: true` with a `window` and no
+    `existing_window`: `window` is the window this launch opened. Use it for
+    the task; its owner being the running instance does not make it the
+    user's.
+  - `handed_off: true` with `existing_window: true`: no new window appeared,
+    and `window` is one the instance already had before the launch, either
+    brought to the front for this launch or its only visible window (the
+    `suggestion` says which). The app most likely keeps one window: do not
+    repeat `--no-attach`.
+  - `attached: true` alone: the user's window. If the task needs a window of
+    its own, run `launch --no-attach` once and work in the window it opens.
+  - Using a window the user already had (`attached` alone, or
+    `existing_window`): only for what the user asked. If the task is to read,
+    only read; do not change what it shows or any unsaved work, and do not
+    close it.
+  - `handed_off: true` with no `window`: which window the app showed is not
+    confirmed (none appeared within a few seconds, or several did). Run
+    `list-windows --app <app>` before launching again, since a second launch
+    may open a second window.- **`launch` keeps the window it opens behind the window in front,** for
   work you do yourself in the background. When the user asks you to open an
   app for them to look at or use, pass `--activate`: the window is brought to
   the front, and `activated` in the result says whether Windows allowed it.
