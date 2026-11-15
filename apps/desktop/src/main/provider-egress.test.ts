@@ -11,6 +11,7 @@ import { SqlitePersistenceClient } from './persistence';
 import {
   authorizeCodexProviderEgress,
   authorizeOfficialApiProviderEgress,
+  describeProviderEgressDenial,
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
   dispatchAfterGrokProviderEgress,
@@ -36,7 +37,7 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('Codex provider egress gate', () => {
-    it('allows sealed Windows paths for Ollama while preserving secret denial', () => {
+    it('allows Windows paths for Ollama while preserving secret denial', () => {
       const fixture = createFixture(false);
       const prompt = 'F:/sc-real-ai-20260910/fixtures/qwen38';
       const input = {
@@ -47,8 +48,9 @@ if (runsWithElectronAbi)
         context,
         now: '2026-09-10T00:00:00.000Z',
       };
+      // A path is no longer read as a random-looking secret, declared as a root or not.
       expect(authorizeOfficialApiProviderEgress(input, 'ollama', 'trusted-local').allowed).toBe(
-        false,
+        true,
       );
       const bound = { ...input, knownWorkspaceRoots: ['F:\\sc-real-ai-20260910\\fixtures'] };
       expect(authorizeOfficialApiProviderEgress(bound, 'ollama', 'trusted-local').allowed).toBe(
@@ -70,8 +72,8 @@ if (runsWithElectronAbi)
       { localOnly: true, suffix: '', scanCodes: [] as string[] },
       {
         localOnly: false,
-        suffix: '\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',
-        scanCodes: ['high-entropy-value'],
+        suffix: '\nAuthorization: Bearer 8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',
+        scanCodes: ['known-secret-pattern'],
       },
       {
         localOnly: false,
@@ -124,13 +126,19 @@ if (runsWithElectronAbi)
           context,
           now: '2026-10-18T00:00:00.000Z',
         });
-      // The Worker prompt's old `label=root` spelling fused the label into the root's token.
+      // The Worker prompt's old `label=root` spelling fused the label into the root's token, which
+      // the entropy guess once stopped. The send no longer guesses, so either spelling goes out.
       const fused = decide(`隔離root: ${label}=${root}`, 'fused-label');
-      expect(fused.allowed).toBe(false);
-      expect(fused.evaluation.reason).toBe('parent_ceiling');
-      expect(fused.disclosureReasons).toEqual(['high-entropy-value']);
+      expect(fused).toMatchObject({ allowed: true, disclosureReasons: [] });
       const apart = decide(`隔離root: ${label} = ${root}`, 'separate-label');
       expect(apart).toMatchObject({ allowed: true, disclosureReasons: [] });
+      // A key beside the label is still stopped, by its shape.
+      const keyed = decide(`隔離root: ${label} = ${root}\napi_key=not-for-a-provider`, 'keyed');
+      expect(keyed).toMatchObject({
+        allowed: false,
+        disclosureReasons: ['credential-field', 'known-secret-pattern'],
+      });
+      expect(keyed.evaluation.reason).toBe('parent_ceiling');
       fixture.persistence.close();
     });
     it.each(['codex', 'claude', 'grok'] as const)(
@@ -322,7 +330,7 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
 
-    it('binds the roots the secret scan was allowed to exempt into the audited resource', () => {
+    it('binds the declared Workspace roots into the audited resource', () => {
       const root = '/private/tmp/sprint-coder-known-roots/workspace';
       const auditFor = (knownWorkspaceRoots: readonly string[] | undefined) => {
         const fixture = createFixture(false);
@@ -361,8 +369,8 @@ if (runsWithElectronAbi)
 
       const none = auditFor(undefined);
       const exempted = auditFor([root]);
-      // Same prompt, same `clean` verdict — but an audit must still distinguish a scan that was
-      // told to ignore a root from one that was told to ignore nothing.
+      // Same prompt, same `clean` verdict — but the audit still distinguishes a Turn that declared
+      // a root from one that declared nothing.
       expect(none).toEqual({ allowed: true, digest: resourceDigestWith(null) });
       expect(exempted).toEqual({
         allowed: true,
@@ -397,20 +405,25 @@ if (runsWithElectronAbi)
         return { decision, digest: audit[0]!.resource_digest };
       };
 
+      // A random-looking label goes out whether or not it was declared: the send no longer guesses.
       expect(gate(prompt, undefined, 'turn-label-undeclared').decision).toMatchObject({
-        allowed: false,
-        disclosureReasons: ['high-entropy-value'],
+        allowed: true,
+        disclosureReasons: [],
       });
       const declared = gate(prompt, [label], 'turn-label-declared');
       expect(declared.decision).toMatchObject({ allowed: true, disclosureReasons: [] });
-      // An audit must tell a scan told to ignore the label from one told to ignore only the root.
+      // The audit still tells a declaration with the label from one with only the root.
       expect(gate('clean prompt', [label], 'turn-clean-label').digest).not.toBe(
         gate('clean prompt', undefined, 'turn-clean-root').digest,
       );
-      // A real secret beside the declared label is still withheld.
+      // A real secret beside the declared label is still withheld, by its shape.
       expect(
-        gate(`${prompt}\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH`, [label], 'turn-label-secret').decision,
-      ).toMatchObject({ allowed: false, disclosureReasons: ['high-entropy-value'] });
+        gate(`${prompt}\nsk-ant-abcdefghijklmnopqrstuvwxyz1234`, [label], 'turn-label-secret')
+          .decision,
+      ).toMatchObject({
+        allowed: false,
+        disclosureReasons: ['ai-provider-token', 'known-secret-pattern'],
+      });
     });
 
     it('rejects partial or unsafe attachment egress facts before evaluation', () => {
@@ -593,7 +606,8 @@ if (runsWithElectronAbi)
       'postgres://alice:hunter2@example.com/db',
       ['xoxb', '1234567890', 'abcdefghijklmnopqrstuvwxyz'].join('-'),
       'glpat-abcdefghijklmnopqrstuvwxyz',
-      'session 8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',
+      // A bare random value is no longer one; a labelled session secret still is.
+      'session_token=8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',
     ])('blocks a newly classified disclosure before Provider dispatch: %s', (prompt) => {
       const fixture = createFixture(false);
       let dispatches = 0;
@@ -642,6 +656,144 @@ if (runsWithElectronAbi)
       });
       expect(dispatches).toBe(0);
       fixture.persistence.close();
+    });
+
+    // The gate scans the whole conversation the Task sends again on every Turn, so a URL in an
+    // earlier request or in the AI's own answer is as much in the send as one in the new request.
+    const pullRequest = 'https://github.com/Robbits-CO-LTD/sprint-coder/pull/1306';
+    function nextTurnAfter(fixture: ReturnType<typeof createFixture>, request: string) {
+      const first = fixture.persistence.startTurn(fixture.task.id, request);
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        fixture.persistence.changeStage(fixture.task.id, first.turnId, stage);
+      fixture.persistence.completeTurn(
+        fixture.task.id,
+        first.turnId,
+        'completed',
+        `ブラウザーで開きました: launch msedge --url ${pullRequest}\n関連: https://github.com/Robbits-CO-LTD/sprint-coder/issues/1298#issuecomment-6892857211`,
+      );
+      const second = fixture.persistence.startTurn(fixture.task.id, '続けてください');
+      return {
+        prompt: second.text,
+        context: fixture.persistence.prepareContext(fixture.task.id, second.turnId),
+        turnId: second.turnId,
+      };
+    }
+
+    it.each(['claude', 'codex', 'grok'] as const)(
+      'lets a %s Turn go on after ordinary URLs in the request and the answer',
+      (kind) => {
+        const fixture = createFixture(false);
+        const next = nextTurnAfter(
+          fixture,
+          `${pullRequest} を見て。https://www.amazon.co.jp/Echo-Dot-5th-Gen/dp/B09B8SZLLG/ref=sr_1_1 と https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd/edit も。`,
+        );
+        expect(next.context.fragments.map(({ content }) => content).join('\n')).toContain(
+          pullRequest,
+        );
+        const dispatch =
+          kind === 'grok'
+            ? dispatchAfterGrokProviderEgress
+            : kind === 'codex'
+              ? dispatchAfterCodexProviderEgress
+              : dispatchAfterClaudeProviderEgress;
+        let dispatches = 0;
+        const decision = dispatch(
+          {
+            broker: new PermissionBroker(fixture.persistence),
+            task: fixture.task,
+            turnId: next.turnId,
+            prompt: next.prompt,
+            context: next.context,
+            now: '2026-11-15T00:00:00.000Z',
+          },
+          () => {
+            dispatches += 1;
+          },
+        );
+        expect(decision).toMatchObject({ allowed: true, disclosureReasons: [] });
+        expect(dispatches).toBe(1);
+        expect(
+          authorizeOfficialApiProviderEgress(
+            {
+              broker: new PermissionBroker(fixture.persistence),
+              task: fixture.task,
+              turnId: `${next.turnId}-api`,
+              prompt: JSON.stringify({ messages: [{ role: 'tool', content: pullRequest }] }),
+              context: next.context,
+              now: '2026-11-15T00:00:00.000Z',
+            },
+            'openai',
+          ),
+        ).toMatchObject({ allowed: true, disclosureReasons: [] });
+        fixture.persistence.close();
+      },
+    );
+
+    it('still stops a send whose conversation holds a key, and says why', () => {
+      const fixture = createFixture(false);
+      const key = 'sk-ant-abcdefghijklmnopqrstuvwxyz1234';
+      // The Turn that carried the key was itself stopped; its request stays in the conversation.
+      const denied = fixture.persistence.startTurn(fixture.task.id, `この key で試して ${key}`);
+      fixture.persistence.completeTurn(fixture.task.id, denied.turnId, 'failed');
+      const second = fixture.persistence.startTurn(fixture.task.id, 'key なしで、もう一度');
+      const next = {
+        prompt: second.text,
+        context: fixture.persistence.prepareContext(fixture.task.id, second.turnId),
+        turnId: second.turnId,
+      };
+      let dispatches = 0;
+      const decision = dispatchAfterClaudeProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: next.turnId,
+          prompt: next.prompt,
+          context: next.context,
+          now: '2026-11-15T00:00:00.000Z',
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+      expect(decision).toMatchObject({
+        allowed: false,
+        disclosureReasons: ['ai-provider-token', 'known-secret-pattern'],
+      });
+      expect(dispatches).toBe(0);
+      const message = describeProviderEgressDenial(decision.disclosureReasons);
+      expect(message).toContain('API key・鍵や token');
+      expect(message).toContain('新しい Task');
+      expect(message).not.toContain('abcdefghij');
+      fixture.persistence.close();
+    });
+
+    it('explains a secret-scan denial from reason codes only', () => {
+      expect(describeProviderEgressDenial(undefined)).toBeNull();
+      expect(describeProviderEgressDenial([])).toBeNull();
+      expect(describeProviderEgressDenial(['webhook-url', 'credential-field'])).toBe(
+        '送る内容（依頼の文や、この Task のこれまでの会話）にWebhook の URL・パスワードや鍵の値（password= など）が入っているため、AI に送りませんでした。この Task からは送れないままなので、その部分を外して、新しい Task で依頼してください。',
+      );
+      // An unknown code still gets a sentence, and a code that maps to the same words is said once.
+      expect(describeProviderEgressDenial(['future-code', 'another-code'])).toContain(
+        '秘密の情報に見える文字列が入っている',
+      );
+      const every = describeProviderEgressDenial([
+        'ai-provider-token',
+        'authorization-header',
+        'service-token',
+        'cookie',
+        'credential-field',
+        'credential-prone-filename',
+        'gitlab-token',
+        'high-entropy-value',
+        'known-secret-pattern',
+        'private-key',
+        'slack-token',
+        'uri-userinfo',
+        'webhook-url',
+      ]);
+      // PublicError.userMessage is bounded at 500 characters.
+      expect(every?.length).toBeLessThanOrEqual(500);
     });
   });
 else

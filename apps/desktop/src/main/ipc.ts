@@ -615,6 +615,7 @@ import {
   authorizeCodexProviderEgress,
   authorizeGrokProviderEgress,
   authorizeOfficialApiProviderEgress,
+  describeProviderEgressDenial,
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
   dispatchAfterGrokProviderEgress,
@@ -5980,7 +5981,9 @@ export class IpcRouter {
       this.teamMcpBridge.unregister(started.turnId);
       this.handleRuntimeFailure(kind, taskId, started.turnId, {
         code: 'RUNTIME_FAILED',
-        userMessage: 'Providerへの送信がpolicyで拒否されました。',
+        userMessage:
+          describeProviderEgressDenial(egress.disclosureReasons) ??
+          'Providerへの送信がpolicyで拒否されました。',
         retryable: false,
       });
       return;
@@ -7878,7 +7881,8 @@ export class IpcRouter {
               providerCode: 'policy_denied',
               modelPreparation: 'not_required',
             },
-            '送信ポリシーでProviderへの送信が拒否されました。Taskのローカル限定設定と機密情報の有無を確認してください。',
+            describeProviderEgressDenial(initialEgress.disclosureReasons) ??
+              '送信ポリシーでProviderへの送信が拒否されました。Taskのローカル限定設定と機密情報の有無を確認してください。',
           );
         if (
           providerImageDispatch !== undefined &&

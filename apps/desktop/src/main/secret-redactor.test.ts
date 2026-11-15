@@ -94,6 +94,34 @@ describe('secret redactor', () => {
     expect(openssh).toBe('[REDACTED_PRIVATE_KEY]');
   });
 
+  it.each(['ENCRYPTED PRIVATE KEY', 'DSA PRIVATE KEY', 'PGP PRIVATE KEY BLOCK'])(
+    'redacts an armored %s whole and in a stream',
+    (kind) => {
+      const block = `-----BEGIN ${kind}-----\nMIIFHzBJBgkqhkiG9w0BBQ0wPDAb\n-----END ${kind}-----`;
+      expect(redactSecrets(`before\n${block}\nafter`)).toBe(
+        'before\n[REDACTED_PRIVATE_KEY]\nafter',
+      );
+      const redactor = createStreamingSecretRedactor();
+      const first = redactor.write(`safe\n-----BEGIN ${kind}-----${'A'.repeat(10_000)}`);
+      const second = redactor.write(`-----END ${kind}-----tail`) + redactor.end();
+      expect(first + second).not.toContain('AAAA');
+      expect(second).toContain('[REDACTED_PRIVATE_KEY]');
+      // A header with no end is withheld whole when the stream ends.
+      const open = createStreamingSecretRedactor();
+      expect(open.write(`-----BEGIN ${kind}-----\nMIIFHzBJ`) + open.end()).toBe(
+        '[REDACTED_PRIVATE_KEY]',
+      );
+    },
+  );
+
+  it.each(['PUBLIC KEY', 'CERTIFICATE', 'PGP PUBLIC KEY BLOCK'])(
+    'leaves an armored %s alone',
+    (kind) => {
+      const block = `-----BEGIN ${kind}-----\nMIIBIjANBgkqhkiG9w0B\n-----END ${kind}-----`;
+      expect(redactSecrets(block)).toBe(block);
+    },
+  );
+
   it('does not touch ordinary prose that merely mentions credential-shaped words', () => {
     const prose = 'The token bucket algorithm limits requests; see the keyboard shortcut docs.';
     expect(redactSecrets(prose)).toBe(prose);
