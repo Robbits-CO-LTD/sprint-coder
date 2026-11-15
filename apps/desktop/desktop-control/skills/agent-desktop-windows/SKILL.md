@@ -75,6 +75,16 @@ observation, actions and capture there fail or return nothing.
   is not watched and can take the foreground.
 - **No permission dialog exists.** `permissions` reports `automation` as
   `not_required`. Elevation boundaries are the only access control.
+- **A browser's address bar does not go anywhere on `set-value`.** Chrome
+  builds its suggestion list only while the address bar has the keyboard
+  focus: when the `set-value` result's `post_state.states` holds `focused`,
+  run `find --window-id <id> --role option` over the whole window (not with
+  `--root` on the page's document; the page's own list items are `option`
+  too) and `click` the row whose name starts with the URL you entered
+  (percent-escapes show decoded). Without `focused` (a window behind, or the
+  focus inside the page after a navigation) no list appears and the address
+  cannot be confirmed in the background: use a link or the site's own search
+  box in the page instead. Do not press Enter.
 - **Chromium and Electron apps read thin before they settle.** Pass a longer
   `--timeout-ms` to `snapshot` instead of concluding the tree is empty.
 - **Blocked shortcuts.** `alt+f4`, `win+l`, `win+d`, `alt+tab`, `win+r`,

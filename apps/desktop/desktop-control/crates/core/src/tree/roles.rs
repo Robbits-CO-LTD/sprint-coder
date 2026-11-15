@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 /// Interactive roles that receive refs during snapshot allocation.
 ///
 /// Each entry must be produced by at least one platform adapter's native-to-canonical
@@ -46,6 +47,9 @@ fn role_query_alias(role: &str) -> Option<crate::Role> {
     match role {
         "gridcell" => Some(crate::Role::Cell),
         "img" => Some(crate::Role::Image),
+        // An item of a list (ARIA `listitem`, UI Automation `ListItem`) is
+        // printed as `option`, and agents ask for it by the ARIA name.
+        "listitem" => Some(crate::Role::Option),
         "radio" => Some(crate::Role::RadioButton),
         "searchbox" | "searchfield" | "textarea" | "textbox" => Some(crate::Role::TextField),
         "spinbutton" => Some(crate::Role::Incrementor),
@@ -125,6 +129,7 @@ mod tests {
         for (alias, canonical) in [
             ("gridcell", "cell"),
             ("img", "image"),
+            ("listitem", "option"),
             ("radio", "radiobutton"),
             ("searchbox", "textfield"),
             ("searchfield", "textfield"),
