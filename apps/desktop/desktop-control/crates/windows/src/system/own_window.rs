@@ -650,6 +650,19 @@ pub(crate) fn recheck_pointer(
     }
 }
 
+/// Whether the window at `point` is Sprint Coder's, read now for the operation in progress the way
+/// `recheck_pointer` reads it: `Some(false)` only when its owner was read and is not the refused
+/// process, `Some(true)` when it is, `None` when it could not be told (no owner read, the variable
+/// unreadable, or outside an operation of the adapter). Nothing is refused here.
+pub(crate) fn point_is_own(point: &agent_desktop_core::Point) -> Option<bool> {
+    let owner = ACTING.with(|cell| cell.borrow().as_ref().map(|acting| acting.owner.clone()))?;
+    match owner.judge(&point_owners(point), current_instance) {
+        Verdict::Allowed => Some(false),
+        Verdict::Own => Some(true),
+        Verdict::Unconfirmed | Verdict::Unreadable => None,
+    }
+}
+
 /// The owners of the window in front.
 pub(crate) fn foreground_owners() -> Vec<Option<u32>> {
     #[cfg(test)]

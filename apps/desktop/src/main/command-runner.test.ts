@@ -44,6 +44,7 @@ import { secureLogger } from './secure-logger';
 import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
 import * as preparedExecutionImageModule from './prepared-execution-image';
 import { resolveDesktopControlCommand } from './desktop-control';
+import { DesktopControlActivity } from './desktop-control-activity';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
   if (process.platform !== 'darwin' || input.executable !== process.execPath)
@@ -2191,6 +2192,121 @@ describe('desktop control outside the command sandbox', () => {
       runnerPath.mockRestore();
     }
   }, 15_000);
+
+  it('raises the desktop-control activity before a run that may move the pointer is spawned, and lowers it however the run ends', async () => {
+    const root = await workspace();
+    const prepare = (script: string) =>
+      prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', script],
+      });
+    const judge = vi.spyOn(desktopControlModule, 'runsOutsideCommandSandbox').mockReturnValue(true);
+    const argvCheck = vi
+      .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+      .mockReturnValue(null);
+    const mode = vi.spyOn(desktopControlModule, 'desktopControlArgvMode');
+    const activity = new DesktopControlActivity(0);
+    const events: string[] = [];
+    activity.subscribe((active) => events.push(active ? 'raised' : 'lowered'));
+    const lowered = async (): Promise<void> => {
+      // The grace period is 0 here; the lowering still waits for its timer.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(activity.active).toBe(false);
+    };
+    try {
+      const runner = new CommandRunner({ sandboxed: true, desktopControlActivity: activity });
+      // A natural end: raised before the spawn, lowered after the run.
+      await expect(
+        runner.run(await prepare('process.exit(0)'), {
+          desktopControlWorkspaceRoots: [root],
+          beforeSpawn: () => events.push('spawn'),
+          onStarted: () => {
+            events.push('started');
+            expect(activity.active).toBe(true);
+          },
+        }),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      expect(mode).toHaveBeenCalled();
+      await lowered();
+      expect(events).toEqual(['raised', 'spawn', 'started', 'lowered']);
+
+      // A failing command.
+      events.length = 0;
+      await expect(
+        runner.run(await prepare('process.exit(3)'), { desktopControlWorkspaceRoots: [root] }),
+      ).resolves.toMatchObject({ exitCode: 3 });
+      await lowered();
+      expect(events).toEqual(['raised', 'lowered']);
+
+      // A failure before the spawn.
+      events.length = 0;
+      const environment = vi
+        .spyOn(desktopControlModule, 'desktopControlEnvironment')
+        .mockImplementationOnce(() => {
+          throw new Error('environment refused for the test');
+        });
+      try {
+        await expect(
+          runner.run(await prepare('process.exit(0)'), { desktopControlWorkspaceRoots: [root] }),
+        ).rejects.toThrow('environment refused for the test');
+      } finally {
+        environment.mockRestore();
+      }
+      await lowered();
+      expect(events).toEqual(['raised', 'lowered']);
+
+      // Overlapping runs: a Stop of the long one, after the short one ended, lowers it.
+      events.length = 0;
+      const stop = new AbortController();
+      let longStarted = (): void => undefined;
+      const started = new Promise<void>((resolve) => {
+        longStarted = resolve;
+      });
+      const long = runner.run(await prepare('setTimeout(() => {}, 60000)'), {
+        desktopControlWorkspaceRoots: [root],
+        signal: stop.signal,
+        onStarted: () => longStarted(),
+      });
+      await started;
+      await expect(
+        runner.run(await prepare('process.exit(0)'), { desktopControlWorkspaceRoots: [root] }),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(activity.active).toBe(true);
+      expect(events).toEqual(['raised']);
+      stop.abort();
+      await expect(long).resolves.toMatchObject({ canceled: true });
+      await lowered();
+      expect(events).toEqual(['raised', 'lowered']);
+
+      // Never raised by a run the argv check refuses, one that only prints or reads, or a run
+      // that is not desktop control.
+      events.length = 0;
+      argvCheck.mockReturnValueOnce('refused for the test');
+      await expect(
+        runner.run(await prepare('process.exit(0)'), { desktopControlWorkspaceRoots: [root] }),
+      ).rejects.toThrow('refused for the test');
+      for (const quiet of ['inert', 'read'] as const) {
+        mode.mockReturnValueOnce(quiet);
+        await expect(
+          runner.run(await prepare('process.exit(0)'), { desktopControlWorkspaceRoots: [root] }),
+        ).resolves.toMatchObject({ exitCode: 0 });
+      }
+      await expect(
+        new CommandRunner({ desktopControlActivity: activity }).run(
+          await prepare('process.exit(0)'),
+          { desktopControlWorkspaceRoots: [root] },
+        ),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(events).toEqual([]);
+    } finally {
+      judge.mockRestore();
+      argvCheck.mockRestore();
+      mode.mockRestore();
+    }
+  }, 30_000);
 
   it('refuses a launch into a Worker’s worktree through a link before it starts, with the roots it is given', async () => {
     const root = await workspace();

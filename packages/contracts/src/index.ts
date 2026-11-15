@@ -3399,6 +3399,13 @@ export const updateHealthSchema = z
   })
   .strict();
 export type UpdateHealth = z.infer<typeof updateHealthSchema>;
+/**
+ * Whether a desktop-control run that may move the pointer is in progress (and the short while
+ * after it, while a drop from it can still arrive). While it is, the windows refuse every drop
+ * from outside, so a drag the run lets go over Sprint Coder lands nothing in it.
+ */
+export const desktopControlActivitySchema = z.object({ active: z.boolean() }).strict();
+export type DesktopControlActivity = z.infer<typeof desktopControlActivitySchema>;
 export const updateCheckResultSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('up_to_date') }).strict(),
   z
@@ -4880,6 +4887,10 @@ export interface SprintCoderApi {
     openManualUpdate(): void;
     openUpdateLog(): void;
   };
+  desktopControl: {
+    /** Receives each change of `DesktopControlActivity`. Returns an unsubscribe function. */
+    subscribeActivity(listener: (activity: DesktopControlActivity) => void): () => void;
+  };
   files: {
     /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
      * the event port, which only carries events newer than the snapshot's lastSeq. */
@@ -5141,6 +5152,8 @@ export const IPC_CHANNELS = {
   updateCheckNow: 'sprint-coder:update:check-now',
   updateOpenManual: 'sprint-coder:update:open-manual',
   updateOpenLog: 'sprint-coder:update:open-log',
+  /** Push-only (webContents.send) `DesktopControlActivity`, never bound to an input schema. */
+  desktopControlActivityEvent: 'sprint-coder:desktop-control:activity',
   runtimeFailureDiagnosticGet: 'sprint-coder:runtime:failure-diagnostic:get',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',

@@ -29,6 +29,7 @@ import {
 } from './path-guard';
 import {
   desktopControlArgvIsInert,
+  desktopControlArgvMode,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
   desktopControlOwnWindowOwner,
@@ -36,6 +37,7 @@ import {
   runsOutsideCommandSandbox,
   type DesktopControlSessionVariables,
 } from './desktop-control';
+import { desktopControlActivity, type DesktopControlActivity } from './desktop-control-activity';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 import { queryNativeProcessIdentity } from './native-process-identity';
@@ -695,6 +697,8 @@ type RunnerOptions = Readonly<{
   maxOutputBytes?: number;
   cancelGraceMs?: number;
   sandboxed?: boolean;
+  /** Raised for each desktop-control run that may move the pointer; Main's own by default. */
+  desktopControlActivity?: DesktopControlActivity;
 }>;
 
 export type RunOptions = Readonly<{
@@ -762,6 +766,7 @@ export class CommandRunner {
   private readonly maxOutputBytes: number;
   private readonly cancelGraceMs: number;
   private readonly sandboxed: boolean;
+  private readonly desktopControlActivity: DesktopControlActivity;
   private readonly active = new Map<string, ActiveProcess>();
 
   constructor(options: RunnerOptions = {}) {
@@ -771,6 +776,7 @@ export class CommandRunner {
     this.maxOutputBytes = options.maxOutputBytes ?? 16 * 1024 * 1024;
     this.cancelGraceMs = options.cancelGraceMs ?? 1_500;
     this.sandboxed = options.sandboxed ?? false;
+    this.desktopControlActivity = options.desktopControlActivity ?? desktopControlActivity;
     if (
       this.batchIntervalMs < 1 ||
       this.maxBatchBytes < 1 ||
@@ -847,6 +853,10 @@ export class CommandRunner {
         'ExecutionSpec identity is unavailable',
       );
     let retainedExecutionImage = false;
+    // Lowers the desktop-control activity this run raised (see below), once.
+    let endDesktopControlActivity: (() => void) | undefined;
+    // The started process's close, which a run that could not end its process tree waits for.
+    let processClosed: Promise<unknown> | undefined;
     try {
       if (options.signal?.aborted)
         return {
@@ -885,6 +895,15 @@ export class CommandRunner {
         : null;
       if (desktopControlRefusal !== null)
         throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
+      // A run that may move the pointer (any but one that only prints or reads the screen) raises
+      // the activity before it is spawned, which tells every window before this returns: they then
+      // refuse drops from outside, so a drag it lets go over Sprint Coder lands nothing there. It is
+      // lowered when the run ends, however it ends (the outer `finally`).
+      if (desktopControl) {
+        const mode = desktopControlArgvMode(spec.argv);
+        if (mode !== 'inert' && mode !== 'read')
+          endDesktopControlActivity = this.desktopControlActivity.begin();
+      }
       const startedAt = Date.now();
       options.beforeSpawn?.();
       let child: ChildProcess;
@@ -980,6 +999,7 @@ export class CommandRunner {
         throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
       }
       const processClosePromise = waitForClose(child);
+      processClosed = processClosePromise;
       const posixControl =
         process.platform === 'win32'
           ? undefined
@@ -1441,6 +1461,12 @@ export class CommandRunner {
         if (!retainActive) this.releaseActive(executionId, active);
       }
     } finally {
+      // A process this run could not end may still hold the pointer: lower only once it closes.
+      if (endDesktopControlActivity !== undefined) {
+        if (retainedExecutionImage && processClosed !== undefined)
+          void processClosed.then(endDesktopControlActivity, endDesktopControlActivity);
+        else endDesktopControlActivity();
+      }
       if (!retainedExecutionImage) await executionImage.close();
     }
   }

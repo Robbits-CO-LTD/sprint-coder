@@ -197,8 +197,12 @@ observation, actions and capture there fail or return nothing.
   permission or approval the run has. While Sprint Coder is in front, a wheel, a click with
   modifiers, and a click on (or a ref action on a part of) a window that never takes the
   foreground (an on-screen keyboard) are refused too (`details.target: "foreground"`);
-  scroll a window behind it with `scroll` on a ref. Do not retry by another route: permissions and approvals in Sprint
-  Coder are the user's to change on screen.
+  scroll a window behind it with `scroll` on a ref. A `--headed` drag whose drop point has
+  become Sprint Coder by the time the button is let go is refused there and the button is let
+  go back at the origin: `details.dropped` is `false` only when the origin was read as another
+  app's window, otherwise `null` (see `details.origin_is_sprint_coder`); Sprint Coder itself
+  accepts no drop from outside while desktop control runs. Do not retry by another route:
+  permissions and approvals in Sprint Coder are the user's to change on screen.
 
 ## What differs on Windows
 

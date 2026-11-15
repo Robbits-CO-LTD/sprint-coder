@@ -1068,7 +1068,7 @@ fn a_drop_on_a_window_that_became_sprint_coder_is_not_made() {
     let adapter = WindowsAdapter::new().refusing_windows_of(process(own, None));
     let drag = |later: Vec<Vec<Option<u32>>>| {
         // Reads: the origin and the destination before anything, then the destination again
-        // just before the button is let go.
+        // just before the button is let go, then (refused) the origin it is let go at.
         let facts = fake::PointerFacts {
             point: vec![Some(other)],
             foreground: vec![Some(other)],
@@ -1089,12 +1089,14 @@ fn a_drop_on_a_window_that_became_sprint_coder_is_not_made() {
             })
         })
     };
-    let (result, flags) = drag(vec![vec![Some(other)], vec![Some(own)]]);
+    // The origin is still another app's window: let go there, nothing was dropped.
+    let (result, flags) = drag(vec![vec![Some(other)], vec![Some(own)], vec![Some(other)]]);
     let error = result.expect_err("the drop is refused");
     let details = error.details.as_ref().expect("details");
     assert_eq!(details["kind"], "own_window_refused");
     assert_eq!(details["dropped"], false);
     assert_eq!(details["button_released_at"], "origin");
+    assert_eq!(details["origin_is_sprint_coder"], false);
     assert_eq!(details["physical_delivery_started"], true);
     assert_eq!(details["emergency_release_posted"], true);
     // The button went down once and was let go once, by the release back at the origin: the
@@ -1102,6 +1104,23 @@ fn a_drop_on_a_window_that_became_sprint_coder_is_not_made() {
     assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 1);
     assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
     assert_eq!(flags.last().copied(), Some(MOUSEEVENTF_LEFTUP));
+    // Sprint Coder now covers the origin too, or its owner cannot be read: the button is still
+    // let go there, and whether anything was dropped is not claimed.
+    for (origin, own_origin) in [
+        (vec![Some(own)], serde_json::Value::from(true)),
+        (vec![None], serde_json::Value::Null),
+    ] {
+        let (result, flags) = drag(vec![vec![Some(other)], vec![Some(own)], origin]);
+        let error = result.expect_err("the drop is refused");
+        let details = error.details.as_ref().expect("details");
+        assert_eq!(details["kind"], "own_window_refused");
+        assert_eq!(details["dropped"], serde_json::Value::Null);
+        assert_eq!(details["button_released_at"], "origin");
+        assert_eq!(details["origin_is_sprint_coder"], own_origin);
+        assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 1);
+        assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
+        assert_eq!(flags.last().copied(), Some(MOUSEEVENTF_LEFTUP));
+    }
     // Unchanged, the drop is made.
     let (result, flags) = drag(Vec::new());
     assert!(result.is_ok(), "{result:?}");

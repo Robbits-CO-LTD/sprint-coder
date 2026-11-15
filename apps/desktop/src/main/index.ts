@@ -23,6 +23,7 @@ import { IpcRouter } from './ipc';
 import { GraphRenderService } from './graph-render';
 import { reportDesktopControlAvailability } from './desktop-control';
 import { endDesktopControlSessions } from './desktop-control-session';
+import { desktopControlActivity, sendDesktopControlActivity } from './desktop-control-activity';
 import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
@@ -96,6 +97,14 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 app.enableSandbox();
+
+// Every window refuses drops from outside while a desktop-control run may move the pointer.
+desktopControlActivity.subscribe((active) =>
+  sendDesktopControlActivity(
+    BrowserWindow.getAllWindows().map((window) => window.webContents),
+    active,
+  ),
+);
 
 ipcMain.on(WINDOW_CONTROL_CHANNELS.action, (event, action: unknown) => {
   const window = trustedWindowControlTarget(event);
@@ -428,6 +437,10 @@ function createWindow(): BrowserWindow {
   };
   window.on('maximize', publishMaximizedState);
   window.on('unmaximize', publishMaximizedState);
+  // A page (re)loaded during a run starts out accepting drops; tell it the current state.
+  window.webContents.on('did-finish-load', () =>
+    sendDesktopControlActivity([window.webContents], desktopControlActivity.active),
+  );
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });

@@ -77,12 +77,25 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
         deadline.ensure_remaining()?;
         // The drop is judged again just before the button is let go: the window at the
         // destination can have changed while the button was down. Refused, the button is not
-        // let go there; the guard lets it go back at the origin (`DragReleaseGuard`).
+        // let go there; the guard lets it go back at the origin (`DragReleaseGuard`). Whether
+        // that drops anything is said only as far as the origin's owner, read now, tells: let go
+        // over another app's window it is a drop back where the drag began (`dropped: false`);
+        // over Sprint Coder's (which refuses drops from outside while desktop control runs) or an
+        // owner that could not be read, it is not known (`dropped: null`).
         crate::system::own_window::recheck_pointer(&params.to, false).map_err(|error| {
             let mut error = crate::system::own_window::refused_part_way(error, "drops_sent", 0);
+            let origin_is_own = crate::system::own_window::point_is_own(&params.from);
             if let Some(details) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
-                details.insert("dropped".into(), false.into());
+                let dropped = match origin_is_own {
+                    Some(false) => serde_json::Value::from(false),
+                    _ => serde_json::Value::Null,
+                };
+                details.insert("dropped".into(), dropped);
                 details.insert("button_released_at".into(), "origin".into());
+                details.insert(
+                    "origin_is_sprint_coder".into(),
+                    origin_is_own.map_or(serde_json::Value::Null, serde_json::Value::from),
+                );
             }
             error
         })?;
