@@ -40,7 +40,7 @@ hardened runtime と空の entitlements で、止まる操作は無かった。
 
 このダイアログが最前面にある間、アプリを指定しない `list-windows` と、`--window-id` を使うコマンドが、全部 TIMEOUT になった（`global_window_inventory_unstable`、`frontmost_window_join`）。署名とは関係が無く、署名の無い build でも同じ。`--app` を付けた一覧と、ref を使う操作は通った。
 
-原因: 最前面のアプリ（`com.apple.UserNotificationCenter`）のフォーカスのある窓（ダイアログ。CoreGraphics の layer は 8）を、layer 0 の窓の記録と突き合わせ、合わない時にやり直す作りだった。取り込んだ agent-desktop 1.2.0 の作りで、upstream の最新も同じ。
+原因: 最前面のアプリ（`com.apple.UserNotificationCenter`）のフォーカスのある窓（ダイアログ。CoreGraphics の layer は 8）を、layer 0 の窓の記録と突き合わせ、合わない時にやり直す作りだった。取り込んだ版（1.2.0）の作りで、upstream の最新も同じ。
 
 修正: PR #1322。ダイアログが出たままの状態で、直す前と後の実行ファイルを比べた。
 

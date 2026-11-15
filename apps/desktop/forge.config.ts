@@ -154,7 +154,7 @@ export function desktopControlResources(
   return [
     executable,
     `${executable}.sha256`,
-    resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt'),
+    resolve(__dirname, '..', '..', 'docs', 'licenses', 'desktop-control-license.txt'),
   ];
 }
 
