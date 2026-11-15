@@ -525,6 +525,8 @@ describe('the executable’s answer that an operation was not delivered', () => 
 /** The persistence and events a command run records, in memory. */
 function createBoundary(workspace: string) {
   const rows = new Map<string, { state: string; outputBytes: number }>();
+  /** What each run brought for its timeline row as it began (`beginCommand`'s description). */
+  const begun: Array<{ desktopAction: unknown }> = [];
   const startCommand = vi.fn(({ commandId }: { commandId: string }) => {
     const row = rows.get(commandId)!;
     if (row.state !== 'starting') throw new Error('Command is not starting');
@@ -553,10 +555,11 @@ function createBoundary(workspace: string) {
         rows.set(input.id, { state: 'prepared', outputBytes: 0 });
         return { id: input.id, state: 'prepared' } as never;
       },
-      beginCommand: (id: string) => {
+      beginCommand: (id: string, desktopAction?: unknown) => {
         const row = rows.get(id)!;
         if (row.state !== 'prepared') throw new Error('Command is not prepared');
         row.state = 'starting';
+        begun.push({ desktopAction });
         return { id, ...row } as never;
       },
       startCommand,
@@ -573,7 +576,7 @@ function createBoundary(workspace: string) {
     },
     publish: vi.fn(),
   } as unknown as CommandToolBoundary;
-  return { boundary, rows, startCommand };
+  return { boundary, rows, startCommand, begun };
 }
 
 describe.each([
@@ -596,7 +599,7 @@ describe.each([
     const definition =
       providerName === 'run_command' ? COMMAND_RUNNER_TOOL : MANAGED_EXEC_COMMAND_TOOL;
     registry.register(definition);
-    const { boundary, rows, startCommand } = createBoundary(workspace);
+    const { boundary, rows, startCommand, begun } = createBoundary(workspace);
     const runner = new CommandRunner({ sandboxed: true });
     const taskId = `task-queue-${providerName}`;
     // Each operation's answers, in turn; Main's own runs answer as the executable does.
@@ -670,6 +673,7 @@ describe.each([
       startCommand,
       sideEffects,
       taskId,
+      begun,
     };
   }
 
@@ -772,6 +776,44 @@ describe.each([
       operations.splice(0);
       await dispatch('leader:3', ['skills', 'get', 'desktop']);
       expect(operations.map(({ queued }) => queued)).toEqual([false]);
+    } finally {
+      await dispose();
+    }
+  });
+
+  it('records on each run’s row whose run it was, from Main’s binding of the call', async () => {
+    const { dispatch, dispose, begun, taskId } = await setUp();
+    const requesters = () =>
+      begun.map(
+        ({ desktopAction }) => (desktopAction as { requester?: unknown } | undefined)?.requester,
+      );
+    try {
+      configureDesktopControlTeamCursors(true);
+      markDesktopControlWorker(taskId, 'agent-1', 'Checker');
+      await dispatch('worker:1');
+      await dispatch('worker:2', ['skills', 'get', 'desktop']);
+      await dispatch('leader:1');
+      await dispatch('leader:2', ['skills', 'get', 'desktop']);
+      expect(requesters()).toEqual([
+        // A Worker's run, named as its approval card names it, a run that only prints included.
+        { label: 'Checker', colorIndex: 0 },
+        { label: 'Checker', colorIndex: 0 },
+        // The Leader's run in Main's session draws the Leader's cursor, as on the Leader's card.
+        { leader: true },
+        // The Leader's run that only prints draws no cursor: its row is as before.
+        undefined,
+      ]);
+      // A Worker's run brings what it does, with whose it is.
+      expect(begun[0]!.desktopAction).toMatchObject({
+        kind: expect.any(String),
+        requester: { label: 'Checker', colorIndex: 0 },
+      });
+      // With the cursors off, the Leader's run says nothing of whose it was, as before.
+      begun.splice(0);
+      configureDesktopControlTeamCursors(false);
+      await dispatch('leader:3');
+      expect(begun).toHaveLength(1);
+      expect(requesters()).toEqual([undefined]);
     } finally {
       await dispose();
     }

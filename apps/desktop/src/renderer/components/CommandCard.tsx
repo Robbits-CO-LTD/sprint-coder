@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalSummary, CommandOutputRecord } from '../types/sprint-coder';
 import { desktopActionSummary, desktopTargetText, desktopTextLabel } from '../lib/desktop-action';
 import type { CommandCardState } from '../store/appStore';
+import { WorkerAvatar } from './WorkerAvatar';
 import {
   commandDurationMs,
   exactArgvDisplay,
@@ -27,6 +28,8 @@ export function CommandCard({
 }) {
   const { command, tail } = card;
   const desktopAction = approvalAction ?? command.desktopAction;
+  // Whose run it was, as Main recorded it as the run started, or else as its card named it.
+  const requester = command.desktopAction?.requester ?? approvalAction?.requester;
   const [expanded, setExpanded] = useState(false);
   const [outputs, setOutputs] = useState<CommandOutputRecord[]>([]);
   const [outputError, setOutputError] = useState<string | null>(null);
@@ -188,6 +191,11 @@ export function CommandCard({
             {desktopAction.title}
           </span>
         )}
+        {/* Only a Team Worker is named on the row: a run with no name is the Leader's, which is
+            every run of a Task without a Team, so naming it there would repeat on each row. */}
+        {desktopAction === undefined || requester === undefined || 'leader' in requester ? null : (
+          <RunRequester requester={requester} />
+        )}
         <span className="command-card__duration" data-testid="command-duration">
           {formatDuration(duration)}
         </span>
@@ -301,6 +309,33 @@ export function CommandCard({
         </p>
       ) : null}
     </section>
+  );
+}
+
+type RunRequesterValue = Exclude<
+  NonNullable<NonNullable<ApprovalSummary['desktopAction']>['requester']>,
+  { leader: true }
+>;
+
+/**
+ * Which Team Worker's desktop-control run the row is, small in its head: the Worker's face and
+ * name as its approval card shows them (the same face and color). A long name is cut on the row
+ * and is read whole from its title and accessible name.
+ */
+function RunRequester({ requester }: { requester: RunRequesterValue }) {
+  const text = `依頼した Worker: ${requester.label}`;
+  return (
+    <span
+      className="command-card__requester"
+      data-testid="command-desktop-requester"
+      data-requester-color={requester.colorIndex ?? 'none'}
+      title={text}
+    >
+      <WorkerAvatar name={requester.label} colorIndex={requester.colorIndex} small />
+      {/* Read whole, with what it is, whatever the row cuts off on screen. */}
+      <span className="sr-only">依頼した Worker: </span>
+      <span className="command-card__requester-name">{requester.label}</span>
+    </span>
   );
 }
 

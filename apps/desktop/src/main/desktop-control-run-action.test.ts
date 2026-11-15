@@ -126,6 +126,70 @@ describe('the timeline row of a desktop-control run allowed without a card', () 
     reopened.close();
   });
 
+  it('keeps whose run it was, as Main bound the call, across a restart', () => {
+    scope.value = { stateRoot };
+    const path = join(directory, 'whose.sqlite3');
+    const persistence = new SqlitePersistenceClient(path);
+    const argv = ['click', '@s1abc:e7'];
+    const worker = { label: 'desktop-operator-cu-counter', colorIndex: 2 };
+    // The same description as without it, and who asked.
+    expect(desktopControlRunAction('task-1', argv, worker)).toEqual({
+      ...desktopControlRunAction('task-1', argv),
+      requester: worker,
+    });
+    prepareClick(persistence, 'worker-run', argv);
+    expect(
+      persistence.beginCommand('worker-run', desktopControlRunAction('task-1', argv, worker))
+        .desktopAction?.requester,
+    ).toEqual(worker);
+    prepareClick(persistence, 'leader-run', argv);
+    persistence.beginCommand(
+      'leader-run',
+      desktopControlRunAction('task-1', argv, { leader: true }),
+    );
+    // A run that only prints says whose it was too, and names no part.
+    prepareClick(persistence, 'worker-status', ['skills', 'get', 'desktop']);
+    const status = persistence.beginCommand(
+      'worker-status',
+      desktopControlRunAction('task-1', ['skills', 'get', 'desktop'], worker),
+    ).desktopAction;
+    expect(status?.requester).toEqual(worker);
+    expect(status?.target).toBeUndefined();
+    // A Worker Main names without a cursor color reads back as it was written.
+    prepareClick(persistence, 'unmarked-run', argv);
+    persistence.beginCommand(
+      'unmarked-run',
+      desktopControlRunAction('task-1', argv, { label: 'Worker' }),
+    );
+    persistence.close();
+    const reopened = new SqlitePersistenceClient(path);
+    expect(reopened.getCommand('worker-run').desktopAction).toMatchObject({
+      kind: 'operate',
+      requester: worker,
+    });
+    expect(reopened.getCommand('leader-run').desktopAction?.requester).toEqual({ leader: true });
+    expect(reopened.getCommand('worker-status').desktopAction?.requester).toEqual(worker);
+    expect(reopened.getCommand('unmarked-run').desktopAction?.requester).toEqual({
+      label: 'Worker',
+    });
+    reopened.close();
+  });
+
+  it('reads a row recorded before whose run it was was kept, with nobody named', () => {
+    scope.value = { stateRoot };
+    const persistence = new SqlitePersistenceClient(join(directory, 'older.sqlite3'));
+    const argv = ['click', '@s1abc:e7'];
+    prepareClick(persistence, 'older', argv);
+    // As an older version recorded it: what the run did, and no `requester`.
+    const recorded = desktopControlRunAction('task-1', argv);
+    expect(recorded).not.toHaveProperty('requester');
+    expect(persistence.beginCommand('older', recorded).desktopAction).toEqual(recorded);
+    expect(persistence.getCommand('older').desktopAction).not.toHaveProperty('requester');
+    // Without a requester, a run that only prints brings nothing, as before.
+    expect(desktopControlRunAction('task-1', ['skills', 'get', 'desktop'])).toBeUndefined();
+    persistence.close();
+  });
+
   it('describes a run that brought no names, or names in no known shape, as before', () => {
     const persistence = new SqlitePersistenceClient(join(directory, 'plain.sqlite3'));
     prepareClick(persistence, 'plain', ['click', '@s1abc:e7']);
