@@ -61,6 +61,9 @@ impl SystemOps for CdpAdapter {
             suggestion: None,
             attached: false,
             new_instance: false,
+            handed_off: false,
+            running_without_window: false,
+            activated: None,
         })
     }
 
