@@ -308,11 +308,6 @@ describe('CI cache reuse and fallback', () => {
       expect(prepare, job).toBeGreaterThan(-1);
       expect(steps.findIndex((step) => step.run?.startsWith(consumer))).toBeGreaterThan(prepare);
     }
-    expect(
-      workflow.jobs['package-linux'].steps.some(
-        (step) => step.uses === './.github/actions/prepare-desktop-control',
-      ),
-    ).toBe(false);
   });
 
   it('accepts a cached desktop-control build only when its bytes match its seal', () => {
@@ -483,7 +478,8 @@ describe('CI scope wiring', () => {
       '${{ fromJSON(needs.classify.outputs.rust_runner) }}',
     );
     expect(workflow.jobs['test-macos']['runs-on']).toBe('macos-latest');
-    expect(workflow.jobs['package-linux']['runs-on']).toBe('ubuntu-latest');
+    // Linux is no longer distributed, so it has no package smoke (owner decision, 2026-11-16).
+    expect(workflow.jobs['package-linux']).toBeUndefined();
     expect(workflow.jobs['renderer-tests']['runs-on']).toBe('ubuntu-latest');
     expect(workflow.jobs['package-windows']['runs-on']).toBe('windows-2022');
     for (const job of ['quality', 'package-tests', 'sandbox-rust-windows']) {
@@ -553,7 +549,6 @@ describe('CI scope wiring', () => {
         'package-macos',
         'platform-tests',
         'electron-bridges',
-        'package-linux',
         'package-windows-build',
         'package-windows',
         'renderer-tests',
@@ -694,9 +689,9 @@ describe('CI scope wiring', () => {
 
 describe('full CI partition contract', () => {
   it.skipIf(process.platform === 'win32')(
-    'builds the Linux and Mac production packages explicitly and propagates failures',
+    'builds the Mac production package explicitly and propagates failures',
     () => {
-      for (const job of ['package-linux', 'package-macos']) {
+      for (const job of ['package-macos']) {
         const step = workflow.jobs[job].steps.find(
           (entry) => entry.name === 'Production package smoke',
         );
@@ -790,7 +785,7 @@ describe('full CI partition contract', () => {
     },
   );
 
-  it('keeps all Linux/Windows shards and native boundaries required for full validation', () => {
+  it('keeps all Windows shards and native boundaries required for full validation', () => {
     const output = join(fixture(), 'output');
     const classifier = workflow.jobs.classify.steps.find((step) => step.id === 'scope');
     const run = spawnSync(process.execPath, ['ci-scope.mjs', 'classify'], {
@@ -807,11 +802,8 @@ describe('full CI partition contract', () => {
     const entries = JSON.parse(
       scopeOutputs(classifyChanges([], { eventName: 'workflow_dispatch' })).platform_matrix,
     ).include;
-    expect(entries.filter((entry) => entry.label === 'Linux').map((entry) => entry.shard)).toEqual([
-      '1/3',
-      '2/3',
-      '3/3',
-    ]);
+    // macOS runs in test-macos; Linux is no longer tested (owner decision, 2026-11-16).
+    expect(entries.filter((entry) => entry.label !== 'Windows')).toEqual([]);
     expect(
       entries.filter((entry) => entry.label === 'Windows').map((entry) => entry.shard),
     ).toEqual(Array.from({ length: 5 }, (_, i) => `${i + 1}/5`));
@@ -840,10 +832,14 @@ describe('full CI partition contract', () => {
         'fetch-depth'
       ],
     ).toBe("${{ startsWith(matrix.shard, 'related') && '0' || '1' }}");
-    for (const name of ['on Linux', 'on Windows'])
-      expect(
-        workflow.jobs['platform-tests'].steps.find((step) => step.name.endsWith(name)).if,
-      ).toContain("!startsWith(matrix.shard, 'related')");
+    expect(
+      workflow.jobs['platform-tests'].steps.find((step) => step.name.endsWith('on Windows')).if,
+    ).toContain("!startsWith(matrix.shard, 'related')");
+    expect(
+      workflow.jobs['platform-tests'].steps.filter((step) =>
+        /Linux/u.test(`${step.name} ${step.if ?? ''}`),
+      ),
+    ).toEqual([]);
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const rust = workflow.jobs['sandbox-rust-windows'];
     expect(rust.if).toBe(
@@ -910,7 +906,7 @@ describe('full CI partition contract', () => {
       expect(step.run).not.toContain('--exclude');
       expect(step['continue-on-error']).toBeUndefined();
     }
-    for (const id of ['package-linux', 'package-macos']) {
+    for (const id of ['package-macos']) {
       const job = workflow.jobs[id];
       expect(job.needs).toBe('classify');
       expect(job.steps.some((step) => step.run === 'npx electron-forge package')).toBe(true);
@@ -936,15 +932,11 @@ describe('full CI partition contract', () => {
     const windowsTest = workflow.jobs['platform-tests'].steps.find((step) =>
       step.name.endsWith('on Windows'),
     );
-    const linuxTest = workflow.jobs['platform-tests'].steps.find((step) =>
-      step.name.endsWith('on Linux'),
-    );
     for (const step of [macTest, windowsTest]) {
       expect(step.run.match(/--exclude/gu)).toHaveLength(2);
       expect(step.run).toContain('src/main/team-coordinator.test.ts');
       expect(step.run).toContain('src/main/graph-mission-persistence.test.ts');
     }
-    expect(linuxTest.run).not.toContain('--exclude');
     for (const job of Object.values(workflow.jobs)) {
       const depsIndex = job.steps?.findIndex(
         (step) => step.uses === './.github/actions/install-deps',

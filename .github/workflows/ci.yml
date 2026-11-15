@@ -383,10 +383,6 @@ jobs:
         if: needs.classify.outputs.native_required == 'true'
         uses: ./.github/actions/install-electron
 
-      - name: Install Linux sandbox dependency
-        if: runner.os == 'Linux' && needs.classify.outputs.native_required == 'true'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
-
       - name: Build managed sandbox runner
         if: needs.classify.outputs.native_required == 'true'
         uses: ./.github/actions/prepare-sandbox
@@ -435,11 +431,6 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $identity) {
             throw 'Windows process identity query warm-up failed'
           }
-
-      - name: Test desktop shard ${{ matrix.shard }} on Linux
-        if: runner.os == 'Linux' && !startsWith(matrix.shard, 'related')
-        working-directory: apps/desktop
-        run: npx vitest run --shard=${{ matrix.shard }}
 
       - name: Test desktop shard ${{ matrix.shard }} on Windows
         if: runner.os == 'Windows' && !startsWith(matrix.shard, 'related')
@@ -525,10 +516,6 @@ jobs:
       - name: Install Electron binary
         uses: ./.github/actions/install-electron
 
-      - name: Install Linux sandbox dependency
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
-
       - name: Build managed sandbox runner
         uses: ./.github/actions/prepare-sandbox
 
@@ -571,54 +558,6 @@ jobs:
         run: npx vitest run ${{ matrix.file }} --maxWorkers=1
         env:
           SPRINT_CODER_ELECTRON_BRIDGE_SHARD: ${{ matrix.shard }}
-
-  package-linux:
-    name: Linux production package smoke
-    needs: classify
-    if: needs.classify.outputs.distribution_required == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install Electron binary
-        uses: ./.github/actions/install-electron
-      - name: Install Linux sandbox dependency
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - name: Build managed sandbox runner
-        uses: ./.github/actions/prepare-sandbox
-      - name: Restore better-sqlite3 Electron ABI binary
-        id: better-sqlite-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
-          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
-      - name: Rebuild better-sqlite3 for Electron ABI
-        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
-        working-directory: apps/desktop
-        run: node ../../build-better-sqlite3.mjs
-      - name: Restore NativeSafeFs Electron ABI binary
-        id: native-safe-fs-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
-          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
-      - name: Build NativeSafeFs for Electron ABI
-        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
-        run: npm run build:native-safe-fs
-      - name: Production package smoke
-        working-directory: apps/desktop
-        run: npx electron-forge package
 
   package-windows-build:
     name: Windows production package
@@ -804,7 +743,6 @@ jobs:
         package-macos,
         platform-tests,
         electron-bridges,
-        package-linux,
         package-windows-build,
         package-windows,
         website,
