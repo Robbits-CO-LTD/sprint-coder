@@ -10,10 +10,11 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import type * as ChildProcessModule from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import type { ResolvedForgeConfig } from '@electron-forge/shared-types';
+import { describe, expect, it, vi } from 'vitest';
+import type { ForgeConfig, ResolvedForgeConfig } from '@electron-forge/shared-types';
 import config, {
   desktopControlResources,
   desktopControlSource,
@@ -39,6 +40,24 @@ import {
   sandboxRunnerPath,
   verifySandboxRunnerDigest,
 } from './src/main/sandbox-runner';
+
+// A test may answer execFileSync calls itself (the macOS postPackage test never runs codesign);
+// every call it does not answer reaches the real child_process.
+const childProcessMock = vi.hoisted(() => ({
+  answer: undefined as ((file: string, args: readonly string[]) => { result: unknown } | undefined) | undefined,
+}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const original = await importOriginal<typeof ChildProcessModule>();
+  const execFileSync = (file: string, ...rest: unknown[]) => {
+    const answered = childProcessMock.answer?.(
+      file,
+      Array.isArray(rest[0]) ? (rest[0] as string[]) : [],
+    );
+    if (answered !== undefined) return answered.result;
+    return (original.execFileSync as (file: string, ...rest: unknown[]) => unknown)(file, ...rest);
+  };
+  return { ...original, execFileSync: execFileSync as typeof original.execFileSync };
+});
 
 // The desktop-control executable's build output, which the package ships under the same name.
 const DESKTOP_CONTROL_SOURCE = resolve(
@@ -431,7 +450,10 @@ describe('desktop-control resources', () => {
       expect(() => verifyDesktopControlBinary(copy)).toThrow('invalid digest manifest');
       rmSync(`${copy}.sha256`);
       expect(() => verifyDesktopControlBinary(copy)).toThrow();
-      expect(() => verifyDesktopControlBinary(join(root, 'missing.exe'))).toThrow();
+      // A build that never ran gets the command to run, not a raw ENOENT.
+      expect(() => verifyDesktopControlBinary(join(root, 'missing.exe'))).toThrow(
+        'executable was not found; run npm run build:desktop-control first',
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -494,6 +516,147 @@ describe('desktop-control resources', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('macOS postPackage desktop-control sealing', () => {
+  const STALE_SEAL = `${'0'.repeat(64)}\n`;
+  const RESEAL = '--preserve-metadata=identifier,entitlements,requirements';
+  const resolvedConfigFor = (forgeConfig: ForgeConfig): ResolvedForgeConfig => ({
+    ...forgeConfig,
+    plugins: forgeConfig.plugins ?? [],
+    rebuildConfig: forgeConfig.rebuildConfig ?? {},
+    packagerConfig: forgeConfig.packagerConfig ?? {},
+    makers: forgeConfig.makers ?? [],
+    publishers: forgeConfig.publishers ?? [],
+    pluginInterface: {
+      triggerHook: async () => undefined,
+      getHookListrTasks: async () => [],
+      triggerMutatingHook: async (_name, item) => item,
+      overrideStartLogic: async () => {
+        throw new Error('Unexpected plugin invocation');
+      },
+    },
+  });
+
+  /**
+   * Runs the real darwin postPackage hook on a fake `Sprint Coder.app`. The signing identity is
+   * read when forge.config loads, so the module is loaded again under the given environment.
+   * Every codesign call is recorded with the seals as they were at that moment, and never run.
+   */
+  async function runMacPostPackage(arch: 'arm64' | 'x64', identity: string | undefined) {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-mac-post-package-'));
+    const appPath = join(root, 'Sprint Coder.app');
+    const resources = join(appPath, 'Contents', 'Resources');
+    const runner = join(resources, 'sprint-coder-sandbox-runner');
+    const desktop = join(resources, 'sprint-coder-desktop-control');
+    const node = join(resources, 'node');
+    mkdirSync(resources, { recursive: true });
+    writeFileSync(runner, 'signed-runner', { mode: 0o755 });
+    writeFileSync(`${runner}.sha256`, STALE_SEAL);
+    writeFileSync(desktop, 'signed-desktop-control', { mode: 0o755 });
+    writeFileSync(`${desktop}.sha256`, STALE_SEAL);
+    writeFileSync(node, 'fake-node', { mode: 0o755 });
+    const codesign: { args: string[]; desktopSeal: string; runnerSeal: string }[] = [];
+    childProcessMock.answer = (file, args) => {
+      if (file === '/usr/bin/codesign') {
+        // Ad-hoc signing rewrites a nested executable's bytes, as the real codesign does.
+        if (args.at(-1) === desktop && !args.includes(RESEAL) && !args.includes('--verify'))
+          appendFileSync(desktop, '+ad-hoc-signature');
+        codesign.push({
+          args: [...args],
+          desktopSeal: readFileSync(`${desktop}.sha256`, 'utf8'),
+          runnerSeal: readFileSync(`${runner}.sha256`, 'utf8'),
+        });
+        return { result: Buffer.alloc(0) };
+      }
+      // The packaged Node version check (BUNDLED_NODE_VERSION in forge.config.ts).
+      if (file === node) return { result: 'v22.23.3\n' };
+      return undefined;
+    };
+    try {
+      vi.stubEnv('CI', '');
+      vi.stubEnv('SPRINT_CODER_RELEASE', '');
+      vi.stubEnv('SPRINT_CODER_ALLOW_ADHOC_CODESIGN', '');
+      vi.stubEnv('SPRINT_CODER_CODESIGN_IDENTITY', identity);
+      vi.resetModules();
+      const { default: freshConfig } = await import('./forge.config');
+      await expect(
+        freshConfig.hooks!.postPackage!(resolvedConfigFor(freshConfig), {
+          platform: 'darwin',
+          arch,
+          outputPaths: [root],
+        }),
+      ).resolves.toBeUndefined();
+      const resealIndex = codesign.findIndex((call) => call.args.includes(RESEAL));
+      expect(codesign.filter((call) => call.args.includes(RESEAL))).toHaveLength(1);
+      const reseal = codesign[resealIndex]!;
+      expect(reseal.args.at(-1)).toBe(appPath);
+      expect(codesign.findIndex((call) => call.args.includes('--verify'))).toBeGreaterThan(
+        resealIndex,
+      );
+      // The sandbox runner is resealed before the outer signature, on both architectures.
+      expect(reseal.runnerSeal).toBe(`${sha256(readFileSync(runner))}\n`);
+      return {
+        appPath,
+        codesign,
+        desktop,
+        desktopBytes: readFileSync(desktop),
+        desktopSeal: readFileSync(`${desktop}.sha256`, 'utf8'),
+        reseal,
+        resealIndex,
+      };
+    } finally {
+      childProcessMock.answer = undefined;
+      vi.unstubAllEnvs();
+      vi.resetModules();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it('seals the ad-hoc signed Apple silicon helper before the outer re-seal with identity -', async () => {
+    const run = await runMacPostPackage('arm64', undefined);
+    const digest = `${sha256(run.desktopBytes)}\n`;
+    expect(digest).not.toBe(STALE_SEAL);
+    expect(run.desktopSeal).toBe(digest);
+    // Already rewritten when the outer app signature was refreshed, so CodeResources covers it.
+    expect(run.reseal.desktopSeal).toBe(digest);
+    const sign = run.reseal.args.indexOf('--sign');
+    expect(run.reseal.args[sign + 1]).toBe('-');
+    expect(run.reseal.args).toContain('--timestamp=none');
+    // Without a configured identity the hook ad-hoc signs the bundle first.
+    expect(run.codesign.findIndex((call) => call.args.at(-1) === run.appPath)).toBeLessThan(
+      run.resealIndex,
+    );
+    // Execute bits exist only off Windows, so only there does the ad-hoc signing reach the helper.
+    if (process.platform !== 'win32') {
+      expect(run.desktopBytes.toString()).toBe('signed-desktop-control+ad-hoc-signature');
+      expect(
+        run.codesign.findIndex(
+          (call) => call.args.at(-1) === run.desktop && !call.args.includes('--verify'),
+        ),
+      ).toBeLessThan(run.resealIndex);
+    }
+  });
+
+  it('seals the helper Packager signed before the outer re-seal with the configured identity', async () => {
+    const identity = 'Developer ID Application: Fixture (FIXTURE123)';
+    const run = await runMacPostPackage('arm64', identity);
+    const digest = `${sha256('signed-desktop-control')}\n`;
+    expect(run.desktopSeal).toBe(digest);
+    expect(run.reseal.desktopSeal).toBe(digest);
+    const sign = run.reseal.args.indexOf('--sign');
+    expect(run.reseal.args[sign + 1]).toBe(identity);
+    expect(run.reseal.args).toContain('--timestamp');
+    expect(run.reseal.args).not.toContain('--timestamp=none');
+    // @electron/osx-sign already signed the bundle in Packager; the hook signs nothing else.
+    expect(run.resealIndex).toBe(0);
+  });
+
+  it('leaves the desktop-control seal alone on Intel macOS, which does not ship it', async () => {
+    const run = await runMacPostPackage('x64', undefined);
+    expect(run.desktopSeal).toBe(STALE_SEAL);
+    expect(run.reseal.desktopSeal).toBe(STALE_SEAL);
   });
 });
 

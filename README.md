@@ -184,7 +184,7 @@ npm start
 
 Windows x64でデスクトップ操作を`npm start`の開発版で使うには、先に`npm run build:desktop-control`を1回実行します（Rustのtoolchainが必要。約1分）。buildしていない開発版では、デスクトップ操作は無効のまま起動します。`npm run package` / `npm run make`は、このbuildを自動で行います。
 
-macOS（Appleシリコン）の開発版でも、先に`npm run build:desktop-control`を1回実行します（rustupでRustのtoolchainを入れておく。版は`rust-toolchain.toml`で決まります）。加えて、システム設定の「プライバシーとセキュリティ」で、開発版を起動するElectronに「アクセシビリティ」と「画面収録」を許可します。許可が無いと、デスクトップ操作は権限が無いという結果で止まります。
+macOS（Appleシリコン）の開発版でも、先に`npm run build:desktop-control`を1回実行します（rustupでRustのtoolchainを入れておく。版は`rust-toolchain.toml`で決まります）。Appleシリコンでは`npm run package` / `npm run make`もこの実行ファイルを入れるので、同じくRustのtoolchainが要ります。加えて、システム設定の「プライバシーとセキュリティ」で「アクセシビリティ」と「画面収録」を許可します。macOSは開発版を起動したアプリに許可を求めるので、`npm start`なら実行した端末やIDEを、Finderや`open`で起動したならElectronを許可します。許可が無いと、デスクトップ操作は権限が無いという結果で止まります。
 
 UI・E2E・ユーザー操作は、開発エージェントのComputer Useで実アプリ・ブラウザを操作して確認します。[検証チェックリストと記録方法](docs/testing/computer-use/README.md)から変更に関係するケースを選びます。単体・結合テストはVitestを維持します。
 

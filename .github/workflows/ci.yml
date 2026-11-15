@@ -391,7 +391,7 @@ jobs:
         if: needs.classify.outputs.native_required == 'true'
         uses: ./.github/actions/prepare-sandbox
 
-      - name: Build Windows desktop control
+      - name: Build desktop control
         if: needs.classify.outputs.native_required == 'true'
         uses: ./.github/actions/prepare-desktop-control
 

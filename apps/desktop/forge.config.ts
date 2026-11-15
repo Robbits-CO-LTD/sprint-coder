@@ -160,8 +160,10 @@ export function desktopControlResources(
 
 /** Fails the build unless the file holds exactly the bytes its `.sha256` manifest seals. */
 export function verifyDesktopControlBinary(executable: string): void {
-  if (!lstatSync(executable).isFile())
-    throw new Error(`desktop-control ${DESKTOP_CONTROL_VERSION} executable was not found`);
+  if (!lstatSync(executable, { throwIfNoEntry: false })?.isFile())
+    throw new Error(
+      `desktop-control ${DESKTOP_CONTROL_VERSION} executable was not found; run npm run build:desktop-control first`,
+    );
   const expected = readFileSync(`${executable}.sha256`, 'utf8').trim();
   if (!/^[a-f0-9]{64}$/u.test(expected))
     throw new Error(`desktop-control ${basename(executable)} has an invalid digest manifest`);

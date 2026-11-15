@@ -55,13 +55,16 @@ afterEach(() =>
   cleanup.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })),
 );
 
-function condition(expression, outputs, os = 'Windows') {
+// macos-latest is Apple silicon; the Windows runners are x64.
+function condition(expression, outputs, os = 'Windows', arch = os === 'macOS' ? 'ARM64' : 'X64') {
   const substituted = expression.replace(
     /steps\.([a-z-]+)\.outputs\.([a-z-]+)/gu,
     (_, step, output) => JSON.stringify(outputs[step]?.[output] ?? ''),
   );
   return runInNewContext(
-    substituted.replace(/runner\.os/gu, JSON.stringify(os)),
+    substituted
+      .replace(/runner\.os/gu, JSON.stringify(os))
+      .replace(/runner\.arch/gu, JSON.stringify(arch)),
     {},
     { timeout: 100 },
   );
@@ -249,6 +252,8 @@ describe('CI cache reuse and fallback', () => {
       expect(condition(macBuild.if, outputs, 'macOS')).toBe(expected);
       for (const os of ['Linux', 'Windows'])
         expect(condition(macBuild.if, outputs, os)).toBe(false);
+      // Intel macOS ships no desktop control, so its runners build nothing.
+      expect(condition(macBuild.if, outputs, 'macOS', 'X64')).toBe(false);
     }
     const compiler = desktopControlAction.runs.steps.find((step) => step.id === 'compiler');
     for (const [os, expected] of [
@@ -257,12 +262,14 @@ describe('CI cache reuse and fallback', () => {
       ['Linux', false],
     ])
       expect(condition(compiler.if, {}, os)).toBe(expected);
+    expect(condition(compiler.if, {}, 'macOS', 'X64')).toBe(false);
     const restore = desktopControlAction.runs.steps.find((step) => step.id === 'desktop-control');
     expect(condition(restore.if, { compiler: { cacheable: 'false' } })).toBe(false);
     expect(condition(restore.if, { compiler: { cacheable: 'true' } })).toBe(true);
     expect(condition(restore.if, { compiler: { cacheable: 'true' } }, 'macOS')).toBe(true);
     expect(condition(restore.if, { compiler: { cacheable: 'false' } }, 'macOS')).toBe(false);
     expect(condition(restore.if, { compiler: { cacheable: 'true' } }, 'Linux')).toBe(false);
+    expect(condition(restore.if, { compiler: { cacheable: 'true' } }, 'macOS', 'X64')).toBe(false);
     // The runner OS is part of the key, so a Windows build is never restored on macOS.
     expect(restore.with.key).toContain('${{ runner.os }}-${{ runner.arch }}');
     expect(restore.with.path).toBe('apps/desktop/desktop-control/build/Release');
@@ -274,6 +281,7 @@ describe('CI cache reuse and fallback', () => {
     const verify = desktopControlAction.runs.steps.at(-1);
     expect(verify.run).toBe('node ci-cache.mjs assert-desktop-control');
     expect(condition(verify.if, {}, 'Linux')).toBe(false);
+    expect(condition(verify.if, {}, 'macOS', 'X64')).toBe(false);
     for (const os of ['Windows', 'macOS']) expect(condition(verify.if, {}, os)).toBe(true);
     // Every Windows job that packages or runs the desktop tests prepares it first.
     for (const [job, consumer] of [
