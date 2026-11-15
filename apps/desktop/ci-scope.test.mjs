@@ -18,6 +18,8 @@ import { partitionWindowsTests } from './vitest.config';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const renderer = 'apps/desktop/src/renderer/';
 const changes = (...paths) => paths.map((path) => ({ path, status: 'M' }));
+// The earlier PR selection of related tests, kept behind an option (see classifyChanges).
+const withPrTests = { pullRequestTests: true };
 const cleanup = [];
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -45,16 +47,22 @@ describe('CI change boundaries', () => {
     [['unclassified/new.ts'], 'pr', ['linux', 'macos', 'windows'], true],
     [[], 'pr', ['linux', 'macos', 'windows'], true],
   ])('selects bounded platform coverage for %j', (paths, mode, platforms, native) => {
-    expect(classifyChanges(changes(...paths))).toMatchObject({ mode, platforms, native });
+    expect(classifyChanges(changes(...paths), withPrTests)).toMatchObject({
+      mode,
+      platforms,
+      native,
+    });
   });
 
   it('checks dedicated boundary suites even when native/CI changes have no static imports', () => {
-    expect(classifyChanges(changes('apps/desktop/sandbox-runner/Cargo.toml'))).toMatchObject({
+    expect(
+      classifyChanges(changes('apps/desktop/sandbox-runner/Cargo.toml'), withPrTests),
+    ).toMatchObject({
       windowsRust: true,
       specs: expect.arrayContaining(['src/main/sandbox-runner.test.ts']),
     });
     expect(
-      classifyChanges(changes('apps/desktop/resources/sandbox-node-pipe-guard.cjs')),
+      classifyChanges(changes('apps/desktop/resources/sandbox-node-pipe-guard.cjs'), withPrTests),
     ).toMatchObject({
       platforms: expect.arrayContaining(['windows']),
       native: true,
@@ -63,16 +71,19 @@ describe('CI change boundaries', () => {
         'src/main/sandbox-node-pipe-guard.integration.test.ts',
       ]),
     });
-    expect(classifyChanges(changes('apps/desktop/native-safe-fs/binding.gyp')).specs).toContain(
-      'src/main/native-safe-fs.test.ts',
-    );
     expect(
-      classifyChanges(changes('apps/desktop/desktop-control/crates/windows/src/lib.rs')).specs,
+      classifyChanges(changes('apps/desktop/native-safe-fs/binding.gyp'), withPrTests).specs,
+    ).toContain('src/main/native-safe-fs.test.ts');
+    expect(
+      classifyChanges(
+        changes('apps/desktop/desktop-control/crates/windows/src/lib.rs'),
+        withPrTests,
+      ).specs,
     ).toContain('src/main/desktop-control.test.ts');
-    expect(classifyChanges(changes('.github/workflows/ci.yml')).specs).toContain(
+    expect(classifyChanges(changes('.github/workflows/ci.yml'), withPrTests).specs).toContain(
       'ci-cache.test.mjs',
     );
-    expect(classifyChanges(changes(`${renderer}index.css`)).specs).toContain(
+    expect(classifyChanges(changes(`${renderer}index.css`), withPrTests).specs).toContain(
       'src/renderer/components/RunCard.test.tsx',
     );
   });
@@ -93,10 +104,11 @@ describe('CI change boundaries', () => {
     'apps/desktop/assets/fonts/SOURCES.txt',
     'apps/desktop/src/main/auto-update.ts',
     'apps/desktop/scripts/ensure-inno-setup.ps1',
-  ])('checks packages on both PR and main changes to %s, including deletion', (path) => {
-    for (const eventName of ['pull_request', 'push']) {
-      for (const status of ['A', 'M', 'D'])
-        expect(classifyChanges([{ path, status }], { eventName }).distribution).toBe(true);
+  ])('checks packages on main changes to %s, including deletion, but not on PRs', (path) => {
+    for (const status of ['A', 'M', 'D']) {
+      expect(classifyChanges([{ path, status }], { eventName: 'push' }).distribution).toBe(true);
+      expect(classifyChanges([{ path, status }]).distribution).toBe(false);
+      expect(classifyChanges([{ path, status }], withPrTests).distribution).toBe(true);
     }
   });
 
@@ -115,6 +127,101 @@ describe('CI change boundaries', () => {
   });
 
   it.each([
+    [`${renderer}components/RunCard.tsx`],
+    ['apps/desktop/src/main/persistence.ts'],
+    ['apps/desktop/src/main/desktop-control.ts'],
+    ['apps/desktop/forge.config.ts'],
+    ['packages/contracts/src/index.ts'],
+    ['unclassified/new.ts'],
+  ])('runs only static checks for a PR changing %s', (path) => {
+    const scope = classifyChanges(changes(path));
+    expect(scope).toMatchObject({
+      mode: 'pr',
+      platforms: [],
+      native: false,
+      splitRelated: false,
+      specs: [],
+      distribution: false,
+      desktopControlRust: false,
+    });
+    const outputs = scopeOutputs(scope);
+    expect(outputs).toMatchObject({
+      quality_required: 'true',
+      platform_required: 'false',
+      full_matrix: 'false',
+      distribution_required: 'false',
+      desktop_control_rust_required: 'false',
+    });
+    expect(JSON.parse(outputs.platform_matrix)).toEqual({ include: [] });
+  });
+
+  it('keeps package tests on PRs under the same conditions as before', () => {
+    for (const path of [
+      'packages/contracts/src/index.ts',
+      'apps/desktop/package.json',
+      'unclassified/new.ts',
+    ])
+      expect(classifyChanges(changes(path)).shared).toBe(true);
+    for (const path of [`${renderer}components/RunCard.tsx`, 'apps/desktop/src/main/task-title.ts'])
+      expect(classifyChanges(changes(path)).shared).toBe(false);
+  });
+
+  it.each([
+    ['apps/desktop/desktop-control/crates/windows/src/lib.rs', false, true],
+    ['apps/desktop/desktop-control/Cargo.lock', false, true],
+    ['build-desktop-control.mjs', false, true],
+    ['.github/actions/prepare-desktop-control/action.yml', false, true],
+    ['apps/desktop/sandbox-runner/src/main.rs', true, false],
+    ['.github/workflows/ci.yml', true, true],
+    ['apps/desktop/src/main/desktop-control.ts', false, false],
+    [`${renderer}components/RunCard.tsx`, false, false],
+  ])('compiles Rust on a PR changing %s (sandbox %s, desktop control %s)', (path, sandbox, dc) => {
+    const scope = classifyChanges(changes(path));
+    expect(scope).toMatchObject({ windowsRust: sandbox, desktopControlRust: dc, platforms: [] });
+    const required = verifyRequiredJobs(scope, {
+      classify: 'success',
+      quality: 'success',
+      'package-tests': 'success',
+      'sandbox-rust-windows': 'success',
+      website: 'success',
+    }).required;
+    expect(required.includes('sandbox-rust-windows')).toBe(sandbox || dc);
+  });
+
+  it('leaves the desktop-control build to the full Windows shards on main and manual CI', () => {
+    for (const eventName of ['push', 'workflow_dispatch']) {
+      const scope = classifyChanges(
+        changes('apps/desktop/desktop-control/crates/windows/src/lib.rs'),
+        { eventName },
+      );
+      expect(scope).toMatchObject({ mode: 'full', windowsRust: true, desktopControlRust: false });
+      expect(scopeOutputs(scope)).toMatchObject({
+        platform_required: 'true',
+        native_required: 'true',
+      });
+    }
+    const docs = classifyChanges(changes('README.md'));
+    expect(() => scopeOutputs({ ...docs, desktopControlRust: true })).toThrow('Invalid CI scope');
+    const pr = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
+    expect(() => scopeOutputs({ ...pr, native: true })).toThrow('Invalid CI scope');
+  });
+
+  it('keeps docs-only and website-only PRs on their light checks', () => {
+    expect(classifyChanges(changes('README.md', 'docs/maintenance.md'))).toMatchObject({
+      mode: 'docs',
+      shared: false,
+      windowsRust: false,
+      desktopControlRust: false,
+      websiteRequired: false,
+    });
+    expect(scopeOutputs(classifyChanges(changes('README.md'))).quality_required).toBe('false');
+    expect(classifyChanges(changes('website/index.html'))).toMatchObject({
+      mode: 'website',
+      websiteRequired: true,
+    });
+  });
+
+  it.each([
     [['apps/desktop/src/main/ipc.ts', 'apps/desktop/src/main/persistence.ts'], true],
     [['apps/desktop/package.json', 'package-lock.json'], true],
     [['packages/contracts/src/index.ts'], true],
@@ -129,7 +236,7 @@ describe('CI change boundaries', () => {
     [['website/index.html'], false],
     [[], false],
   ])('splits the Windows related run only for wide selections: %j', (paths, split) => {
-    const scope = classifyChanges(changes(...paths));
+    const scope = classifyChanges(changes(...paths), withPrTests);
     expect(scope.splitRelated).toBe(split);
     const rows = JSON.parse(scopeOutputs(scope).platform_matrix).include;
     const windows = rows.filter((row) => row.label === 'Windows').map((row) => row.shard);
@@ -155,7 +262,7 @@ describe('CI change boundaries', () => {
   });
 
   it.each(['D', 'R100', 'T', 'U', '?'])('widens coverage for status %s', (status) => {
-    expect(classifyChanges([{ path: 'website/index.html', status }])).toMatchObject({
+    expect(classifyChanges([{ path: 'website/index.html', status }], withPrTests)).toMatchObject({
       mode: 'pr',
       platforms: ['linux', 'macos', 'windows'],
       websiteRequired: true,
@@ -184,13 +291,14 @@ describe('required CI result aggregation', () => {
   it.each(['failure', 'cancelled', 'skipped', undefined])(
     'rejects an unsuccessful required job: %s',
     (result) => {
-      for (const [paths, job] of [
+      for (const [paths, job, options] of [
         [['website/index.html'], 'website'],
-        [[`${renderer}components/RunCard.tsx`], 'platform-tests'],
+        [[`${renderer}components/RunCard.tsx`], 'platform-tests', withPrTests],
         [['packages/contracts/src/index.ts'], 'package-tests'],
-        [['apps/desktop/forge.config.ts'], 'package-windows'],
+        [['apps/desktop/forge.config.ts'], 'package-windows', { eventName: 'push' }],
+        [['apps/desktop/desktop-control/src/main.rs'], 'sandbox-rust-windows'],
       ]) {
-        const scope = classifyChanges(changes(...paths));
+        const scope = classifyChanges(changes(...paths), options);
         expect(() => verifyRequiredJobs(scope, { classify: 'success', [job]: result })).toThrow(
           `${job}: ${result}`,
         );
@@ -201,7 +309,7 @@ describe('required CI result aggregation', () => {
   it.each(['failure', 'cancelled', 'skipped', undefined])(
     'rejects a split Windows related run when its matrix result is %s',
     (result) => {
-      const scope = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
+      const scope = classifyChanges(changes('apps/desktop/src/main/ipc.ts'), withPrTests);
       expect(scope.splitRelated).toBe(true);
       const results = { classify: 'success', quality: 'success', 'platform-tests': 'success' };
       expect(() => verifyRequiredJobs(scope, results)).not.toThrow();
@@ -403,13 +511,15 @@ describe('GitHub classification entrypoint', () => {
           }),
       );
       expect(entries.mode).toBe('pr');
+      expect(entries.quality_required).toBe('true');
+      expect(entries.platform_required).toBe('false');
       expect(entries.full_matrix).toBe('false');
       expect(entries.distribution_required).toBe('false');
       expect(entries.comparison_base).toBe(base);
       expect(entries.diff_base).toBe(ancestor);
       expect(JSON.parse(entries.scope_json)).toMatchObject({
         mode: 'pr',
-        platforms: ['linux', 'macos', 'windows'],
+        platforms: [],
         websiteRequired: false,
       });
       const summary = readFileSync(join(directory, 'summary'), 'utf8');

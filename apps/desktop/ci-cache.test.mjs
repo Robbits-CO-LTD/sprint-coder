@@ -446,28 +446,34 @@ describe('CI scope wiring', () => {
   it.each([
     ['README.md', ['classify', 'required']],
     ['website/index.html', ['classify', 'website', 'required']],
+    // PRs run static checks only; tests and package smokes first run on main.
+    ['apps/desktop/src/renderer/lib/format.ts', ['classify', 'quality', 'required']],
+    ['apps/desktop/src/renderer/components/RunCard.tsx', ['classify', 'quality', 'required']],
+    ['apps/desktop/src/main/persistence.ts', ['classify', 'quality', 'required']],
+    ['apps/desktop/forge.config.ts', ['classify', 'quality', 'package-tests', 'required']],
     [
-      'apps/desktop/src/renderer/lib/format.ts',
-      ['classify', 'quality', 'platform-tests', 'required'],
+      'apps/desktop/desktop-control/crates/windows/src/lib.rs',
+      ['classify', 'quality', 'sandbox-rust-windows', 'required'],
     ],
-    [
-      'apps/desktop/src/renderer/components/RunCard.tsx',
-      ['classify', 'quality', 'platform-tests', 'required'],
-    ],
-    ['apps/desktop/src/main/persistence.ts', ['classify', 'quality', 'platform-tests', 'required']],
     [
       'apps/desktop/forge.config.ts',
       [
         'classify',
         'quality',
         'package-tests',
-        'platform-tests',
-        'package-linux',
+        'sandbox-rust-windows',
+        'test-macos',
         'package-macos',
+        'platform-tests',
+        'electron-bridges',
+        'package-linux',
         'package-windows-build',
         'package-windows',
+        'renderer-tests',
+        'website',
         'required',
       ],
+      'push',
     ],
     [
       'README.md',
@@ -499,7 +505,12 @@ describe('CI scope wiring', () => {
               `needs.classify.outputs.${key}`,
               JSON.stringify(value),
             );
-          return runInNewContext(expression, {}, { timeout: 100 });
+          // The selected jobs pass, so the main failure report stays out of every selection.
+          const context = {
+            github: { event_name: eventName, ref: 'refs/heads/main' },
+            needs: { required: { result: 'success' } },
+          };
+          return runInNewContext(expression, context, { timeout: 100 });
         })
         .map(([id]) => id);
       expect(new Set(selected)).toEqual(new Set(expected));
@@ -516,7 +527,7 @@ describe('CI scope wiring', () => {
   it('waits for every job and rejects failures of required package and website checks', () => {
     expect([...workflow.jobs.required.needs].sort()).toEqual(
       Object.keys(workflow.jobs)
-        .filter((id) => id !== 'required')
+        .filter((id) => !['required', 'report-main-failure'].includes(id))
         .sort(),
     );
     const scope = classifyChanges([{ path: 'apps/desktop/forge.config.ts', status: 'M' }], {
@@ -540,6 +551,39 @@ describe('CI scope wiring', () => {
     ).toBe(true);
     expect(installer.some((step) => step.uses?.startsWith('actions/download-artifact@'))).toBe(
       false,
+    );
+  });
+
+  it('reports a failed main push run as a bug Issue, and nothing else', () => {
+    const report = workflow.jobs['report-main-failure'];
+    expect(report.needs).toBe('required');
+    // Only this job may write Issues; it reads the run's jobs to name the failed ones.
+    expect(report.permissions).toEqual({ actions: 'read', issues: 'write' });
+    for (const [id, job] of Object.entries(workflow.jobs))
+      if (id !== 'report-main-failure') expect(job.permissions?.issues).toBeUndefined();
+    expect(report.steps.every((step) => step.uses === undefined)).toBe(true);
+    const runs = (event_name, result, ref = 'refs/heads/main') =>
+      runInNewContext(report.if.replaceAll('always()', 'true'), {
+        github: { event_name, ref },
+        needs: { required: { result } },
+      });
+    expect(runs('push', 'failure')).toBe(true);
+    for (const [event, result, ref] of [
+      ['push', 'success'],
+      ['push', 'cancelled'],
+      ['pull_request', 'failure'],
+      ['workflow_dispatch', 'failure'],
+      ['push', 'failure', 'refs/heads/other'],
+    ])
+      expect(runs(event, result, ref)).toBe(false);
+    const script = report.steps[0].run;
+    expect(script).toContain('${GITHUB_SHA:0:7}');
+    expect(script).toContain('select(.conclusion == "failure")');
+    expect(script).toContain('map(select(.title == env.ISSUE_TITLE))');
+    expect(script).toContain('gh issue comment "${existing}" --body-file "${body}"');
+    expect(script).toContain('gh issue create --title "${ISSUE_TITLE}" --label bug');
+    expect(script.indexOf('gh issue list --state open')).toBeLessThan(
+      script.indexOf('gh issue create'),
     );
   });
 });
@@ -698,8 +742,21 @@ describe('full CI partition contract', () => {
       ).toContain("!startsWith(matrix.shard, 'related')");
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const rust = workflow.jobs['sandbox-rust-windows'];
-    expect(rust.if).toBe("needs.classify.outputs.windows_rust_required == 'true'");
+    expect(rust.if).toBe(
+      "needs.classify.outputs.windows_rust_required == 'true' || needs.classify.outputs.desktop_control_rust_required == 'true'",
+    );
     const build = rust.steps.find((step) => step.run?.includes('cargo build --release'));
+    expect(build.if).toBe("needs.classify.outputs.windows_rust_required == 'true'");
+    // A PR has no test shard that builds desktop control, so the Rust job compiles it.
+    const desktopControl = rust.steps.find(
+      (step) => step.uses === './.github/actions/prepare-desktop-control',
+    );
+    expect(desktopControl.if).toBe(
+      "needs.classify.outputs.desktop_control_rust_required == 'true'",
+    );
+    expect(workflow.jobs.classify.outputs.desktop_control_rust_required).toBe(
+      '${{ steps.scope.outputs.desktop_control_rust_required }}',
+    );
     expect(build.run).toContain('cargo test --no-run --locked');
     expect(build.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
     const bridges = workflow.jobs['electron-bridges'];
