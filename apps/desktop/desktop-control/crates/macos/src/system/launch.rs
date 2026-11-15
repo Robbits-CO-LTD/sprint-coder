@@ -180,20 +180,13 @@ fn result_from_launched(
 ) -> Result<LaunchResult, AdapterError> {
     let renderer = crate::system::renderer_kind::detect_chromium(launched.0);
     let attached = matches!(target, LaunchTarget::Existing { .. });
-    let activated = if options.activate {
-        let focused = crate::system::window::window_inventory::focused_window_until(
-            deadline_instant(deadline)?,
-        )?;
-        Some(window.as_ref().is_some_and(|window| {
-            focused.as_ref().is_some_and(|front| {
-                front.id == window.id
-                    && front.pid == window.pid
-                    && front.process_instance == window.process_instance
-            })
-        }))
-    } else {
-        None
-    };
+    let activated = options.activate.then(|| {
+        window_is_in_front(window.as_ref(), || {
+            crate::system::window::window_inventory::focused_window_until(deadline_instant(
+                deadline,
+            )?)
+        })
+    });
     Ok(LaunchResult {
         attached,
         new_instance: !attached && window.is_some(),
@@ -209,6 +202,24 @@ fn result_from_launched(
         cdp: None,
         renderer,
         suggestion: None,
+    })
+}
+
+/// Whether the launched window is the one in front. The app is already open, so this only
+/// reports: no window is not activated (and the front is not read), and a front that cannot be
+/// read is not confirmed as activated rather than an error after the launch.
+#[cfg(target_os = "macos")]
+fn window_is_in_front(
+    window: Option<&WindowInfo>,
+    focused: impl FnOnce() -> Result<Option<WindowInfo>, AdapterError>,
+) -> bool {
+    let Some(window) = window else {
+        return false;
+    };
+    focused().ok().flatten().is_some_and(|front| {
+        front.id == window.id
+            && front.pid == window.pid
+            && front.process_instance == window.process_instance
     })
 }
 

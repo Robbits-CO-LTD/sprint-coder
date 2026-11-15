@@ -148,4 +148,30 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 段階ごとに、直さずに残したものをここに足す。
 
-- （段階 1 の後に記入）
+### 段階 1 の独立レビューで出て、残したもの
+
+安全の規則（自身の窓の拒否）に関わるもの:
+
+- 通知の command: Sprint Coder が前面にある時、通知センターを閉じる Escape や、前面の戻しが拒否される。その時、通知への操作は届いた後なのに「何も送っていない」と返る。
+- Chromium の窓の読み取りの前に行う有効化（`activate_renderer_accessibility`）も拒否の対象なので、Sprint Coder 自身の窓の snapshot・find が `POLICY_DENIED` になり得る。「読み取りは拒否しない」という契約との差。害は無いので、そのままにしている。
+- guard は、操作の範囲（scope）が設定されていない thread では通す作り。今はすべての経路に scope があるが、process 全体で持つ形に固めたい。
+- Sprint Coder が前面にある時の、menu bar への物理クリックの扱いは未確認。
+- 間接の経路（Dock からの終了、システム設定の切り替え、通知の action）は対象外。Windows も同じ。
+
+動作と報告に関わるもの:
+
+- drag が拒否された時に、どこでボタンを離したかを結果に出していない。
+- 実行中のアプリへ接続する経路（attach）のエラーの一部に、「届いていない」の印が付かない。
+- 拒否の変数がある時、宛先の無いキーと mouse の event ごとに、前面のアプリや窓の一覧を読む。遅さは実測していない。
+
+取り込んだ upstream のコードに関わるもの:
+
+- `AXValueGetValue` に渡す前の型の確認が無い箇所がある（`node_attribute_decode.rs` ほか）。相手のアプリが別の型を返した時の挙動は未確認。
+- 起動のたびに、古い版（1.0 系）の常駐プロセスを探して終了させる処理（`stop_legacy_command_hosts`）が残っている。利用者が別に入れた古い agent-desktop に作用し得る。
+- 権限が無い時の案内の文言が upstream のまま（「agent-desktop を起動するアプリ」）。
+- screenshot の一時ファイルが、強制終了の時に `$TMPDIR` に残り得る。
+
+試験と CI:
+
+- PR の CI では macOS の Rust を compile しない。release の前の全試験と release の workflow で build する。
+- CLI の試験（`cargo test -p agent-desktop`）は、取り込んでいない upstream のファイルを読むので compile できない。Windows と同じ。

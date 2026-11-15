@@ -321,3 +321,168 @@ fn unreadable_variable_refuses_adapter_entrypoints_without_native_access() {
         );
     }
 }
+
+fn screen_window(owner: Option<u32>, layer: f64, alpha: f64) -> ScreenWindow {
+    ScreenWindow {
+        owner,
+        bounds: Some(agent_desktop_core::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 500.0,
+        }),
+        layer: Some(layer),
+        alpha: Some(alpha),
+    }
+}
+
+fn judge_at(windows: Option<&[ScreenWindow]>, hit_owner: Option<u32>) -> Verdict {
+    let point = agent_desktop_core::Point { x: 100.0, y: 100.0 };
+    process(500, None).judge_point(&point, windows, hit_owner, |_| None)
+}
+
+#[test]
+fn a_click_through_overlay_does_not_hide_the_refused_window_below_it() {
+    // This executable's cursor overlay (popup menu level, alpha 1, ignores mouse events).
+    let overlay = screen_window(Some(7), 103.0, 1.0);
+    let transparent = screen_window(Some(8), 0.0, 0.0);
+    let own = screen_window(Some(500), 0.0, 1.0);
+    let other = screen_window(Some(9), 0.0, 1.0);
+    assert_eq!(
+        judge_at(Some(&[overlay.clone(), own.clone()]), None),
+        Verdict::Own
+    );
+    assert_eq!(
+        judge_at(Some(&[transparent, own.clone()]), None),
+        Verdict::Own
+    );
+    // An ordinary window of another app above the refused one takes the click.
+    assert_eq!(
+        judge_at(Some(&[other.clone(), own.clone()]), None),
+        Verdict::Allowed
+    );
+    assert_eq!(
+        judge_at(Some(&[overlay.clone(), other.clone(), own.clone()]), None),
+        Verdict::Allowed
+    );
+    // The refused process's own menu or panel above another app's window.
+    let own_menu = screen_window(Some(500), 101.0, 1.0);
+    assert_eq!(
+        judge_at(Some(&[own_menu, other.clone()]), None),
+        Verdict::Own
+    );
+    assert_eq!(
+        judge_at(Some(&[own.clone(), other.clone()]), None),
+        Verdict::Own
+    );
+    // Only another app's windows at the point.
+    assert_eq!(judge_at(Some(&[overlay.clone()]), None), Verdict::Allowed);
+    assert_eq!(judge_at(Some(&[other.clone()]), None), Verdict::Allowed);
+}
+
+#[test]
+fn windows_away_from_the_point_or_unreadable_fail_closed_where_they_matter() {
+    let other = screen_window(Some(9), 0.0, 1.0);
+    let own = screen_window(Some(500), 0.0, 1.0);
+    let far = ScreenWindow {
+        bounds: Some(agent_desktop_core::Rect {
+            x: 1000.0,
+            y: 1000.0,
+            width: 10.0,
+            height: 10.0,
+        }),
+        ..own.clone()
+    };
+    assert_eq!(
+        judge_at(Some(&[far.clone(), other.clone()]), None),
+        Verdict::Allowed
+    );
+    // Nothing at the point, or no list at all.
+    assert_eq!(judge_at(Some(&[]), None), Verdict::Unconfirmed);
+    assert_eq!(judge_at(Some(&[far]), None), Verdict::Unconfirmed);
+    assert_eq!(judge_at(None, None), Verdict::Unconfirmed);
+    // A window whose owner cannot be read above the one that takes the click.
+    let unread = ScreenWindow::default();
+    assert_eq!(
+        judge_at(Some(&[unread.clone(), other.clone()]), None),
+        Verdict::Unconfirmed
+    );
+    assert_eq!(
+        judge_at(
+            Some(&[ScreenWindow {
+                owner: None,
+                ..other.clone()
+            }]),
+            None
+        ),
+        Verdict::Unconfirmed
+    );
+    // Unreadable bounds: the refused process's window may be at the point; another app's
+    // window is not taken as the receiver.
+    let own_unbounded = ScreenWindow {
+        bounds: None,
+        ..own.clone()
+    };
+    let other_unbounded = ScreenWindow {
+        bounds: None,
+        ..other.clone()
+    };
+    assert_eq!(
+        judge_at(Some(&[own_unbounded, other.clone()]), None),
+        Verdict::Own
+    );
+    assert_eq!(
+        judge_at(Some(&[other_unbounded, own.clone()]), None),
+        Verdict::Own
+    );
+    // Unreadable layer or alpha is not taken as an ordinary window.
+    let unknown_layer = ScreenWindow {
+        layer: None,
+        ..other.clone()
+    };
+    assert_eq!(
+        judge_at(Some(&[unknown_layer, own.clone()]), None),
+        Verdict::Own
+    );
+}
+
+#[test]
+fn the_accessibility_hit_test_only_adds_refusals() {
+    let other = screen_window(Some(9), 0.0, 1.0);
+    let own = screen_window(Some(500), 0.0, 1.0);
+    assert_eq!(
+        judge_at(Some(&[other.clone(), own.clone()]), Some(500)),
+        Verdict::Own
+    );
+    assert_eq!(judge_at(None, Some(500)), Verdict::Own);
+    assert_eq!(judge_at(Some(&[other.clone()]), Some(9)), Verdict::Allowed);
+    // A readable hit test of another app does not rescue an unreadable window list.
+    assert_eq!(judge_at(None, Some(9)), Verdict::Unconfirmed);
+    // The pid was reused by another process: the instance decides as for every target.
+    let point = agent_desktop_core::Point { x: 100.0, y: 100.0 };
+    assert_eq!(
+        process(500, Some(INSTANCE)).judge_point(&point, Some(&[own]), Some(500), |_| {
+            Some("macos-proc-v1:1:1".to_string())
+        }),
+        Verdict::Allowed
+    );
+    assert_eq!(
+        RefusedWindowOwner::Nobody.judge_point(&point, None, None, |_| None),
+        Verdict::Allowed
+    );
+    assert_eq!(
+        RefusedWindowOwner::Unreadable.judge_point(&point, Some(&[other]), None, |_| None),
+        Verdict::Unreadable
+    );
+}
+
+#[test]
+fn either_front_application_source_naming_the_refused_process_refuses_a_key() {
+    let owner = process(500, None);
+    let unread = |_: u32| None;
+    assert_eq!(owner.judge(&[Some(9), Some(500)], unread), Verdict::Own);
+    assert_eq!(owner.judge(&[Some(500), Some(9)], unread), Verdict::Own);
+    assert_eq!(owner.judge(&[None, Some(9)], unread), Verdict::Allowed);
+    assert_eq!(owner.judge(&[Some(9), None], unread), Verdict::Allowed);
+    assert_eq!(owner.judge(&[None, None], unread), Verdict::Unconfirmed);
+}

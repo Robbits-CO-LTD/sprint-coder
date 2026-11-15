@@ -1,6 +1,6 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
-use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+use core_graphics::event::{CGEvent, CGEventFlags};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use std::time::Duration;
 
@@ -98,7 +98,8 @@ fn post_pair(
         .take()
         .ok_or_else(|| AdapterError::internal("Keyboard release guard lost its key-up event"))
         .map_err(|error| delivery.annotate(error))?;
-    post(&up, target_pid).map_err(|error| delivery.annotate(error))?;
+    // The key-up of a key-down already sent is never judged, so no key is left down.
+    deliver(&up, target_pid);
     ensure_budget(deadline, total, *delivery)
 }
 
@@ -110,7 +111,7 @@ struct KeyReleaseGuard {
 impl Drop for KeyReleaseGuard {
     fn drop(&mut self) {
         if let Some(event) = self.event.take() {
-            let _ = post(&event, self.target_pid);
+            deliver(&event, self.target_pid);
         }
     }
 }
@@ -134,12 +135,26 @@ fn event_source() -> Result<CGEventSource, AdapterError> {
 
 fn post(event: &CGEvent, target_pid: Option<i32>) -> Result<(), AdapterError> {
     crate::system::own_window::check_key(target_pid)?;
+    deliver(event, target_pid);
+    Ok(())
+}
+
+#[cfg(not(all(test, not(feature = "interactive-tests"))))]
+fn deliver(event: &CGEvent, target_pid: Option<i32>) {
     if let Some(pid) = target_pid {
         event.post_to_pid(pid);
     } else {
-        event.post(CGEventTapLocation::HID);
+        event.post(core_graphics::event::CGEventTapLocation::HID);
     }
-    Ok(())
+}
+
+/// Unit tests never post real input; they read what would have been posted.
+#[cfg(all(test, not(feature = "interactive-tests")))]
+fn deliver(event: &CGEvent, target_pid: Option<i32>) {
+    let key_code =
+        event.get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE);
+    let down = event.get_type() as u32 == core_graphics::event::CGEventType::KeyDown as u32;
+    tests::POSTED.with(|posted| posted.borrow_mut().push((key_code, down, target_pid)));
 }
 
 fn sleep_bounded(
@@ -222,6 +237,35 @@ fn text_too_large() -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "interactive-tests"))]
+    thread_local! {
+        pub(super) static POSTED: std::cell::RefCell<Vec<(i64, bool, Option<i32>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(not(feature = "interactive-tests"))]
+    #[test]
+    fn a_key_up_is_sent_even_when_its_owner_is_now_refused() {
+        POSTED.with(|posted| posted.borrow_mut().clear());
+        let source = event_source().unwrap();
+        let up = create_key_event(&source, 36, false, CGEventFlags::empty()).unwrap();
+        let _scope =
+            crate::system::own_window::enter(&crate::RefusedWindowOwner::Unreadable, "press");
+        // A key-down is judged and refused before anything is posted.
+        let down = create_key_event(&source, 36, true, CGEventFlags::empty()).unwrap();
+        assert!(post(&down, Some(42)).is_err());
+        assert!(POSTED.with(|posted| posted.borrow().is_empty()));
+        // The release guard of a key-down already sent posts its key-up regardless.
+        drop(KeyReleaseGuard {
+            event: Some(up),
+            target_pid: Some(42),
+        });
+        assert_eq!(
+            POSTED.with(|posted| posted.borrow().clone()),
+            vec![(36, false, Some(42))]
+        );
+    }
 
     #[test]
     fn text_chunks_preserve_unicode_without_splitting_surrogates() {

@@ -93,6 +93,7 @@ struct DragReleaseGuard {
     abort_drag: CGEvent,
     abort_up: CGEvent,
     destination_up: Option<CGEvent>,
+    destination: CGPoint,
     delivery: crate::input::mouse::mouse_drag_state::DragDeliveryState,
 }
 
@@ -125,6 +126,7 @@ impl DragReleaseGuard {
                 CGMouseButton::Left,
                 flags,
             )?),
+            destination,
             delivery: crate::input::mouse::mouse_drag_state::DragDeliveryState::default(),
         })
     }
@@ -147,10 +149,16 @@ impl DragReleaseGuard {
 
     fn release_at_destination(&mut self, deadline: Deadline) -> Result<(), AdapterError> {
         crate::input::mouse::ensure_budget(deadline, self.delivery())?;
+        // The drop is judged again just before the button is let go there. Refused, the guard
+        // stays armed and lets the button go back at the origin, as on Windows.
+        crate::system::own_window::check_point(&agent_desktop_core::Point {
+            x: self.destination.x,
+            y: self.destination.y,
+        })?;
         let event = self.destination_up.take().ok_or_else(|| {
             AdapterError::internal("Drag release guard lost its destination event")
         })?;
-        crate::input::mouse::post_checked(&event)?;
+        crate::input::mouse::post_unjudged(&event);
         self.delivery.disarm();
         crate::input::mouse::ensure_budget(deadline, self.delivery())
     }
@@ -163,8 +171,9 @@ impl DragReleaseGuard {
 impl Drop for DragReleaseGuard {
     fn drop(&mut self) {
         if self.delivery.should_release() {
-            let _ = crate::input::mouse::post_checked(&self.abort_drag);
-            let _ = crate::input::mouse::post_checked(&self.abort_up);
+            // Never judged: a press was sent, so the button is always let go.
+            crate::input::mouse::post_unjudged(&self.abort_drag);
+            crate::input::mouse::post_unjudged(&self.abort_up);
         }
     }
 }
@@ -273,6 +282,63 @@ mod tests {
             ..base
         };
         assert!(validate_drag(&excessive_dwell).is_err());
+    }
+
+    #[cfg(not(feature = "interactive-tests"))]
+    fn posted() -> Vec<(u32, f64, f64)> {
+        crate::input::mouse::POSTED.with(|posted| std::mem::take(&mut *posted.borrow_mut()))
+    }
+
+    #[cfg(not(feature = "interactive-tests"))]
+    #[test]
+    fn a_refused_drop_lets_the_button_go_at_the_origin_without_judging_the_release() {
+        posted();
+        let source = crate::input::mouse::event_source().unwrap();
+        let origin = CGPoint::new(10.0, 20.0);
+        let mut guard =
+            DragReleaseGuard::prepare(&source, origin, CGPoint::new(300.0, 400.0)).expect("events");
+        guard.arm();
+        guard.mark_down_posted();
+        let _scope =
+            crate::system::own_window::enter(&crate::RefusedWindowOwner::Unreadable, "drag");
+        // The path between the press and the drop is not judged.
+        crate::input::mouse::post_event_with_source(
+            &source,
+            (
+                CGEventType::LeftMouseDragged,
+                CGPoint::new(150.0, 200.0),
+                CGMouseButton::Left,
+                CGEventFlags::empty(),
+            ),
+            Deadline::standard().unwrap(),
+            guard.delivery_mut(),
+        )
+        .expect("drag path is not refused");
+        let error = guard
+            .release_at_destination(Deadline::standard().unwrap())
+            .expect_err("drop is judged");
+        assert!(crate::system::own_window::is_refusal(&error));
+        drop(guard);
+        assert_eq!(
+            posted(),
+            vec![
+                (CGEventType::LeftMouseDragged as u32, 150.0, 200.0),
+                (CGEventType::LeftMouseDragged as u32, 10.0, 20.0),
+                (CGEventType::LeftMouseUp as u32, 10.0, 20.0),
+            ]
+        );
+    }
+
+    #[cfg(not(feature = "interactive-tests"))]
+    #[test]
+    fn a_guard_never_armed_posts_no_release() {
+        posted();
+        let source = crate::input::mouse::event_source().unwrap();
+        let guard =
+            DragReleaseGuard::prepare(&source, CGPoint::new(1.0, 2.0), CGPoint::new(3.0, 4.0))
+                .expect("events");
+        drop(guard);
+        assert!(posted().is_empty());
     }
 
     #[test]

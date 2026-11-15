@@ -57,6 +57,14 @@ const destination = join(
 );
 copyFileSync(executables[0], destination);
 if (macOS) chmodSync(destination, 0o755);
-const digest = createHash('sha256').update(readFileSync(destination)).digest('hex');
+const built = readFileSync(destination);
+// On macOS the app starts this executable from its own path only when its bytes hold no relative
+// loader path (prepared-execution-image.ts looks for these strings anywhere in the file, embedded
+// documentation included), so one here would make every run refused: fail the build instead.
+if (macOS)
+  for (const token of ['@loader_path/', '@executable_path/', '@rpath/'])
+    if (built.includes(token))
+      throw new Error(`desktop-control: the macOS executable contains "${token}"`);
+const digest = createHash('sha256').update(built).digest('hex');
 writeFileSync(`${destination}.sha256`, `${digest}\n`, { mode: 0o600 });
 console.log(`desktop-control: ${destination} ${digest}`);

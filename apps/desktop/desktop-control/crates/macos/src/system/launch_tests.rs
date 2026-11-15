@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 #[test]
@@ -107,4 +108,30 @@ fn launch_options_enforce_a_bounded_text_budget() {
     let error = validate_launch_options(&options).expect_err("payload too large");
 
     assert_eq!(error.code, ErrorCode::InvalidArgs);
+}
+
+#[test]
+fn activation_reports_false_instead_of_failing_after_the_app_opened() {
+    let app = AppInfo {
+        name: "fixture".into(),
+        pid: agent_desktop_core::ProcessId::new(42),
+        bundle_id: None,
+        process_instance: Some("macos-proc-v1:1:2".into()),
+        presentation: None,
+    };
+    let window = WindowInfo::for_process(&app);
+    // No window: the front is not read at all.
+    assert!(!window_is_in_front(None, || panic!(
+        "front must not be read"
+    )));
+    // The front could not be read (time-out, front app changed): not activated, no error.
+    assert!(!window_is_in_front(Some(&window), || Err(
+        AdapterError::timeout("front read timed out")
+    )));
+    assert!(!window_is_in_front(Some(&window), || Ok(None)));
+    let mut other = window.clone();
+    other.id = "w-999999".into();
+    assert!(!window_is_in_front(Some(&window), || Ok(Some(other))));
+    let front = window.clone();
+    assert!(window_is_in_front(Some(&window), || Ok(Some(front))));
 }

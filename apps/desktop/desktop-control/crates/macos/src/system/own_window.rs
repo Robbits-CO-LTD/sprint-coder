@@ -2,7 +2,11 @@
 //! Sprint Coder's windows are readable but never operated. The variable and verdicts
 //! follow the Windows contract, including PID reuse and unreadable identities.
 //! Adapter scopes cover nested actions and cleanup. Native mutation and input boundaries
-//! re-read owners immediately before delivery, including each later input in a sequence.
+//! re-read owners immediately before each unit that starts an effect (a press, each later
+//! click of a multi-click, a drop); the release that pairs with a press already sent is always
+//! sent, so no button or key is left down. A point is judged by every window above the one
+//! that takes the click (`judge_point`) and by the accessibility hit test; a key without a
+//! target by both the workspace's and accessibility's front application.
 
 use agent_desktop_core::{AdapterError, DeliverySemantics, ErrorCode};
 use serde_json::json;
@@ -104,6 +108,63 @@ impl RefusedWindowOwner {
         if own { Verdict::Own } else { Verdict::Allowed }
     }
 
+    /// Judges a pointer delivery at `point`. `windows` are the on-screen windows front to back
+    /// (`None` when the list could not be read) and `hit_owner` the owner of the accessibility
+    /// element at the point, when that could be read. The click goes to the first ordinary
+    /// window at the point (layer 0, not fully transparent, readable owner); windows above it
+    /// (overlays, menus, the Dock, click-through or transparent windows) may not be the
+    /// receiver, so the refused process owning any of them, or the receiver, refuses. A window
+    /// whose owner cannot be read above the receiver, or no readable window at the point,
+    /// refuses as unconfirmed. The hit test only adds refusals: when it cannot be read the
+    /// windows decide alone.
+    pub(crate) fn judge_point(
+        &self,
+        point: &agent_desktop_core::Point,
+        windows: Option<&[ScreenWindow]>,
+        hit_owner: Option<u32>,
+        instance_of: impl Fn(u32) -> Option<String>,
+    ) -> Verdict {
+        match self {
+            Self::Nobody => return Verdict::Allowed,
+            Self::Unreadable => return Verdict::Unreadable,
+            Self::Process { .. } => {}
+        }
+        let is_own = |owner: u32| self.judge(&[Some(owner)], &instance_of) == Verdict::Own;
+        if hit_owner.is_some_and(is_own) {
+            return Verdict::Own;
+        }
+        let Some(windows) = windows else {
+            return Verdict::Unconfirmed;
+        };
+        let mut unknown_above = false;
+        let mut other_seen = false;
+        for window in windows {
+            // Bounds that cannot be read may contain the point.
+            let at_point = window.bounds.as_ref().map(|rect| contains(rect, point));
+            if at_point == Some(false) {
+                continue;
+            }
+            match window.owner {
+                Some(owner) if is_own(owner) => return Verdict::Own,
+                Some(_) if at_point.is_none() => {}
+                Some(_) if window.takes_clicks() => {
+                    return if unknown_above {
+                        Verdict::Unconfirmed
+                    } else {
+                        Verdict::Allowed
+                    };
+                }
+                Some(_) => other_seen = true,
+                None => unknown_above = true,
+            }
+        }
+        if other_seen && !unknown_above {
+            Verdict::Allowed
+        } else {
+            Verdict::Unconfirmed
+        }
+    }
+
     /// Refuses `operation` when the owners `owners` reads (only read when something is
     /// refused) decide so.
     pub(crate) fn check(
@@ -120,6 +181,23 @@ impl RefusedWindowOwner {
             self.judge(&owners(), current_instance)
         };
         refusal(operation, verdict, None).map_or(Ok(()), Err)
+    }
+}
+
+/// One on-screen window as CoreGraphics lists it; a field that could not be read is `None`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ScreenWindow {
+    pub(crate) owner: Option<u32>,
+    pub(crate) bounds: Option<agent_desktop_core::Rect>,
+    pub(crate) layer: Option<f64>,
+    pub(crate) alpha: Option<f64>,
+}
+
+impl ScreenWindow {
+    /// An ordinary window: the normal window layer and not fully transparent. Anything else
+    /// (higher layers, unreadable layer or alpha, alpha 0) may let the click through.
+    fn takes_clicks(&self) -> bool {
+        self.layer == Some(0.0) && self.alpha.is_some_and(|alpha| alpha > 0.0)
     }
 }
 
@@ -261,7 +339,8 @@ pub(crate) fn check_named_app(
 }
 
 pub(crate) fn check_front() -> Result<(), AdapterError> {
-    check(|| vec![facts::frontmost_pid()])
+    // Either source naming the refused process refuses; both unreadable is unconfirmed.
+    check(|| vec![facts::frontmost_pid(), facts::focused_application_pid()])
 }
 
 pub(crate) fn check_key(pid: Option<i32>) -> Result<(), AdapterError> {
@@ -272,7 +351,20 @@ pub(crate) fn check_key(pid: Option<i32>) -> Result<(), AdapterError> {
 }
 
 pub(crate) fn check_point(point: &agent_desktop_core::Point) -> Result<(), AdapterError> {
-    check(|| vec![facts::point_owner(point)])
+    let Some(acting) = ACTING.with(|cell| cell.borrow().clone()) else {
+        return Ok(());
+    };
+    let verdict = match acting.owner {
+        RefusedWindowOwner::Nobody => return Ok(()),
+        RefusedWindowOwner::Unreadable => Verdict::Unreadable,
+        RefusedWindowOwner::Process { .. } => acting.owner.judge_point(
+            point,
+            facts::point_windows().as_deref(),
+            facts::point_hit_owner(point),
+            current_instance,
+        ),
+    };
+    refusal(acting.operation, verdict, None).map_or(Ok(()), Err)
 }
 
 pub(crate) fn check_window(window: &agent_desktop_core::WindowInfo) -> Result<(), AdapterError> {
@@ -320,25 +412,76 @@ mod facts {
         None
     }
 
-    pub(super) fn point_owner(point: &agent_desktop_core::Point) -> Option<u32> {
-        let windows = CGDisplay::window_list_info(kCGWindowListOptionOnScreenOnly, None)?;
-        // CoreGraphics returns front-to-back order. Include every layer, including panels.
-        for raw in windows.get_all_values() {
-            let dict = borrowed_cf_dictionary(raw as _)?;
-            let bounds = dict.find(CFString::new("kCGWindowBounds"))?;
-            let bounds = borrowed_cf_dictionary(bounds.as_concrete_TypeRef())?;
-            let rect = agent_desktop_core::Rect {
-                x: number(&bounds, "X")?,
-                y: number(&bounds, "Y")?,
-                width: number(&bounds, "Width")?,
-                height: number(&bounds, "Height")?,
-            };
-            if super::contains(&rect, point) {
-                return pid(&dict);
-            }
+    fn screen_window(raw: *const std::ffi::c_void) -> super::ScreenWindow {
+        let Some(dict) = borrowed_cf_dictionary(raw as _) else {
+            return super::ScreenWindow::default();
+        };
+        let bounds = dict
+            .find(CFString::new("kCGWindowBounds"))
+            .and_then(|bounds| borrowed_cf_dictionary(bounds.as_concrete_TypeRef()))
+            .and_then(|bounds| {
+                Some(agent_desktop_core::Rect {
+                    x: number(&bounds, "X")?,
+                    y: number(&bounds, "Y")?,
+                    width: number(&bounds, "Width")?,
+                    height: number(&bounds, "Height")?,
+                })
+            });
+        super::ScreenWindow {
+            owner: pid(&dict),
+            bounds,
+            layer: number(&dict, "kCGWindowLayer"),
+            alpha: number(&dict, "kCGWindowAlpha"),
         }
-        None
     }
+
+    /// The on-screen windows, front to back, every layer included.
+    pub(super) fn point_windows() -> Option<Vec<super::ScreenWindow>> {
+        let windows = CGDisplay::window_list_info(kCGWindowListOptionOnScreenOnly, None)?;
+        Some(
+            windows
+                .get_all_values()
+                .into_iter()
+                .map(screen_window)
+                .collect(),
+        )
+    }
+
+    /// The owner of the accessibility element at the point (system-wide hit test).
+    pub(super) fn point_hit_owner(point: &agent_desktop_core::Point) -> Option<u32> {
+        let deadline = std::time::Instant::now() + AX_READ_BUDGET;
+        let system =
+            crate::tree::AXElement(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
+        if system.0.is_null() {
+            return None;
+        }
+        let (error, hit) = crate::tree::properties::ax_ipc::element_at_position(
+            &system,
+            (point.x as f32, point.y as f32),
+            deadline,
+        );
+        let hit = crate::tree::AXElement(hit);
+        if error != accessibility_sys::kAXErrorSuccess || hit.0.is_null() {
+            return None;
+        }
+        element_owner(&hit, deadline)
+    }
+
+    /// The application accessibility reports as focused.
+    pub(super) fn focused_application_pid() -> Option<u32> {
+        let deadline = std::time::Instant::now() + AX_READ_BUDGET;
+        let system =
+            crate::tree::AXElement(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
+        if system.0.is_null() {
+            return None;
+        }
+        let app = crate::tree::surface_read::element(&system, "AXFocusedApplication", deadline)
+            .ok()
+            .flatten()?;
+        element_owner(&app, deadline)
+    }
+
+    const AX_READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
     pub(super) fn frontmost_pid() -> Option<u32> {
         // Workspace reads require no Accessibility permission and cover apps without windows.
@@ -365,7 +508,13 @@ mod facts {
     pub(super) fn frontmost_pid() -> Option<u32> {
         None
     }
-    pub(super) fn point_owner(_: &agent_desktop_core::Point) -> Option<u32> {
+    pub(super) fn point_windows() -> Option<Vec<super::ScreenWindow>> {
+        None
+    }
+    pub(super) fn point_hit_owner(_: &agent_desktop_core::Point) -> Option<u32> {
+        None
+    }
+    pub(super) fn focused_application_pid() -> Option<u32> {
         None
     }
     pub(super) fn window_owner(_: &str) -> Option<u32> {
