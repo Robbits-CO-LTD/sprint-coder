@@ -188,7 +188,7 @@ macOS（Appleシリコン）の開発版でも、先に`npm run build:desktop-co
 
 UI・E2E・ユーザー操作は、開発エージェントのComputer Useで実アプリ・ブラウザを操作して確認します。[検証チェックリストと記録方法](docs/testing/computer-use/README.md)から変更に関係するケースを選びます。単体・結合テストはVitestを維持します。
 
-通常の変更では対象test、typecheck、lintから実行します。CIのmacOS、Windows、Linuxでの型・単体・native・package検証と、Computer Useでの画面検証は別の証拠です。対象build・環境・操作・証拠と `PASS` / `FAIL` / `SKIP` / `BLOCKED` を記録し、Computer Useを利用できない場合は `BLOCKED` とします。shellは起動、fixture準備、ログ・ファイル照合に使えます。実Providerへの課金を伴う送信は明示された場合のみ実施します。
+通常の変更では対象test、typecheck、lintから実行します。CIのmacOS、Windowsでの型・単体・native・package検証と、Computer Useでの画面検証は別の証拠です。対象build・環境・操作・証拠と `PASS` / `FAIL` / `SKIP` / `BLOCKED` を記録し、Computer Useを利用できない場合は `BLOCKED` とします。shellは起動、fixture準備、ログ・ファイル照合に使えます。実Providerへの課金を伴う送信は明示された場合のみ実施します。
 
 <details>
 <summary><strong>Windowsインストーラーをローカルで作る</strong></summary>
@@ -209,7 +209,7 @@ npm run make:windows
 ## 配布状態
 
 - stable / beta versionをSemVerで管理し、betaには`-beta.N`を付けます。
-- beta workflowはmacOSのDMG / 更新用ZIPとUbuntu portable ZIPを作り、GitHub prereleaseをDraftとして用意します。
+- beta workflowはmacOSのDMG / 更新用ZIPを作り、GitHub prereleaseをDraftとして用意します。
 - Windows installer / portable ZIP / Squirrel更新artifactはローカルでコード署名し、同じDraft Releaseへ添付します。
 - macOS beta artifactは現時点ではad-hoc署名で、Apple notarizationには未対応です。
 - 公開済みの配布物は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)で確認できます。

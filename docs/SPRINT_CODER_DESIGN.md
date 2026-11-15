@@ -66,7 +66,7 @@ RendererはMainから受け取った正規化済みのsnapshotを表示する。
 | `docs/PRODUCT_AND_TECHNICAL_DESIGN.md` | Chat／UX／非競合部分の詳細設計 baseline                                                              |
 | `docs/REFERENCE_AGENT_ARCHITECTURE.md` | Agent Kernel、Context Compiler、Tool Brokerの参照設計                                                |
 | `docs/plan/team-v2`                    | Team v2、Provider、migration、security、testの現行ADRと実装計画                                      |
-| `.github/workflows`                    | CI、Provider smoke、macOS／Linux中心のBeta release検証                                               |
+| `.github/workflows`                    | CI、Provider smoke、macOS中心のBeta release検証                                                      |
 
 ## 4. ドメインモデル
 
@@ -262,7 +262,7 @@ Access presetは`ask`、`auto`、`full`であり、`full`を既定にしない�
 
 ### 10.2 リリース方針
 
-- macOS／LinuxのBeta release artifactと更新manifestはGitHub Actionsで検証・作成する。
+- macOSのBeta release artifactと更新manifestはGitHub Actionsで検証・作成する。
 - **WindowsのリリースbuildはGitHub Actionsで実行しない。** 証明書を付与できるWindows環境でbuild・署名し、署名済みartifactを別途releaseへ登録する。CIにWindows互換テストが残っていても、それは署名済みリリースartifactの代替ではない。
 - Windows signingに必要な証明書や秘密鍵をmacOS／Linux runnerへコピーしない。
 - release前にはversion、embedded client version、native module／NativeSafeFsのElectron ABI、署名、artifact名、checksum、update manifestを確認する。
