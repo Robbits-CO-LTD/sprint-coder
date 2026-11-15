@@ -78,6 +78,25 @@ describe('release signing and notarization', () => {
     expect(signingSecrets).toBeGreaterThan(initializePaths);
   });
 
+  it('requires a successful main CI run for the release commit before any build', () => {
+    // PRs run static checks only, so the full test matrix of main CI is the release's test gate.
+    const metadata = workflow.slice(
+      workflow.indexOf('\n  metadata:'),
+      workflow.indexOf('\n  validate-quality:'),
+    );
+    const check = metadata.indexOf('Verify main CI passed for the release commit');
+    expect(check).toBeGreaterThan(metadata.indexOf('git merge-base --is-ancestor'));
+    expect(metadata).toMatch(/permissions:\n {6}actions: read\n {6}contents: read\n/u);
+    const step = metadata.slice(check);
+    expect(step).toContain('commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"');
+    expect(step).toContain('actions/workflows/ci.yml/runs');
+    expect(step).toContain('-f head_sha="${commit}" -f branch=main -f status=success');
+    expect(step).toContain('select(.event == "push" or .event == "workflow_dispatch")');
+    expect(step).toContain('exit 1');
+    // Every later job, signing included, waits for metadata through release-validation.
+    expect(workflow).toMatch(/ {2}make:\n(?:.|\n)*? {4}needs: release-validation/);
+  });
+
   it('gates signing secrets behind an environment and a main-reachability check', () => {
     const reachability = workflow.indexOf('git merge-base --is-ancestor');
     const signingSecrets = workflow.indexOf('secrets.MACOS_CI_KEYCHAIN_PASSWORD');
