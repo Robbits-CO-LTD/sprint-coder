@@ -5,6 +5,7 @@ pub(crate) mod dispatch;
 pub(crate) mod envelope_parity;
 pub(crate) mod focus;
 pub(crate) mod foreground_hold;
+pub(crate) mod foreground_return;
 pub(crate) mod input_envelope_parity;
 pub(crate) mod list_item_click;
 pub(crate) mod mutation;

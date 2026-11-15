@@ -63,6 +63,15 @@ observation, actions and capture there fail or return nothing.
   Run `restore --window-id <id>` (or `restore --app <image>`) and snapshot
   again before acting. Do not use `focus-window` by reflex: it steals the
   user's foreground.
+- **A window an app opens for a background action opens behind.** When a ref
+  action without `--headed` (a `click` that opens a browser window or a
+  dialog) makes the app open a window, the foreground is kept on, or given
+  back to, the window the user had. `details.foreground: "handed_back"` says
+  the new window took the front and was given back. `"target_in_front"` says
+  the app's window is in front now; `foreground_hand_back: "failed"` beside it
+  means giving it back was refused, `"left_for_user"` that the user may have
+  picked it. Find the new window with `list-windows --app <app>`. A window the
+  app opens well after the action returned (a second or so) is not watched.
 - **No permission dialog exists.** `permissions` reports `automation` as
   `not_required`. Elevation boundaries are the only access control.
 - **Chromium and Electron apps read thin before they settle.** Pass a longer
