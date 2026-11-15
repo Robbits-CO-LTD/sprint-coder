@@ -51,7 +51,7 @@ pub(crate) fn launch_app_impl(
             shown_at: observed.shown_at,
             // The instance's one visible window, not seen to move: it is left
             // where it is in the window order.
-            restack: observed.existing != Some(false),
+            restack: observed.existing != Some(launch_attach::ExistingWindow::Only),
         });
         left_for_user = guard.finish(&observed.owners, observed.window.as_ref(), settle);
     }
@@ -72,7 +72,7 @@ pub(crate) fn launch_app_impl(
                 observed.handoff_ambiguous,
             ) {
                 (true, true, _) => match observed.existing {
-                    Some(raised) => launch_attach::existing_window_guidance(raised),
+                    Some(kind) => launch_attach::existing_window_guidance(kind),
                     None => launch_attach::HANDED_OFF_NEW_WINDOW.to_string(),
                 },
                 (true, false, true) => launch_attach::HANDED_OFF_AMBIGUOUS.to_string(),
@@ -197,10 +197,9 @@ struct LaunchObservation {
     /// a window the instance already had: when the launched process was seen
     /// to have exited (it hands the launch over just before).
     shown_at: Option<std::time::Instant>,
-    /// `Some` when the window is one the instance already showed before the
-    /// launch (`existing_window`): `true` when the instance brought it to the
-    /// front, `false` when it is only the instance's one visible window.
-    existing: Option<bool>,
+    /// `Some` when the window is one the instance already had before the
+    /// launch (`existing_window`), and how it came to be named.
+    existing: Option<launch_attach::ExistingWindow>,
 }
 
 impl LaunchObservation {
@@ -223,8 +222,8 @@ impl LaunchObservation {
 fn existing_window_observation(
     lineage: &launch_handoff::Lineage,
     window: WindowInfo,
-    exited_at: std::time::Instant,
-    raised: bool,
+    shown_at: Option<std::time::Instant>,
+    kind: launch_attach::ExistingWindow,
 ) -> LaunchObservation {
     let mut owners = lineage.pids();
     owners.push(window.pid);
@@ -235,18 +234,27 @@ fn existing_window_observation(
         handed_off: true,
         handoff_ambiguous: false,
         descendants_alive: false,
-        shown_at: Some(exited_at),
-        existing: Some(raised),
+        shown_at,
+        existing: Some(kind),
     }
 }
 
 /// Whether a window the instance already had, now in front, came forward
 /// within [`HANDOFF_APP_ACTIVATION_GRACE`] of the launched process being
 /// seen to exit: soon enough to be the instance answering the hand-over.
+/// Compiled wherever `observe_launched_window` is, as `within_grace` is.
 fn launch_window_existing_in_grace(exited_at: std::time::Instant) -> bool {
     within_grace(Some(exited_at), std::time::Instant::now())
 }
 
+/// Whether a window the instance already had, now in front, is taken as
+/// brought forward by the instance for this launch: only within the grace
+/// after the launched process was seen to exit, and only when it was not
+/// already in front while that process still ran (the user may have picked
+/// it then; it is left in front and in its place).
+fn counts_as_raised(within_grace_of_exit: bool, in_front_before_exit: bool) -> bool {
+    within_grace_of_exit && !in_front_before_exit
+}
 /// Watches a process this launch created for its window. While the process
 /// runs, only its own window counts, exactly as before. Once it has exited, a
 /// window of a live descendant counts instead (see `launch_handoff`), and a
@@ -319,6 +327,12 @@ fn observe_launched_window(
                         let mut owners = lineage.pids();
                         owners.push(window.pid);
                         let shown_at = handoff.first_seen(&window.id);
+                        // A handle that existed before the launch, hidden, is a
+                        // window the instance already had and showed again (a
+                        // tray app's main window), not one this launch opened.
+                        let existing = handoff
+                            .existed_before(&window.id)
+                            .then_some(launch_attach::ExistingWindow::Revealed);
                         return Ok(LaunchObservation {
                             window: Some(window),
                             owners,
@@ -327,7 +341,7 @@ fn observe_launched_window(
                             handoff_ambiguous: false,
                             descendants_alive: false,
                             shown_at,
-                            existing: None,
+                            existing,
                         });
                     }
                     // Several candidates: none is taken, nor restacked.
@@ -343,14 +357,22 @@ fn observe_launched_window(
                 // A window the instance already had, brought to the front just
                 // as the launch was handed over: the app used it instead of
                 // opening one. Later, it may be the user's doing.
+                // One that came to the front while the launched process still
+                // ran may be the user's pick, and is never taken as raised.
                 if let Some(window) = read.raised
-                    && launch_window_existing_in_grace(exited_at)
+                    && counts_as_raised(
+                        launch_window_existing_in_grace(exited_at),
+                        handoff.was_in_front_before_exit(&window.id),
+                    )
                 {
                     return Ok(existing_window_observation(
-                        &lineage, window, exited_at, true,
+                        &lineage,
+                        window,
+                        Some(exited_at),
+                        launch_attach::ExistingWindow::Raised,
                     ));
                 }
-                only_existing = read.only_existing.map(|window| (window, exited_at));
+                only_existing = read.only_existing;
                 let handoff_until = *handoff_deadline
                     .get_or_insert_with(|| deadline.capped(launch_handoff::HANDOFF_WINDOW_WAIT));
                 // A live descendant keeps the whole deadline (a launcher whose
@@ -364,9 +386,14 @@ fn observe_launched_window(
             if launch_handoff::after_exit(descendants_alive, instance_runs, wait_over)
                 == launch_handoff::AfterExit::Stop
             {
-                if !descendants_alive && let Some((window, exited_at)) = only_existing {
+                if !descendants_alive && let Some(window) = only_existing {
+                    // Not seen to move for the launch: no grace, so with the
+                    // user's input its being in front is left alone.
                     return Ok(existing_window_observation(
-                        &lineage, window, exited_at, false,
+                        &lineage,
+                        window,
+                        None,
+                        launch_attach::ExistingWindow::Only,
                     ));
                 }
                 return Ok(LaunchObservation {
@@ -380,10 +407,13 @@ fn observe_launched_window(
         {
             if exited
                 && !descendants_alive
-                && let Some((window, exited_at)) = only_existing
+                && let Some(window) = only_existing
             {
                 return Ok(existing_window_observation(
-                    &lineage, window, exited_at, false,
+                    &lineage,
+                    window,
+                    None,
+                    launch_attach::ExistingWindow::Only,
                 ));
             }
             return Ok(LaunchObservation {
@@ -634,7 +664,6 @@ struct HandoffSettle {
 /// Whether `now` is within [`HANDOFF_APP_ACTIVATION_GRACE`] of when the
 /// window was first seen. A window whose first sight is not known gets no
 /// grace: with the user's input, its taking the foreground is left alone.
-#[cfg(any(target_os = "windows", test))]
 fn within_grace(shown_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
     shown_at
         .is_some_and(|shown| now.saturating_duration_since(shown) <= HANDOFF_APP_ACTIVATION_GRACE)
@@ -1491,6 +1520,16 @@ mod foreground_guard_tests {
             drive(&[(Front::Handed, true, true), (Front::Other, true, true)]),
             [WatchAction::Restore, WatchAction::StopForUser]
         );
+    }
+    /// A window the instance had that was already in front before the
+    /// launched process exited (the user picked it while the launch waited)
+    /// is not taken as brought forward, so it is neither handed back nor
+    /// restacked; one that came forward right after the exit is.
+    #[test]
+    fn a_window_in_front_before_the_exit_is_not_taken_as_brought_forward() {
+        assert!(!super::counts_as_raised(true, true));
+        assert!(super::counts_as_raised(true, false));
+        assert!(!super::counts_as_raised(false, false));
     }
     #[test]
     fn a_foreground_that_stayed_on_the_prior_window_is_restored() {

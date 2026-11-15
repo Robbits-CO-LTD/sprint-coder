@@ -104,14 +104,16 @@ observation, actions and capture there fail or return nothing.
   there is one, is owned by the running instance (`window.pid`, not the
   exited `pid`).
   - `new_instance: true`, or `handed_off: true` with a `window` and no
-    `existing_window`: `window` is the window this launch opened. Use it for
-    the task; its owner being the running instance does not make it the
-    user's.
+    `existing_window`: `window` did not exist before the launch; it is the
+    window this launch opened. Use it for the task; its owner being the
+    running instance does not make it the user's.
   - `handed_off: true` with `existing_window: true`: no new window appeared,
-    and `window` is one the instance already had before the launch, either
-    brought to the front for this launch or its only visible window (the
-    `suggestion` says which). The app most likely keeps one window: do not
-    repeat `--no-attach`.
+    and `window` is one the instance already had before the launch: brought
+    to the front for this launch, its only visible window, or one it kept
+    hidden and showed again (a tray app's main window, which may hold what
+    the user left in it); the `suggestion` says which. When it was brought
+    forward or is the only window, the app most likely keeps one window: do
+    not repeat `--no-attach`.
   - `attached: true` alone: the user's window. If the task needs a window of
     its own, run `launch --no-attach` once and work in the window it opens.
   - Using a window the user already had (`attached` alone, or
@@ -121,7 +123,8 @@ observation, actions and capture there fail or return nothing.
   - `handed_off: true` with no `window`: which window the app showed is not
     confirmed (none appeared within a few seconds, or several did). Run
     `list-windows --app <app>` before launching again, since a second launch
-    may open a second window.- **`launch` keeps the window it opens behind the window in front,** for
+    may open a second window.
+- **`launch` keeps the window it opens behind the window in front,** for
   work you do yourself in the background. When the user asks you to open an
   app for them to look at or use, pass `--activate`: the window is brought to
   the front, and `activated` in the result says whether Windows allowed it.

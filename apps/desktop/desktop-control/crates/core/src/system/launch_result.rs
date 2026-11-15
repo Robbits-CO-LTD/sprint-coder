@@ -51,8 +51,8 @@ pub struct LaunchResult {
     /// while an instance of the same executable that ran before the launch
     /// still runs: the app passed the launch to that instance (`attached` is
     /// then `true` too). A `window` beside it is one that instance showed
-    /// after the launch started (new, or kept hidden until then), owned by
-    /// `window.pid`; without a `window`, no such window was seen. Left out
+    /// after the launch started, owned by `window.pid` (with `existing_window`
+    /// when it already had it); without a `window`, no such window was seen. Left out
     /// when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
@@ -64,10 +64,11 @@ pub struct LaunchResult {
     pub running_without_window: bool,
     /// `true` with `handed_off` when `window` is one the running instance
     /// already showed before the launch, not a new one: no new window
-    /// appeared, and either the instance brought this window to the front as
-    /// the launch was handed over (an app with one window uses it), or it is
-    /// the instance's only visible window. `suggestion` says which. Left out
-    /// when `false`.
+    /// appeared, and the instance brought this window to the front as the
+    /// launch was handed over (an app with one window uses it), or it is the
+    /// instance's only visible window, or the instance showed it again after
+    /// keeping it hidden (a tray app's main window). `suggestion` says which.
+    /// Left out when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub existing_window: bool,
     /// Present only with `--activate`: whether `window` was in front when the

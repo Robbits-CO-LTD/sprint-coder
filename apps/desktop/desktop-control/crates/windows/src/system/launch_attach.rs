@@ -428,9 +428,8 @@ pub(super) const ATTACHED_WITHOUT_WINDOW: &str = "Nothing was started and no win
 /// launch to the running instance, which then opened the reported window.
 pub(super) const HANDED_OFF_NEW_WINDOW: &str = "The launched process passed the launch to the \
      instance of the same app that was already running and exited (a single-instance app). \
-     That running instance showed `window` after this launch started (a new window, or one it \
-     had kept hidden), so it is most likely the window this launch opened: use it for the \
-     task. It is owned by the running instance (`window.pid`) rather than by a process this \
+     That running instance showed `window`, a window that did not exist before this launch \
+     started, so it is most likely the window this launch opened: use it for the task. It is owned by the running instance (`window.pid`) rather than by a process this \
      launch started, which is why new_instance is false; that does not make it one of the \
      user's windows. The instance's other windows may be ones the user had open.";
 
@@ -479,12 +478,36 @@ pub(super) const HANDED_OFF: &str = "The launched process exited without a windo
      for the app to see its windows before launching again; windows that were open before \
      the launch may be ones the user had open.";
 
+/// How a window the running instance already had before the launch came to
+/// be the launch's `window` (`existing_window`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExistingWindow {
+    /// Shown before the launch, and brought to the front as the launch was
+    /// handed over.
+    Raised,
+    /// Shown before the launch, and the instance's only visible window when
+    /// no new one appeared.
+    Only,
+    /// Hidden before the launch (its handle already existed), and shown again
+    /// for the launch: a tray app's main window, with whatever the user left
+    /// in it.
+    Revealed,
+}
+
+/// The guidance a launch reports when, passed to the running instance, the
+/// instance showed again a window it already had but kept hidden.
+pub(super) const HANDED_OFF_EXISTING_REVEALED: &str = "The launched process passed the \
+     launch to the instance of the same app that was already running and exited. The instance \
+     showed `window` again: a window it already had before this launch but kept hidden (an app \
+     in the tray shows its main window again), not a new one (existing_window). It may hold \
+     what the user left in it.";
+
 /// The full guidance for a window the running instance already had.
-pub(super) fn existing_window_guidance(raised: bool) -> String {
-    let head = if raised {
-        HANDED_OFF_EXISTING_RAISED
-    } else {
-        HANDED_OFF_EXISTING_ONLY
+pub(super) fn existing_window_guidance(kind: ExistingWindow) -> String {
+    let head = match kind {
+        ExistingWindow::Raised => HANDED_OFF_EXISTING_RAISED,
+        ExistingWindow::Only => HANDED_OFF_EXISTING_ONLY,
+        ExistingWindow::Revealed => HANDED_OFF_EXISTING_REVEALED,
     };
     format!("{head} {USE_EXISTING_WINDOW}")
 }

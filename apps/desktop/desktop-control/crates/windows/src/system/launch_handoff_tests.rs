@@ -203,7 +203,12 @@ fn the_handoff_wait_is_short_and_bounded() {
 #[cfg(target_os = "windows")]
 #[test]
 fn the_windows_read_before_a_launch_use_the_inventory_ids() {
-    let (before, _) = shown_windows().expect("top-level windows can be enumerated");
+    let (before, _, all) = shown_windows().expect("top-level windows can be enumerated");
+    assert!(
+        before.is_subset(&all),
+        "every shown window is among all windows"
+    );
+    assert!(all.len() >= before.len());
     assert!(before.iter().all(|id| id.starts_with("w-")));
     let deadline = Deadline::after(5_000).expect("deadline");
     let filter = WindowFilter {
@@ -402,4 +407,15 @@ fn a_window_not_shown_before_or_beside_several_instances_is_not_an_existing_one(
         read_existing(&shown, &targets, &ids(&["w-1"]), None, true),
         (None, None)
     ));
+}
+
+/// A handle that existed before the launch, hidden, is a window the instance
+/// already had; only a handle that did not exist is one the launch opened.
+/// Unreadable reads as existing, the restricted side.
+#[test]
+fn a_window_shown_again_is_told_from_a_new_one_by_its_handle() {
+    let all = ids(&["w-1", "w-hidden"]);
+    assert!(existed_before(Some(&all), "w-hidden"));
+    assert!(!existed_before(Some(&all), "w-new"));
+    assert!(existed_before(None, "w-new"));
 }

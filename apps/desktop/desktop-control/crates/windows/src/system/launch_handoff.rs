@@ -71,6 +71,13 @@ pub(super) struct Handoff {
     /// The id of the foreground window when the launch began, so a window
     /// that was already in front is not taken as brought forward.
     prior_foreground: Option<String>,
+    /// The ids of every top-level window before the launch, hidden ones too
+    /// (`None` when they could not be read).
+    all_before: Option<HashSet<String>>,
+    /// Windows the instances already had that came to the front while the
+    /// launched process still ran: the user may have picked them, so they are
+    /// never taken as brought forward by the instance.
+    in_front_before_exit: RefCell<HashSet<String>>,
 }
 
 impl Handoff {
@@ -84,10 +91,12 @@ impl Handoff {
         let pids: Vec<ProcessId> = instances.iter().map(|instance| instance.pid).collect();
         let several_instances = shown
             .as_ref()
-            .is_some_and(|(_, owners)| several_instances_show_windows(owners, &pids));
+            .is_some_and(|(_, owners, _)| several_instances_show_windows(owners, &pids));
         Self {
             instances,
-            before: shown.map(|(ids, _)| ids),
+            all_before: shown.as_ref().map(|(_, _, all)| all.clone()),
+            before: shown.map(|(ids, _, _)| ids),
+            in_front_before_exit: RefCell::new(HashSet::new()),
             several_instances,
             first_seen: RefCell::new(HashMap::new()),
             prior_foreground: foreground_window_id(),
@@ -104,7 +113,24 @@ impl Handoff {
     /// One read of the windows, only to record when each window an instance
     /// showed after the launch started was first seen.
     pub(super) fn note(&self, deadline: Deadline) -> Result<(), AdapterError> {
-        self.read(deadline).map(|_| ())
+        let read = self.read(deadline)?;
+        if let Some(window) = read.raised {
+            self.in_front_before_exit.borrow_mut().insert(window.id);
+        }
+        Ok(())
+    }
+
+    /// Whether the window `id`, which the instances already had, came to the
+    /// front while the launched process still ran (see `note`).
+    pub(super) fn was_in_front_before_exit(&self, id: &str) -> bool {
+        self.in_front_before_exit.borrow().contains(id)
+    }
+
+    /// Whether a window an instance shows now already existed, shown or
+    /// hidden, before the launch: then it is not a window the launch opened.
+    /// Unreadable reads as existing (the restricted side).
+    pub(super) fn existed_before(&self, id: &str) -> bool {
+        existed_before(self.all_before.as_ref(), id)
     }
 
     /// When the window `id` was first seen by `note` or `look`, if it was.
@@ -235,6 +261,11 @@ fn foreground_window_id() -> Option<String> {
 fn foreground_window_id() -> Option<String> {
     None
 }
+/// Whether `id` was among every top-level window before the launch; `true`
+/// when those could not be read, so doubt restricts how the window is used.
+pub(super) fn existed_before(all_before: Option<&HashSet<String>>, id: &str) -> bool {
+    all_before.is_none_or(|all| all.contains(id))
+}
 /// The ids of the windows of `targets` (same pid and process instance) that
 /// were not shown before the launch.
 pub(super) fn fresh_window_ids<'a>(
@@ -359,11 +390,15 @@ pub(super) fn several_instances_show_windows(
 /// window that was hidden (a tray app's main window) is left out, so the
 /// instance showing it for the launch counts as showing a window. Beside the
 /// ids, the processes that own those windows (or the app a shell frame hosts).
-fn shown_windows() -> Option<(HashSet<String>, HashSet<ProcessId>)> {
+/// Last, the ids of every top-level window, shown or hidden: a window an
+/// instance shows later under one of these ids is one it already had.
+fn shown_windows() -> Option<(HashSet<String>, HashSet<ProcessId>, HashSet<String>)> {
     use super::super::window::{frame_identity, window_enum, window_identity, window_ops};
     let mut ids = HashSet::new();
     let mut owners = HashSet::new();
+    let mut all = HashSet::new();
     window_enum::enumerate_top_level(|window| {
+        all.insert(window_ops::window_id(window.handle));
         if super::launch_attach::is_shown(&window) {
             ids.insert(window_ops::window_id(window.handle));
             owners.extend(window_identity::live_window_owner(window.handle));
@@ -372,7 +407,7 @@ fn shown_windows() -> Option<(HashSet<String>, HashSet<ProcessId>)> {
         true
     })
     .ok()?;
-    Some((ids, owners))
+    Some((ids, owners, all))
 }
 
 /// The launched process and every descendant proven to be its own.
