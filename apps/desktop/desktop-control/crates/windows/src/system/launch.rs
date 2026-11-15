@@ -416,11 +416,20 @@ impl ForegroundGuard {
         let prior_is_minimized = unsafe { IsIconic(prior) } != 0;
         // Whether the watch left the foreground alone as possibly the user's
         // choice: then a window in front is not reported as the app's doing.
+        // A hand-back that was tried and never seen to work is not that.
+        let mut hand_back = HandBack::default();
         let mut left_for_user = false;
         let mut may_restore = match settle {
             Some(settle) => {
-                left_for_user = step(foreground, settle) == ForegroundStep::LeftAlone;
-                !left_for_user && !prior_is_minimized
+                let action = hand_back.observe(
+                    step(foreground, settle),
+                    foreground == prior,
+                    !handed.is_null() && foreground == handed,
+                );
+                left_for_user = action == WatchAction::StopForUser;
+                // A first read that says hand back is done by the hold below.
+                !matches!(action, WatchAction::StopForUser | WatchAction::StopFailed)
+                    && !prior_is_minimized
             }
             None => may_restore_foreground(foreground == prior, prior_is_minimized),
         };
@@ -430,20 +439,25 @@ impl ForegroundGuard {
         if may_restore && let Some(settle) = settle {
             // Held locked, the instance's first activation fails, and an app
             // gets only that one (#1276).
-            may_restore =
-                settle_foreground(prior, handed, self.started, settle, HANDOFF_FOREGROUND_HOLD);
-            left_for_user = !may_restore;
+            let end = settle_foreground(
+                prior,
+                handed,
+                self.started,
+                settle,
+                HANDOFF_FOREGROUND_HOLD,
+                &mut hand_back,
+            );
+            may_restore = end == WatchAction::Wait;
+            left_for_user = end == WatchAction::StopForUser;
         }
         self.unlock();
         if !may_restore {
             return left_for_user;
         }
+        // A handed-off window is handed back by the watch below, whose first
+        // read comes right after the restack.
         let foreground = unsafe { GetForegroundWindow() };
-        let taken = match settle {
-            Some(settle) => step(foreground, settle) == ForegroundStep::Restore,
-            None => window_is_owned_by(foreground, owners),
-        };
-        if foreground != prior && taken {
+        if settle.is_none() && foreground != prior && window_is_owned_by(foreground, owners) {
             unsafe { SetForegroundWindow(prior) };
         }
         if let Some(window) = window {
@@ -478,13 +492,15 @@ impl ForegroundGuard {
             }
         }
         if let Some(settle) = settle {
-            left_for_user = !settle_foreground(
+            let end = settle_foreground(
                 prior,
                 handed,
                 self.started,
                 settle,
                 HANDOFF_FOREGROUND_WATCH,
+                &mut hand_back,
             );
+            left_for_user = end == WatchAction::StopForUser;
         }
         left_for_user
     }
@@ -614,10 +630,60 @@ fn user_input_since(started: u32) -> bool {
     input_at_or_after(info.dwTime, started)
 }
 
+/// How a watch over the handed-off window's foreground goes on or ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchAction {
+    /// Nothing to do yet (or the watch ran its span).
+    Wait,
+    /// Hand the foreground back to the window that was in front.
+    Restore,
+    /// Stopped because the move may have been the user's: a take outside the
+    /// grace with input before any hand-back was tried, a take again after a
+    /// hand-back was seen to work, or the foreground on another window.
+    StopForUser,
+    /// Stopped with the handed-off window still in front after a hand-back
+    /// was tried and never seen to work (Windows refused it): the app's
+    /// doing, reported as such.
+    StopFailed,
+}
+
+/// Remembers whether a hand-back was tried and not yet seen to work, so a
+/// window that stays in front through a refused hand-back is not taken as
+/// the user's choice once the grace runs out.
+#[derive(Debug, Default)]
+struct HandBack {
+    pending: bool,
+}
+
+impl HandBack {
+    fn observe(
+        &mut self,
+        step: ForegroundStep,
+        foreground_is_prior: bool,
+        foreground_is_handed: bool,
+    ) -> WatchAction {
+        if foreground_is_prior {
+            self.pending = false;
+        }
+        match step {
+            ForegroundStep::Keep => WatchAction::Wait,
+            ForegroundStep::Restore => {
+                self.pending = true;
+                WatchAction::Restore
+            }
+            ForegroundStep::LeftAlone if self.pending && foreground_is_handed => {
+                WatchAction::StopFailed
+            }
+            ForegroundStep::LeftAlone => WatchAction::StopForUser,
+        }
+    }
+}
+
 /// Watches the foreground for `span` (inside the settle's deadline) and hands
 /// it back to `prior` whenever `foreground_step` says the handed-off window
-/// `handed` took it as the app's move. `false` when the watch stopped, so
-/// nothing more may be done to the foreground or the window order.
+/// `handed` took it as the app's move. `Wait` when the span ran out; a stop
+/// otherwise, after which nothing more may be done to the foreground or the
+/// window order.
 #[cfg(target_os = "windows")]
 fn settle_foreground(
     prior: windows_sys::Win32::Foundation::HWND,
@@ -625,26 +691,29 @@ fn settle_foreground(
     started: u32,
     settle: HandoffSettle,
     span: Duration,
-) -> bool {
+    hand_back: &mut HandBack,
+) -> WatchAction {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
     let until = std::time::Instant::now() + span.min(settle.deadline.remaining());
     loop {
         let foreground = unsafe { GetForegroundWindow() };
-        match foreground_step(
+        let is_handed = !handed.is_null() && foreground == handed;
+        let step = foreground_step(
             foreground.is_null(),
             foreground == prior,
-            !handed.is_null() && foreground == handed,
+            is_handed,
             user_input_since(started),
             within_grace(settle.shown_at, std::time::Instant::now()),
-        ) {
-            ForegroundStep::Keep => {}
-            ForegroundStep::Restore => {
+        );
+        match hand_back.observe(step, foreground == prior, is_handed) {
+            WatchAction::Wait => {}
+            WatchAction::Restore => {
                 unsafe { SetForegroundWindow(prior) };
             }
-            ForegroundStep::LeftAlone => return false,
+            stop => return stop,
         }
         if std::time::Instant::now() >= until {
-            return true;
+            return WatchAction::Wait;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -1042,8 +1111,8 @@ mod tests;
 #[cfg(test)]
 mod foreground_guard_tests {
     use super::{
-        ForegroundStep, apply_foreground_fact, foreground_step, input_at_or_after, launch_attach,
-        launch_result, may_restore_foreground, within_grace,
+        ForegroundStep, HandBack, WatchAction, apply_foreground_fact, foreground_step,
+        input_at_or_after, launch_attach, launch_result, may_restore_foreground, within_grace,
     };
     use agent_desktop_core::{ProcessId, WindowInfo, WindowState};
     use std::time::{Duration, Instant};
@@ -1250,6 +1319,101 @@ mod foreground_guard_tests {
             "{text}"
         );
         assert_eq!(text, launch_attach::HANDED_OFF_NEW_WINDOW);
+    }
+    /// One read of the foreground: (prior, handed window, other window).
+    #[derive(Clone, Copy)]
+    enum Front {
+        Prior,
+        Handed,
+        Other,
+    }
+
+    /// Drives a watch over reads of (front, user input, within grace) and
+    /// returns the action of each read.
+    fn drive(reads: &[(Front, bool, bool)]) -> Vec<WatchAction> {
+        let mut hand_back = HandBack::default();
+        reads
+            .iter()
+            .map(|&(front, input, grace)| {
+                let (prior, handed) = match front {
+                    Front::Prior => (true, false),
+                    Front::Handed => (false, true),
+                    Front::Other => (false, false),
+                };
+                let step = foreground_step(false, prior, handed, input, grace);
+                hand_back.observe(step, prior, handed)
+            })
+            .collect()
+    }
+
+    /// The handed-off window takes the front as it is shown, the user is
+    /// working, Windows refuses the hand-back, and the window stays in front
+    /// past the grace: a refused hand-back, not the user's choice.
+    #[test]
+    fn a_refused_hand_back_stays_a_failure_after_the_grace() {
+        let actions = drive(&[
+            (Front::Handed, true, true),
+            (Front::Handed, true, true),
+            (Front::Handed, true, false),
+        ]);
+        assert_eq!(
+            actions,
+            [
+                WatchAction::Restore,
+                WatchAction::Restore,
+                WatchAction::StopFailed
+            ]
+        );
+        let mut result = handed_off_with_window();
+        let left_for_user = *actions.last().expect("an action") == WatchAction::StopForUser;
+        apply_foreground_fact(&mut result, false, true, left_for_user);
+        assert!(result.window.as_ref().expect("window").state.is_focused);
+        let text = result.suggestion.as_deref().expect("suggestion");
+        assert!(
+            text.ends_with(launch_attach::HANDED_OFF_LEFT_IN_FRONT),
+            "{text}"
+        );
+    }
+
+    /// (a) A take outside the grace with input, before any hand-back.
+    #[test]
+    fn a_first_take_outside_the_grace_with_input_is_left_for_the_user() {
+        assert_eq!(
+            drive(&[(Front::Prior, true, false), (Front::Handed, true, false)]),
+            [WatchAction::Wait, WatchAction::StopForUser]
+        );
+    }
+
+    /// (b) A take again after a hand-back was seen to work, outside the
+    /// grace with input.
+    #[test]
+    fn a_take_after_a_hand_back_worked_is_left_for_the_user() {
+        assert_eq!(
+            drive(&[
+                (Front::Handed, true, true),
+                (Front::Prior, true, true),
+                (Front::Handed, true, false),
+            ]),
+            [
+                WatchAction::Restore,
+                WatchAction::Wait,
+                WatchAction::StopForUser
+            ]
+        );
+    }
+
+    /// (c) The foreground on another window, even after a hand-back was
+    /// tried.
+    #[test]
+    fn another_window_in_front_is_left_for_the_user() {
+        assert_eq!(
+            drive(&[(Front::Other, false, true)]),
+            [WatchAction::StopForUser]
+        );
+        assert_eq!(
+            drive(&[(Front::Handed, true, true), (Front::Other, true, true)]),
+            [WatchAction::Restore, WatchAction::StopForUser]
+        );
     }
     #[test]
     fn a_foreground_that_stayed_on_the_prior_window_is_restored() {
