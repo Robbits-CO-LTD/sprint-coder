@@ -1061,6 +1061,8 @@ export function SetupWizard({
       ref={rootRef}
       className={`setup-wizard${animate ? ' is-animated' : ' is-still'}${replay ? ' is-replay' : ''}${leaving ? ' is-leaving' : ''}`}
       data-testid="setup-wizard"
+      // The Setup is a dark stage under every theme (see the top of index.css).
+      data-theme="black"
       data-step={step}
       data-motion={animate ? 'full' : 'reduced'}
       data-intro={intro}
@@ -1693,6 +1695,7 @@ export function SetupReplayDialog({
       ref={dialogRef}
       className="setup-replay-dialog"
       data-testid="setup-replay-dialog"
+      data-theme="black"
       aria-labelledby="setup-title"
       onCancel={(event) => {
         event.preventDefault();

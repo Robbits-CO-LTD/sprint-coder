@@ -4735,6 +4735,9 @@ export interface SprintCoderApi {
     isMaximized(): Promise<boolean>;
     onMaximizedChanged(listener: (maximized: boolean) => void): () => void;
   };
+  /** Asks Main to keep the chosen theme for this profile and to recolour the window's own parts.
+   * The themes and the page's side of a change are in apps/desktop (src/window-theme.ts). */
+  theme: { set(theme: string): void };
   tasks: {
     list(): Promise<TaskSummary[]>;
     /** Receives non-persisted Task summary updates such as a completed generated title. */

@@ -4,7 +4,15 @@
    one restrained blue spent only where it carries meaning (send, focus, in-progress), and type
    that does the ordering. The working column is the brightest plane; navigation recedes. */
 
-:root {
+/* Themes. The colours in this first block are the theme 黒: the look described above, and the
+   default. Every other theme is one block in themes.css that gives the same variables other
+   values (and one entry in src/window-theme.ts); nothing else in the styles names a theme.
+   `data-theme` on <html> chooses the theme. An element inside the page can carry `data-theme` too
+   and shows that theme within itself: the Setup's stage stays 黒 under every theme, and Settings
+   draws its three previews that way. What is not a colour is in the `:root` block after this one,
+   and what is worked out from these colours is in the block after that. */
+:root,
+[data-theme='black'] {
   /* Surfaces. A six-step matte charcoal ladder, neutral with only a trace of cool cast so it reads
      as anodised metal rather than as blue-black. Steps are deliberately small (~4-7 units of
      relative luminance apart): panels are told apart by tone, not by a border between them, which
@@ -16,6 +24,8 @@
   --bg-elevated: #1c1c1f;
   --bg-hover: #232327;
   --bg-selected: #2a2a2f;
+  /* The plane under everything: the Team canvas, which the Worker cards float over. */
+  --bg-deep: #070a0e;
 
   /* Text */
   --text-primary: #ededf0;
@@ -64,6 +74,35 @@
   --brand-blue: #618ef8;
   --brand-violet: #c679fd;
 
+  /* Hairlines. The default separator across the app — light-on-dark at a few percent, so it reads
+     as the edge where one matte plane meets another rather than as a drawn line. --hairline-strong
+     is for edges that also have to survive on top of a raised surface; -hover and -active are the
+     same edge as a control is pointed at and as it takes the focus. */
+  --hairline: rgba(255, 255, 255, 0.065);
+  --hairline-strong: rgba(255, 255, 255, 0.1);
+  --hairline-hover: rgba(255, 255, 255, 0.14);
+  --hairline-active: rgba(255, 255, 255, 0.16);
+
+  /* Light and shade, as `r, g, b` so each use keeps its own strength: `rgba(var(--shade-rgb), …)`.
+     --sheen-rgb is the highlight along a top face; --shade-rgb is every shadow and every scrim.
+     --shadow-k and --scrim-k scale the strength written at each use for the whole theme at once (a
+     shadow that reads as soft on a dark surface is heavy on a light one). --backdrop-rgb is the
+     tint behind the Settings sheet; --well-tint darkens a recessed well (a command's output). */
+  --sheen-rgb: 255, 255, 255;
+  --shade-rgb: 0, 0, 0;
+  --shadow-k: 1;
+  --scrim-k: 1;
+  --backdrop-rgb: 7, 8, 10;
+  --well-tint: rgba(0, 0, 0, 0.2);
+}
+
+/* What is the same in every theme. */
+:root {
+  /* The ink on a colour that is the same in every theme (a Worker's cursor colour): whichever of
+     the two reads on it. */
+  --on-color-dark: #131315;
+  --on-color-light: #fff;
+
   /* Radius scale. The UI is built from squares with softened corners — no pills, no circles except
      where the shape is literally a dot. Five steps, one per structural level, tightened from the
      previous scale so nothing reads as a lozenge and every control of the same weight reads as the
@@ -75,51 +114,6 @@
   --r-xl: 14px; /* full panels and floating node surfaces */
   --r-composer: 20px; /* the composer alone: the one soft object the eye returns to */
   --sidebar-width: 264px;
-
-  /* Tinted lines and washes are derived from the interaction palette. They stay local to active,
-     focused and informational elements instead of tinting the workspace background. */
-  --accent-line: color-mix(in srgb, var(--accent) 46%, transparent);
-  --accent-line-soft: color-mix(in srgb, var(--accent) 30%, transparent);
-  --accent-wash: color-mix(in srgb, var(--accent) 10%, transparent);
-  --accent-wash-strong: color-mix(in srgb, var(--accent) 16%, transparent);
-  --info-line: color-mix(in srgb, var(--info) 42%, transparent);
-  --info-wash: color-mix(in srgb, var(--info) 10%, transparent);
-  --danger-line: color-mix(in srgb, var(--danger) 45%, transparent);
-  --danger-wash: color-mix(in srgb, var(--danger) 9%, transparent);
-  --success-wash: color-mix(in srgb, var(--success) 9%, transparent);
-  --neutral-wash: color-mix(in srgb, var(--text-primary) 6%, transparent);
-  --neutral-wash-strong: color-mix(in srgb, var(--text-primary) 10%, transparent);
-
-  /* Hairlines. The default separator across the app — light-on-dark at a few percent, so it reads
-     as the edge where one matte plane meets another rather than as a drawn line. --hairline-strong
-     is for edges that also have to survive on top of a raised surface. */
-  --hairline: rgba(255, 255, 255, 0.065);
-  --hairline-strong: rgba(255, 255, 255, 0.1);
-
-  /* Relief. The house recipe for anything pressable: a matte fill, a 1px highlight along the top
-     face where light would catch it, and a tight contact shadow underneath. This is what replaces
-     the old outline-everything approach — a control reads as raised because of how it is lit, not
-     because a border was drawn around it. */
-  --relief:
-    inset 0 0 0 1px var(--hairline-strong), inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 1px 2px rgba(0, 0, 0, 0.24);
-  --relief-hover:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 1px 2px rgba(0, 0, 0, 0.28);
-  /* Pressed controls lose their highlight and take the shadow inside — the face goes down. */
-  --relief-press: inset 0 1px 2px rgba(0, 0, 0, 0.36), inset 0 0 0 1px var(--hairline);
-  /* Recessed: fields and wells — a hairline edge on a slightly darker face. */
-  --inset-well: inset 0 0 0 1px var(--hairline-strong), inset 0 1px 2px rgba(0, 0, 0, 0.22);
-
-  /* Elevation. Three steps for detached surfaces (cards, popovers, dialogs). Softer and wider than
-     before so a floating panel reads as hovering over the workspace instead of being cut out of it. */
-  --shadow-1: inset 0 0 0 1px var(--hairline);
-  --shadow-2:
-    inset 0 0 0 1px var(--hairline-strong), 0 2px 6px rgba(0, 0, 0, 0.28),
-    0 16px 40px rgba(0, 0, 0, 0.36);
-  --shadow-3:
-    inset 0 0 0 1px var(--hairline-strong), 0 8px 24px rgba(0, 0, 0, 0.34),
-    0 32px 80px rgba(0, 0, 0, 0.46);
 
   /* The one content measure in the app. The conversation, the empty state and the composer all lay
      out against it, so every block of content in the working surface shares the same two vertical
@@ -139,6 +133,60 @@
      font uses one of these two tokens; code, logs and command output use --font-mono. */
   --font-sans: 'SC Sans', system-ui, sans-serif;
   --font-mono: 'SC Mono', ui-monospace, monospace;
+}
+
+/* What is worked out from a theme's colours. Declared on every element that carries a theme, not
+   only on <html>: a variable that refers to another is settled on the element that declares it, so
+   a theme shown inside the page (see the top of this file) has to work these out again from its
+   own colours. The same reason gives such an element its own text colour. */
+:root,
+[data-theme] {
+  color: var(--text-primary);
+
+  /* Tinted lines and washes are derived from the interaction palette. They stay local to active,
+     focused and informational elements instead of tinting the workspace background. */
+  --accent-line: color-mix(in srgb, var(--accent) 46%, transparent);
+  --accent-line-soft: color-mix(in srgb, var(--accent) 30%, transparent);
+  --accent-wash: color-mix(in srgb, var(--accent) 10%, transparent);
+  --accent-wash-strong: color-mix(in srgb, var(--accent) 16%, transparent);
+  --info-line: color-mix(in srgb, var(--info) 42%, transparent);
+  --info-wash: color-mix(in srgb, var(--info) 10%, transparent);
+  --danger-line: color-mix(in srgb, var(--danger) 45%, transparent);
+  --danger-wash: color-mix(in srgb, var(--danger) 9%, transparent);
+  --success-wash: color-mix(in srgb, var(--success) 9%, transparent);
+  --neutral-wash: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  --neutral-wash-strong: color-mix(in srgb, var(--text-primary) 10%, transparent);
+
+  /* Relief. The house recipe for anything pressable: a matte fill, a 1px highlight along the top
+     face where light would catch it, and a tight contact shadow underneath. This is what replaces
+     the old outline-everything approach — a control reads as raised because of how it is lit, not
+     because a border was drawn around it. */
+  --relief:
+    inset 0 0 0 1px var(--hairline-strong), inset 0 1px 0 rgba(var(--sheen-rgb), 0.04),
+    0 1px 2px rgba(var(--shade-rgb), calc(0.24 * var(--shadow-k)));
+  --relief-hover:
+    inset 0 0 0 1px var(--hairline-hover), inset 0 1px 0 rgba(var(--sheen-rgb), 0.05),
+    0 1px 2px rgba(var(--shade-rgb), calc(0.28 * var(--shadow-k)));
+  /* Pressed controls lose their highlight and take the shadow inside — the face goes down. */
+  --relief-press:
+    inset 0 1px 2px rgba(var(--shade-rgb), calc(0.36 * var(--shadow-k))),
+    inset 0 0 0 1px var(--hairline);
+  /* Recessed: fields and wells — a hairline edge on a slightly darker face. */
+  --inset-well:
+    inset 0 0 0 1px var(--hairline-strong),
+    inset 0 1px 2px rgba(var(--shade-rgb), calc(0.22 * var(--shadow-k)));
+
+  /* Elevation. Three steps for detached surfaces (cards, popovers, dialogs). Softer and wider than
+     before so a floating panel reads as hovering over the workspace instead of being cut out of it. */
+  --shadow-1: inset 0 0 0 1px var(--hairline);
+  --shadow-2:
+    inset 0 0 0 1px var(--hairline-strong),
+    0 2px 6px rgba(var(--shade-rgb), calc(0.28 * var(--shadow-k))),
+    0 16px 40px rgba(var(--shade-rgb), calc(0.36 * var(--shadow-k)));
+  --shadow-3:
+    inset 0 0 0 1px var(--hairline-strong),
+    0 8px 24px rgba(var(--shade-rgb), calc(0.34 * var(--shadow-k))),
+    0 32px 80px rgba(var(--shade-rgb), calc(0.46 * var(--shadow-k)));
 }
 
 /* Inline SVG icon set (see components/icons.tsx). Nudged down 1px so the stroke's optical
@@ -238,6 +286,32 @@ samp,
 
 .app-shell.setup-reveal .main {
   animation: setup-chat-enter 780ms var(--ease-spatial) 150ms both;
+}
+
+/* Under a theme other than 黒, this is also the moment the window goes from the Setup's dark stage
+   to the theme's own colours. A veil in the stage's colour (setup.css) lifts off the whole window
+   over the same beat, so the colours cross over instead of cutting. 黒 keeps the handoff it always
+   had: no veil. */
+:root[data-theme]:not([data-theme='black']) .app-frame:has(> .app-shell.setup-reveal) {
+  position: relative;
+}
+:root[data-theme]:not([data-theme='black']) .app-frame:has(> .app-shell.setup-reveal)::after {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: #070b14;
+  content: '';
+  pointer-events: none;
+  animation: setup-veil-lift 720ms cubic-bezier(0.45, 0, 0.55, 1) both;
+}
+
+@keyframes setup-veil-lift {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 @keyframes setup-sidebar-enter {
@@ -558,7 +632,7 @@ button {
   z-index: 9;
   box-shadow:
     inset -1px 0 0 var(--hairline-strong),
-    16px 0 40px rgba(0, 0, 0, 0.4);
+    16px 0 40px rgba(var(--shade-rgb), calc(0.4 * var(--shadow-k)));
 }
 .app-shell:not(.team-mode).sidebar-overlay.sidebar-collapsed .sidebar {
   transform: translateX(-100%);
@@ -612,7 +686,7 @@ body.is-resizing-sidebar iframe {
   position: absolute;
   inset: 0;
   z-index: 8;
-  background: rgba(0, 0, 0, 0.42);
+  background: rgba(var(--shade-rgb), calc(0.42 * var(--scrim-k)));
   border: none;
   padding: 0;
   cursor: pointer;
@@ -658,7 +732,7 @@ body.is-resizing-sidebar iframe {
   box-shadow: var(--shadow-3);
 }
 .project-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(var(--shade-rgb), calc(0.55 * var(--scrim-k)));
 }
 .project-dialog form {
   display: grid;
@@ -1080,7 +1154,7 @@ body.is-resizing-sidebar iframe {
 .team-btn:hover:not(:disabled) {
   color: var(--text-primary);
   background: var(--neutral-wash);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0 0 1px var(--hairline-hover);
 }
 .team-btn:active:not(:disabled) {
   background: var(--neutral-wash);
@@ -1418,8 +1492,8 @@ body.is-resizing-sidebar iframe {
   border-radius: var(--r-lg);
   object-fit: cover;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    0 2px 8px rgba(0, 0, 0, 0.3);
+    inset 0 1px 0 rgba(var(--sheen-rgb), 0.1),
+    0 2px 8px rgba(var(--shade-rgb), calc(0.3 * var(--shadow-k)));
   user-select: none;
 }
 .timeline-welcome-copy {
@@ -1797,7 +1871,7 @@ body.is-resizing-sidebar iframe {
   overflow: hidden;
   padding: 8px 16px;
   border-top: 1px solid var(--hairline);
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--well-tint);
   color: var(--text-secondary);
   font: 11.5px/22px var(--font-mono);
 }
@@ -2127,16 +2201,16 @@ body.is-resizing-sidebar iframe {
   background: var(--bg-elevated);
   box-shadow:
     inset 0 0 0 1px var(--hairline-strong),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 12px 28px -18px rgba(0, 0, 0, 0.6);
+    inset 0 1px 0 rgba(var(--sheen-rgb), 0.04),
+    0 12px 28px -18px rgba(var(--shade-rgb), calc(0.6 * var(--shadow-k)));
   transition: box-shadow var(--t-quick) var(--ease-ui);
 }
 /* Focus brightens the panel's own edge rather than outlining the textarea inside it. */
 .composer-panel:focus-within {
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 12px 28px -18px rgba(0, 0, 0, 0.6);
+    inset 0 0 0 1px var(--hairline-active),
+    inset 0 1px 0 rgba(var(--sheen-rgb), 0.05),
+    0 12px 28px -18px rgba(var(--shade-rgb), calc(0.6 * var(--shadow-k)));
 }
 .goal-progress {
   display: grid;
@@ -2148,7 +2222,7 @@ body.is-resizing-sidebar iframe {
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   background: color-mix(in srgb, var(--bg-panel) 92%, var(--accent-wash));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), 0.025);
 }
 .goal-progress-mark {
   display: grid;
@@ -2345,7 +2419,7 @@ body.is-resizing-sidebar iframe {
   border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: 0 1px 0 rgba(var(--sheen-rgb), 0.04);
   color: var(--text-secondary);
   font: 11px/14px var(--font-mono);
   text-align: center;
@@ -2568,7 +2642,7 @@ body.is-resizing-sidebar iframe {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(0, 0, 0, 0.58);
+  background: rgba(var(--shade-rgb), calc(0.58 * var(--scrim-k)));
 }
 .file-editor-dialog {
   position: relative;
@@ -3531,7 +3605,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   display: grid;
   place-items: center;
   font-size: 15px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), 0.24);
   /* Deliberately not transitioning `background`. This button swaps between "unavailable" and "the
      primary action" as the turn state changes, and interpolating that swap paints a stretch of
      in-between colour that is neither state and that its label cannot be read against — axe catches
@@ -3564,7 +3638,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .send-btn:active:not(:disabled) {
   transform: scale(0.96);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.32);
+  box-shadow: inset 0 1px 3px rgba(var(--shade-rgb), 0.32);
 }
 /* An opaque matte face rather than a translucent wash, so the unavailable state is a real surface
    that reads the same wherever the button sits. */
@@ -4116,7 +4190,7 @@ button.composer-permission-chip[aria-expanded='true'] {
      which would shift the whole world AND the header/controls overlays; `clip` forbids
      programmatic scrolling entirely while still clipping overflow the same way. */
   overflow: clip;
-  background: #070a0e;
+  background: var(--bg-deep);
   /* Entry fade (demo/index.html line 107: `#canvasLayer` transitions opacity 220ms on
      `.team-mode`). This component only ever mounts when entering Team mode (App.tsx renders it
      conditionally, never toggles a class on an already-mounted instance), so an unconditional
@@ -4487,7 +4561,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   background: var(--bg-app);
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-xl);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.36);
+  box-shadow: 0 16px 40px rgba(var(--shade-rgb), calc(0.36 * var(--shadow-k)));
   overflow: hidden;
   /* Default opacity 1 (not 0): only a genuinely *new* spawn gets the `.spawn` class (see
      TeamCanvas's baseline-seeding), and that animation's own `from{opacity:0}` keyframe covers
@@ -4715,10 +4789,10 @@ button.composer-permission-chip[aria-expanded='true'] {
   box-shadow: none;
 }
 .w-avatar[data-ink='dark'] {
-  color: var(--bg-app);
+  color: var(--on-color-dark);
 }
 .w-avatar[data-ink='light'] {
-  color: #fff;
+  color: var(--on-color-light);
 }
 /* On an approval card's requester band. (Forced colours: see the block after `.run-title.sheen`.) */
 .w-avatar[data-size='small'] {
@@ -5192,7 +5266,7 @@ button.composer-permission-chip[aria-expanded='true'] {
     bottom: 0;
     width: min(460px, 100%);
     z-index: 7;
-    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+    box-shadow: -12px 0 32px rgba(var(--shade-rgb), calc(0.35 * var(--shadow-k)));
     overflow-x: clip;
   }
 }
@@ -5648,7 +5722,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   overflow: hidden;
 }
 .settings-dialog::backdrop {
-  background: rgba(7, 8, 10, 0.7);
+  background: rgba(var(--backdrop-rgb), calc(0.7 * var(--scrim-k)));
   backdrop-filter: blur(3px);
 }
 .settings-dialog[open] {
@@ -5668,7 +5742,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   box-shadow: var(--shadow-3);
 }
 .team-policy-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(var(--shade-rgb), calc(0.5 * var(--scrim-k)));
 }
 .team-policy-body {
   display: flex;
@@ -6361,6 +6435,187 @@ button.composer-permission-chip[aria-expanded='true'] {
   }
   .team-provider-expand > span {
     transition: none;
+  }
+}
+
+/* 「テーマ」 (ThemeSetting.tsx): the themes side by side, each a small picture of the window drawn
+   with that theme's own variables (the picture carries the theme's `data-theme`). The frame and the
+   name around a picture belong to the theme on screen. Quiet on purpose: the chosen one has the
+   accent's edge and a check mark, and nothing moves. */
+.theme-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  max-width: 560px;
+}
+.theme-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+/* The radio button itself is not drawn (the frame shows its state) but stays in place over the
+   picture, so it keeps its focus, its arrow keys and its name. */
+.theme-option input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.theme-option-frame {
+  display: block;
+  padding: 3px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  transition:
+    border-color var(--t-quick) var(--ease-ui),
+    box-shadow var(--t-quick) var(--ease-ui);
+}
+.theme-option:hover .theme-option-frame {
+  border-color: var(--hairline-active);
+}
+.theme-option input:checked + .theme-option-frame {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.theme-option input:focus-visible + .theme-option-frame {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.theme-option-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 550;
+}
+.theme-option-name .icon {
+  color: var(--accent);
+  visibility: hidden;
+}
+.theme-option input:checked ~ .theme-option-name {
+  color: var(--text-primary);
+}
+.theme-option input:checked ~ .theme-option-name .icon {
+  visibility: visible;
+}
+.theme-preview {
+  display: grid;
+  grid-template-columns: 30% minmax(0, 1fr);
+  height: 104px;
+  overflow: hidden;
+  border-radius: calc(var(--r-lg) - 4px);
+  background: var(--bg-app);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.theme-preview i {
+  display: block;
+  flex: none;
+}
+.theme-preview-side {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 7px 0;
+  border-right: 1px solid var(--hairline);
+  background: var(--bg-sidebar);
+}
+.theme-preview-side i {
+  position: relative;
+  height: 9px;
+  border-radius: 3px;
+}
+.theme-preview-side i::after {
+  position: absolute;
+  top: 3px;
+  left: 5px;
+  width: 58%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-secondary);
+  content: '';
+  opacity: 0.55;
+}
+.theme-preview-side i:nth-child(3)::after {
+  width: 74%;
+}
+.theme-preview-side i:nth-child(4)::after {
+  width: 44%;
+}
+.theme-preview-side i.is-current {
+  background: var(--bg-selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.theme-preview-side i.is-current::after {
+  background: var(--text-primary);
+  opacity: 0.85;
+}
+.theme-preview-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 11px 10px 8px;
+}
+.theme-preview-ask {
+  align-self: flex-end;
+  width: 46%;
+  height: 11px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+}
+.theme-preview-line {
+  width: 82%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-primary);
+  opacity: 0.8;
+}
+.theme-preview-line + .theme-preview-line {
+  width: 56%;
+}
+.theme-preview-card {
+  height: 15px;
+  border-radius: 4px;
+  background: var(--bg-panel);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+}
+.theme-preview-composer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 17px;
+  margin-top: auto;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+}
+.theme-preview-composer i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+@media (max-width: 720px) {
+  .theme-options {
+    gap: 10px;
+  }
+  .theme-preview {
+    height: 88px;
+  }
+}
+@media (forced-colors: active) {
+  .theme-option input:checked + .theme-option-frame {
+    outline: 2px solid Highlight;
   }
 }
 

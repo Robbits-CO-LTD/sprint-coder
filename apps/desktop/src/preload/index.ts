@@ -188,6 +188,14 @@ import {
 } from '@sprint-coder/contracts';
 import { createTeamSubscriptionBuffer } from './team-subscription-buffer';
 import { WINDOW_CONTROL_CHANNELS } from '../window-controls';
+import {
+  applyThemeBeforeFirstPaint,
+  DEFAULT_THEME,
+  isThemeId,
+  themeOrDefault,
+  WINDOW_THEME_CHANNELS,
+  type ThemeId,
+} from '../window-theme';
 import { clipboardCarriesImage, createTrustedImagePasteGate } from '../clipboard-image-paste';
 
 async function invoke<TInput, TOutput>(
@@ -393,6 +401,11 @@ const api: SprintCoderApi = {
       };
       ipcRenderer.on(WINDOW_CONTROL_CHANNELS.maximizedChanged, handler);
       return () => ipcRenderer.removeListener(WINDOW_CONTROL_CHANNELS.maximizedChanged, handler);
+    },
+  },
+  theme: {
+    set: (theme) => {
+      if (isThemeId(theme)) ipcRenderer.send(WINDOW_THEME_CHANNELS.set, theme);
     },
   },
   tasks: {
@@ -1286,5 +1299,21 @@ function isPortResponse(value: unknown, requestId: string, taskId: string): bool
     value.taskId === taskId
   );
 }
+
+/**
+ * The theme Main keeps for this profile. Asked synchronously, once, because the answer has to be on
+ * the page before anything is drawn: an asynchronous answer would arrive after the first frame, and
+ * that frame would show the default theme. Main answers from memory. Any failure is the default
+ * theme, never a page that does not start.
+ */
+function storedTheme(): ThemeId {
+  try {
+    return themeOrDefault(ipcRenderer.sendSync(WINDOW_THEME_CHANNELS.get));
+  } catch {
+    return DEFAULT_THEME;
+  }
+}
+
+if (typeof document !== 'undefined') applyThemeBeforeFirstPaint(storedTheme(), document);
 
 contextBridge.exposeInMainWorld('sprintCoder', api);

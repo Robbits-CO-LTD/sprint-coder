@@ -5,6 +5,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  nativeTheme,
   net,
   protocol,
   session,
@@ -74,6 +75,14 @@ import {
   WINDOW_CONTROL_CHANNELS,
   windowChromeOptions,
 } from '../window-controls';
+import {
+  applyWindowTheme,
+  isThemeId,
+  themeDefinition,
+  WINDOW_THEME_CHANNELS,
+  type ThemeId,
+} from '../window-theme';
+import { readStoredTheme, writeStoredTheme } from './window-theme-store';
 
 const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
@@ -84,6 +93,8 @@ let router: IpcRouter | null = null;
 let autoUpdateController: AutoUpdateController | null = null;
 let shutdownCommitted = false;
 let shutdownInFlight = false;
+// The profile's theme, read on first use (after the profile's folder is decided, below).
+let windowTheme: ThemeId | null = null;
 
 if (process.platform === 'win32') app.setAppUserModelId('com.squirrel.SprintCoder.SprintCoder');
 const disabledFeatures = disabledChromiumFeatures(process.platform);
@@ -114,6 +125,22 @@ ipcMain.on(WINDOW_CONTROL_CHANNELS.action, (event, action: unknown) => {
 ipcMain.handle(WINDOW_CONTROL_CHANNELS.getMaximized, (event) => {
   const window = trustedWindowControlTarget(event);
   return window?.isMaximized() ?? false;
+});
+// The preload asks this synchronously before the page is drawn, so it always answers.
+ipcMain.on(WINDOW_THEME_CHANNELS.get, (event) => {
+  event.returnValue = currentWindowTheme();
+});
+ipcMain.on(WINDOW_THEME_CHANNELS.set, (event, theme: unknown) => {
+  const window = trustedMainWindowTarget(event);
+  if (window === null || !isThemeId(theme)) return;
+  windowTheme = theme;
+  applyWindowTheme(theme, window, nativeTheme);
+  try {
+    writeStoredTheme(windowThemePath(), theme);
+  } catch (error) {
+    // The window already shows the theme; only the next launch would not remember it.
+    secureLogger.warn('The chosen theme could not be saved', error);
+  }
 });
 ipcMain.handle(IPC_CHANNELS.updateCheckNow, async (event) => {
   if (trustedMainWindowTarget(event) === null || autoUpdateController === null)
@@ -397,14 +424,26 @@ async function disposeApplicationResources(): Promise<void> {
   }
 }
 
+function windowThemePath(): string {
+  return join(app.getPath('userData'), 'theme.json');
+}
+
+function currentWindowTheme(): ThemeId {
+  windowTheme ??= readStoredTheme(windowThemePath());
+  return windowTheme;
+}
+
 function createWindow(): BrowserWindow {
+  // Before the window exists, so it is made in the theme's colour and its native parts match.
+  const theme = currentWindowTheme();
+  applyWindowTheme(theme, null, nativeTheme);
   const window = new BrowserWindow({
     width: 1180,
     height: 800,
     minWidth: 760,
     minHeight: 560,
     show: false,
-    backgroundColor: '#12110f',
+    backgroundColor: themeDefinition(theme).windowBackground,
     ...windowChromeOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),

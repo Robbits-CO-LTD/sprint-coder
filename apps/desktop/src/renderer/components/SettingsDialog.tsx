@@ -16,6 +16,9 @@ import { SkillSettingsSection } from './SkillSettingsSection';
 import { AssistantPreferencesSettings } from './AssistantPreferencesSettings';
 import { TeamUsageModeSetting } from './TeamUsageModeSetting';
 import { SetupReplayGroup } from './SetupReplayGroup';
+import { ThemeSetting } from './ThemeSetting';
+import { useTheme } from '../lib/theme';
+import { THEME_ATTRIBUTE } from '../../window-theme';
 import { useTaskBoundary } from './TaskBoundary';
 import {
   TEAM_CONCURRENCY_DEFAULT,
@@ -74,7 +77,7 @@ import {
 // controls, laid out as a ~900px two-pane workspace with a section list on the left. The flag-off
 // body keeps the established single-column layout, so the flag remains a usable fallback.
 
-type SettingsSection = 'models' | 'replies' | 'team' | 'skills' | 'advanced';
+type SettingsSection = 'models' | 'replies' | 'team' | 'skills' | 'appearance' | 'advanced';
 type SkillCreationRequest = {
   prompt: string;
   builtinSkillId: 'skill-creator';
@@ -106,6 +109,7 @@ export const SETTINGS_SECTIONS: readonly {
   },
   { id: 'team', label: 'Team', description: '新しいTeamの既定値', eyebrow: 'Team' },
   { id: 'skills', label: 'Skill', description: '読み込みと有効化', eyebrow: 'Skills' },
+  { id: 'appearance', label: '見た目', description: 'テーマ', eyebrow: 'Appearance' },
   {
     id: 'advanced',
     label: '詳細',
@@ -124,6 +128,7 @@ export function SettingsDialog({
   focusProviders?: boolean;
 }) {
   const workspace = useAppStore((s) => s.settingsWorkspaceV2);
+  const theme = useTheme();
   const { createTask } = useTaskBoundary();
   const dialogRef = useRef<HTMLDialogElement>(null);
   // The element that had focus when the dialog opened. Chromium's <dialog> restores focus itself,
@@ -189,6 +194,9 @@ export function SettingsDialog({
       className={`settings-dialog${workspace ? ' settings-dialog-v2' : ''}`}
       data-testid="settings-dialog"
       aria-labelledby="settings-dialog-title"
+      // Its own theme, not its surroundings': Settings can be opened over the first run's Setup,
+      // whose stage stays 黒, and the theme chosen here has to show here.
+      {...{ [THEME_ATTRIBUTE]: theme }}
       // `cancel` is Escape; `close` also covers the backdrop-click path below. Both route through
       // the parent so `open` and the element's own state can never disagree.
       onCancel={(e) => {
@@ -273,6 +281,7 @@ export function LegacyBody({
           />
         </>
       )}
+      <ThemeSetting />
       <SoundEffectsGroup key={freshOnOpen} />
       <LicenseGroup />
       {supported && <SetupReplayGroup />}
@@ -315,7 +324,7 @@ export function WorkspaceBody({
       <header className="settings-header">
         <div>
           <h2 id="settings-dialog-title">設定</h2>
-          <p>モデル、接続、返事の仕方、Team、Skill、CLIの診断を管理します。</p>
+          <p>モデル、接続、返事の仕方、Team、Skill、見た目、CLIの診断を管理します。</p>
         </div>
         <CloseButton onClose={onClose} />
       </header>
@@ -377,6 +386,10 @@ export function WorkspaceBody({
                 active={open}
                 {...(onCreateSkill === undefined ? {} : { onCreateWithAi: onCreateSkill })}
               />
+            </WorkspacePage>
+
+            <WorkspacePage {...page('appearance')} active={current === 'appearance'}>
+              <ThemeSetting />
             </WorkspacePage>
 
             <WorkspacePage {...page('advanced')} active={current === 'advanced'}>

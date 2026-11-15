@@ -1,0 +1,117 @@
+/* The themes other than 黒 (whose colours are the first block of index.css, the default).
+
+   One theme is one block: the same colour variables as index.css's first block, with other
+   values. To add a theme, add a block here and an entry in src/window-theme.ts (its name in
+   Settings, whether it is dark or light, and its `--bg-app` as the window's own background).
+   lib/themes.test.ts checks every theme the same way: that it defines every colour variable, that
+   the window's background matches, and that text and boundaries keep the contrast the app
+   promises (WCAG 2.2 AA) on every surface.
+
+   Loaded after index.css, so a block here wins over the default on <html>. */
+
+/* 灰色: the same dark workspace one step up — a neutral graphite instead of near-black, for a
+   room with more light in it. The ladder keeps 黒's order (navigation below the working surface,
+   raised things lighter) and its small steps; text and the state colours are lifted with the
+   surfaces so they keep their contrast on the lightest of them. */
+[data-theme='gray'] {
+  --bg-app: #2f2f33;
+  --bg-sidebar: #27272a;
+  --bg-panel: #353539;
+  --bg-elevated: #3a3a3f;
+  --bg-hover: #424248;
+  --bg-selected: #4b4b52;
+  --bg-deep: #222225;
+
+  --text-primary: #f2f2f5;
+  --text-secondary: #c2c2ca;
+  --text-muted: #d9d9df;
+  --text-disabled: #8b8b94;
+
+  --border-subtle: #4a4a51;
+  --border-strong: #a6a6b0;
+
+  --accent: #a9c5f6;
+  --accent-hover: #c2d6fa;
+  --accent-ink: #061019;
+  --accent-muted: #3a4a66;
+  --focus-ring: #a9c5f6;
+
+  --success: #93e2af;
+  --warning: #f5cf87;
+  --danger: #ffb0a8;
+  --info: #b5cff8;
+
+  --ai-accent: #dfbdff;
+  --ai-surface: #3b3743;
+
+  --brand-cyan: #45befc;
+  --brand-blue: #618ef8;
+  --brand-violet: #c679fd;
+
+  /* A white line shows less on a lighter surface, so the same edges are drawn a little stronger. */
+  --hairline: rgba(255, 255, 255, 0.075);
+  --hairline-strong: rgba(255, 255, 255, 0.115);
+  --hairline-hover: rgba(255, 255, 255, 0.16);
+  --hairline-active: rgba(255, 255, 255, 0.19);
+
+  --sheen-rgb: 255, 255, 255;
+  --shade-rgb: 0, 0, 0;
+  --shadow-k: 0.8;
+  --scrim-k: 0.85;
+  --backdrop-rgb: 14, 14, 17;
+  --well-tint: rgba(0, 0, 0, 0.16);
+}
+
+/* 白: a light workspace. The working surface is white and navigation recedes into a pale grey;
+   what is raised is told apart by a fine dark edge and a soft shadow rather than by a lighter
+   tone, since nothing is lighter than white. The accent, the state colours and the AI violet are
+   the same hues as 黒's, taken dark enough to be read as text on every light surface; the accent
+   is a fill with white ink here (in the dark themes it is a light fill with dark ink). */
+[data-theme='white'] {
+  --bg-app: #ffffff;
+  --bg-sidebar: #f5f5f7;
+  --bg-panel: #fafafb;
+  --bg-elevated: #ffffff;
+  --bg-hover: #efeff2;
+  --bg-selected: #e6e6eb;
+  --bg-deep: #ececf0;
+
+  --text-primary: #18181b;
+  --text-secondary: #4e4e57;
+  --text-muted: #3f3f46;
+  --text-disabled: #a1a1aa;
+
+  --border-subtle: #e4e4e9;
+  --border-strong: #7e7e88;
+
+  --accent: #2557c7;
+  --accent-hover: #1c469f;
+  --accent-ink: #ffffff;
+  --accent-muted: #dde7fb;
+  --focus-ring: #2557c7;
+
+  --success: #17713f;
+  --warning: #7d5200;
+  --danger: #b3261e;
+  --info: #245fb5;
+
+  --ai-accent: #6b35c9;
+  --ai-surface: #f3effb;
+
+  /* The logo's colours, a step deeper so the 2px rail still shows on a pale surface. */
+  --brand-cyan: #17a2e8;
+  --brand-blue: #4a7bf0;
+  --brand-violet: #b05cf5;
+
+  --hairline: rgba(24, 24, 32, 0.1);
+  --hairline-strong: rgba(24, 24, 32, 0.16);
+  --hairline-hover: rgba(24, 24, 32, 0.26);
+  --hairline-active: rgba(24, 24, 32, 0.34);
+
+  --sheen-rgb: 255, 255, 255;
+  --shade-rgb: 30, 32, 48;
+  --shadow-k: 0.4;
+  --scrim-k: 0.6;
+  --backdrop-rgb: 30, 32, 48;
+  --well-tint: rgba(24, 24, 32, 0.035);
+}
