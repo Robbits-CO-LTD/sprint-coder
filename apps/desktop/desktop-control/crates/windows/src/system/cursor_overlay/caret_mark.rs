@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The agent's text caret: a thin bar in the accent colour where the app is
 //! inserting text, in a layered window of its own so it can sit in a text
 //! field far from wherever the cursor rests. It marks the field the cursor
@@ -37,22 +38,37 @@ mod imp {
             })
         }
 
-        /// Draws the caret over `at`. With `follow`, only a caret already
-        /// showing moves, and no `at` hides it.
-        pub(crate) fn place(&self, at: Option<&Rect>, accent: [f64; 3], follow: bool) {
+        /// Draws the caret over `at`, at the height of the window `anchor`
+        /// names. With `follow`, only a caret already showing moves, and no
+        /// `at` hides it.
+        pub(crate) fn place(
+            &self,
+            at: Option<&Rect>,
+            accent: [f64; 3],
+            follow: bool,
+            anchor: Option<isize>,
+        ) {
             if follow && !self.shown.get() {
                 return;
             }
             match at {
-                Some(at) => self.show(at, accent),
+                Some(at) => self.show(at, accent, anchor),
                 None if follow => self.hide(),
                 None => {}
             }
         }
 
+        /// Re-places a caret that is showing, so it follows its window
+        /// between keystrokes.
+        pub(crate) fn restack(&self, anchor: Option<isize>) {
+            if self.shown.get() {
+                self.window.place(anchor);
+            }
+        }
+
         /// Draws the caret over `at`. The CLI and the renderer are both
         /// per-monitor DPI aware, so `at` is already in physical pixels.
-        fn show(&self, at: &Rect, accent: [f64; 3]) {
+        fn show(&self, at: &Rect, accent: [f64; 3], anchor: Option<isize>) {
             let width = at.width.round().max(1.0) as i32;
             let height = at.height.round().max(1.0) as i32;
             let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
@@ -61,7 +77,7 @@ mod imp {
                 | (channel(accent[1]) << 8)
                 | channel(accent[2]);
             let pixels = vec![pixel; (width as usize) * (height as usize)];
-            self.window.raise();
+            self.window.place(anchor);
             let _ = self.window.present(
                 at.x.round() as i32,
                 at.y.round() as i32,

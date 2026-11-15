@@ -49,6 +49,9 @@ pub(crate) fn execute_with_auto_wait_and_lease(
     AdapterError,
 > {
     let deadline = operation_deadline(&request)?;
+    // The cursor is drawn at the height of the window the ref was captured in.
+    let _anchor =
+        crate::cursor_overlay::anchor_window(context.entry.source.source_window_id.clone());
     let result = execute_with_deadline(context, request, deadline, dispatch);
     result.map_err(|error| {
         if deadline.is_expired() {

@@ -44,6 +44,7 @@ pub(crate) mod schedule;
 pub(crate) mod server;
 pub(crate) mod session_state;
 pub(crate) mod spawn;
+pub(crate) mod stacking;
 #[cfg(target_os = "windows")]
 pub(crate) mod surface_host;
 pub(crate) mod text;

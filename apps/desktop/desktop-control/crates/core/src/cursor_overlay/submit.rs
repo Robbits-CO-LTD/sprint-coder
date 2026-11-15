@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::CursorPhase;
 use crate::{
     AdapterError, CommandContext, DeliveryDisposition, DeliverySemantics, MouseEvent,
@@ -204,7 +205,7 @@ fn send(
         return false;
     };
     let instruction = match instruction {
-        Ok(instruction) => instruction,
+        Ok(instruction) => instruction.with_window(super::anchor::current_window()),
         Err(error) => {
             tracing::warn!(code = %error.code.as_str(), "agent cursor instruction was skipped");
             return false;

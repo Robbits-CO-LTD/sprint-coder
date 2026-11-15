@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The click-through, never-focused surface the overlay paints onto.
 //!
 //! The extended style set is load-bearing and measured rather than assumed:
@@ -17,6 +18,8 @@
 #[cfg(target_os = "windows")]
 use crate::system::cursor_overlay::dib::Dib;
 #[cfg(target_os = "windows")]
+use crate::system::cursor_overlay::stacking::Stacker;
+#[cfg(target_os = "windows")]
 use crate::system::cursor_overlay::wide::{wide, win32_error};
 #[cfg(target_os = "windows")]
 use agent_desktop_core::AdapterError;
@@ -30,11 +33,10 @@ use windows_sys::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, HWND_TOPMOST, MSG, PM_REMOVE,
-    PeekMessageW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+    RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow, TranslateMessage, ULW_ALPHA,
+    UpdateLayeredWindow, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 #[cfg(target_os = "windows")]
@@ -55,6 +57,7 @@ unsafe extern "system" fn overlay_proc(
 #[cfg(target_os = "windows")]
 pub(crate) struct OverlayWindow {
     handle: HWND,
+    stacker: Stacker,
 }
 
 #[cfg(target_os = "windows")]
@@ -97,24 +100,25 @@ impl OverlayWindow {
                 "The cursor overlay window could not be created",
             ));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            stacker: Stacker::new(),
+        })
     }
 
-    /// Re-raises within the topmost band on every present, because the
-    /// shell's own chrome is topmost too and the most recently raised
-    /// window wins inside that band.
-    pub(crate) fn raise(&self) {
-        unsafe {
-            SetWindowPos(
-                self.handle,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-            );
-        }
+    /// Re-places the window on every present, at the height of the window
+    /// the agent works in (`anchor`, a window handle): directly above that
+    /// window and what it owns, under whatever covers it (`stacking`).
+    ///
+    /// With no window named it re-raises within the topmost band, as it
+    /// always did, because the shell's own chrome is topmost too and the
+    /// most recently raised window wins inside that band. A topmost working
+    /// window (the taskbar, an always-on-top window) is placed the same way,
+    /// which is what puts the cursor above it.
+    pub(crate) fn place(&self, anchor: Option<isize>) {
+        let class = wide(CLASS_NAME);
+        self.stacker
+            .place(self.handle, anchor, &class[..class.len() - 1]);
     }
 
     /// Places and paints the surface in one call. Position, size and

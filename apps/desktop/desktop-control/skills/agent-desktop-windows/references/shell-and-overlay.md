@@ -79,7 +79,7 @@ shape when none are, and a top-level `ClearAllButton`.
 ## Cursor Overlay
 
 `cursor-overlay enable` renders on Windows: a detached renderer process paints a
-presentation-only cursor in a click-through, topmost, non-activating window.
+presentation-only cursor in a click-through, non-activating window.
 
 ```powershell
 $env:AGENT_DESKTOP_HOME = "$env:TEMP\ad-scratch"
@@ -107,7 +107,14 @@ agent-desktop cursor-overlay disable
 - **It starts at the centre of the primary monitor's work area**, not over the
   app you drive. The first frame lands shortly after `enable` returns, so poll
   for the pixels before you take a screenshot.
-- **It draws above the taskbar and other topmost shell chrome.**
+- **It is drawn at the height of the window the action works in.** A ref
+  action's cursor sits directly above the ref's window (and the popups that
+  window owns) and under any window that covers it, so a cursor working in a
+  covered window is hidden with it; a minimised or closed window hides its
+  cursor. A topmost window (the taskbar, an always-on-top window) and an
+  action that names no window (`enable`'s greeting) draw it above everything,
+  the taskbar and other topmost shell chrome included. A screenshot of a
+  covered window does not show the cursor.
 - **It ignores the "Show animations in Windows" setting.** Windows reports
   animations off by default on a stock Windows Server host, so the explicit
   `enable` counts as the opt-in. macOS honours Reduce Motion instead.

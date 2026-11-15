@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The name the overlay's control pipe is reached by.
 //!
 //! Pure: a deterministic function of the state root, the session id and the
@@ -25,7 +26,10 @@ use std::path::Path;
 /// That is the correct state for a protocol that has never changed, and it is
 /// said out loud rather than left to be discovered: the sweep costs nothing
 /// until the first append and does its work from the moment there is one.
-pub(crate) const PROTOCOL_GENERATIONS: [&str; 1] = ["w1"];
+///
+/// `w2`: an instruction may name the window the action works in (`window`),
+/// which a `w1` renderer refuses as an unknown field.
+pub(crate) const PROTOCOL_GENERATIONS: [&str; 2] = ["w1", "w2"];
 
 /// The generation this build speaks. A child whose marker names a different
 /// one refuses to serve, and its pipe name differs, so a stale renderer is
