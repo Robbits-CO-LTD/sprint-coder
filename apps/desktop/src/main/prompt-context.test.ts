@@ -255,7 +255,7 @@ describe('prompt context compiler', () => {
     // A one-window app: the existing window, within what was asked, without repeating --no-attach.
     // The executable marks a window the instance had before the launch with existing_window.
     expect(text).toContain(
-      '--no-attach でも新しい窓が出ない時（handed_off と一緒に existing_window: true が付き、window は起動の前からあった窓。メールやチャットのように窓が 1 つのアプリ）',
+      '結果に existing_window: true が付いた時（--no-attach でも新しい窓が出なかった、またはトレイのアプリが隠していた窓を出し直した。window は起動の前からあった窓。メールやチャットのように窓が 1 つのアプリ）',
     );
     expect(text).not.toContain('reused_window');
     expect(text).toContain(
