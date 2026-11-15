@@ -439,96 +439,101 @@ describe('desktop control Workspace roots', () => {
     }
   });
 
-  it('seals a launch by name with the Start menu path before the card, and runs that path', async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-launch-name-'));
-    roots.push(workspace);
-    const registry = new ToolRegistry();
-    registry.register(COMMAND_RUNNER_TOOL);
-    const { boundary } = createCommandBoundary(workspace);
-    const result: CommandResult = {
-      executionId: 'execution',
-      exitCode: 0,
-      signal: null,
-      canceled: false,
-      termination: 'natural',
-      durationMs: 1,
-      outputBytes: 0,
-      truncated: false,
-    };
-    const runner = new CommandRunner({ sandboxed: true });
-    const run = vi.spyOn(runner, 'run').mockResolvedValue(result);
-    // What the card is raised for: the input the authorizer sees.
-    const carded: unknown[] = [];
-    const broker = new ToolBroker(
-      registry,
-      () => 1,
-      (request) => {
-        carded.push(request.input);
-        return {
-          decision: 'allow',
-          reason: 'test',
-          beforeExecute: () => true,
-          approvalDecision: 'allow_once',
-        };
-      },
-    );
-    registerCommandRunnerTool(broker, runner, boundary, COMMAND_RUNNER_TOOL);
-    const owner = {
-      taskId: 'task-launch-name',
-      turnId: 'turn-launch-name',
-      workspaceId: 'workspace-launch-name',
-      policyEpoch: 1,
-    };
-    broker.startTurn(owner, 'grok');
-    // An absolute path outside the Workspace as this OS reads one, since the replaced arguments
-    // are judged again with the checks of an absolute path.
-    const path =
-      process.platform === 'win32'
-        ? 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe'
-        : '/opt/RabbitMail/rabbitmail-desktop';
-    const desktop = vi
-      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
-      .mockReturnValue(true);
-    const byName = vi
-      .spyOn(desktopControlModule, 'desktopControlLaunchByName')
-      .mockImplementation((argv) =>
-        argv[1] === 'RabbitMail'
-          ? { argv: ['launch', path] }
-          : argv[1] === 'Missing'
-            ? { refusal: 'デスクトップ操作の実行を拒否した: 見つからない。' }
-            : null,
+  // Not on macOS: there `launch` keeps the name it was given (the executable resolves it) and
+  // refuses a path, so no argument is replaced. `desktop-control.test.ts` covers that lookup.
+  it.skipIf(process.platform === 'darwin')(
+    'seals a launch by name with the Start menu path before the card, and runs that path',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-launch-name-'));
+      roots.push(workspace);
+      const registry = new ToolRegistry();
+      registry.register(COMMAND_RUNNER_TOOL);
+      const { boundary } = createCommandBoundary(workspace);
+      const result: CommandResult = {
+        executionId: 'execution',
+        exitCode: 0,
+        signal: null,
+        canceled: false,
+        termination: 'natural',
+        durationMs: 1,
+        outputBytes: 0,
+        truncated: false,
+      };
+      const runner = new CommandRunner({ sandboxed: true });
+      const run = vi.spyOn(runner, 'run').mockResolvedValue(result);
+      // What the card is raised for: the input the authorizer sees.
+      const carded: unknown[] = [];
+      const broker = new ToolBroker(
+        registry,
+        () => 1,
+        (request) => {
+          carded.push(request.input);
+          return {
+            decision: 'allow',
+            reason: 'test',
+            beforeExecute: () => true,
+            approvalDecision: 'allow_once',
+          };
+        },
       );
-    try {
-      await broker.dispatch({
-        ...owner,
-        callId: 'launch-name',
-        providerName: 'run_command',
-        input: { executable: process.execPath, argv: ['launch', 'RabbitMail'], purpose: 'open' },
-      });
-      expect(carded).toEqual([expect.objectContaining({ argv: ['launch', path] })]);
-      expect(run).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({ argv: ['launch', path] }),
-        expect.anything(),
-      );
-      expect(run.mock.calls[0]![0]).toBe(carded[0]);
-
-      // A name the Start menu does not settle is refused before any card.
-      await expect(
-        broker.dispatch({
+      registerCommandRunnerTool(broker, runner, boundary, COMMAND_RUNNER_TOOL);
+      const owner = {
+        taskId: 'task-launch-name',
+        turnId: 'turn-launch-name',
+        workspaceId: 'workspace-launch-name',
+        policyEpoch: 1,
+      };
+      broker.startTurn(owner, 'grok');
+      // An absolute path outside the Workspace as this OS reads one, since the replaced arguments
+      // are judged again with the checks of an absolute path.
+      const path =
+        process.platform === 'win32'
+          ? 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe'
+          : '/opt/RabbitMail/rabbitmail-desktop';
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      const byName = vi
+        .spyOn(desktopControlModule, 'desktopControlLaunchByName')
+        .mockImplementation((argv) =>
+          argv[1] === 'RabbitMail'
+            ? { argv: ['launch', path] }
+            : argv[1] === 'Missing'
+              ? { refusal: 'デスクトップ操作の実行を拒否した: 見つからない。' }
+              : null,
+        );
+      try {
+        await broker.dispatch({
           ...owner,
-          callId: 'launch-missing',
+          callId: 'launch-name',
           providerName: 'run_command',
-          input: { executable: process.execPath, argv: ['launch', 'Missing'], purpose: 'open' },
-        }),
-      ).rejects.toThrow('見つからない');
-      expect(carded).toHaveLength(1);
-    } finally {
-      desktop.mockRestore();
-      byName.mockRestore();
-      run.mockRestore();
-      await broker.dispose();
-    }
-  });
+          input: { executable: process.execPath, argv: ['launch', 'RabbitMail'], purpose: 'open' },
+        });
+        expect(carded).toEqual([expect.objectContaining({ argv: ['launch', path] })]);
+        expect(run).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ argv: ['launch', path] }),
+          expect.anything(),
+        );
+        expect(run.mock.calls[0]![0]).toBe(carded[0]);
+
+        // A name the Start menu does not settle is refused before any card.
+        await expect(
+          broker.dispatch({
+            ...owner,
+            callId: 'launch-missing',
+            providerName: 'run_command',
+            input: { executable: process.execPath, argv: ['launch', 'Missing'], purpose: 'open' },
+          }),
+        ).rejects.toThrow('見つからない');
+        expect(carded).toHaveLength(1);
+      } finally {
+        desktop.mockRestore();
+        byName.mockRestore();
+        run.mockRestore();
+        await broker.dispose();
+      }
+    },
+  );
 
   it.skipIf(
     process.platform !== 'win32' || desktopControlModule.resolveDesktopControlCommand() === null,
@@ -861,76 +866,98 @@ describe('desktop control Workspace roots', () => {
       expect(run.mock.calls.at(-1)![1]?.desktopControlWorkspaceRoots).toEqual([workspace]);
       run.mockClear();
       authorize.mockClear();
-      // `launch`: an executable in the Worker's worktree or in the parent's Workspace is refused
-      // before any card, and so would the runner refuse it with the roots it is given; one
-      // outside both goes on to its card, for the Worker as for the Leader.
-      const outside =
-        process.platform === 'win32'
-          ? ['C:\\Windows\\System32\\charmap.exe', 'C:\\Program Files\\RabbitMail\\rabbitmail.exe']
-          : ['/usr/bin/xcalc', '/opt/RabbitMail/rabbitmail'];
-      for (const inside of [join(worktree, 'app.exe'), join(workspace, 'app.exe')]) {
-        await expect(dispatch('marked', ['launch', inside])).rejects.toThrow(
-          'Workspace の中の実行ファイルは起動できない',
-        );
-        expect(
-          desktopControlModule.desktopControlArgvRefusal(['launch', inside], [workspace, worktree]),
-        ).toContain('Workspace の中の実行ファイルは起動できない');
-      }
-      // Without the Worker's roots, its worktree would read as outside: what the fix closes.
-      expect(
-        desktopControlModule.desktopControlArgvRefusal(
-          ['launch', join(worktree, 'app.exe')],
-          [workspace],
-        ),
-      ).toBeNull();
-      expect(authorize).not.toHaveBeenCalled();
-      for (const path of outside) {
-        await dispatch('marked', ['launch', path]);
-        await dispatch('leader', ['launch', path]);
-      }
-      expect(authorize).toHaveBeenCalledTimes(4);
-      expect(run.mock.calls.map(([spec]) => spec.argv[0])).toEqual([
-        'launch',
-        'launch',
-        'launch',
-        'launch',
-      ]);
-      run.mockClear();
-      authorize.mockClear();
-      // Through links: a root given through a link, with the executable named through the link or
-      // by its real path, existing or not yet written; and a link from outside into the worktree.
-      // Refused before any card, and by the runner's check with the roots it would be given.
-      for (const [who, root, inside] of [
-        ['linked', linkedRoot, join(linkedRoot, 'app.exe')],
-        ['linked', linkedRoot, join(realWorktree, 'app.exe')],
-        ['linked', linkedRoot, join(linkedRoot, 'tool.exe')],
-        ['linked', linkedRoot, join(realWorktree, 'tool.exe')],
-        ['real', realWorktree, join(outsideLink, 'app.exe')],
-        ['real', realWorktree, join(outsideLink, 'tool.exe')],
-        ['real', realWorktree, join(insideLink, 'outside.exe')],
-        ['linked', linkedRoot, join(linkedRoot, 'to-elsewhere', 'outside.exe')],
-      ] as const) {
-        for (const argv of [
-          ['launch', inside],
-          ['batch', JSON.stringify([{ command: 'launch', args: { app: inside } }])],
+      if (process.platform === 'darwin') {
+        // macOS: `launch` takes an app's name or bundle id only, so a path is refused before any
+        // card wherever it points, in the Worker's worktree, in the parent's Workspace or outside.
+        for (const path of [
+          join(worktree, 'app.exe'),
+          join(workspace, 'app.exe'),
+          '/usr/bin/xcalc',
+          '/opt/RabbitMail/rabbitmail',
         ]) {
-          await expect(dispatch(who, argv)).rejects.toThrow(
-            'Workspace の中の実行ファイルは起動できない',
-          );
-          expect(desktopControlModule.desktopControlArgvRefusal(argv, [workspace, root])).toContain(
-            'Workspace の中の実行ファイルは起動できない',
-          );
+          await expect(dispatch('marked', ['launch', path])).rejects.toThrow('パスは渡せない');
+          await expect(dispatch('leader', ['launch', path])).rejects.toThrow('パスは渡せない');
         }
+        expect(authorize).not.toHaveBeenCalled();
+        expect(run).not.toHaveBeenCalled();
+      } else {
+        // `launch`: an executable in the Worker's worktree or in the parent's Workspace is refused
+        // before any card, and so would the runner refuse it with the roots it is given; one
+        // outside both goes on to its card, for the Worker as for the Leader.
+        const outside =
+          process.platform === 'win32'
+            ? [
+                'C:\\Windows\\System32\\charmap.exe',
+                'C:\\Program Files\\RabbitMail\\rabbitmail.exe',
+              ]
+            : ['/usr/bin/xcalc', '/opt/RabbitMail/rabbitmail'];
+        for (const inside of [join(worktree, 'app.exe'), join(workspace, 'app.exe')]) {
+          await expect(dispatch('marked', ['launch', inside])).rejects.toThrow(
+            'Workspace の中の実行ファイルは起動できない',
+          );
+          expect(
+            desktopControlModule.desktopControlArgvRefusal(
+              ['launch', inside],
+              [workspace, worktree],
+            ),
+          ).toContain('Workspace の中の実行ファイルは起動できない');
+        }
+        // Without the Worker's roots, its worktree would read as outside: what the fix closes.
+        expect(
+          desktopControlModule.desktopControlArgvRefusal(
+            ['launch', join(worktree, 'app.exe')],
+            [workspace],
+          ),
+        ).toBeNull();
+        expect(authorize).not.toHaveBeenCalled();
+        for (const path of outside) {
+          await dispatch('marked', ['launch', path]);
+          await dispatch('leader', ['launch', path]);
+        }
+        expect(authorize).toHaveBeenCalledTimes(4);
+        expect(run.mock.calls.map(([spec]) => spec.argv[0])).toEqual([
+          'launch',
+          'launch',
+          'launch',
+          'launch',
+        ]);
+        run.mockClear();
+        authorize.mockClear();
+        // Through links: a root given through a link, with the executable named through the link or
+        // by its real path, existing or not yet written; and a link from outside into the worktree.
+        // Refused before any card, and by the runner's check with the roots it would be given.
+        for (const [who, root, inside] of [
+          ['linked', linkedRoot, join(linkedRoot, 'app.exe')],
+          ['linked', linkedRoot, join(realWorktree, 'app.exe')],
+          ['linked', linkedRoot, join(linkedRoot, 'tool.exe')],
+          ['linked', linkedRoot, join(realWorktree, 'tool.exe')],
+          ['real', realWorktree, join(outsideLink, 'app.exe')],
+          ['real', realWorktree, join(outsideLink, 'tool.exe')],
+          ['real', realWorktree, join(insideLink, 'outside.exe')],
+          ['linked', linkedRoot, join(linkedRoot, 'to-elsewhere', 'outside.exe')],
+        ] as const) {
+          for (const argv of [
+            ['launch', inside],
+            ['batch', JSON.stringify([{ command: 'launch', args: { app: inside } }])],
+          ]) {
+            await expect(dispatch(who, argv)).rejects.toThrow(
+              'Workspace の中の実行ファイルは起動できない',
+            );
+            expect(
+              desktopControlModule.desktopControlArgvRefusal(argv, [workspace, root]),
+            ).toContain('Workspace の中の実行ファイルは起動できない');
+          }
+        }
+        // The folder the inner link points at is itself outside every root, named by its own path.
+        expect(
+          desktopControlModule.desktopControlArgvRefusal(
+            ['launch', join(elsewhere, 'outside.exe')],
+            [workspace, realWorktree],
+          ),
+        ).toBeNull();
+        expect(authorize).not.toHaveBeenCalled();
+        expect(run).not.toHaveBeenCalled();
       }
-      // The folder the inner link points at is itself outside every root, named by its own path.
-      expect(
-        desktopControlModule.desktopControlArgvRefusal(
-          ['launch', join(elsewhere, 'outside.exe')],
-          [workspace, realWorktree],
-        ),
-      ).toBeNull();
-      expect(authorize).not.toHaveBeenCalled();
-      expect(run).not.toHaveBeenCalled();
       // A Worker whose mark is gone by the time its run would start never runs, least of all as
       // the Leader.
       authorize.mockImplementationOnce(() => {
