@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ErrorCode, Rect, WindowInfo};
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
 use std::time::Instant;
@@ -321,7 +322,7 @@ fn required_string_field(dict: &WindowDictionary, key: &str) -> Result<String, A
     string_field(dict, key).ok_or_else(|| missing_field_error(key))
 }
 
-fn int_field(dict: &WindowDictionary, key: &str) -> Option<i64> {
+pub(in crate::system) fn int_field(dict: &WindowDictionary, key: &str) -> Option<i64> {
     use crate::tree::properties::cf_type::borrowed_cf_number;
     use core_foundation::base::TCFType;
 
