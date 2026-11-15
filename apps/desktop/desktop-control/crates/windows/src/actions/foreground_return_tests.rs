@@ -1,7 +1,7 @@
 // Added by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
-    HandBackOutcome, WatchState, Watched, counts_as_handed, grace_start, outcome, takes_as_raised,
-    watch_needed, within_grace_of_action,
+    HandBackOutcome, WatchState, Watched, counts_as_handed, grace_start, outcome,
+    replaced_in_front, takes_as_raised, watch_needed, within_grace_of_action,
 };
 use crate::system::launch::{WatchAction, foreground_step, within_grace};
 use std::time::{Duration, Instant};
@@ -24,11 +24,24 @@ enum Front {
 /// action was sent), through the same steps as the watch on Windows, and
 /// returns the action of each read and how the watch ended.
 fn drive(reads: &[(Front, bool, u64)]) -> (Vec<WatchAction>, Watched) {
+    let reads: Vec<(Front, bool, u64, bool)> = reads
+        .iter()
+        .map(|&(front, input, at)| (front, input, at, false))
+        .collect();
+    drive_with(false, &reads)
+}
+
+/// `drive`, with whether the window in front before was the target's own
+/// (`prior_was_target`) and, for each read, whether it is gone by then.
+fn drive_with(
+    prior_was_target: bool,
+    reads: &[(Front, bool, u64, bool)],
+) -> (Vec<WatchAction>, Watched) {
     let started = Instant::now();
     let mut state = WatchState::default();
     let mut raised = false;
     let mut actions = Vec::new();
-    for &(front, input, at) in reads {
+    for (index, &(front, input, at, prior_gone)) in reads.iter().enumerate() {
         let now = started + Duration::from_millis(at);
         let (is_prior, is_target, shown_before, first_seen) = match front {
             Front::Prior => (true, false, false, None),
@@ -41,6 +54,12 @@ fn drive(reads: &[(Front, bool, u64)]) -> (Vec<WatchAction>, Watched) {
             Front::Existing => (false, true, true, None),
             Front::Other => (false, false, false, None),
         };
+        // As the watch does, before any hand-back.
+        if replaced_in_front(prior_was_target, prior_gone, is_target, is_prior) {
+            state.replaced_by = Some(1_000 + index as isize);
+            actions.push(WatchAction::StopForUser);
+            break;
+        }
         if is_target
             && !is_prior
             && takes_as_raised(shown_before, raised, within_grace_of_action(started, now))
@@ -215,6 +234,74 @@ fn only_a_window_of_the_target_counts() {
         !counts_as_handed(false, false, false, false),
         "another process"
     );
+}
+
+/// #1293's rest: the click went to the profile picker in front, the picker
+/// closed, and the browser's new window took the front in its place. The
+/// user's front stayed on the same app and there was nothing to hand back
+/// to: nothing is tried, and the result says the window was replaced (with
+/// the new window), not that a hand-back failed.
+#[test]
+fn the_target_window_in_front_replaced_by_another_of_its_windows_is_not_handed_back() {
+    let (actions, watched) = drive_with(
+        true,
+        &[
+            (Front::Prior, false, 300, false),
+            (Front::New(1_450), false, 1_460, true),
+        ],
+    );
+    assert_eq!(actions, [WatchAction::Wait, WatchAction::StopForUser]);
+    assert!(!watched.tried, "no hand-back to a window that is gone");
+    assert_eq!(watched.replaced_by, Some(1_001));
+    assert_eq!(
+        outcome(Some(watched), true, false),
+        HandBackOutcome::Replaced(1_001)
+    );
+    // Gone only after a hand-back was tried (the new window came first):
+    // still replaced, never failed.
+    let (actions, watched) = drive_with(
+        true,
+        &[
+            (Front::New(100), false, 110, false),
+            (Front::New(100), false, 400, true),
+        ],
+    );
+    assert_eq!(actions, [WatchAction::Restore, WatchAction::StopForUser]);
+    assert!(watched.pending);
+    assert_eq!(
+        outcome(Some(watched), true, false),
+        HandBackOutcome::Replaced(1_001)
+    );
+}
+
+/// The window in front before was another app's, and it is still there: the
+/// target's new window taking the front is handed back, as before. A window
+/// of the target in front while the target's own window that was in front
+/// is still shown is not a replacement either.
+#[test]
+fn another_apps_window_that_is_still_there_is_handed_back_to() {
+    let (actions, watched) = drive_with(
+        false,
+        &[
+            (Front::New(340), false, 360, false),
+            (Front::Prior, false, 380, false),
+        ],
+    );
+    assert_eq!(actions, [WatchAction::Restore, WatchAction::Wait]);
+    assert_eq!(
+        outcome(Some(watched), false, true),
+        HandBackOutcome::HandedBack
+    );
+    assert!(
+        !replaced_in_front(false, true, true, false),
+        "another app's window gone"
+    );
+    assert!(!replaced_in_front(true, false, true, false), "still shown");
+    assert!(
+        !replaced_in_front(true, true, false, false),
+        "another app in front"
+    );
+    assert!(replaced_in_front(true, true, true, false));
 }
 
 /// The watch reuses the launch's decision and spans, and the hand-back lives

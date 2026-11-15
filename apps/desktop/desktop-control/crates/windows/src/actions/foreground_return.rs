@@ -35,6 +35,13 @@
 //!   appeared, so the grace never stretches past it.
 //! - A hand-back that was tried and never seen to work is reported apart from
 //!   a take left alone as possibly the user's choice.
+//! - When the window in front before was the target's own and the action
+//!   closed it (a profile picker whose button opens the browser window), the
+//!   target's window in front in its place is not handed back: there is no
+//!   window left to give the front to, and the user's front stays on the same
+//!   app. The result says the window was replaced, and names the window in
+//!   front (`window_replaced`, `details.foreground_window`), instead of a
+//!   refused hand-back.
 //!
 //! What this does not catch: a window the target creates only after that
 //! look (a browser that first loads a profile from disk), since the action
@@ -54,6 +61,12 @@ pub(crate) const HAND_BACK_FAILED: &str = "failed";
 /// `details.foreground_hand_back` beside `target_in_front`: the target's
 /// window came to the front when the user may have picked it, so it was left.
 pub(crate) const LEFT_FOR_USER: &str = "left_for_user";
+/// `details.foreground_hand_back` beside `target_in_front`: the window that
+/// was in front was the target's own, it closed (or was hidden) because of
+/// the action, and another window of the target is in front in its place
+/// (`details.foreground_window`). Nothing was handed back: the window to hand
+/// it back to is gone, and the user's front stays on the same app.
+pub(crate) const WINDOW_REPLACED: &str = "window_replaced";
 
 /// What the watch did with the foreground, for the result's details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,6 +80,9 @@ pub(crate) enum HandBackOutcome {
     Failed,
     /// The target's window is in front, left alone as possibly the user's.
     LeftForUser,
+    /// The window in front before was the target's own and is gone, and
+    /// this window of the target (its handle) is in front in its place.
+    Replaced(isize),
 }
 
 /// How the watch ended, read once the action is over.
@@ -77,6 +93,26 @@ pub(crate) struct Watched {
     /// Whether the last hand-back asked for was not yet seen to work.
     pub(crate) pending: bool,
     pub(crate) last: WatchAction,
+    /// The target's window that took the place of the window in front
+    /// before, the target's own, which is gone (see [`replaced_in_front`]).
+    pub(crate) replaced_by: Option<isize>,
+}
+
+/// Whether the window in front before the action, a window of the target
+/// itself (`prior_was_target`), is gone (closed, or no longer shown) and a
+/// window of the target is in front in its place: the action made the
+/// target swap the window the user had in front for another of its own (a
+/// profile picker that closes as the browser window it opens comes up).
+/// The user's front stays on the same app, and there is nothing left to
+/// hand it back to, so the watch stops without trying (#1293). A window of
+/// another app that was in front and is still there is handed back as before.
+pub(crate) fn replaced_in_front(
+    prior_was_target: bool,
+    prior_gone: bool,
+    front_is_target: bool,
+    front_is_prior: bool,
+) -> bool {
+    prior_was_target && prior_gone && front_is_target && !front_is_prior
 }
 
 /// Whether the look right after the action calls for a watch: the target
@@ -143,6 +179,9 @@ pub(crate) fn outcome(
     let Some(watched) = watched else {
         return HandBackOutcome::None;
     };
+    if let Some(window) = watched.replaced_by {
+        return HandBackOutcome::Replaced(window);
+    }
     if came_forward {
         if watched.last == WatchAction::StopFailed || watched.pending {
             HandBackOutcome::Failed
@@ -164,6 +203,7 @@ pub(crate) fn outcome(
 pub(crate) struct WatchState {
     pub(crate) hand_back: HandBack,
     pub(crate) tried: bool,
+    pub(crate) replaced_by: Option<isize>,
 }
 
 impl WatchState {
@@ -172,6 +212,7 @@ impl WatchState {
             tried: self.tried,
             pending: self.hand_back.pending(),
             last,
+            replaced_by: self.replaced_by,
         }
     }
 }
@@ -179,8 +220,8 @@ impl WatchState {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::{
-        WatchState, Watched, counts_as_handed, grace_start, takes_as_raised, watch_needed,
-        within_grace_of_action,
+        WatchState, Watched, counts_as_handed, grace_start, replaced_in_front, takes_as_raised,
+        watch_needed, within_grace_of_action,
     };
     use crate::actions::foreground_hold::window_belongs_to;
     use crate::system::launch::{
@@ -203,6 +244,9 @@ mod imp {
     pub(crate) struct ActionWatch {
         pid: u32,
         prior: HWND,
+        /// Whether the window in front before the action was the target's
+        /// own (the action went to the window the user had in front).
+        prior_was_target: bool,
         /// `GetTickCount` when the action began, for `user_input_since`.
         tick: u32,
         started: Instant,
@@ -224,6 +268,7 @@ mod imp {
             Some(Self {
                 pid,
                 prior,
+                prior_was_target: !prior.is_null() && window_belongs_to(prior, pid),
                 tick,
                 started,
                 before,
@@ -253,6 +298,21 @@ mod imp {
             let front = unsafe { GetForegroundWindow() };
             let target_took_front =
                 !front.is_null() && front != self.prior && window_belongs_to(front, self.pid);
+            // The target's own window that was in front, already gone, with
+            // another of its windows in front: nothing to hand back to.
+            if replaced_in_front(
+                self.prior_was_target,
+                self.prior_gone(),
+                target_took_front,
+                false,
+            ) {
+                unlock();
+                let state = WatchState {
+                    replaced_by: Some(front as isize),
+                    ..WatchState::default()
+                };
+                return Some(state.watched(WatchAction::Wait));
+            }
             // A prior window gone or minimized is not given the foreground
             // back, as a launch leaves it.
             let restorable = !self.prior.is_null()
@@ -282,6 +342,15 @@ mod imp {
                 );
             }
             Some(state.watched(last))
+        }
+
+        /// Whether the window in front before the action is gone: destroyed,
+        /// or no longer shown (hidden as it closes).
+        fn prior_gone(&self) -> bool {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
+            !self.prior.is_null()
+                && (unsafe { IsWindow(self.prior) } == 0
+                    || unsafe { IsWindowVisible(self.prior) } == 0)
         }
 
         /// Records `at` for each window of `windows` shown now that was not
@@ -331,6 +400,17 @@ mod imp {
                 let is_prior = front == self.prior;
                 let is_target = !front.is_null() && window_belongs_to(front, self.pid);
                 let shown_before = self.before.get(&key).copied() == Some(true);
+                // Checked before any hand-back: one to a window that is gone
+                // cannot work, and would read as refused.
+                if replaced_in_front(
+                    self.prior_was_target,
+                    self.prior_gone(),
+                    is_target,
+                    is_prior,
+                ) {
+                    state.replaced_by = Some(key);
+                    return WatchAction::StopForUser;
+                }
                 if is_target
                     && !is_prior
                     && takes_as_raised(

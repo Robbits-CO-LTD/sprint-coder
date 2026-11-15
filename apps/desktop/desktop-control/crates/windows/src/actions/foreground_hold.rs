@@ -52,8 +52,10 @@
 //! after all that and was not before, the result (or the error) says so
 //! (`details.foreground: "target_in_front"`), whoever moved it (the person
 //! may have clicked the target), with `details.foreground_hand_back:
-//! "failed"` when a hand-back was refused, or `"left_for_user"` when the take
-//! was left alone as possibly the user's. A window counts as the target's
+//! "failed"` when a hand-back was refused, `"left_for_user"` when the take
+//! was left alone as possibly the user's, or `"window_replaced"` (with
+//! `details.foreground_window`) when the target's own window that was in
+//! front closed and another of its windows took its place. A window counts as the target's
 //! when the target's process owns it, owns its root owner, or is the app a
 //! shell frame hosts in it. An answer that comes after the action is over is
 //! not seen.
@@ -107,16 +109,26 @@ impl HoldReport {
     /// The details this report adds; none when the lock held, the wait
     /// completed and the target stayed behind.
     pub(crate) fn entries(self) -> Vec<(&'static str, &'static str)> {
-        use crate::actions::foreground_return::{HAND_BACK_FAILED, HANDED_BACK, LEFT_FOR_USER};
+        use crate::actions::foreground_return::{
+            HAND_BACK_FAILED, HANDED_BACK, LEFT_FOR_USER, WINDOW_REPLACED,
+        };
         let mut entries = Vec::new();
-        if self.came_forward {
+        if let HandBackOutcome::Replaced(_) = self.hand_back {
+            // The target is in front in place of its own window that was:
+            // said so whether or not that window still counts as its own
+            // (a hidden one still does), and never as a refused hand-back.
+            entries.push(("foreground", TARGET_IN_FRONT));
+            entries.push(("foreground_hand_back", WINDOW_REPLACED));
+        } else if self.came_forward {
             entries.push(("foreground", TARGET_IN_FRONT));
             match self.hand_back {
                 HandBackOutcome::Failed => entries.push(("foreground_hand_back", HAND_BACK_FAILED)),
                 HandBackOutcome::LeftForUser => {
                     entries.push(("foreground_hand_back", LEFT_FOR_USER))
                 }
-                HandBackOutcome::None | HandBackOutcome::HandedBack => {}
+                HandBackOutcome::None
+                | HandBackOutcome::HandedBack
+                | HandBackOutcome::Replaced(_) => {}
             }
         } else if self.hand_back == HandBackOutcome::HandedBack {
             entries.push(("foreground", HANDED_BACK));
@@ -199,6 +211,14 @@ pub(crate) fn note_report(
     if entries.is_empty() {
         return result;
     }
+    // The window now in front in place of the target's own that closed, by
+    // the id the window commands take, so the next command can use it.
+    let replaced_by = match report.hand_back {
+        HandBackOutcome::Replaced(handle) => Some(crate::system::window::window_ops::window_id(
+            handle as crate::system::window::window_enum::WindowHandle,
+        )),
+        _ => None,
+    };
     let merge = |details: Option<serde_json::Value>| {
         let mut map = match details {
             Some(serde_json::Value::Object(map)) => map,
@@ -211,6 +231,9 @@ pub(crate) fn note_report(
         };
         for (key, value) in &entries {
             map.insert((*key).into(), (*value).into());
+        }
+        if let Some(id) = &replaced_by {
+            map.insert("foreground_window".into(), id.clone().into());
         }
         serde_json::Value::Object(map)
     };

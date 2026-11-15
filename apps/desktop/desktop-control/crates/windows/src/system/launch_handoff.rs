@@ -172,10 +172,15 @@ impl Handoff {
                     self.prior_foreground.as_deref(),
                     self.several_instances,
                 );
+                let shown = owned_by_targets(&windows, &targets)
+                    .into_iter()
+                    .map(|window| (window.id.clone(), window.process_instance.clone()))
+                    .collect();
                 HandoffRead {
                     look: pick_handoff_window(windows, &targets, before, self.several_instances),
                     raised,
                     only_existing,
+                    shown,
                 }
             }),
             Err(error) if super::is_unobservable_within_budget(&error) => {
@@ -199,6 +204,10 @@ pub(super) struct HandoffRead {
     /// the launch and no new one appeared: all a launch can say then is that
     /// no new window appeared and this is the instance's one visible window.
     pub(super) only_existing: Option<WindowInfo>,
+    /// The id and process instance of every window the instances show in this
+    /// read (empty when nothing could be read), so a window kept from an
+    /// earlier read can be checked to be still shown (`still_shows`).
+    pub(super) shown: Vec<(String, Option<String>)>,
 }
 
 impl HandoffRead {
@@ -207,7 +216,18 @@ impl HandoffRead {
             look: HandoffLook::None,
             raised: None,
             only_existing: None,
+            shown: Vec::new(),
         }
+    }
+
+    /// Whether `window`, read earlier, is still shown by the same process
+    /// instance in this read. A read that could not see the windows says no.
+    pub(super) fn still_shows(&self, window: &WindowInfo) -> bool {
+        window.process_instance.is_some()
+            && self
+                .shown
+                .iter()
+                .any(|(id, instance)| *id == window.id && *instance == window.process_instance)
     }
 }
 
@@ -226,14 +246,7 @@ pub(super) fn read_existing(
     if several_instances {
         return (None, None);
     }
-    let owned: Vec<&WindowInfo> = windows
-        .iter()
-        .filter(|window| {
-            targets.iter().any(|(pid, token)| {
-                window.pid == *pid && token.is_some() && window.process_instance == *token
-            })
-        })
-        .collect();
+    let owned = owned_by_targets(windows, targets);
     let raised = owned
         .iter()
         .find(|window| {
@@ -247,6 +260,21 @@ pub(super) fn read_existing(
         _ => None,
     };
     (raised, only_existing)
+}
+
+/// The windows of `targets`: the same pid and the same process instance.
+fn owned_by_targets<'a>(
+    windows: &'a [WindowInfo],
+    targets: &[(ProcessId, Option<String>)],
+) -> Vec<&'a WindowInfo> {
+    windows
+        .iter()
+        .filter(|window| {
+            targets.iter().any(|(pid, token)| {
+                window.pid == *pid && token.is_some() && window.process_instance == *token
+            })
+        })
+        .collect()
 }
 
 /// The id of the foreground window now, as the window inventory names it.
