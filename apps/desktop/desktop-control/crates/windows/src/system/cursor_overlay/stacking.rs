@@ -66,8 +66,10 @@ pub(crate) enum Placement {
     TopOfTopmost,
     /// Directly below this window, which is directly above the family.
     Below(isize),
-    /// Top of the ordinary band, out of the topmost band.
-    TopOfOrdinary,
+    /// Top of the ordinary band, out of the topmost band. `under` is the
+    /// topmost window directly above the family, when there is one: the
+    /// ordinary band ends directly below it.
+    TopOfOrdinary { under: Option<isize> },
     /// Under every window.
     Bottom,
     /// Already directly above the family; moving it would only repaint.
@@ -110,7 +112,7 @@ pub(crate) fn placement(
         // the topmost band it is still above the family, but it is above
         // everything else as well, so it comes down to the ordinary band.
         return if own_topmost {
-            Placement::TopOfOrdinary
+            Placement::TopOfOrdinary { under: None }
         } else {
             Placement::Stay
         };
@@ -118,9 +120,56 @@ pub(crate) fn placement(
     match just_above_top {
         // The family is the highest ordinary window: the top of the
         // ordinary band is directly above it.
-        None => Placement::TopOfOrdinary,
-        Some(neighbour) if neighbour.topmost => Placement::TopOfOrdinary,
+        None => Placement::TopOfOrdinary { under: None },
+        Some(neighbour) if neighbour.topmost => Placement::TopOfOrdinary {
+            under: Some(neighbour.handle),
+        },
         Some(neighbour) => Placement::Below(neighbour.handle),
+    }
+}
+
+/// What `SetWindowPos` is handed as `hWndInsertAfter` for a placement, or
+/// `None` for no call at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InsertAfter {
+    /// `HWND_TOPMOST`: top of the topmost band, from either band.
+    Topmost,
+    /// `HWND_NOTOPMOST`: out of the topmost band, to the top of the ordinary
+    /// one. It does nothing to a window that is already ordinary.
+    NoTopmost,
+    /// `HWND_TOP`: the top of the band the window is in, which for an
+    /// ordinary window is the top of the ordinary band, under every topmost
+    /// window.
+    Top,
+    /// `HWND_BOTTOM`.
+    Bottom,
+    /// Directly below this window.
+    Window(isize),
+}
+
+/// The `hWndInsertAfter` that carries out `decided` for an overlay that is in
+/// the topmost band (`own_topmost`) or not.
+///
+/// The top of the ordinary band needs two different calls: `HWND_NOTOPMOST`
+/// brings a topmost overlay down there, but leaves an ordinary one where it
+/// is - so an overlay the working window had just been brought above would
+/// stay under it on every later frame. An ordinary overlay is put directly
+/// below the topmost window that ends the band, which stays ordinary (a
+/// window inserted after a topmost one keeps its band). `HWND_TOP` is only
+/// the fallback when no topmost window is above: measured, Windows ignored
+/// `HWND_TOP` for a window that had to go above the foreground window, while
+/// it honoured an insertion below a named window to the same place.
+pub(crate) fn insert_after(decided: Placement, own_topmost: bool) -> Option<InsertAfter> {
+    match decided {
+        Placement::Stay => None,
+        Placement::TopOfTopmost => Some(InsertAfter::Topmost),
+        Placement::TopOfOrdinary { .. } if own_topmost => Some(InsertAfter::NoTopmost),
+        Placement::TopOfOrdinary {
+            under: Some(window),
+        } => Some(InsertAfter::Window(window)),
+        Placement::TopOfOrdinary { under: None } => Some(InsertAfter::Top),
+        Placement::Bottom => Some(InsertAfter::Bottom),
+        Placement::Below(window) => Some(InsertAfter::Window(window)),
     }
 }
 
@@ -134,12 +183,12 @@ pub(crate) use imp::Stacker;
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use super::{Anchor, Kind, Neighbour, Placement, WALK_LIMIT, placement};
+    use super::{Anchor, InsertAfter, Kind, Neighbour, WALK_LIMIT, insert_after, placement};
     use std::cell::Cell;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GA_ROOT, GA_ROOTOWNER, GW_HWNDPREV, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetWindow,
-        GetWindowLongPtrW, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow,
+        GetWindowLongPtrW, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow,
         IsWindowVisible, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos, WS_EX_TOPMOST,
     };
 
@@ -161,15 +210,16 @@ mod imp {
         /// the order of every other window are left as they are.
         pub(crate) fn place(&self, own: HWND, anchor: Option<isize>, overlay_class: &[u16]) {
             let (view, root, family) = self.resolve(anchor);
+            let own_topmost = is_topmost(own);
             let decided = match view {
                 Anchor::Live { topmost: false } => placement(
                     view,
                     Walk::from(root, |window| classify(window, own, family, overlay_class)),
-                    is_topmost(own),
+                    own_topmost,
                 ),
-                other => placement(other, std::iter::empty(), is_topmost(own)),
+                other => placement(other, std::iter::empty(), own_topmost),
             };
-            apply(own, decided);
+            apply(own, insert_after(decided, own_topmost));
         }
 
         /// The anchor as it stands now, its root window and its family's
@@ -280,13 +330,14 @@ mod imp {
         }
     }
 
-    fn apply(own: HWND, decided: Placement) {
-        let after = match decided {
-            Placement::Stay => return,
-            Placement::TopOfTopmost => HWND_TOPMOST,
-            Placement::TopOfOrdinary => HWND_NOTOPMOST,
-            Placement::Bottom => HWND_BOTTOM,
-            Placement::Below(window) => window as HWND,
+    fn apply(own: HWND, after: Option<InsertAfter>) {
+        let after = match after {
+            None => return,
+            Some(InsertAfter::Topmost) => HWND_TOPMOST,
+            Some(InsertAfter::NoTopmost) => HWND_NOTOPMOST,
+            Some(InsertAfter::Top) => HWND_TOP,
+            Some(InsertAfter::Bottom) => HWND_BOTTOM,
+            Some(InsertAfter::Window(window)) => window as HWND,
         };
         unsafe {
             SetWindowPos(
