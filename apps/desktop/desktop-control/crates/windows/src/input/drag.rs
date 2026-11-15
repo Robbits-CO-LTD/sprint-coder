@@ -54,7 +54,7 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
     deadline.ensure_remaining()?;
     sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS))?;
 
-    let mut guard = DragReleaseGuard::new(origin).with_origin_point(params.from.clone());
+    let mut guard = DragReleaseGuard::new(origin);
     guard.arm();
     post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTDOWN)]);
     guard.mark_delivered();
@@ -76,27 +76,16 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
 
         deadline.ensure_remaining()?;
         // The drop is judged again just before the button is let go: the window at the
-        // destination can have changed while the button was down. Refused, the button is not let
-        // go there. It is let go at a point verified not to be Sprint Coder's - the origin, a
-        // screen edge, or (none safe) in place, never held (`guard.release_now`).
-        if let Err(error) = crate::system::own_window::recheck_pointer(&params.to, false) {
-            let released = guard.release_now();
+        // destination can have changed while the button was down. Refused, the button is not
+        // let go there; the guard lets it go back at the origin (`DragReleaseGuard`).
+        crate::system::own_window::recheck_pointer(&params.to, false).map_err(|error| {
             let mut error = crate::system::own_window::refused_part_way(error, "drops_sent", 0);
             if let Some(details) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
-                details.insert("button_released_at".into(), released.label.into());
-                // Only `false` when the button was let go somewhere verified not to be Sprint
-                // Coder's; otherwise whether anything reached Sprint Coder is unknown.
-                details.insert(
-                    "dropped".into(),
-                    if released.sprint_coder_avoided {
-                        false.into()
-                    } else {
-                        serde_json::Value::Null
-                    },
-                );
+                details.insert("dropped".into(), false.into());
+                details.insert("button_released_at".into(), "origin".into());
             }
-            return Err(error);
-        }
+            error
+        })?;
         post_mouse_inputs(&[move_input(destination)]);
         guard.mark_delivered();
         post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTUP)]);

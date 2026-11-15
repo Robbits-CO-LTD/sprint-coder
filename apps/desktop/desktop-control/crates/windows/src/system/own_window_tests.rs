@@ -1089,85 +1089,23 @@ fn a_drop_on_a_window_that_became_sprint_coder_is_not_made() {
             })
         })
     };
-    // The release point is chosen from the facts at that moment (`drag_release_plan`); the plan
-    // is put in place so this test is about the refusal and the result, not the desktop read.
-    let refused = |later: Vec<Vec<Option<u32>>>, plan: crate::system::own_window::ReleasePlan| {
-        crate::system::own_window::with_fake_release(plan, || drag(later))
-    };
-    let origin_plan = crate::system::own_window::ReleasePlan {
-        target: Some(Point { x: 5.0, y: 5.0 }),
-        label: "origin",
-        sprint_coder_avoided: true,
-    };
-    let (result, flags) = refused(
-        vec![vec![Some(other)], vec![Some(own)]],
-        origin_plan.clone(),
-    );
+    let (result, flags) = drag(vec![vec![Some(other)], vec![Some(own)]]);
     let error = result.expect_err("the drop is refused");
     let details = error.details.as_ref().expect("details");
     assert_eq!(details["kind"], "own_window_refused");
-    // Let go at the origin, which is verified not to be Sprint Coder's: nothing reached it.
     assert_eq!(details["dropped"], false);
     assert_eq!(details["button_released_at"], "origin");
     assert_eq!(details["physical_delivery_started"], true);
-    // The button went down once and was let go once; it is never left held.
+    assert_eq!(details["emergency_release_posted"], true);
+    // The button went down once and was let go once, by the release back at the origin: the
+    // flags just before it are the move back there.
     assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTDOWN), 1);
     assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
     assert_eq!(flags.last().copied(), Some(MOUSEEVENTF_LEFTUP));
-
-    // The origin became Sprint Coder's too, so the button is let go at a verified safe point.
-    let (result, _flags) = refused(
-        vec![vec![Some(other)], vec![Some(own)]],
-        crate::system::own_window::ReleasePlan {
-            target: Some(Point { x: 1.0, y: 1.0 }),
-            label: "safe_point",
-            sprint_coder_avoided: true,
-        },
-    );
-    let details = result.expect_err("refused").details.expect("details");
-    assert_eq!(details["button_released_at"], "safe_point");
-    assert_eq!(details["dropped"], false);
-
-    // No point could be verified safe: the button is let go in place rather than held, and
-    // whether anything reached Sprint Coder is unknown (`dropped` is null, not false).
-    let (result, flags) = refused(
-        vec![vec![Some(other)], vec![Some(own)]],
-        crate::system::own_window::ReleasePlan {
-            target: None,
-            label: "in_place_unverified",
-            sprint_coder_avoided: false,
-        },
-    );
-    let details = result.expect_err("refused").details.expect("details");
-    assert_eq!(details["button_released_at"], "in_place_unverified");
-    assert!(details["dropped"].is_null());
-    assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
-
     // Unchanged, the drop is made.
     let (result, flags) = drag(Vec::new());
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(count_flag(&flags, MOUSEEVENTF_LEFTUP), 1);
-}
-
-#[test]
-fn choose_release_takes_the_origin_then_a_safe_edge_then_in_place() {
-    use crate::system::own_window::choose_release;
-    let p = |x: f64| Point { x, y: 0.0 };
-    // The origin is safe: let go there.
-    let plan = choose_release(&[(p(0.0), true), (p(1.0), true)]);
-    assert_eq!(plan.target, Some(p(0.0)));
-    assert_eq!(plan.label, "origin");
-    assert!(plan.sprint_coder_avoided);
-    // The origin is not, a later edge is: let go at that edge.
-    let plan = choose_release(&[(p(0.0), false), (p(1.0), false), (p(2.0), true)]);
-    assert_eq!(plan.target, Some(p(2.0)));
-    assert_eq!(plan.label, "safe_point");
-    assert!(plan.sprint_coder_avoided);
-    // None is safe: in place, not held.
-    let plan = choose_release(&[(p(0.0), false), (p(1.0), false)]);
-    assert_eq!(plan.target, None);
-    assert_eq!(plan.label, "in_place_unverified");
-    assert!(!plan.sprint_coder_avoided);
 }
 
 #[cfg(target_os = "windows")]

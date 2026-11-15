@@ -394,37 +394,6 @@ mod facts {
         hwnd_owners(unsafe { GetForegroundWindow() } as isize)
     }
 
-    /// Points a few pixels inside each corner of the virtual screen.
-    pub(crate) fn screen_corners() -> Vec<Point> {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-            SM_YVIRTUALSCREEN,
-        };
-        let metric = |index| unsafe { GetSystemMetrics(index) };
-        let (left, top, width, height) = (
-            metric(SM_XVIRTUALSCREEN),
-            metric(SM_YVIRTUALSCREEN),
-            metric(SM_CXVIRTUALSCREEN),
-            metric(SM_CYVIRTUALSCREEN),
-        );
-        if width <= 0 || height <= 0 {
-            return Vec::new();
-        }
-        let inset = 2;
-        let xs = [left + inset, left + width - 1 - inset];
-        let ys = [top + inset, top + height - 1 - inset];
-        let mut corners = Vec::new();
-        for y in ys {
-            for x in xs {
-                corners.push(Point {
-                    x: f64::from(x),
-                    y: f64::from(y),
-                });
-            }
-        }
-        corners
-    }
-
     fn styles(window: HWND) -> Option<super::WindowStyles> {
         use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -678,101 +647,6 @@ pub(crate) fn recheck_pointer(
     match acting {
         Some((owner, operation)) => owner.check_pointer(operation, &[point], reaches_front),
         None => Ok(()),
-    }
-}
-
-/// Where a drag's button is let go when the drag is aborted or refused. `target` is the point to
-/// move to before letting go (`None` lets go in place, the last resort); `label` and
-/// `sprint_coder_avoided` describe it for the result.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReleasePlan {
-    pub(crate) target: Option<agent_desktop_core::Point>,
-    pub(crate) label: &'static str,
-    pub(crate) sprint_coder_avoided: bool,
-}
-
-/// Picks the release point from candidates already judged safe or not. The origin comes first, so
-/// an unchanged drag still lets go where it picked up; a later candidate is a fallback point
-/// verified not to belong to Sprint Coder. When none is safe, the button is let go in place
-/// rather than held (a held button blocks the user's own mouse), and the result says so.
-pub(crate) fn choose_release(candidates: &[(agent_desktop_core::Point, bool)]) -> ReleasePlan {
-    for (index, (point, safe)) in candidates.iter().enumerate() {
-        if *safe {
-            return ReleasePlan {
-                target: Some(point.clone()),
-                label: if index == 0 { "origin" } else { "safe_point" },
-                sprint_coder_avoided: true,
-            };
-        }
-    }
-    ReleasePlan {
-        target: None,
-        label: "in_place_unverified",
-        sprint_coder_avoided: false,
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static FAKE_RELEASE: std::cell::RefCell<Option<ReleasePlan>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Puts `plan` in place of the desktop's release selection while `body` runs.
-#[cfg(test)]
-pub(crate) fn with_fake_release<T>(plan: ReleasePlan, body: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            FAKE_RELEASE.with(|cell| *cell.borrow_mut() = None);
-        }
-    }
-    FAKE_RELEASE.with(|cell| *cell.borrow_mut() = Some(plan));
-    let _reset = Reset;
-    body()
-}
-
-/// Whether the window at `point` (its root and root owner too) is verified not to be Sprint
-/// Coder's, so a button let go there drops nothing into it; read with the acting operation's owner.
-fn point_is_safe(owner: &RefusedWindowOwner, point: &agent_desktop_core::Point) -> bool {
-    owner.judge(&point_owners(point), current_instance) == Verdict::Allowed
-}
-
-/// Where to let a refused or aborted drag's button go, chosen by the facts at that moment: the
-/// origin when it is not Sprint Coder's, otherwise the first screen edge that is not, otherwise
-/// in place. Outside an operation that refuses anything (no variable, or not the adapter's), the
-/// origin as before.
-pub(crate) fn drag_release_plan(origin: &agent_desktop_core::Point) -> ReleasePlan {
-    #[cfg(test)]
-    if let Some(plan) = FAKE_RELEASE.with(|cell| cell.borrow().clone()) {
-        return plan;
-    }
-    let owner = ACTING.with(|cell| cell.borrow().as_ref().map(|acting| acting.owner.clone()));
-    let Some(owner) = owner.filter(RefusedWindowOwner::is_active) else {
-        return ReleasePlan {
-            target: Some(origin.clone()),
-            label: "origin",
-            sprint_coder_avoided: true,
-        };
-    };
-    let mut candidates = vec![(origin.clone(), point_is_safe(&owner, origin))];
-    for corner in screen_corners() {
-        let safe = point_is_safe(&owner, &corner);
-        candidates.push((corner, safe));
-    }
-    choose_release(&candidates)
-}
-
-/// Points a short way inside each corner of the virtual screen, where the desktop (the shell)
-/// usually is, as fallback places to let a drag's button go.
-pub(crate) fn screen_corners() -> Vec<agent_desktop_core::Point> {
-    #[cfg(target_os = "windows")]
-    {
-        facts::screen_corners()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Vec::new()
     }
 }
 
