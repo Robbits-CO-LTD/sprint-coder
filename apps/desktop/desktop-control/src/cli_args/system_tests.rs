@@ -1,4 +1,30 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
+
+#[test]
+fn launch_url_is_read_once_on_the_command_line_and_in_a_batch() {
+    let args =
+        LaunchArgs::try_parse_from(["launch", "chrome", "--url", "https://example.com/"]).unwrap();
+    assert_eq!(args.url.as_deref(), Some("https://example.com/"));
+    assert!(
+        LaunchArgs::try_parse_from([
+            "launch",
+            "chrome",
+            "--url",
+            "https://example.com/",
+            "--url=https://example.org/",
+        ])
+        .is_err(),
+        "a second --url is refused, not taken over the first"
+    );
+    assert!(LaunchArgs::try_parse_from(["launch", "chrome", "--url", "--new-window"]).is_err());
+    let batch: LaunchArgs = serde_json::from_value(serde_json::json!({
+        "app": "chrome",
+        "url": "https://example.com/"
+    }))
+    .unwrap();
+    assert_eq!(batch.url.as_deref(), Some("https://example.com/"));
+}
 
 /// Chromium switches all start with `--`, and `--arg` passthrough exists
 /// specifically to forward them; clap rejects a hyphen-leading value on a

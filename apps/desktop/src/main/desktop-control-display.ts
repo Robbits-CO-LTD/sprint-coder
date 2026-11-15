@@ -263,6 +263,12 @@ const BEHIND_NOTE =
 const FRONT_ONLY_COMMANDS = new Set(['focus-window', 'restore', 'maximize', 'launch']);
 const TEXT_CUT_NOTE =
   '入れる文字が長いため、途中までを表示しています。全文は「詳細（実行内容）」で確かめてください。';
+// `launch <browser> --url <URL>` opens one page in a new browser window; never granted for the Task.
+const URL_LAUNCH_TITLE = 'ブラウザーで URL を開きます';
+const URL_NOTE =
+  'この URL を、ブラウザーの新しい窓で開きます。開く先（https:// の後の名前）を確かめてください。URL を開く起動は、毎回確かめます。';
+const URL_CUT_NOTE =
+  'URL が長いため、途中を省いて表示しています（開く先の名前までは全部出しています）。全文は「詳細（実行内容）」で確かめてください。';
 
 type KnownWindow = Readonly<{ app: unknown; title: unknown; pid: unknown; instance: unknown }>;
 const KNOWN_TASKS = 50;
@@ -512,9 +518,11 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
           // Not read from a batch entry, so a drag in one is never shown as explained.
           destination: undefined,
           text:
-            textArgument(command) === undefined
-              ? undefined
-              : stringField(args, textArgument(command)![1]),
+            command === 'launch'
+              ? stringField(args, 'url')
+              : textArgument(command) === undefined
+                ? undefined
+                : stringField(args, textArgument(command)![1]),
           surface: stringField(args, 'surface'),
         },
         snapshots,
@@ -530,7 +538,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
       )
     )
       openDetails = true;
-    if (described.some(({ cut }) => cut)) notes.push(TEXT_CUT_NOTE);
+    for (const note of new Set(described.filter(({ cut }) => cut).map(cutNote))) notes.push(note);
     if (entries.length > DESKTOP_ACTION_MAX_STEPS) {
       stepsOmitted = entries.length - DESKTOP_ACTION_MAX_STEPS;
       notes.push(
@@ -557,7 +565,12 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
         windowId: read.options.get('--window-id'),
         app: APP_COMMANDS.has(command) ? read.positionals[0] : read.options.get('--app'),
         destination: command === 'drag' ? read.options.get('--to') : undefined,
-        text: text === undefined ? undefined : read.positionals[text[0]],
+        text:
+          command === 'launch'
+            ? read.options.get('--url')
+            : text === undefined
+              ? undefined
+              : read.positionals[text[0]],
         surface: read.options.get('--surface'),
       },
       snapshots,
@@ -568,7 +581,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     // A point given as coordinates is not what the card names, even beside a part.
     if (COORDINATE_OPTIONS.some((option) => read.options.has(option))) openDetails = true;
     if (described.cut) {
-      notes.push(TEXT_CUT_NOTE);
+      notes.push(cutNote(described));
       openDetails = true;
     }
   }
@@ -589,8 +602,11 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     openDetails = true;
   if (mode === 'background' && commands.some((command) => PART_OPERATIONS.has(command)))
     notes.unshift(BEHIND_NOTE);
+  // A launch that opens a URL is decided on its own card every time, never by a Task grant.
+  const urlLaunch = all.some((step) => step.textRole === 'url') || launchesUrl(read);
   if (all.some((step) => step.kind === 'launch' && step.mode !== 'foreground'))
     notes.unshift(LAUNCH_NOTE);
+  if (urlLaunch) notes.unshift(URL_NOTE);
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
@@ -610,7 +626,8 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     ...head,
     ...(steps === undefined ? {} : { steps }),
     ...(stepsOmitted === undefined ? {} : { stepsOmitted }),
-    allowTaskGrant: mode !== 'foreground' && !menuItems && !taskGrantBlocked(read, snapshots),
+    allowTaskGrant:
+      mode !== 'foreground' && !menuItems && !urlLaunch && !taskGrantBlocked(read, snapshots),
     notes,
     openDetails,
   };
@@ -707,8 +724,11 @@ function describeStep(
   // Any command naming a menu item ref; the executable runs it only for `click`.
   const menu = ref !== undefined && ref !== '' && snapshots.refRecord(ref) === 'menu';
   const label = menu ? snapshots.menuLabelOf(ref) : undefined;
-  const title =
-    command === 'select' && (text === undefined || text === '')
+  // `launch --url`: the text is the page it opens, never text it enters.
+  const url = command === 'launch' && text !== undefined;
+  const title = url
+    ? URL_LAUNCH_TITLE
+    : command === 'select' && (text === undefined || text === '')
       ? SELECT_ITEM_TITLE
       : command === 'snapshot' && surface === 'menubar'
         ? MENU_BAR_TITLE
@@ -729,7 +749,12 @@ function describeStep(
     command === 'drag' && destination !== undefined && destination !== ''
       ? snapshots.part(destination)
       : undefined;
-  const shown = text === undefined || text === '' ? undefined : visible(text, TEXT_MAX, true);
+  const shown =
+    text === undefined || text === ''
+      ? undefined
+      : url
+        ? visibleUrl(text)
+        : visible(text, TEXT_MAX, true);
   const unexplained =
     kind !== 'read' &&
     ((target === undefined && !NO_TARGET_COMMANDS.has(command)) ||
@@ -743,7 +768,9 @@ function describeStep(
       mode,
       ...(target === undefined ? {} : { target }),
       ...(drop === undefined ? {} : { destination: drop }),
-      ...(shown === undefined ? {} : { text: shown.text, textRole: textArgument(command)![2] }),
+      ...(shown === undefined
+        ? {}
+        : { text: shown.text, textRole: url ? 'url' : textArgument(command)![2] }),
     },
     cut: shown?.cut === true,
     unexplained,
@@ -758,6 +785,38 @@ function describeStep(
 function unnamed(target: DesktopActionTarget): boolean {
   if (!target.resolved || target.all !== undefined || target.role === undefined) return false;
   return target.role === '窓' ? target.window === undefined : target.name === undefined;
+}
+
+function cutNote({ step }: { step: DesktopActionStep }): string {
+  return step.textRole === 'url' ? URL_CUT_NOTE : TEXT_CUT_NOTE;
+}
+
+/** Whether the run has a `launch` with a URL anywhere, shown or not. */
+function launchesUrl(read: ReturnType<typeof readDesktopControlCommand>): boolean {
+  if (read === null || read.help) return false;
+  if (read.command === 'launch') return read.options.has('--url');
+  if (read.command !== 'batch') return false;
+  return (readBatchEntries(read.positionals) ?? []).some(
+    ({ command, args }) => command === 'launch' && args['url'] !== undefined,
+  );
+}
+
+/**
+ * A URL as the card shows it: whole when it fits; otherwise its scheme and host (and port) stay
+ * whole, so where it goes is always seen, and the rest has its middle cut.
+ */
+function visibleUrl(url: string): { text: string; cut: boolean } {
+  const whole = visible(url, Number.MAX_SAFE_INTEGER).text;
+  if (whole.length <= TEXT_MAX) return { text: whole, cut: false };
+  const slashes = whole.indexOf('//');
+  const pathStart = slashes < 0 ? -1 : whole.slice(slashes + 2).search(/[/?#]/u);
+  const origin = pathStart < 0 ? '' : whole.slice(0, slashes + 2 + pathStart);
+  if (origin === '' || origin.length > TEXT_MAX / 2)
+    return { text: cutMiddle(whole, TEXT_MAX), cut: true };
+  return {
+    text: `${origin}${cutMiddle(whole.slice(origin.length), TEXT_MAX - origin.length)}`,
+    cut: true,
+  };
 }
 
 function textArgument(command: string): readonly [number, string, TextRole] | undefined {

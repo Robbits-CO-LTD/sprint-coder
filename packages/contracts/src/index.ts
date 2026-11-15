@@ -2259,8 +2259,11 @@ export const desktopActionStepSchema = z
     destination: desktopActionTargetSchema.optional(),
     /** The text it enters, the value it selects or the keys it presses. */
     text: z.string().min(1).max(1_000).optional(),
-    /** What `text` is: entered text, a selected value, keys, clipboard text or a button's name. */
-    textRole: z.enum(['enter', 'select', 'keys', 'clipboard', 'button']).optional(),
+    /**
+     * What `text` is: entered text, a selected value, keys, clipboard text, a button's name, or
+     * the URL a `launch --url` opens in a browser.
+     */
+    textRole: z.enum(['enter', 'select', 'keys', 'clipboard', 'button', 'url']).optional(),
   })
   .strict();
 export type DesktopActionStep = z.infer<typeof desktopActionStepSchema>;
