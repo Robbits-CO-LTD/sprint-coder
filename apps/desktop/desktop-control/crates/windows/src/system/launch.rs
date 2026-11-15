@@ -44,13 +44,13 @@ pub(crate) fn launch_app_impl(
     let (pid, token, process) = create_process(&prepared.executable, options, deadline)?;
     let lineage = launch_handoff::Lineage::new(pid, &token, process);
     let observed = observe_launched_window(pid, &token, lineage, &handoff, options, deadline)?;
+    let mut left_for_user = false;
     if let Some(guard) = guard {
-        // Taken as soon as the watch returns: it returns the moment it found
-        // the handed-off window.
-        let found_at = std::time::Instant::now();
-        let settle = (observed.handed_off && observed.window.is_some())
-            .then_some(HandoffSettle { deadline, found_at });
-        guard.finish(&observed.owners, observed.window.as_ref(), settle);
+        let settle = (observed.handed_off && observed.window.is_some()).then_some(HandoffSettle {
+            deadline,
+            shown_at: observed.shown_at,
+        });
+        left_for_user = guard.finish(&observed.owners, observed.window.as_ref(), settle);
     }
     let new_instance = observed.window.is_some() && !observed.handed_off;
     let mut result = launch_result(id, pid, token, observed.window);
@@ -78,7 +78,7 @@ pub(crate) fn launch_app_impl(
     }
     result.running_without_window = prepared.running_without_window;
     bring_forward_if_asked(&mut result, options.activate, deadline);
-    report_foreground(&mut result, options.activate);
+    report_foreground(&mut result, options.activate, left_for_user);
     Ok(result)
 }
 
@@ -86,17 +86,27 @@ pub(crate) fn launch_app_impl(
 /// when the window was found, before the foreground was handed back), and,
 /// without `--activate`, says so when a window the running instance showed
 /// stayed in front although the launch tried to keep it behind.
-fn report_foreground(result: &mut LaunchResult, activate: bool) {
+fn report_foreground(result: &mut LaunchResult, activate: bool, left_for_user: bool) {
     let in_front = result.window.as_ref().is_some_and(is_foreground);
-    apply_foreground_fact(result, activate, in_front);
+    apply_foreground_fact(result, activate, in_front, left_for_user);
 }
 
-fn apply_foreground_fact(result: &mut LaunchResult, activate: bool, in_front: bool) {
+/// `left_for_user`: the watch stopped because the move may have been the
+/// user's (a click or Alt+Tab on the window). A window in front then gets no
+/// note: saying the app took the front would be wrong when the user did, and
+/// the user who did knows. The note is kept for a window the launch tried to
+/// hand back and could not.
+fn apply_foreground_fact(
+    result: &mut LaunchResult,
+    activate: bool,
+    in_front: bool,
+    left_for_user: bool,
+) {
     let Some(window) = result.window.as_mut() else {
         return;
     };
     window.state.is_focused = in_front;
-    if !activate && in_front && result.handed_off {
+    if !activate && in_front && result.handed_off && !left_for_user {
         let note = launch_attach::HANDED_OFF_LEFT_IN_FRONT;
         result.suggestion = Some(match result.suggestion.take() {
             Some(text) => format!("{text} {note}"),
@@ -176,6 +186,9 @@ struct LaunchObservation {
     handed_off: bool,
     handoff_ambiguous: bool,
     descendants_alive: bool,
+    /// For a handed-off window: when it was first seen (see
+    /// `Handoff::note`), the start of [`HANDOFF_APP_ACTIVATION_GRACE`].
+    shown_at: Option<std::time::Instant>,
 }
 
 impl LaunchObservation {
@@ -187,6 +200,7 @@ impl LaunchObservation {
             handed_off: false,
             handoff_ambiguous: false,
             descendants_alive: false,
+            shown_at: None,
         }
     }
 }
@@ -219,9 +233,16 @@ fn observe_launched_window(
                 handed_off: false,
                 handoff_ambiguous: false,
                 descendants_alive: false,
+                shown_at: None,
             });
         }
         let exited = lineage.launched_has_exited();
+        if !exited && handoff.any_running() {
+            // Only to record when each window an instance shows is first seen;
+            // whether the launch was passed on is still decided only once the
+            // launched process has exited. A failed read records nothing.
+            let _ = handoff.note(deadline);
+        }
         let mut wait_until = deadline;
         let mut descendants_alive = false;
         if exited {
@@ -239,6 +260,7 @@ fn observe_launched_window(
                         handed_off: false,
                         handoff_ambiguous: false,
                         descendants_alive: false,
+                        shown_at: None,
                     });
                 }
             }
@@ -248,6 +270,7 @@ fn observe_launched_window(
                     launch_handoff::HandoffLook::One(window) => {
                         let mut owners = lineage.pids();
                         owners.push(window.pid);
+                        let shown_at = handoff.first_seen(&window.id);
                         return Ok(LaunchObservation {
                             window: Some(window),
                             owners,
@@ -255,6 +278,7 @@ fn observe_launched_window(
                             handed_off: true,
                             handoff_ambiguous: false,
                             descendants_alive: false,
+                            shown_at,
                         });
                     }
                     // Several candidates: none is taken, nor restacked.
@@ -362,7 +386,7 @@ impl ForegroundGuard {
         owners: &[ProcessId],
         window: Option<&WindowInfo>,
         settle: Option<HandoffSettle>,
-    ) {
+    ) -> bool {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GWL_EXSTYLE, GetForegroundWindow, GetShellWindow, GetWindowLongW, IsIconic, IsWindow,
             SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
@@ -386,13 +410,17 @@ impl ForegroundGuard {
                 foreground == prior,
                 !handed.is_null() && foreground == handed,
                 user_input_since(started),
-                settle.found_at.elapsed() <= HANDOFF_APP_ACTIVATION_GRACE,
+                within_grace(settle.shown_at, std::time::Instant::now()),
             )
         };
         let prior_is_minimized = unsafe { IsIconic(prior) } != 0;
+        // Whether the watch left the foreground alone as possibly the user's
+        // choice: then a window in front is not reported as the app's doing.
+        let mut left_for_user = false;
         let mut may_restore = match settle {
             Some(settle) => {
-                step(foreground, settle) != ForegroundStep::LeftAlone && !prior_is_minimized
+                left_for_user = step(foreground, settle) == ForegroundStep::LeftAlone;
+                !left_for_user && !prior_is_minimized
             }
             None => may_restore_foreground(foreground == prior, prior_is_minimized),
         };
@@ -404,10 +432,11 @@ impl ForegroundGuard {
             // gets only that one (#1276).
             may_restore =
                 settle_foreground(prior, handed, self.started, settle, HANDOFF_FOREGROUND_HOLD);
+            left_for_user = !may_restore;
         }
         self.unlock();
         if !may_restore {
-            return;
+            return left_for_user;
         }
         let foreground = unsafe { GetForegroundWindow() };
         let taken = match settle {
@@ -449,7 +478,7 @@ impl ForegroundGuard {
             }
         }
         if let Some(settle) = settle {
-            settle_foreground(
+            left_for_user = !settle_foreground(
                 prior,
                 handed,
                 self.started,
@@ -457,6 +486,7 @@ impl ForegroundGuard {
                 HANDOFF_FOREGROUND_WATCH,
             );
         }
+        left_for_user
     }
 
     fn unlock(&mut self) {
@@ -484,7 +514,7 @@ impl ForegroundGuard {
 const HANDOFF_FOREGROUND_HOLD: Duration = Duration::from_millis(1_200);
 const HANDOFF_FOREGROUND_WATCH: Duration = Duration::from_millis(800);
 
-/// How soon after the launch found the handed-off window that window may
+/// How soon after the handed-off window was first seen that window may
 /// take the foreground and still be taken as the app's move while the user is
 /// giving input.
 ///
@@ -494,18 +524,28 @@ const HANDOFF_FOREGROUND_WATCH: Duration = Duration::from_millis(800);
 /// Alt+Tab, takes well over that. An app that activates its window together
 /// with showing it does so within the same message handling, tens of
 /// milliseconds. 300 ms sits between the two. The clock starts when the
-/// launch found the window, which is after it appeared; the watch that finds
-/// it looks at least every 100 ms once a running instance may get the launch,
-/// so the span counted from the appearance is at most about 400 ms plus one
-/// window listing.
+/// window was first seen (`Handoff::note`), read every 100 ms at most while
+/// the launched process still runs and after it exited, not when the launch
+/// found it had been passed on (which can be seconds later, when the launched
+/// process is slow to exit): so the clock starts at most one look interval
+/// (100 ms) plus one window listing after the window appeared.
 const HANDOFF_APP_ACTIVATION_GRACE: Duration = Duration::from_millis(300);
 
-/// When the launch found the handed-off window, and the deadline the watch
-/// on its foreground stays inside.
+/// When the handed-off window was first seen (`None` when it is not known),
+/// and the deadline the watch on its foreground stays inside.
 #[derive(Debug, Clone, Copy)]
 struct HandoffSettle {
     deadline: Deadline,
-    found_at: std::time::Instant,
+    shown_at: Option<std::time::Instant>,
+}
+
+/// Whether `now` is within [`HANDOFF_APP_ACTIVATION_GRACE`] of when the
+/// window was first seen. A window whose first sight is not known gets no
+/// grace: with the user's input, its taking the foreground is left alone.
+#[cfg(any(target_os = "windows", test))]
+fn within_grace(shown_at: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    shown_at
+        .is_some_and(|shown| now.saturating_duration_since(shown) <= HANDOFF_APP_ACTIVATION_GRACE)
 }
 
 /// What the watch does with the foreground it reads.
@@ -595,7 +635,7 @@ fn settle_foreground(
             foreground == prior,
             !handed.is_null() && foreground == handed,
             user_input_since(started),
-            settle.found_at.elapsed() <= HANDOFF_APP_ACTIVATION_GRACE,
+            within_grace(settle.shown_at, std::time::Instant::now()),
         ) {
             ForegroundStep::Keep => {}
             ForegroundStep::Restore => {
@@ -685,7 +725,8 @@ impl ForegroundGuard {
         _owners: &[ProcessId],
         _window: Option<&WindowInfo>,
         _settle: Option<HandoffSettle>,
-    ) {
+    ) -> bool {
+        false
     }
 }
 
@@ -1002,9 +1043,10 @@ mod tests;
 mod foreground_guard_tests {
     use super::{
         ForegroundStep, apply_foreground_fact, foreground_step, input_at_or_after, launch_attach,
-        launch_result, may_restore_foreground,
+        launch_result, may_restore_foreground, within_grace,
     };
     use agent_desktop_core::{ProcessId, WindowInfo, WindowState};
+    use std::time::{Duration, Instant};
 
     // foreground_step(null, prior, handed window, user input, within grace)
 
@@ -1123,7 +1165,7 @@ mod foreground_guard_tests {
     #[test]
     fn a_window_put_back_behind_is_not_reported_focused() {
         let mut result = handed_off_with_window();
-        apply_foreground_fact(&mut result, false, false);
+        apply_foreground_fact(&mut result, false, false, false);
         assert!(!result.window.as_ref().expect("window").state.is_focused);
         assert_eq!(
             result.suggestion.as_deref(),
@@ -1136,13 +1178,13 @@ mod foreground_guard_tests {
     #[test]
     fn a_window_left_in_front_says_so() {
         let mut result = handed_off_with_window();
-        apply_foreground_fact(&mut result, false, true);
+        apply_foreground_fact(&mut result, false, true, false);
         assert!(result.window.as_ref().expect("window").state.is_focused);
         let text = result.suggestion.as_deref().expect("suggestion");
         assert!(text.starts_with(launch_attach::HANDED_OFF_NEW_WINDOW));
         assert!(text.ends_with(launch_attach::HANDED_OFF_LEFT_IN_FRONT));
         let mut asked = handed_off_with_window();
-        apply_foreground_fact(&mut asked, true, true);
+        apply_foreground_fact(&mut asked, true, true, false);
         assert_eq!(
             asked.suggestion.as_deref(),
             Some(launch_attach::HANDED_OFF_NEW_WINDOW),
@@ -1150,6 +1192,65 @@ mod foreground_guard_tests {
         );
     }
 
+    /// The grace counts from when the window was first seen, not from when
+    /// the launch found it had been passed on. Here the launched process ran
+    /// 2 seconds; the window was seen from 0.1 s. With the user's input and
+    /// the window in front, the user may have clicked it, so it is left alone.
+    #[test]
+    fn the_grace_starts_when_the_window_was_first_seen() {
+        let launch = Instant::now();
+        let shown = launch + Duration::from_millis(100);
+        let passed_on = launch + Duration::from_secs(2);
+        assert!(!within_grace(Some(shown), passed_on));
+        assert_eq!(
+            foreground_step(
+                false,
+                false,
+                true,
+                true,
+                within_grace(Some(shown), passed_on)
+            ),
+            ForegroundStep::LeftAlone
+        );
+    }
+
+    /// The RabbitMail kind: the window takes the front as it is shown. With
+    /// the user's input, that is still the app's move and is handed back.
+    #[test]
+    fn a_window_that_takes_the_front_as_it_is_shown_is_handed_back_with_input() {
+        let shown = Instant::now();
+        let now = shown + Duration::from_millis(50);
+        assert!(within_grace(Some(shown), now));
+        assert_eq!(
+            foreground_step(false, false, true, true, within_grace(Some(shown), now)),
+            ForegroundStep::Restore
+        );
+    }
+
+    /// A window whose first sight is not known gets no grace.
+    #[test]
+    fn a_window_never_seen_before_gets_no_grace() {
+        assert!(!within_grace(None, Instant::now()));
+        assert_eq!(
+            foreground_step(false, false, true, true, within_grace(None, Instant::now())),
+            ForegroundStep::LeftAlone
+        );
+    }
+
+    /// The user brought the window to the front during the watch (the watch
+    /// left it alone): no note says the app took it.
+    #[test]
+    fn a_window_the_user_may_have_picked_gets_no_left_in_front_note() {
+        let mut result = handed_off_with_window();
+        apply_foreground_fact(&mut result, false, true, true);
+        assert!(result.window.as_ref().expect("window").state.is_focused);
+        let text = result.suggestion.as_deref().expect("suggestion");
+        assert!(
+            !text.contains(launch_attach::HANDED_OFF_LEFT_IN_FRONT),
+            "{text}"
+        );
+        assert_eq!(text, launch_attach::HANDED_OFF_NEW_WINDOW);
+    }
     #[test]
     fn a_foreground_that_stayed_on_the_prior_window_is_restored() {
         assert!(may_restore_foreground(true, false));

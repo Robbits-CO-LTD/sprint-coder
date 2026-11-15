@@ -304,3 +304,32 @@ fn a_child_started_before_the_parent_exited_is_a_live_descendant() {
     assert_eq!(live.len(), 1, "the started child is the one descendant");
     assert!(live[0].1.is_some(), "the descendant's instance is recorded");
 }
+
+/// A window's first sight is kept: a later look does not move it, so the
+/// grace counts from when the window appeared, however late the launch is
+/// found to have been passed on.
+#[test]
+fn the_first_sight_of_a_window_is_kept() {
+    let mut first_seen = HashMap::new();
+    let early = Instant::now();
+    let late = early + Duration::from_secs(2);
+    record_first_seen(&mut first_seen, vec!["w-5"], early);
+    record_first_seen(&mut first_seen, vec!["w-5", "w-6"], late);
+    assert_eq!(first_seen.get("w-5"), Some(&early));
+    assert_eq!(first_seen.get("w-6"), Some(&late));
+}
+
+#[test]
+fn only_windows_of_the_targets_not_shown_before_are_noted() {
+    let targets = vec![(ProcessId::from(20), Some("instance-20".to_string()))];
+    let windows = vec![
+        window("w-1", 20, Some("instance-20")),
+        window("w-5", 20, Some("instance-20")),
+        window("w-6", 30, Some("instance-30")),
+        window("w-7", 20, Some("instance-other")),
+    ];
+    assert_eq!(
+        fresh_window_ids(&windows, &targets, &ids(&["w-1"])),
+        vec!["w-5"]
+    );
+}
