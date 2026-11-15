@@ -11,7 +11,9 @@ import {
   assertTeamMessageAllowed,
   assertTeamPolicy,
   assertWorkerPersistenceInput,
+  activeWorkerStates,
   isWorkerActive,
+  nonTerminalStates,
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
@@ -48,6 +50,21 @@ describe('worker liveness', () => {
 
   it('classifies every declared state', () => {
     for (const state of workerStates) expect(typeof isWorkerActive(state)).toBe('boolean');
+  });
+
+  it('publishes the active states as exactly those isWorkerActive accepts', () => {
+    expect(activeWorkerStates).toEqual(workerStates.filter(isWorkerActive));
+  });
+
+  it('derives the active states from the transitions, so a new unfinished state joins them', () => {
+    const table = {
+      busy: ['stopping', 'done'],
+      stopping: ['stopped'],
+      done: [],
+      stopped: [],
+    } as const;
+    expect(nonTerminalStates(table)).toEqual(['busy', 'stopping']);
+    expect(nonTerminalStates({ ...table, stopping: [] })).toEqual(['busy']);
   });
 });
 

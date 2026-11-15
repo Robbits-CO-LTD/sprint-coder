@@ -224,6 +224,7 @@ import {
   transitionTeam,
   transitionTeamMessage,
   transitionWorker,
+  activeWorkerStates,
   createExecutionInstruction,
   nextTeamAttemptOrdinal,
   reviseQueuedExecutionInstruction,
@@ -1275,6 +1276,13 @@ const teamTaskTransitions: Readonly<
   failed: [],
   canceled: [],
 };
+
+/**
+ * One `?` per active Worker state, for `state IN (...)` in the queries that look for Workers still at
+ * work. The states themselves are bound (`...activeWorkerStates`), never written into the SQL, and
+ * come from the domain's transition table (issue #1283).
+ */
+const ACTIVE_WORKER_STATE_PLACEHOLDERS = activeWorkerStates.map(() => '?').join(', ');
 
 const TEAM_GLOBAL_LIMITS_SEED = JSON.stringify(DEFAULT_TEAM_BUDGET_LIMITS.global);
 const TEAM_BUDGET_STRUCTURED_SEED = JSON.stringify({
@@ -9926,9 +9934,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
         count: count(
           `SELECT COUNT(*) AS count FROM agents
            WHERE team_id = ? AND kind = 'worker' AND id IS NOT ?
-             AND state IN ('invited', 'spawning', 'ready', 'busy', 'waiting')`,
+             AND state IN (${ACTIVE_WORKER_STATE_PLACEHOLDERS})`,
           teamId,
           hiringAgentId,
+          ...activeWorkerStates,
         ),
       },
       {
@@ -14099,9 +14108,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare(
           `SELECT id, state FROM agents
            WHERE kind = 'worker'
-             AND state IN ('invited', 'spawning', 'ready', 'busy', 'waiting')`,
+             AND state IN (${ACTIVE_WORKER_STATE_PLACEHOLDERS})`,
         )
-        .all() as { id: string; state: WorkerState }[];
+        .all(...activeWorkerStates) as { id: string; state: WorkerState }[];
       for (const worker of workerRows) {
         if (recoverableAssigneeIds.has(worker.id)) {
           if (worker.state === 'busy')
@@ -14359,7 +14368,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         `SELECT
            (SELECT COUNT(*) FROM agents a
              WHERE a.team_id = t.id AND a.kind = 'worker'
-               AND a.state IN ('invited', 'spawning', 'ready', 'busy', 'waiting')) AS workers,
+               AND a.state IN (${ACTIVE_WORKER_STATE_PLACEHOLDERS})) AS workers,
            (t.state NOT IN ('completed', 'failed') AND (EXISTS (
              SELECT 1 FROM team_executions e
               WHERE e.team_id = t.id AND e.state NOT IN ('completed', 'failed', 'canceled')
@@ -14370,7 +14379,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
          FROM teams t
          WHERE t.task_id = ?`,
       )
-      .get(taskId) as { workers: number; unfinished: number } | undefined;
+      .get(...activeWorkerStates, taskId) as { workers: number; unfinished: number } | undefined;
     const workers = team?.workers ?? 0;
     return { turn, team: workers > 0 || team?.unfinished === 1, workers };
   }

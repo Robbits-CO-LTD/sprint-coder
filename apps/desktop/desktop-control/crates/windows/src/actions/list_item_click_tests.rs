@@ -77,6 +77,31 @@ fn a_list_item_without_invoke_is_refused_and_one_with_invoke_is_not() {
     );
 }
 
+/// What was read in Chrome (#1298): a row of the address bar's suggestion list
+/// is a `ListItem` with Invoke, under a Chrome window (`Chrome_WidgetWin_1`),
+/// and its background click went through and opened the page; a web page's
+/// `listitem` has no Invoke and is refused. An Electron page's `role=option`
+/// read the same as the suggestion row (Invoke, `Chrome_RenderWidgetHostHWND`).
+#[test]
+fn a_chromium_option_with_invoke_is_clicked_and_a_web_list_item_without_is_not() {
+    for depth in [1, 3, 8] {
+        let list = list_read(found(depth, false, false), FrameworkRead::NotAsked);
+        assert_eq!(list, ListRead::NotItem, "{depth}");
+        assert!(!needs_control_type(list, true));
+        assert_eq!(
+            decide_click(list, TypeRead::NotAsked, true),
+            ClickCheck::Proceed
+        );
+        assert_eq!(
+            decide_click(list, TypeRead::Known(LIST_ITEM_CONTROL_TYPE), false),
+            ClickCheck::Refuse
+        );
+    }
+    for class in ["Chrome_WidgetWin_1", "Chrome_RenderWidgetHostHWND"] {
+        assert!(!is_foreground_taking_list_class(class), "{class}");
+    }
+}
+
 #[test]
 fn other_controls_read_as_such_keep_their_click_path() {
     // Button, check box, hyperlink, data item: not list items.

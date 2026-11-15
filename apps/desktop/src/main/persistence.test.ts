@@ -41,6 +41,7 @@ import {
   createToolDefinition,
   createToolId,
   expandAccessPreset,
+  workerStates,
   type AccessPreset,
 } from '@sprint-coder/domain';
 import {
@@ -12599,6 +12600,64 @@ if (runsWithElectronAbi)
         const fresh = reopened.registerTeamWorker(input('fresh'));
         reopened.transitionWorkerState(fresh.id, 'spawning');
         expect(reopened.reformEndedTeam(team.id, fresh.id).state).toBe('forming');
+      } finally {
+        reopened.close();
+      }
+    });
+
+    it('counts, refuses a re-hire for, and recovers a Worker in exactly the states listed before the list was derived (issue #1283)', () => {
+      // The five states the three queries spelled out before they took the domain's list.
+      const listedBefore = ['invited', 'spawning', 'ready', 'busy', 'waiting'];
+      const { persistence, path } = createPersistence();
+      const fixtures = workerStates.map((state) => {
+        const task = persistence.createTask(`Worker in ${state}`);
+        const team = persistence.promoteTaskToTeam(task.id);
+        persistence.transitionTeamState(team.id, 'forming');
+        const worker = persistence.registerTeamWorker({
+          teamId: team.id,
+          role: state,
+          objective: `${state} の作業`,
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'summary',
+        });
+        return { state, taskId: task.id, teamId: team.id, workerId: worker.id };
+      });
+      persistence.close();
+      // Every state at once, the stored way: no Turn, execution or mission is left behind to
+      // blur which state a count came from.
+      const raw = new Database(path);
+      const setState = raw.prepare('UPDATE agents SET state = ? WHERE id = ?');
+      for (const { state, workerId } of fixtures) setState.run(state, workerId);
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      try {
+        for (const { state, taskId, teamId, workerId } of fixtures) {
+          const counted = listedBefore.includes(state) ? 1 : 0;
+          expect(reopened.getTaskRecordedWork(taskId), state).toEqual({
+            turn: false,
+            team: counted === 1,
+            workers: counted,
+          });
+          expect(reopened.listFailedTeamRehireBlockers(teamId), state).toEqual(
+            counted === 1 ? [{ kind: 'workers', count: 1 }] : [],
+          );
+          // The hiring Worker itself never blocks, whatever its state.
+          expect(reopened.listFailedTeamRehireBlockers(teamId, workerId), state).toEqual([]);
+        }
+        expect(reopened.recoverTeamsOnStartup(new Date().toISOString()).workers).toBe(
+          listedBefore.length,
+        );
+        const after = new Map(
+          fixtures.map(({ teamId, workerId }) => [
+            workerId,
+            reopened.getTeamSnapshot(teamId).agents.find(({ id }) => id === workerId)?.state,
+          ]),
+        );
+        // Recovery stops each Worker still at work (none has an execution to resume) and leaves the
+        // finished ones as they were.
+        for (const { state, workerId } of fixtures)
+          expect(after.get(workerId), state).toBe(listedBefore.includes(state) ? 'stopped' : state);
       } finally {
         reopened.close();
       }
