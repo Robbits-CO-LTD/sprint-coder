@@ -1366,6 +1366,12 @@ describe('desktop control on Apple silicon macOS', () => {
           ownExecutable: join(place.applications, 'Sprint Coder.app', 'Contents', 'MacOS', 'X'),
           macApplicationFolders: [place.applications, place.system, join(place.base, 'none')],
           bundleIdentifier: (bundle: string) => ids[bundle.split('/').pop()!] ?? null,
+          bundlesWithIdentifier: (id: string) =>
+            [place.applications, place.system].flatMap((folder) =>
+              readdirSync(folder)
+                .filter((file) => ids[file]?.toLowerCase() === id.toLowerCase())
+                .map((file) => join(folder, file)),
+            ),
         };
         const launch = (argv: string[]) => desktopControlLaunchByName(argv, [], lookup);
         // Found by file name, without letter case: nothing replaced.
@@ -1411,6 +1417,59 @@ describe('desktop control on Apple silicon macOS', () => {
           launch(['batch', JSON.stringify([{ command: 'launch', args: { app: 'TextEdit' } }])]),
         ).toBeNull();
         expect(launch(['list-windows', '--app', 'Missing App'])).toBeNull();
+      } finally {
+        place.remove();
+      }
+    });
+
+    it('looks a bundle id up once and confirms only the bundles the lookup names', () => {
+      const place = folders();
+      try {
+        const textEdit = join(place.system, 'TextEdit.app');
+        const terminal = join(place.system, 'Terminal.app');
+        const outside = join(place.base, 'Elsewhere', 'TextEdit.app');
+        const nested = join(place.applications, 'Utility.app', 'Contents', 'TextEdit.app');
+        // Terminal.app under an id the name check alone lets through: refused by its file name.
+        const local: Record<string, string> = { ...ids, 'Terminal.app': 'com.example.shell' };
+        const identifier = vi.fn((bundle: string) => local[bundle.split('/').pop()!] ?? null);
+        const run = (app: string, hinted: readonly string[] | null) => {
+          identifier.mockClear();
+          const bundlesWithIdentifier = vi.fn((_id: string) => hinted);
+          const result = desktopControlLaunchByName(['launch', app], [], {
+            ...mac,
+            ownExecutable: join(place.applications, 'Sprint Coder.app', 'Contents', 'MacOS', 'X'),
+            macApplicationFolders: [place.applications, place.system],
+            bundleIdentifier: identifier,
+            bundlesWithIdentifier,
+          });
+          expect(bundlesWithIdentifier).toHaveBeenCalledTimes(1);
+          expect(bundlesWithIdentifier).toHaveBeenCalledWith(app);
+          return result;
+        };
+        const notFound = { refusal: expect.stringContaining('bundle ID のアプリが') };
+        // Found in a standard folder and confirmed by its own bundle id: judged, then allowed.
+        expect(run('com.apple.TextEdit', [textEdit])).toBeNull();
+        expect(identifier.mock.calls.map(([bundle]) => bundle)).toEqual([textEdit, textEdit]);
+        // Outside the standard folders, or deeper than their top level: not found.
+        expect(run('com.apple.TextEdit', [outside, nested])).toEqual(notFound);
+        expect(identifier).not.toHaveBeenCalled();
+        // A stale index naming a bundle whose bundle id is another: not found.
+        expect(run('com.apple.TextEdit', [join(place.applications, 'TextEdit Copy.app')])).toEqual(
+          notFound,
+        );
+        // Nothing from the lookup (no index, an error, the time limit): not found, and no other
+        // bundle is read.
+        for (const hinted of [null, []]) {
+          expect(run('com.apple.TextEdit', hinted)).toEqual(notFound);
+          expect(identifier).not.toHaveBeenCalled();
+        }
+        // A refused kind reached by bundle id is still refused.
+        expect(run('com.example.shell', [terminal])).toMatchObject({
+          refusal: expect.stringContaining('com.example.shell は起動できない'),
+        });
+        expect(
+          run('com.example.sprint-coder', [join(place.applications, 'Sprint Coder.app')]),
+        ).toMatchObject({ refusal: expect.stringContaining('Sprint Coder 自身は起動できない') });
       } finally {
         place.remove();
       }

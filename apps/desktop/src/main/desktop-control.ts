@@ -67,6 +67,12 @@ export type DesktopControlLookup = Readonly<{
   macApplicationFolders?: readonly string[];
   /** macOS: the `CFBundleIdentifier` of an app bundle, or `null` when it cannot be read. */
   bundleIdentifier?: (bundle: string) => string | null;
+  /**
+   * macOS: the paths of the app bundles with this bundle id (Spotlight by default), or `null` when
+   * they cannot be read. Only a hint: each path is still checked against the folders and its own
+   * `CFBundleIdentifier`.
+   */
+  bundlesWithIdentifier?: (id: string) => readonly string[] | null;
 }>;
 
 /**
@@ -1682,7 +1688,8 @@ const MAC_BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
 /**
  * Why the `launch` of these arguments (each `launch` of a batch too) may not run on macOS, or
  * `null`. The name is looked up among the apps in the standard places (`MAC_APPLICATION_FOLDERS`),
- * by the bundle's file name without letter case, or by bundle id when no file name matches. Every
+ * by the bundle's file name without letter case, or by bundle id when no file name matches (the
+ * candidates from Spotlight, each confirmed by its Info.plist; none without the index). Every
  * bundle it may name is judged by its file name and bundle id, never by the shown name, which
  * follows the person's language: one refused kind refuses the run. The arguments stay as given;
  * the executable resolves the name again and refuses an app outside those places itself.
@@ -1728,11 +1735,22 @@ function macLaunchBundleRefusal(app: string, lookup: DesktopControlLookup): stri
   });
   const wanted = app.toLowerCase().replace(/\.app$/u, '');
   let found = bundles.filter((bundle) => posix.basename(bundle).toLowerCase() === `${wanted}.app`);
-  if (found.length === 0 && MAC_BUNDLE_ID.test(app))
-    found = bundles.filter((bundle) => identifier(bundle)?.toLowerCase() === app.toLowerCase());
+  const byId = found.length === 0 && MAC_BUNDLE_ID.test(app);
+  if (byId) {
+    // By bundle id: Spotlight names the candidates (one process, not one `plutil` per bundle in
+    // the folders); only those among the bundles above count, each confirmed by its own Info.plist,
+    // so a stale index cannot make another bundle pass for this one.
+    const listed = new Set(bundles);
+    const hinted = (lookup.bundlesWithIdentifier ?? spotlightBundlesWithIdentifier)(app) ?? [];
+    found = [...new Set(hinted)].filter(
+      (bundle) => listed.has(bundle) && identifier(bundle)?.toLowerCase() === app.toLowerCase(),
+    );
+  }
   if (found.length === 0)
     return refusal(
-      `「${app}」というアプリが、macOS の標準のアプリの場所（/Applications・/System/Applications・~/Applications など）に見つからない。そこにある .app の名前（.app を除いた名前。TextEdit など）で launch する`,
+      byId
+        ? `「${app}」という bundle ID のアプリが、macOS の標準のアプリの場所（/Applications・/System/Applications・~/Applications など）に見つからない（bundle ID は Spotlight の索引で引くため、索引が使えないと見つからない）。そこにある .app の名前（.app を除いた名前。TextEdit など）で launch する`
+        : `「${app}」というアプリが、macOS の標準のアプリの場所（/Applications・/System/Applications・~/Applications など）に見つからない。そこにある .app の名前（.app を除いた名前。TextEdit など）で launch する`,
     );
   for (const bundle of found) {
     const file = posix.basename(bundle);
@@ -1745,6 +1763,28 @@ function macLaunchBundleRefusal(app: string, lookup: DesktopControlLookup): stri
       return refusal(`${app} は起動できない（端末・shell・設定・パスワードの道具）`);
   }
   return null;
+}
+
+/**
+ * The paths Spotlight gives for app bundles with this bundle id (letter case ignored), or `null`
+ * when it cannot be asked (an id outside `MAC_BUNDLE_ID`, no index, an error or the time limit).
+ * The id has only letters, digits, `-` and `.`, so it cannot end the quoted value or add a
+ * wildcard; `mdfind` gets the query as one argument, without a shell.
+ */
+function spotlightBundlesWithIdentifier(id: string): readonly string[] | null {
+  if (!MAC_BUNDLE_ID.test(id)) return null;
+  try {
+    return execFileSync('/usr/bin/mdfind', [`kMDItemCFBundleIdentifier == "${id}"c`], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      maxBuffer: 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .split('\n')
+      .filter((line) => line.startsWith('/') && line.toLowerCase().endsWith('.app'));
+  } catch {
+    return null;
+  }
 }
 
 // Read with `plutil`, since many bundles keep a binary Info.plist; kept per file version.
