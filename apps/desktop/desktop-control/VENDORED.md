@@ -12,7 +12,7 @@ Sprint Coder のデスクトップ操作の実行ファイルは、このフォ�
 
 ## 入れたもの
 
-Windows と macOS arm64 用の CLI の build に要る部分。Sprint Coder のアプリで macOS の機能を有効にする変更は別の段階で行う。
+Windows と macOS arm64 用の CLI の build に要る部分。
 
 - `Cargo.toml`（workspace）、`Cargo.lock`、`rust-toolchain.toml`（1.89.0）、`LICENSE`
 - `crates/core`、`crates/windows`、`crates/macos`
@@ -23,7 +23,7 @@ Windows と macOS arm64 用の CLI の build に要る部分。Sprint Coder の�
 
 `crates/linux`、`crates/ffi`、`apps`（説明のサイト）、`npm`、`benchmarks`、`probes`、`assets`、`docs`、`tests`、`scripts`、`.github`、`.githooks`、`.agents`、`.claude`、`.git`、root の説明の文書（`README.md`、`AGENTS.md`、`CHANGELOG.md`、`CONCEPTS.md`、`CONTRIBUTING.md` など）、`clippy.toml`、`deny.toml`、`.gitleaks.toml` など build に要らない設定。
 
-macOS のソースは取り込み済み。clipboard helper、カーソル、配布への同梱、アプリ側での有効化は別の段階で扱う。
+macOS のソースは取り込み済み。macOS（Apple シリコン）では、アプリ側で有効にしてあり、配布物にも実行ファイルを入れている。macOS でまだ無いのは、clipboard helper、カーソルの表示（Team のカーソルを含む）、`launch --url` で、別の段階で扱う。
 
 ## 取り込んだ後に消したもの
 

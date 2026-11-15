@@ -1,16 +1,16 @@
 name: Prepare verified desktop-control build
-description: Reuse the cached Windows desktop-control build or build it from the source in this repository; other hosts build nothing.
+description: Reuse the cached Windows or Apple silicon macOS desktop-control build or build it from the source in this repository; other hosts build nothing.
 runs:
   using: composite
   steps:
     - name: Check Rust build settings
       id: compiler
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' || (runner.os == 'macOS' && runner.arch == 'ARM64')
       shell: bash
       run: node ci-cache.mjs compiler >> "$GITHUB_OUTPUT"
     - name: Restore desktop-control build
       id: desktop-control
-      if: runner.os == 'Windows' && steps.compiler.outputs.cacheable == 'true'
+      if: (runner.os == 'Windows' || (runner.os == 'macOS' && runner.arch == 'ARM64')) && steps.compiler.outputs.cacheable == 'true'
       uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
       with:
         path: apps/desktop/desktop-control/build/Release
@@ -29,7 +29,15 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         npm run build:desktop-control
         exit $LASTEXITCODE
+    # Intel macOS ships no desktop control (build-desktop-control.mjs builds nothing there).
+    - name: Build desktop-control on macOS cache miss or invalid output
+      if: runner.os == 'macOS' && runner.arch == 'ARM64' && (steps.desktop-control.outputs.cache-hit != 'true' || steps.validation.outputs.valid != 'true')
+      shell: bash
+      run: |
+        set -euo pipefail
+        node ci-cache.mjs reset-desktop-control
+        npm run build:desktop-control
     - name: Verify desktop-control seal and executable
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' || (runner.os == 'macOS' && runner.arch == 'ARM64')
       shell: bash
       run: node ci-cache.mjs assert-desktop-control

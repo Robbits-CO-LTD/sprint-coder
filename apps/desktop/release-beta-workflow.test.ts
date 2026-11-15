@@ -34,13 +34,19 @@ describe('release signing and notarization', () => {
 
     expect(sandboxBuild).toBeGreaterThan(-1);
     expect(macPackaging).toBeGreaterThan(sandboxBuild);
-    // Every target runs it; it builds only where desktop control ships (Windows x64).
+    // Every target runs it; it builds only where desktop control ships (Windows x64, macOS arm64).
     expect(desktopControlBuild).toBeGreaterThan(sandboxBuild);
     expect(macPackaging).toBeGreaterThan(desktopControlBuild);
     expect(otherMake).toBeGreaterThan(desktopControlBuild);
     expect(makeJob).toContain('node ../../build-better-sqlite3.mjs');
     expect(makeJob).toContain('npm run build:native-safe-fs');
     expect(makeJob).not.toContain('actions/cache');
+    // The macOS job packages it too, so the build step is not limited to one runner.
+    const make = (parse(workflow) as { jobs: { make: { steps: Record<string, unknown>[] } } }).jobs
+      .make;
+    const build = make.steps.find((step) => step.name === 'Build desktop control');
+    expect(build?.run).toBe('npm run build:desktop-control');
+    expect(build?.if).toBeUndefined();
   });
 
   it('runs the full CI test set on the tagged commit before any build (owner rule, 2026-11-15)', () => {

@@ -6,11 +6,11 @@
  * with the executable, re-sealed after signing. Only a file whose bytes match its manifest is
  * ever treated as the desktop-control executable.
  *
- * Windows x64 and Apple silicon macOS run it. Only Windows x64 ships it in the package so far:
- * on macOS it runs from the development build output until packaging adds it. Linux has not been
- * verified on a real desktop (the display environment and process-group Stop do not fit yet), so
- * nothing is built there and desktop control stays off. The Team's desktop cursors and the
- * clipboard writes stay Windows-only.
+ * Windows x64 and Apple silicon macOS run it, and both ship it in the package (on macOS in
+ * `Contents/Resources`, sealed again after code signing like the sandbox runner). Linux has not
+ * been verified on a real desktop (the display environment and process-group Stop do not fit
+ * yet), so nothing is built there and desktop control stays off. The Team's desktop cursors and
+ * the clipboard writes stay Windows-only.
  *
  * Kept free of imports so forge.config.ts can use the same facts at package time.
  */
@@ -33,7 +33,7 @@ export function desktopControlSupported(platform: string, arch: string): boolean
 
 /** Whether the package for this platform and architecture ships the executable. */
 export function desktopControlPackaged(platform: string, arch: string): boolean {
-  return platform === 'win32' && arch === 'x64';
+  return (platform === 'win32' && arch === 'x64') || (platform === 'darwin' && arch === 'arm64');
 }
 
 /**

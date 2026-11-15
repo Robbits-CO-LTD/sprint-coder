@@ -208,6 +208,8 @@ describe('CI change boundaries', () => {
 
   it.each([
     ['apps/desktop/desktop-control/crates/windows/src/lib.rs', false, true],
+    // A PR compiles only on Windows; the macOS crate is built by the full run's macOS jobs.
+    ['apps/desktop/desktop-control/crates/macos/src/lib.rs', false, true],
     ['apps/desktop/desktop-control/Cargo.lock', false, true],
     ['build-desktop-control.mjs', false, true],
     ['.github/actions/prepare-desktop-control/action.yml', false, true],
@@ -243,6 +245,17 @@ describe('CI change boundaries', () => {
         native_required: 'true',
       });
     }
+    // The macOS jobs that build and package the macOS desktop control run in every full run.
+    const macos = classifyChanges(changes('apps/desktop/desktop-control/crates/macos/src/lib.rs'), {
+      eventName: 'workflow_dispatch',
+    });
+    expect(macos).toMatchObject({ mode: 'full', distribution: true });
+    expect(scopeOutputs(macos)).toMatchObject({
+      full_matrix: 'true',
+      distribution_required: 'true',
+    });
+    for (const job of ['test-macos', 'package-macos'])
+      expect(() => verifyRequiredJobs(macos, { classify: 'success' })).toThrow(`${job}: missing`);
     const docs = classifyChanges(changes('README.md'));
     expect(() => scopeOutputs({ ...docs, desktopControlRust: true })).toThrow('Invalid CI scope');
     const pr = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
