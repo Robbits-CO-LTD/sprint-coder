@@ -1,5 +1,7 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
-use agent_desktop_core::{AdapterError, Deadline, DeliverySemantics, ErrorCode, NativeHandle};
+use agent_desktop_core::{
+    AdapterError, Deadline, DeliverySemantics, ErrorCode, NativeHandle, Rect,
+};
 
 use super::hit_test::corroborate::root_of_hwnd;
 use crate::tree::automation::automation_client;
@@ -139,7 +141,8 @@ pub(crate) fn outside_scroll_viewports(
     use crate::tree::automation::uia_error;
     use crate::tree::properties::read_one;
     use crate::tree::walk::walker_source::{parent_step, viewport_bounds};
-    let Some(mut visible) = read_one(element, TreeProperty::BoundingRectangle)
+    use windows::Win32::Foundation::HWND;
+    let Some(visible) = read_one(element, TreeProperty::BoundingRectangle)
         .bounds()
         .known()
         .copied()
@@ -150,31 +153,92 @@ pub(crate) fn outside_scroll_viewports(
     let walker = client
         .get_raw_view_walker()
         .map_err(|error| uia_error(&error, "read scroll ancestors"))?;
-    let mut current = element.clone();
+    clipped_by_scroll_viewports(
+        element.clone(),
+        visible,
+        &ViewportClimb {
+            parent_of: &|node: &UIAElement| parent_step(&walker, node),
+            scrollable: &|node: &UIAElement| {
+                read_one(node, TreeProperty::ScrollAvailable).flag() == Some(true)
+            },
+            native_hwnd: &|node: &UIAElement| {
+                let handle: HWND = node.0.get_native_window_handle().map_err(|_| ())?.into();
+                Ok(handle.0 as isize)
+            },
+            window_shown: &|hwnd: isize| unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(
+                    hwnd as *mut std::ffi::c_void,
+                ) != 0
+            },
+            viewport: &|node: &UIAElement| viewport_bounds(node),
+            deadline,
+        },
+    )
+}
+
+/// The scroll-clipping climb's cross-process reads, injected so the rule can
+/// be tested without a live provider. `native_hwnd` answers `Ok(0)` when the
+/// element owns no window.
+pub(crate) struct ViewportClimb<'a, N> {
+    pub(crate) parent_of: &'a dyn Fn(&N) -> Result<Option<N>, ()>,
+    pub(crate) scrollable: &'a dyn Fn(&N) -> bool,
+    pub(crate) native_hwnd: &'a dyn Fn(&N) -> Result<isize, ()>,
+    pub(crate) window_shown: &'a dyn Fn(isize) -> bool,
+    pub(crate) viewport: &'a dyn Fn(&N) -> Result<Option<Rect>, AdapterError>,
+    pub(crate) deadline: Deadline,
+}
+
+/// Whether `target` falls outside one of the scroll viewports above `start`.
+///
+/// A scroll ancestor that owns a window which is not shown is passed over:
+/// its rectangle is where that hidden window sits, not a clip of what is
+/// drawn. Chromium (Chrome, Electron) moves the window it draws a page in,
+/// `Chrome_RenderWidgetHostHWND`, under its own hidden top-level window while
+/// the page is hidden, which Chrome does whenever other windows cover its
+/// window. The moved window keeps its size but sits at the screen's origin,
+/// so every part of the page below or right of that rectangle read as
+/// clipped (#1294: the guest button at the bottom of a covered profile
+/// picker was refused as offscreen while the profile cards above it were
+/// not). The provider's own `IsOffscreen` and the minimized-window check
+/// still apply. A window handle that cannot be read is left to `viewport`,
+/// which reports that failure as before.
+pub(crate) fn clipped_by_scroll_viewports<N>(
+    start: N,
+    target: Rect,
+    climb: &ViewportClimb<'_, N>,
+) -> Result<bool, AdapterError> {
+    let mut visible = target;
+    let mut current = start;
     for _ in 0..crate::tree::walk::walker::DEFAULT_MAX_RAW_DEPTH {
-        deadline.ensure_remaining()?;
-        current = match parent_step(&walker, &current) {
+        climb.deadline.ensure_remaining()?;
+        current = match (climb.parent_of)(&current) {
             Ok(Some(parent)) => parent,
             Ok(None) => return Ok(false),
             Err(()) => {
-                return Err(agent_desktop_core::AdapterError::new(
-                    agent_desktop_core::ErrorCode::AppUnresponsive,
+                return Err(AdapterError::new(
+                    ErrorCode::AppUnresponsive,
                     "Could not inspect scroll clipping",
                 ));
             }
         };
-        if read_one(&current, TreeProperty::ScrollAvailable).flag() != Some(true) {
+        if !(climb.scrollable)(&current) {
             continue;
         }
-        if let Some(viewport) = viewport_bounds(&current)? {
+        if let Ok(hwnd) = (climb.native_hwnd)(&current)
+            && hwnd != 0
+            && !(climb.window_shown)(hwnd)
+        {
+            continue;
+        }
+        if let Some(viewport) = (climb.viewport)(&current)? {
             match crate::tree::hit_test::intersect_rects(visible, viewport) {
                 Some(intersection) => visible = intersection,
                 None => return Ok(true),
             }
         }
     }
-    Err(agent_desktop_core::AdapterError::new(
-        agent_desktop_core::ErrorCode::AppUnresponsive,
+    Err(AdapterError::new(
+        ErrorCode::AppUnresponsive,
         "Scroll ancestor traversal exceeded its limit",
     ))
 }
@@ -197,3 +261,7 @@ pub(crate) fn stamp_minimized_offscreen(properties: &mut ElementProperties) {
 #[cfg(test)]
 #[path = "minimized_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "scroll_clip_tests.rs"]
+mod scroll_clip_tests;
