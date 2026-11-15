@@ -45,7 +45,8 @@ pub(crate) fn launch_app_impl(
     let lineage = launch_handoff::Lineage::new(pid, &token, process);
     let observed = observe_launched_window(pid, &token, lineage, &handoff, options, deadline)?;
     if let Some(guard) = guard {
-        guard.finish(&observed.owners, observed.window.as_ref());
+        let settle = (observed.handed_off && observed.window.is_some()).then_some(deadline);
+        guard.finish(&observed.owners, observed.window.as_ref(), settle);
     }
     let new_instance = observed.window.is_some() && !observed.handed_off;
     let mut result = launch_result(id, pid, token, observed.window);
@@ -73,7 +74,31 @@ pub(crate) fn launch_app_impl(
     }
     result.running_without_window = prepared.running_without_window;
     bring_forward_if_asked(&mut result, options.activate, deadline);
+    report_foreground(&mut result, options.activate);
     Ok(result)
+}
+
+/// Makes `window.is_focused` the fact when the launch returns (it was read
+/// when the window was found, before the foreground was handed back), and,
+/// without `--activate`, says so when a window the running instance showed
+/// stayed in front although the launch tried to keep it behind.
+fn report_foreground(result: &mut LaunchResult, activate: bool) {
+    let in_front = result.window.as_ref().is_some_and(is_foreground);
+    apply_foreground_fact(result, activate, in_front);
+}
+
+fn apply_foreground_fact(result: &mut LaunchResult, activate: bool, in_front: bool) {
+    let Some(window) = result.window.as_mut() else {
+        return;
+    };
+    window.state.is_focused = in_front;
+    if !activate && in_front && result.handed_off {
+        let note = launch_attach::HANDED_OFF_LEFT_IN_FRONT;
+        result.suggestion = Some(match result.suggestion.take() {
+            Some(text) => format!("{text} {note}"),
+            None => note.to_string(),
+        });
+    }
 }
 
 /// With `--activate`, brings the result's window to the front and records
@@ -282,7 +307,14 @@ fn observe_launched_window(
 /// launch. If the app still took the foreground in the moment between the
 /// unlock and the check, the foreground is handed back. If the foreground
 /// moved off that window while the lock held, the user moved it, so neither
-/// step runs (see `may_restore_foreground`).
+/// step runs (see `may_restore_foreground`), unless a window a running
+/// instance showed for the launch took it. For such a window the foreground
+/// is also held and watched for a short while, because the instance may
+/// activate it after the launch would otherwise have returned (see
+/// [`HANDOFF_FOREGROUND_HOLD`]). The hand-back calls `SetForegroundWindow`
+/// directly: it never goes through the adapter's `focus_window`, whose
+/// refusal of Sprint Coder's own windows does not apply to giving the
+/// foreground back to the window that had it.
 #[cfg(target_os = "windows")]
 struct ForegroundGuard {
     prior: windows_sys::Win32::Foundation::HWND,
@@ -304,53 +336,83 @@ impl ForegroundGuard {
     }
 
     /// `owners` are the processes the launch is tied to: the launched one,
-    /// and its descendants when the window came from one of them.
-    fn finish(mut self, owners: &[ProcessId], window: Option<&WindowInfo>) {
+    /// and its descendants when the window came from one of them, or the
+    /// running instance whose window was taken. `settle` is given for a
+    /// window a running instance showed (`handed_off`): see
+    /// [`HANDOFF_FOREGROUND_HOLD`].
+    fn finish(
+        mut self,
+        owners: &[ProcessId],
+        window: Option<&WindowInfo>,
+        settle: Option<Deadline>,
+    ) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, IsIconic, IsWindow,
+            GWL_EXSTYLE, GetForegroundWindow, GetShellWindow, GetWindowLongW, IsIconic, IsWindow,
             SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
             SetForegroundWindow, SetWindowPos, WS_EX_TOPMOST,
         };
-        let foreground_is_prior = unsafe { GetForegroundWindow() } == self.prior;
+        let foreground = unsafe { GetForegroundWindow() };
+        let foreground_is_prior = foreground == self.prior;
+        // A running instance may take the foreground through the lock (an app
+        // that synthesizes input to get it, which drops the lock): that move
+        // is the app's, not the user's, so it is undone too.
+        let taken_by_launch = settle.is_some()
+            && !foreground.is_null()
+            && !foreground_is_prior
+            && window_is_owned_by(foreground, owners);
         let prior_is_minimized = unsafe { IsIconic(self.prior) } != 0;
-        let may_restore = may_restore_foreground(foreground_is_prior, prior_is_minimized);
-        self.unlock();
-        if !may_restore {
-            return;
-        }
+        let mut may_restore =
+            may_restore_foreground(foreground_is_prior || taken_by_launch, prior_is_minimized);
         let prior = self.prior;
         if prior.is_null() || unsafe { IsWindow(prior) } == 0 {
+            may_restore = false;
+        }
+        if may_restore && let Some(deadline) = settle {
+            // Held locked, the instance's first activation fails, and an app
+            // gets only that one (#1276).
+            may_restore = settle_foreground(prior, owners, HANDOFF_FOREGROUND_HOLD, deadline);
+        }
+        self.unlock();
+        if !may_restore {
             return;
         }
         let foreground = unsafe { GetForegroundWindow() };
         if foreground != prior && window_is_owned_by(foreground, owners) {
             unsafe { SetForegroundWindow(prior) };
         }
-        let Some(window) = window else {
-            return;
-        };
-        let handle = super::window::window_ops::parse_handle(&window.id);
-        let prior_is_topmost =
-            unsafe { GetWindowLongW(prior, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0;
-        if handle.is_null() || handle == prior || prior_is_topmost {
-            return;
+        if let Some(window) = window {
+            let handle = super::window::window_ops::parse_handle(&window.id);
+            let prior_is_topmost =
+                unsafe { GetWindowLongW(prior, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0;
+            // Below the desktop's own window the launched window would be
+            // hidden behind the desktop: it stays where it is, behind the
+            // foreground handed back to the desktop.
+            let prior_is_desktop = prior == unsafe { GetShellWindow() };
+            if !handle.is_null()
+                && handle != prior
+                && !prior_is_topmost
+                && !prior_is_desktop
+                && window_is_owned_by(handle, owners)
+            {
+                unsafe {
+                    SetWindowPos(
+                        handle,
+                        prior,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_ASYNCWINDOWPOS
+                            | SWP_NOMOVE
+                            | SWP_NOSIZE
+                            | SWP_NOACTIVATE
+                            | SWP_NOOWNERZORDER,
+                    )
+                };
+            }
         }
-        if window_is_owned_by(handle, owners) {
-            unsafe {
-                SetWindowPos(
-                    handle,
-                    prior,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_ASYNCWINDOWPOS
-                        | SWP_NOMOVE
-                        | SWP_NOSIZE
-                        | SWP_NOACTIVATE
-                        | SWP_NOOWNERZORDER,
-                )
-            };
+        if let Some(deadline) = settle {
+            settle_foreground(prior, owners, HANDOFF_FOREGROUND_WATCH, deadline);
         }
     }
 
@@ -360,6 +422,93 @@ impl ForegroundGuard {
             unsafe { LockSetForegroundWindow(LSFW_UNLOCK) };
         }
     }
+}
+
+/// How long, after a running instance showed the window a launch was passed
+/// to, the foreground stays locked and watched, and how long it is watched
+/// after the lock is dropped.
+///
+/// An instance shows that window from its own message handling and often
+/// activates it a moment later, after the launch already returned (measured
+/// with a probe that activates 800 ms after showing: the old guard had
+/// unlocked by then and the probe took the foreground). An app gets only its
+/// first activation (#1276): one that fails while the lock holds does not
+/// come back, so the hold covers the activation that follows the show. The
+/// watch after it catches an app that takes the foreground anyway (one that
+/// synthesizes input drops the lock) and hands the foreground back. Both stay
+/// inside the launch's deadline; 2 seconds in all is the price, paid only by
+/// a launch passed to a running instance without `--activate`.
+const HANDOFF_FOREGROUND_HOLD: Duration = Duration::from_millis(1_200);
+const HANDOFF_FOREGROUND_WATCH: Duration = Duration::from_millis(800);
+
+/// What the watch does with the foreground it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundStep {
+    /// Still on the window that was in front (or between windows): wait.
+    Keep,
+    /// A window of the launch took it: hand it back.
+    Restore,
+    /// Another window has it: the user (or another app) moved it, so the
+    /// watch stops and leaves it alone.
+    LeftAlone,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn foreground_step(
+    foreground_is_null: bool,
+    foreground_is_prior: bool,
+    owned_by_launch: bool,
+) -> ForegroundStep {
+    match (foreground_is_null, foreground_is_prior, owned_by_launch) {
+        (true, _, _) | (false, true, _) => ForegroundStep::Keep,
+        (false, false, true) => ForegroundStep::Restore,
+        (false, false, false) => ForegroundStep::LeftAlone,
+    }
+}
+
+/// Watches the foreground for `span` (inside `deadline`) and hands it back
+/// to `prior` whenever a window of the launch takes it. `false` when the
+/// foreground went elsewhere, so nothing more may be done to it.
+#[cfg(target_os = "windows")]
+fn settle_foreground(
+    prior: windows_sys::Win32::Foundation::HWND,
+    owners: &[ProcessId],
+    span: Duration,
+    deadline: Deadline,
+) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    let until = std::time::Instant::now() + span.min(deadline.remaining());
+    loop {
+        let foreground = unsafe { GetForegroundWindow() };
+        match foreground_step(
+            foreground.is_null(),
+            foreground == prior,
+            window_is_owned_by(foreground, owners),
+        ) {
+            ForegroundStep::Keep => {}
+            ForegroundStep::Restore => {
+                unsafe { SetForegroundWindow(prior) };
+            }
+            ForegroundStep::LeftAlone => return false,
+        }
+        if std::time::Instant::now() >= until {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether `window` is the foreground window now: what `is_focused` reports.
+#[cfg(target_os = "windows")]
+fn is_foreground(window: &WindowInfo) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let handle = super::window::window_ops::parse_handle(&window.id);
+    !handle.is_null() && unsafe { GetForegroundWindow() } == handle
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_foreground(window: &WindowInfo) -> bool {
+    window.state.is_focused
 }
 
 #[cfg(target_os = "windows")]
@@ -420,7 +569,13 @@ impl ForegroundGuard {
         None
     }
 
-    fn finish(self, _owners: &[ProcessId], _window: Option<&WindowInfo>) {}
+    fn finish(
+        self,
+        _owners: &[ProcessId],
+        _window: Option<&WindowInfo>,
+        _settle: Option<Deadline>,
+    ) {
+    }
 }
 
 fn launch_result(
@@ -734,7 +889,83 @@ mod tests;
 
 #[cfg(test)]
 mod foreground_guard_tests {
-    use super::may_restore_foreground;
+    use super::{
+        ForegroundStep, apply_foreground_fact, foreground_step, launch_attach, launch_result,
+        may_restore_foreground,
+    };
+    use agent_desktop_core::{ProcessId, WindowInfo, WindowState};
+
+    /// While the launch watches the foreground, a window of the launch (the
+    /// running instance that showed the window) taking it is handed back; any
+    /// other window taking it was the user's doing and ends the watch.
+    #[test]
+    fn the_watch_hands_back_only_what_the_launch_took() {
+        assert_eq!(foreground_step(false, true, false), ForegroundStep::Keep);
+        assert_eq!(foreground_step(true, false, false), ForegroundStep::Keep);
+        assert_eq!(foreground_step(false, false, true), ForegroundStep::Restore);
+        assert_eq!(
+            foreground_step(false, false, false),
+            ForegroundStep::LeftAlone
+        );
+    }
+
+    #[test]
+    fn the_hold_and_the_watch_are_short() {
+        let total = super::HANDOFF_FOREGROUND_HOLD + super::HANDOFF_FOREGROUND_WATCH;
+        assert!(total <= std::time::Duration::from_secs(3), "{total:?}");
+        assert!(super::HANDOFF_FOREGROUND_HOLD >= std::time::Duration::from_millis(800));
+    }
+
+    fn handed_off_with_window() -> agent_desktop_core::system::launch_result::LaunchResult {
+        let mut result = launch_result("app.exe", ProcessId::from(7), "7:1".to_string(), None);
+        result.window = Some(WindowInfo {
+            id: "w-1".into(),
+            title: String::new(),
+            app: "app.exe".into(),
+            pid: ProcessId::from(8),
+            process_instance: Some("8:1".into()),
+            bounds: None,
+            state: WindowState {
+                is_focused: true,
+                ..WindowState::default()
+            },
+        });
+        result.handed_off = true;
+        result.suggestion = Some(launch_attach::HANDED_OFF_NEW_WINDOW.to_string());
+        result
+    }
+
+    /// `is_focused` is the fact at return: a window read as focused when it
+    /// was found, then handed back, reports `false`, with no extra note.
+    #[test]
+    fn a_window_put_back_behind_is_not_reported_focused() {
+        let mut result = handed_off_with_window();
+        apply_foreground_fact(&mut result, false, false);
+        assert!(!result.window.as_ref().expect("window").state.is_focused);
+        assert_eq!(
+            result.suggestion.as_deref(),
+            Some(launch_attach::HANDED_OFF_NEW_WINDOW)
+        );
+    }
+
+    /// A window that stayed in front without `--activate` says so, and the
+    /// guidance tells the caller to say so to the user.
+    #[test]
+    fn a_window_left_in_front_says_so() {
+        let mut result = handed_off_with_window();
+        apply_foreground_fact(&mut result, false, true);
+        assert!(result.window.as_ref().expect("window").state.is_focused);
+        let text = result.suggestion.as_deref().expect("suggestion");
+        assert!(text.starts_with(launch_attach::HANDED_OFF_NEW_WINDOW));
+        assert!(text.ends_with(launch_attach::HANDED_OFF_LEFT_IN_FRONT));
+        let mut asked = handed_off_with_window();
+        apply_foreground_fact(&mut asked, true, true);
+        assert_eq!(
+            asked.suggestion.as_deref(),
+            Some(launch_attach::HANDED_OFF_NEW_WINDOW),
+            "with --activate, in front is what was asked for"
+        );
+    }
 
     #[test]
     fn a_foreground_that_stayed_on_the_prior_window_is_restored() {

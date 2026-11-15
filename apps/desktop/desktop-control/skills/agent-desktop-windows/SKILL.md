@@ -113,8 +113,10 @@ observation, actions and capture there fail or return nothing.
   app for them to look at or use, pass `--activate`: the window is brought to
   the front, and `activated` in the result says whether Windows allowed it.
   When `activated` is `false`, or you launched without `--activate`, tell the
-  user the window opened behind their other windows. When unsure, launch
-  without `--activate` and say so.
+  user the window opened behind their other windows, unless
+  `window.is_focused` is `true`: then the app took the front itself and it
+  could not be put back, so tell the user it opened in front. When unsure,
+  launch without `--activate` and say so.
 - **The `window` a launch returns can be a splash screen** that closes once
   the app's main window opens. When a command on that window id fails with
   `WINDOW_NOT_FOUND`, run `list-windows --app <app>` and use the current id.
