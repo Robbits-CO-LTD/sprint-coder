@@ -2393,15 +2393,28 @@ describe('a desktop-control run the Full access preset allowed, judged again as 
     registry.register(definition);
     const { boundary, commandRows } = createCommandBoundary(workspace);
     const runner = new CommandRunner({ sandboxed: true });
-    const called: string[] = [];
     const spawned: string[] = [];
+    // The signal that the runner was handed a run (`called`) or let it start (`spawned`), so the
+    // test goes on when the run gets there, however long the preparation before it takes (each
+    // run's ExecutionSpec seals the whole executable image first).
+    const signals = new Map<string, ReturnType<typeof deferred>>();
+    const signal = (name: string) => {
+      let entry = signals.get(name);
+      if (entry === undefined) {
+        entry = deferred();
+        signals.set(name, entry);
+      }
+      return entry;
+    };
+    const reached = (stage: 'called' | 'spawned', key: string) => signal(`${stage}:${key}`).promise;
     const run = vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
       const key = spec.argv.join(' ');
-      called.push(key);
+      signal(`called:${key}`).release();
       const held = hold.get(key);
       if (held !== undefined && spec.argv[0] === 'session') await held;
       options.beforeSpawn?.();
       spawned.push(key);
+      signal(`spawned:${key}`).release();
       if (held !== undefined && spec.argv[0] !== 'session') await held;
       if (spec.argv[0] === 'session' && spec.argv[1] === 'start')
         await options.onBatch?.([
@@ -2457,7 +2470,7 @@ describe('a desktop-control run the Full access preset allowed, judged again as 
       await broker.dispose();
       await sessions?.dispose();
     };
-    return { dispatch, called, spawned, state, commandRows, cleanup };
+    return { dispatch, reached, spawned, state, commandRows, cleanup };
   }
 
   const sessionStart = 'session start --name sprint-coder --cursor --multi-agent --no-trace';
@@ -2478,7 +2491,8 @@ describe('a desktop-control run the Full access preset allowed, judged again as 
       try {
         // Allowed by Full access, then held while the Task's session is prepared.
         const typing = t.dispatch('full-type', ['type', '@s1:e1', 'ABC']);
-        await vi.waitFor(() => expect(t.called).toContain(sessionStart));
+        // Held there: Main's session start was handed to the runner and waits to be released.
+        await t.reached('called', sessionStart);
         // Back to ask while it waits; then the session is ready.
         t.state.preset = 'ask';
         preparing.release();
@@ -2515,11 +2529,16 @@ describe('a desktop-control run the Full access preset allowed, judged again as 
       // The session is there, and a long run allowed on its card holds the Task's turn.
       await t.dispatch('full-first', ['list-windows']);
       const long = t.dispatch('card-long', ['wait', '--text', 'Done']);
-      await vi.waitFor(() => expect(t.spawned).toContain('wait --text Done'));
+      await t.reached('spawned', 'wait --text Done');
       // Behind it wait a run Full access allowed and one the person allowed on its card.
       const typing = t.dispatch('full-type', ['type', '@s1:e1', 'ABC']);
       const carded = t.dispatch('card-click', ['click', '@s1:e1']);
-      await vi.waitFor(() => expect(desktopControlQueueState('task-full-queue').waiting).toBe(2));
+      // The Task's order has no signal of its own: its state is read until both wait in it. Each
+      // gets there only after its ExecutionSpec sealed the whole executable, so the bound is the
+      // test's, not a guess of how long that takes.
+      await vi.waitFor(() => expect(desktopControlQueueState('task-full-queue').waiting).toBe(2), {
+        timeout: 15_000,
+      });
       t.state.preset = 'ask';
       longRun.release();
       await long;
