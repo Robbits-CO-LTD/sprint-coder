@@ -197,8 +197,11 @@ observation, actions and capture there fail or return nothing.
   permission or approval the run has. While Sprint Coder is in front, a wheel, a click with
   modifiers, and a click on (or a ref action on a part of) a window that never takes the
   foreground (an on-screen keyboard) are refused too (`details.target: "foreground"`);
-  scroll a window behind it with `scroll` on a ref. Do not retry by another route: permissions and approvals in Sprint
-  Coder are the user's to change on screen.
+  scroll a window behind it with `scroll` on a ref. A `--count` click, a wheel and a drag are
+  judged again before each later input, so a sequence that ends over Sprint Coder stops part-way
+  (`details.clicks_sent` / `wheel_events_sent`); a refused drag lets its button go at a point that
+  is not Sprint Coder's (`details.button_released_at`), never dropping onto it. Do not retry by
+  another route: permissions and approvals in Sprint Coder are the user's to change on screen.
 
 ## What differs on Windows
 
