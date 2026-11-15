@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AppError, ClipboardFormat, Direction, Modifier, MouseButton,
     commands::{get, is_check},
@@ -130,6 +131,9 @@ pub(crate) fn build_launch_options(
     launch: &crate::cli_args::system::LaunchArgs,
 ) -> Result<LaunchOptions, AppError> {
     let (args, env) = (launch.args.as_slice(), launch.env.as_slice());
+    if let Some(url) = &launch.url {
+        return url_launch_options(launch, url);
+    }
     if let Some(index) = args.iter().position(|argument| argument.contains('\0')) {
         return Err(AppError::invalid_input(format!(
             "Invalid --arg entry #{index}: argument contains a NUL byte"
@@ -152,6 +156,33 @@ pub(crate) fn build_launch_options(
         attach_if_running: !launch.no_attach,
         activate: launch.activate,
         cdp_port: launch.cdp,
+    })
+}
+
+/// `launch <browser> --url <URL>`: the browser's new-window switch and the URL, and nothing else
+/// the caller chose (`launch_url`). Always a new start, never attached to a running instance (a
+/// launch with arguments never attaches); a running browser takes the page into a new window.
+fn url_launch_options(
+    launch: &crate::cli_args::system::LaunchArgs,
+    url: &str,
+) -> Result<LaunchOptions, AppError> {
+    if !launch.args.is_empty()
+        || !launch.env.is_empty()
+        || launch.cwd.is_some()
+        || launch.cdp.is_some()
+    {
+        return Err(AppError::invalid_input(
+            "--url cannot be combined with --arg, --env, --cwd or --cdp; nothing was launched",
+        ));
+    }
+    Ok(LaunchOptions {
+        args: super::launch_url::launch_url_args(&launch.app, url)?,
+        env: BTreeMap::new(),
+        cwd: None,
+        timeout_ms: launch.timeout,
+        attach_if_running: false,
+        activate: launch.activate,
+        cdp_port: None,
     })
 }
 

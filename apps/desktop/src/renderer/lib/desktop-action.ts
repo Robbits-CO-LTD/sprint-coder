@@ -41,6 +41,7 @@ const TEXT_LABEL = {
   keys: '押すキー',
   clipboard: '書く文字',
   button: '押すボタン',
+  url: '開く URL',
 } as const;
 
 export function desktopTextLabel(step: Pick<DesktopStep, 'textRole'>): string {

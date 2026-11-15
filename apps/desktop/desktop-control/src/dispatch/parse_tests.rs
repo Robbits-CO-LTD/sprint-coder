@@ -115,5 +115,57 @@ fn launch_args(args: &[String], env: &[String]) -> crate::cli_args::system::Laun
         no_attach: false,
         activate: false,
         cdp: None,
+        url: None,
+    }
+}
+
+fn url_launch(app: &str, url: &str) -> crate::cli_args::system::LaunchArgs {
+    crate::cli_args::system::LaunchArgs {
+        app: app.into(),
+        url: Some(url.into()),
+        ..launch_args(&[], &[])
+    }
+}
+
+#[test]
+fn a_url_launch_passes_only_the_new_window_switch_and_the_url_and_never_attaches() {
+    let options = build_launch_options(&url_launch(
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "https://example.com/a?q=1",
+    ))
+    .unwrap();
+    assert_eq!(options.args, ["--new-window", "https://example.com/a?q=1"]);
+    assert!(options.env.is_empty() && options.cwd.is_none() && options.cdp_port.is_none());
+    assert!(!options.attach_if_running);
+    assert_eq!(options.timeout_ms, 100);
+}
+
+#[test]
+fn a_url_launch_refuses_other_arguments_a_non_browser_and_a_non_canonical_url() {
+    let mut with_arg = url_launch("chrome", "https://example.com/");
+    with_arg.args = vec!["--remote-debugging-port=9222".into()];
+    let mut with_env = url_launch("chrome", "https://example.com/");
+    with_env.env = vec!["A=1".into()];
+    let mut with_cwd = url_launch("chrome", "https://example.com/");
+    with_cwd.cwd = Some("C:\\".into());
+    let mut with_cdp = url_launch("chrome", "https://example.com/");
+    with_cdp.cdp = Some(0);
+    for launch in [
+        with_arg,
+        with_env,
+        with_cwd,
+        with_cdp,
+        url_launch("notepad", "https://example.com/"),
+        url_launch("chrome", "file:///C:/Windows/win.ini"),
+        url_launch(
+            "chrome",
+            "https://example.com/ --remote-debugging-port=9222",
+        ),
+        url_launch("chrome", "HTTPS://example.com/"),
+    ] {
+        assert_eq!(
+            build_launch_options(&launch).unwrap_err().code(),
+            "INVALID_ARGS"
+        );
     }
 }
