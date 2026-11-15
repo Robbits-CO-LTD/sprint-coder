@@ -439,8 +439,22 @@ pub(super) const HANDED_OFF_NEW_WINDOW: &str = "The launched process passed the 
 pub(super) const HANDED_OFF_EXISTING_RAISED: &str = "The launched process passed the launch to \
      the instance of the same app that was already running and exited. No new window \
      appeared: the instance brought `window`, a window it already had before this launch, to \
-     the front instead (existing_window). This app likely keeps one window, so do not repeat \
-     --no-attach.";
+     the front instead (existing_window), even though it has other windows open. It uses that \
+     window for such a launch (an app that keeps one window, or a browser whose profile picker \
+     was already open), so do not repeat --no-attach: it would most likely bring the same \
+     window forward again.";
+
+/// The guidance a launch reports when, passed to the running instance, no new
+/// window appeared, and a window the instance already had came to the front
+/// during the launch while the user was giving input: the instance most
+/// likely brought it forward, but the user may have picked it.
+pub(super) const HANDED_OFF_EXISTING_CAME_FORWARD: &str = "The launched process passed the \
+     launch to the instance of the same app that was already running and exited. No new \
+     window appeared within a few seconds, and `window`, a window that instance already had \
+     before this launch, came to the front during the launch (existing_window). The instance \
+     most likely brought it forward for this launch, but the user was using the computer at \
+     the time and may have picked it, so it was left where it is. Do not repeat --no-attach: \
+     it would most likely bring the same window forward again.";
 
 /// The guidance a launch reports when, passed to the running instance, no new
 /// window appeared and the instance shows exactly one window, which it
@@ -482,9 +496,12 @@ pub(super) const HANDED_OFF: &str = "The launched process exited without a windo
 /// be the launch's `window` (`existing_window`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExistingWindow {
-    /// Shown before the launch, and brought to the front as the launch was
-    /// handed over.
+    /// Shown before the launch, and brought to the front by the instance for
+    /// the launch: as it was handed over, or with no input from the user.
     Raised,
+    /// Shown before the launch, and in front after it, while the user gave
+    /// input: most likely the instance's doing, maybe the user's pick.
+    CameForward,
     /// Shown before the launch, and the instance's only visible window when
     /// no new one appeared.
     Only,
@@ -506,6 +523,7 @@ pub(super) const HANDED_OFF_EXISTING_REVEALED: &str = "The launched process pass
 pub(super) fn existing_window_guidance(kind: ExistingWindow) -> String {
     let head = match kind {
         ExistingWindow::Raised => HANDED_OFF_EXISTING_RAISED,
+        ExistingWindow::CameForward => HANDED_OFF_EXISTING_CAME_FORWARD,
         ExistingWindow::Only => HANDED_OFF_EXISTING_ONLY,
         ExistingWindow::Revealed => HANDED_OFF_EXISTING_REVEALED,
     };

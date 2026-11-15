@@ -191,6 +191,7 @@ fn the_attach_guidance_says_nothing_started_and_how_to_get_a_new_window() {
     assert!(launch_attach::HANDED_OFF_AMBIGUOUS.contains("not confirmed"));
     for kind in [
         launch_attach::ExistingWindow::Raised,
+        launch_attach::ExistingWindow::CameForward,
         launch_attach::ExistingWindow::Only,
         launch_attach::ExistingWindow::Revealed,
     ] {
@@ -204,6 +205,7 @@ fn the_attach_guidance_says_nothing_started_and_how_to_get_a_new_window() {
     }
     for kind in [
         launch_attach::ExistingWindow::Raised,
+        launch_attach::ExistingWindow::CameForward,
         launch_attach::ExistingWindow::Only,
     ] {
         let text = launch_attach::existing_window_guidance(kind);

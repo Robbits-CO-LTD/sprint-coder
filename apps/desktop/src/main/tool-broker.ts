@@ -107,9 +107,34 @@ export type ManagedToolLifecycleEvent = Readonly<{
 
 export class ToolAuthorizationDeniedError extends Error {
   constructor(readonly authorization: ToolAuthorizationDecision) {
-    super(`Tool authorization ${authorization.decision}: ${authorization.reason}`);
+    super(
+      `Tool authorization ${authorization.decision}: ${describeToolDenial(authorization.reason)}`,
+    );
     this.name = 'ToolAuthorizationDeniedError';
   }
+}
+
+const NOT_ANSWERED =
+  "The call was NOT run. It waited on the user's approval card, and the card was withdrawn before the user answered: the Turn ended, or the call was canceled, while it still waited. The user neither allowed nor refused it. Do not report it as run or as failed; say it was not run because no approval was given, and ask again if it is still needed.";
+
+/**
+ * What the agent reads for a denial whose reason code alone is easy to mistake (issue #1285): a card
+ * withdrawn unanswered reads as neither a refusal nor a failure. The code stays first, so anything
+ * matching on it still does; any other reason is passed on as it is.
+ */
+export function describeToolDenial(reason: string): string {
+  const explanation =
+    reason === 'approval_canceled' ||
+    reason === 'turn_ended' ||
+    reason === 'turn_finished' ||
+    reason === 'turn_canceled'
+      ? NOT_ANSWERED
+      : reason === 'approval_deny'
+        ? 'The call was NOT run: the user denied it on its approval card.'
+        : reason === 'policy_epoch_changed'
+          ? 'The call was NOT run: the permission settings changed while it waited for approval. Ask again if it is still needed.'
+          : null;
+  return explanation === null ? reason : `${reason}. ${explanation}`;
 }
 
 /**
