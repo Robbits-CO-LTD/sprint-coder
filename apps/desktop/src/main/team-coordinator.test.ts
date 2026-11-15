@@ -272,6 +272,53 @@ describe('removeTemporaryDirectory', () => {
   });
 });
 
+describe('failedShardTests', () => {
+  function reportWith(
+    ...results: { fullName: string; duration?: number; failureMessages: string[] }[]
+  ): string {
+    const directory = mkdtempSync(join(tmpdir(), 'coordinator-shard-report-'));
+    cleanup.push(directory);
+    const report = join(directory, 'report.json');
+    writeFileSync(
+      report,
+      JSON.stringify({
+        testResults: [
+          { assertionResults: results.map((result) => ({ ...result, status: 'failed' })) },
+        ],
+      }),
+    );
+    return report;
+  }
+
+  it('says a test timed out when vitest kept only the stack of its definition (#1304)', () => {
+    const text = failedShardTests(
+      reportWith({
+        fullName: 'TeamCoordinator pages',
+        duration: 20_004.6,
+        failureMessages: ['Error: STACK_TRACE_ERROR\n    at task (chunk-hooks.js:638:27)'],
+      }),
+    );
+    expect(text).toBe(
+      'FAILED: TeamCoordinator pages (after 20005 ms)\n' +
+        'Timed out: the test ran past its time budget (vitest keeps only its stack).\n' +
+        'Error: STACK_TRACE_ERROR\n    at task (chunk-hooks.js:638:27)',
+    );
+  });
+
+  it('keeps an assertion failure as it is, with no timeout line', () => {
+    const text = failedShardTests(
+      reportWith({
+        fullName: 'TeamCoordinator lists',
+        duration: 12,
+        failureMessages: ['AssertionError: expected 1 to be 2'],
+      }),
+    );
+    expect(text).toBe(
+      'FAILED: TeamCoordinator lists (after 12 ms)\nAssertionError: expected 1 to be 2',
+    );
+  });
+});
+
 function createPersistence(): SqlitePersistenceClient {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-coordinator-'));
   cleanup.push(directory);
@@ -1175,7 +1222,12 @@ function grokFailureDiagnostic(
   };
 }
 
-/** The failing tests (name and first message) a vitest JSON report names, for a shard failure. */
+/**
+ * The failing tests (name, duration and first message) a vitest JSON report names, for a shard
+ * failure. The report keeps only an error's stack, and vitest gives a timeout the stack of the
+ * test's definition with the message "STACK_TRACE_ERROR", so "timed out" is said here or the CI log
+ * cannot tell a timeout from an assertion (issue #1304).
+ */
 function failedShardTests(report: string): string {
   try {
     const parsed = JSON.parse(readFileSync(report, 'utf8')) as {
@@ -1183,6 +1235,7 @@ function failedShardTests(report: string): string {
         assertionResults?: readonly {
           fullName?: string;
           status?: string;
+          duration?: number | null;
           failureMessages?: readonly string[];
         }[];
       }[];
@@ -1190,10 +1243,14 @@ function failedShardTests(report: string): string {
     const failed = (parsed.testResults ?? [])
       .flatMap(({ assertionResults }) => assertionResults ?? [])
       .filter(({ status }) => status === 'failed')
-      .map(
-        ({ fullName, failureMessages }) =>
-          `FAILED: ${fullName ?? '(unnamed)'}\n${(failureMessages ?? [])[0]?.slice(0, 3_000) ?? ''}`,
-      );
+      .map(({ fullName, duration, failureMessages }) => {
+        const message = (failureMessages ?? [])[0] ?? '';
+        const took = typeof duration === 'number' ? ` (after ${Math.round(duration)} ms)` : '';
+        const timedOut = message.startsWith('Error: STACK_TRACE_ERROR')
+          ? 'Timed out: the test ran past its time budget (vitest keeps only its stack).\n'
+          : '';
+        return `FAILED: ${fullName ?? '(unnamed)'}${took}\n${timedOut}${message.slice(0, 3_000)}`;
+      });
     return failed.length > 0 ? failed.join('\n\n') : 'No failed test in the shard report';
   } catch (error) {
     return `The shard report could not be read: ${String(error)}`;
@@ -1786,7 +1843,10 @@ if (runsWithElectronAbi)
       } finally {
         persistence.close();
       }
-    });
+      // About 1,400 separate SQLite write commits (each one synced to disk) and thousands of reads:
+      // about 1.2 s on a developer machine, but past the 20 s default on a slow Windows CI disk
+      // (issue #1304). The budget is for that disk; the paging checks stay the same.
+    }, 120_000);
 
     it('emits metadata-only lifecycle diagnostics for Team work', async () => {
       const persistence = createPersistence();
