@@ -20,6 +20,7 @@ import {
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 import {
+  describeToolDenial,
   ToolBroker,
   type ApprovalWaitObserver,
   type ToolAuthorizationDecision,
@@ -1625,6 +1626,42 @@ describe('ApprovalCoordinator cancellation of an aborted call', () => {
     harness.coordinator.resolve(resolveCommand(otherCard, 'allow_once'));
     await expect(otherTurn).resolves.toEqual({ ok: true });
     expect(executions()).toBe(1);
+  });
+
+  it('tells a call its unanswered card was withdrawn, apart from a refusal (issue #1285)', async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const unanswered = dispatchFetch(broker, 'call-1', 'https://one.test');
+    const refused = dispatchFetch(broker, 'call-2', 'https://two.test');
+    await viWaitFor(() => harness.published.length === 2);
+    const [, refusedCard] = harness.published as [StoredApproval, StoredApproval];
+
+    harness.coordinator.resolve(resolveCommand(refusedCard, 'deny'));
+    harness.coordinator.cancelUnansweredForTurn('task-1', 'turn-1');
+
+    // The code stays first; the words say it did not run and that nobody refused it.
+    const withdrawn = await unanswered.then(
+      () => '',
+      (error: Error) => error.message,
+    );
+    expect(withdrawn).toContain('Tool authorization deny: approval_canceled. ');
+    expect(withdrawn).toContain('NOT run');
+    expect(withdrawn).toContain('withdrawn before the user answered');
+    expect(withdrawn).toContain('neither allowed nor refused');
+    const denied = await refused.then(
+      () => '',
+      (error: Error) => error.message,
+    );
+    expect(denied).toContain('approval_deny');
+    expect(denied).toContain('the user denied it');
+    expect(denied).not.toContain('withdrawn');
+    expect(executions()).toBe(0);
+    // A reason it has no words for is passed on as it is.
+    expect(describeToolDenial('desktop_app_task_grant')).toBe('desktop_app_task_grant');
+    expect(describeToolDenial('turn_finished')).toContain('NOT run');
   });
 
   it('refuses a late allow once the cancellation committed first', async () => {

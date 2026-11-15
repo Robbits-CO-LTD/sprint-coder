@@ -2726,6 +2726,12 @@ export const turnSnapshotSchema = z
      */
     interruptedTurnIds: z.array(idSchema).max(4_096).default([]),
     /**
+     * Turns that ended `canceled` — stopped, not finished by their Runtime — among those that had an
+     * approval card withdrawn without an answer (issue #1285). The Renderer marks a withdrawn card
+     * in the history only when its Turn is not one of these: the stop already says why it went.
+     */
+    canceledTurnIds: z.array(idSchema).max(4_096).default([]),
+    /**
      * The Task's kept Auto decision rows — the newest 200 denials and the newest 200 others, oldest
      * first — up to `lastSeq` (issue #863). Read in the same call as the counts below and
      * `lastSeq`, so a decision recorded while the snapshot waited is in all three or in none.

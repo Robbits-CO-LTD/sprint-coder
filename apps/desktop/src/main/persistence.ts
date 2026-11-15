@@ -19955,6 +19955,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ORDER BY created_at DESC, rowid DESC LIMIT 4096`,
       )
       .all(taskId) as Array<{ id: string }>;
+    // Stopped Turns whose cards were withdrawn unanswered (issue #1285): the Renderer leaves those
+    // cards unmarked, and marks the ones a Turn left behind when it ended on its own.
+    const canceledTurns = this.db
+      .prepare(
+        `SELECT t.id FROM turns AS t
+         WHERE t.task_id = ? AND t.state = 'canceled'
+           AND EXISTS (SELECT 1 FROM approvals AS a WHERE a.turn_id = t.id AND a.state = 'canceled')
+         ORDER BY t.created_at DESC, t.rowid DESC LIMIT 4096`,
+      )
+      .all(taskId) as Array<{ id: string }>;
     const activatedSkills = this.db
       .prepare(
         `SELECT c.turn_id, c.source, c.skill_id, c.digest, c.name
@@ -19990,6 +20000,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
               entries: this.getDisplayTurnDiff(taskId, latestCompletedTurn.id),
             },
       interruptedTurnIds: interruptedTurns.map(({ id }) => id),
+      canceledTurnIds: canceledTurns.map(({ id }) => id),
       // Read in the same call as lastSeq, so the rows and counts cover exactly the decisions up
       // to it and a subscription that resumes after lastSeq neither misses nor repeats one
       // (issue #863).
