@@ -34,7 +34,7 @@ export { TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 // source is exactly as it was before the mark existed.
 export function teamMcpDesktopHireProperty(enabled: boolean): string {
   return enabled
-    ? "\n        desktopControl: { type: 'boolean', description: 'true lets this leaf worker run only the Sprint Coder desktop-control executable (each run is still authorized under the Task access setting: on a user approval card, or without one under Full access). Give each such worker its own app/window; at most 3 at once.' },"
+    ? "\n        desktopControl: { type: 'boolean', description: 'true lets this leaf worker run only the Sprint Coder desktop-control executable (each run is still authorized under the Task access setting: on a user approval card, or without one under Full access). Give each such worker its own app/window: one its launch opened, or for a one-window app such as mail the existing window within what the user asked. Do not stop because no new window of its own can be made; never give one window to two workers at once; at most 3 at once.' },"
     : '';
 }
 const TEAM_MCP_DESKTOP_HIRE_PROPERTY = teamMcpDesktopHireProperty(
