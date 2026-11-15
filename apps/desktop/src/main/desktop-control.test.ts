@@ -7,11 +7,14 @@ import {
   DESKTOP_CONTROL_SKILL_REFERENCES,
   DESKTOP_CONTROL_HOST_PID_VARIABLE,
   DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE,
+  DESKTOP_CONTROL_REFUSED_WINDOW_OWNER_VARIABLE,
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
   desktopControlExpectedWindowOwner,
   desktopControlLaunchByName,
+  desktopControlOwnWindowOwner,
+  desktopControlRefusedWindowOwner,
   desktopControlStateFolder,
   isDesktopControlExecutable,
   isShippedDesktopControlPath,
@@ -219,6 +222,106 @@ describe('desktop-control run environment', () => {
       { pid: 1, instance: 'windows proc' },
     ])
       expect(desktopControlExpectedWindowOwner(owner)).toBeNull();
+  });
+
+  it('always drops the refused window owner the caller chose, and sets only the one Main gives', () => {
+    const chosen = {
+      SPRINT_CODER_DESKTOP_REFUSED_WINDOW_OWNER: '1',
+      sprint_coder_desktop_refused_window_owner: '',
+      Sprint_Coder_Desktop_Refused_Window_Owner: '3:windows-proc-v1:3:3',
+      OTHER: 'kept',
+    };
+    const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
+    expect(desktopControlEnvironment(chosen, [], lookup)).toEqual({
+      OTHER: 'kept',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
+    const own = '83584:windows-proc-v1:13438878845:5256581';
+    expect(
+      desktopControlEnvironment(chosen, [], lookup, undefined, undefined, undefined, own),
+    ).toEqual({
+      OTHER: 'kept',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+      [DESKTOP_CONTROL_REFUSED_WINDOW_OWNER_VARIABLE]: own,
+    });
+  });
+
+  it('writes Main as the refused owner in the form the executable reads, with its instance when known', () => {
+    // FILETIME ticks: 13438878845 s and 5256581 ticks, as the executable's process instance.
+    expect(desktopControlRefusedWindowOwner(83584, 'win32:134388788455256581')).toBe(
+      '83584:windows-proc-v1:13438878845:5256581',
+    );
+    expect(desktopControlRefusedWindowOwner(83584, 'win32:10000000')).toBe(
+      '83584:windows-proc-v1:1:0',
+    );
+    // An unknown start time, or one in another form (the PowerShell fallback's .NET ticks are
+    // also written `win32:`, but not by the native identity this reads): the pid alone.
+    for (const identity of [null, '', 'win32:', 'win32:0', 'win32:-1', 'linux:5', 'win32:1e9'])
+      expect(desktopControlRefusedWindowOwner(83584, identity)).toBe('83584');
+    expect(desktopControlRefusedWindowOwner(83584, `win32:${'9'.repeat(20)}`)).toBe('83584');
+    for (const pid of [0, -1, 1.5, 2 ** 32, Number.NaN])
+      expect(desktopControlRefusedWindowOwner(pid, 'win32:10000000')).toBeNull();
+    // Main's own process, read once.
+    const own = desktopControlOwnWindowOwner();
+    expect(own === String(process.pid) || own.startsWith(`${process.pid}:windows-proc-v1:`)).toBe(
+      true,
+    );
+    expect(desktopControlOwnWindowOwner()).toBe(own);
+  });
+});
+
+describe('launching Sprint Coder itself', () => {
+  const OWN = 'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-1.0.0\\Sprint Coder.exe';
+  const realpath = (path: string) => (path.toLowerCase() === 'c:\\links\\sc.exe' ? OWN : path);
+  const lookup = {
+    platform: 'win32' as const,
+    realpath,
+    ownExecutable: OWN,
+    startMenuShortcuts: () => [],
+  };
+  const refused = (argv: string[]) => desktopControlArgvRefusal(argv, ['C:\\work\\repo'], lookup);
+  const reason = 'Sprint Coder 自身は起動できない';
+
+  it('is refused by its own file, in any letter case, through a link, or by its name', () => {
+    for (const app of [
+      OWN,
+      OWN.toUpperCase(),
+      'C:\\links\\sc.exe',
+      // The Squirrel stub beside the versions, and the name alone.
+      'C:\\Users\\me\\AppData\\Local\\SprintCoder\\Sprint Coder.exe',
+      'sprint coder.exe',
+    ]) {
+      expect(refused(['launch', app])).toContain(reason);
+      expect(refused(['batch', JSON.stringify([{ command: 'launch', args: { app } }])])).toContain(
+        reason,
+      );
+    }
+    expect(refused(['launch', 'C:\\Program Files\\App\\app.exe'])).toBeNull();
+    expect(refused(['launch', 'notepad'])).toBeNull();
+  });
+
+  it('is refused when the Start menu name resolves to it', () => {
+    const named = {
+      ...lookup,
+      isFile: (path: string) => path === OWN,
+      environment: { SystemRoot: 'C:\\Windows' },
+      startMenuShortcuts: () => [{ name: 'Sprint Coder', target: OWN, args: '' }],
+    };
+    const result = desktopControlLaunchByName(
+      ['launch', 'Sprint Coder'],
+      ['C:\\work\\repo'],
+      named,
+    );
+    expect(result).toEqual({ refusal: expect.stringContaining(reason) });
+  });
+
+  it('defaults to the running executable', () => {
+    expect(
+      desktopControlArgvRefusal(['launch', process.execPath], [], {
+        platform: 'win32',
+        realpath: (path) => path,
+      }),
+    ).toContain(reason);
   });
 });
 

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 mod adapter;
 pub(crate) mod app_ops;
 pub(crate) mod capture;
@@ -17,6 +18,7 @@ pub(crate) mod lifecycle_envelope_parity;
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) mod lifecycle_test_support;
 pub(crate) mod menu;
+pub(crate) mod own_window;
 pub(crate) mod permissions;
 #[cfg(target_os = "windows")]
 pub(crate) mod private_file;

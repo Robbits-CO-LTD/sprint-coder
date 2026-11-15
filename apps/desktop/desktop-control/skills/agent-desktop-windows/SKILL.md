@@ -191,6 +191,18 @@ observation, actions and capture there fail or return nothing.
   readback differs: read `details.post_state` and do not retry. A `set-value`
   the app reformats reads as failed. See `references/troubleshooting.md`.
 - **Unsigned binary warnings are expected.** See `references/troubleshooting.md`.
+- **Sprint Coder's own windows are never operated.** Reading them works, but every
+  operation on them (or on whatever the pointer or keys would reach there) returns
+  `POLICY_DENIED`, `details.kind: "own_window_refused"`, with nothing sent, whatever
+  permission or approval the run has. While Sprint Coder is in front, a wheel, a click with
+  modifiers, and a click on (or a ref action on a part of) a window that never takes the
+  foreground (an on-screen keyboard) are refused too (`details.target: "foreground"`);
+  scroll a window behind it with `scroll` on a ref. A `--headed` drag whose drop point has
+  become Sprint Coder by the time the button is let go is refused there and the button is let
+  go back at the origin: `details.dropped` is `false` only when the origin was read as another
+  app's window, otherwise `null` (see `details.origin_is_sprint_coder`); Sprint Coder itself
+  accepts no drop from outside while desktop control runs. Do not retry by another route:
+  permissions and approvals in Sprint Coder are the user's to change on screen.
 
 ## What differs on Windows
 

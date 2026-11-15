@@ -2,12 +2,14 @@
 use agent_desktop_core::{
     AccessibilityNode, ActionOps, AdapterError, AppInfo, ClipboardContent, ClipboardFormat,
     Deadline, DragParams, ElementState, InputOps, InteractionLease, KeyCombo, LiveElement,
-    MouseEvent, NativeHandle, ObservationOps, ObservationRequest, ObservationRoot, OperationReport,
-    ProcessIdentity, Rect, RefEntry, SnapshotSurface, SurfaceInfo, TreeOptions, WindowFilter,
-    WindowInfo,
+    MouseEvent, MouseEventKind, NativeHandle, ObservationOps, ObservationRequest, ObservationRoot,
+    OperationReport, ProcessIdentity, Rect, RefEntry, SnapshotSurface, SurfaceInfo, TreeOptions,
+    WindowFilter, WindowInfo,
 };
 use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use crate::system::own_window::{self, RefusedWindowOwner};
 
 /// The Windows adapter.
 ///
@@ -20,15 +22,59 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// state is keyed per process, not a single flag: an adapter instance is
 /// reused across a batch or an FFI session, so one process settling must
 /// never suppress another process's activation.
+///
+/// It also carries whose windows no operation may act on
+/// (`system::own_window`): every method that acts on a window, a part or the
+/// pointer and keyboard reads, before sending anything, who owns what it is
+/// about to act on.
 pub struct WindowsAdapter {
     renderer_activation_attempted: Mutex<HashSet<ProcessIdentity>>,
+    refused_owner: RefusedWindowOwner,
 }
 
 impl WindowsAdapter {
     pub fn new() -> Self {
         Self {
             renderer_activation_attempted: Mutex::new(HashSet::new()),
+            refused_owner: RefusedWindowOwner::Nobody,
         }
+    }
+
+    /// The adapter refusing every operation on the windows of `owner`.
+    pub fn refusing_windows_of(mut self, owner: RefusedWindowOwner) -> Self {
+        self.refused_owner = owner;
+        self
+    }
+
+    /// Refuses `operation` when what `owners` reads belongs to the refused process.
+    pub(crate) fn refuse_own_window(
+        &self,
+        operation: &'static str,
+        owners: impl FnOnce() -> Vec<Option<u32>>,
+    ) -> Result<(), AdapterError> {
+        self.refused_owner.check(operation, owners)
+    }
+
+    /// The same for an operation on what a handle names (`own_window::handle_owners`), and by
+    /// the window in front too when the part's window may not take the foreground, so what the
+    /// action makes (an on-screen keyboard's key) would reach that window
+    /// (`RefusedWindowOwner::check_front_for_part`).
+    pub(crate) fn refuse_own_handle(
+        &self,
+        operation: &'static str,
+        handle: &NativeHandle,
+        deadline: Deadline,
+    ) -> Result<(), AdapterError> {
+        if !self.refused_owner.is_active() {
+            return Ok(());
+        }
+        match own_window::handle_owners(handle, deadline) {
+            Some(owners) => self.refuse_own_window(operation, || owners)?,
+            // Not a part at all: the action refuses it without sending anything.
+            None => return Ok(()),
+        }
+        self.refused_owner
+            .check_front_for_part(operation, handle, deadline)
     }
 
     /// Records that the Chromium settle has run for `process`, scoped to its
@@ -289,6 +335,9 @@ impl ActionOps for WindowsAdapter {
         deadline: Deadline,
         lease: &InteractionLease,
     ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
+        self.refuse_own_window("run_menu_command", || own_window::window_owners(window))?;
+        self.refused_owner
+            .check_front_for_window("run_menu_command", window)?;
         crate::actions::win32_menu::run_menu_command(entry, window, deadline, lease)
     }
 
@@ -298,7 +347,12 @@ impl ActionOps for WindowsAdapter {
         request: agent_desktop_core::actions::action_request::ActionRequest,
         lease: &InteractionLease,
     ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
-        crate::actions::dispatch::execute_action_impl(handle, request, lease)
+        self.refuse_own_handle("execute_action", handle, lease.deadline())?;
+        // A physical double- or triple-click judges each later click again
+        // (`own_window::recheck_pointer`).
+        own_window::while_acting(&self.refused_owner, "execute_action", || {
+            crate::actions::dispatch::execute_action_impl(handle, request, lease)
+        })
     }
 
     fn scroll_into_view(
@@ -306,6 +360,7 @@ impl ActionOps for WindowsAdapter {
         handle: &NativeHandle,
         lease: &InteractionLease,
     ) -> Result<(), AdapterError> {
+        self.refuse_own_handle("scroll_into_view", handle, lease.deadline())?;
         crate::actions::scroll_into_view::scroll_into_view_impl(handle, lease)
     }
 }
@@ -315,8 +370,35 @@ impl InputOps for WindowsAdapter {
         event: MouseEvent,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        match event.kind {
+            // A move makes no key, button or wheel input, only the hover the window at the point
+            // sees, so that window alone decides.
+            MouseEventKind::Move => {
+                self.refuse_own_window("mouse_event", || own_window::point_owners(&event.point))?;
+            }
+            // A wheel can reach the focused window instead of the one at the point (when
+            // scrolling inactive windows is off), so the window in front decides too.
+            MouseEventKind::Wheel { .. } => {
+                self.refused_owner
+                    .check_pointer("mouse_event", &[&event.point], true)?;
+            }
+            // A click: the window in front decides too when its modifier keys (which go to the
+            // focused window) come with it, or when the window at the point may not take the
+            // foreground (`own_window::may_not_take_foreground`).
+            _ => {
+                self.refused_owner.check_pointer(
+                    "mouse_event",
+                    &[&event.point],
+                    !event.modifiers.is_empty(),
+                )?;
+            }
+        }
         let report = OperationReport::pointer_dispatched(&event, false);
-        crate::input::mouse::synthesize_mouse(event, lease.deadline())?;
+        // Each later click of a `--count` and each later wheel event is judged again just
+        // before it is sent (`own_window::recheck_pointer`).
+        own_window::while_acting(&self.refused_owner, "mouse_event", || {
+            crate::input::mouse::synthesize_mouse(event, lease.deadline())
+        })?;
         Ok(report)
     }
 
@@ -338,8 +420,15 @@ impl InputOps for WindowsAdapter {
         params: DragParams,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
+        // Where it picks up and where it drops: either one on a Sprint Coder window refuses it,
+        // and so does Sprint Coder in front when either end may not take the foreground.
+        self.refused_owner
+            .check_pointer("drag", &[&params.from, &params.to], false)?;
         let report = OperationReport::drag_dispatched(&params);
-        crate::input::drag::synthesize_drag(params, lease.deadline())?;
+        // The drop is judged again just before the button is let go.
+        own_window::while_acting(&self.refused_owner, "drag", || {
+            crate::input::drag::synthesize_drag(params, lease.deadline())
+        })?;
         Ok(report)
     }
 
