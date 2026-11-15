@@ -1,12 +1,15 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   desktopAppGrantCovering,
   desktopAppGrantOffer,
+  macProcessExecutable,
   type DesktopAppGrantKey,
 } from './desktop-control-app-grant';
+import { queryNativeProcessIdentity } from './native-process-identity';
 import {
   desktopControlOwnerReader,
   rememberDesktopControlWindows,
@@ -576,6 +579,14 @@ describe('desktop-control app-wide Task grant on macOS', () => {
       '@e6': mac('Code', 905, 'w-95'),
       '@e7': mac('不明', 906, 'w-96'),
       '@e8': mac('Notes', 907, 'w-97'),
+      '@e9': mac('メモ', 908, 'w-98'),
+      '@e10': mac('Chrome Canary', 909, 'w-99'),
+      '@e11': mac('IntelliJ', 910, 'w-100'),
+      '@e12': mac('アクティビティモニタ', 911, 'w-101'),
+      '@e13': mac('Firefox', 912, 'w-102'),
+      '@e14': mac('Insiders', 913, 'w-103'),
+      '@e15': mac('Cursor', 914, 'w-104'),
+      '@e16': mac('プレビュー', 915, 'w-105'),
     });
     return folder;
   };
@@ -588,7 +599,35 @@ describe('desktop-control app-wide Task grant on macOS', () => {
     905: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
     906: null,
     907: '/usr/local/bin/notes-without-bundle',
+    // A copy of Terminal renamed to Notes: the file name passes, the bundle id does not.
+    908: '/Users/me/Applications/Notes.app/Contents/MacOS/Terminal',
+    909: '/Applications/Canary Renamed.app/Contents/MacOS/Google Chrome Canary',
+    910: '/Applications/IDE.app/Contents/MacOS/idea',
+    911: '/Applications/Processes.app/Contents/MacOS/Activity Monitor',
+    912: '/Applications/Web.app/Contents/MacOS/firefox',
+    913: '/Applications/Code Copy.app/Contents/MacOS/Electron',
+    914: '/Applications/Editor.app/Contents/MacOS/Cursor',
+    // A bundle whose id cannot be read.
+    915: '/System/Applications/Preview.app/Contents/MacOS/Preview',
   };
+  // As each bundle's Info.plist names it; no id is read from this machine.
+  const bundleIds: Record<string, string | null> = {
+    '/System/Applications/TextEdit.app': 'com.apple.TextEdit',
+    '/System/Library/CoreServices/Finder.app': 'com.apple.finder',
+    '/Applications/Google Chrome.app': 'com.google.Chrome',
+    '/System/Applications/Utilities/Terminal.app': 'com.apple.Terminal',
+    '/Applications/Sprint Coder.app': 'com.sprint-coder.desktop',
+    '/Applications/Visual Studio Code.app': 'com.microsoft.VSCode',
+    '/Users/me/Applications/Notes.app': 'com.apple.Terminal',
+    '/Applications/Canary Renamed.app': 'com.google.Chrome.canary',
+    '/Applications/IDE.app': 'com.jetbrains.intellij',
+    '/Applications/Processes.app': 'com.apple.ActivityMonitor',
+    '/Applications/Web.app': 'org.mozilla.firefoxdeveloperedition',
+    '/Applications/Code Copy.app': 'com.microsoft.VSCodeInsiders',
+    '/Applications/Editor.app': 'com.todesktop.230313mzl4w4u92',
+    '/System/Applications/Preview.app': null,
+  };
+  const bundleIdentifier = (bundle: string) => bundleIds[bundle] ?? null;
 
   it('grants by the app bundle the process runs from, never by the shown name', () => {
     const folder = root();
@@ -602,6 +641,7 @@ describe('desktop-control app-wide Task grant on macOS', () => {
           seen.push(owner);
           return executables[owner.pid] ?? null;
         },
+        bundleIdentifier,
       };
       const key = desktopAppGrantOffer(['click', '@smac:e1'], lookup);
       expect(key).toMatchObject({ pid: 900, app: 'テキストエディット' });
@@ -613,11 +653,26 @@ describe('desktop-control app-wide Task grant on macOS', () => {
       // a process whose bundle cannot be read or that runs from no bundle at all.
       for (const ref of ['e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8'])
         expect(desktopAppGrantOffer(['click', `@smac:${ref}`], lookup), ref).toBeNull();
+      // Bundles whose file name is not on any list, kept out by bundle id: a renamed copy of
+      // Terminal, a Chrome variant, a JetBrains IDE, a renamed Activity Monitor, a Firefox edition, VS Code
+      // Insiders, Cursor; and a bundle whose id cannot be read.
+      for (const ref of ['e9', 'e10', 'e11', 'e12', 'e13', 'e14', 'e15', 'e16'])
+        expect(desktopAppGrantOffer(['click', `@smac:${ref}`], lookup), ref).toBeNull();
+      // A copy of Sprint Coder under another name, by its bundle id.
+      expect(
+        desktopAppGrantOffer(['click', '@smac:e1'], {
+          ...lookup,
+          ownExecutable: '/Applications/Other.app/Contents/MacOS/Sprint Coder',
+          bundleIdentifier: (bundle: string) =>
+            bundle === '/Applications/Other.app' ? 'com.apple.TextEdit' : bundleIdentifier(bundle),
+        }),
+      ).toBeNull();
       // Without a platform given, the record's macOS process instance picks the macOS rules.
       const byRecord = {
         stateRoot: folder,
         ownExecutable: lookup.ownExecutable,
         processExecutable: lookup.processExecutable,
+        bundleIdentifier,
       };
       expect(desktopAppGrantOffer(['click', '@smac:e1'], byRecord)).toMatchObject({ pid: 900 });
       expect(desktopAppGrantOffer(['click', '@smac:e3'], byRecord)).toBeNull();
@@ -632,6 +687,62 @@ describe('desktop-control app-wide Task grant on macOS', () => {
       rmSync(folder, { recursive: true, force: true });
     }
   });
+
+  const forged = '/System/Applications/TextEdit.app/Contents/MacOS/TextEdit';
+  it.runIf(process.platform === 'darwin' && existsSync(forged))(
+    'reads the executable the process runs, never the argv[0] it chose',
+    async () => {
+      const child = spawn('/bin/bash', ['-c', 'exec -a "$0" /bin/sleep 30', forged], {
+        stdio: 'ignore',
+      });
+      const folder = mkdtempSync(join(tmpdir(), 'sc-dc-app-grant-forged-'));
+      try {
+        const pid = child.pid!;
+        // Wait until the shell has replaced itself, so argv[0] is the forged path.
+        const comm = () =>
+          execFileSync('/bin/ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8' }).trim();
+        for (let tries = 0; comm() !== forged && tries < 100; tries += 1)
+          await new Promise((done) => setTimeout(done, 20));
+        expect(comm()).toBe(forged);
+        const start = /^darwin:([0-9]+):([0-9]+)$/u.exec(
+          queryNativeProcessIdentity(pid)?.startIdentity ?? '',
+        );
+        expect(start).not.toBeNull();
+        const instance = `macos-proc-v1:${start![1]!}:${start![2]!}`;
+        expect(macProcessExecutable({ pid, instance, app: 'TextEdit' })).toBe('/bin/sleep');
+        // Another start time is another process instance: nothing is read.
+        expect(
+          macProcessExecutable({ pid, instance: 'macos-proc-v1:1:0', app: 'TextEdit' }),
+        ).toBeNull();
+        // The whole offer, with the real readers: a forged TextEdit gets no grant.
+        writeRefmap(folder, 'sforged', {
+          '@e1': {
+            ...part('テキストエディット', pid, 'w-110'),
+            process_instance: instance,
+          },
+        });
+        expect(
+          desktopAppGrantOffer(['click', '@sforged:e1'], {
+            platform: 'darwin',
+            stateRoot: folder,
+            ownExecutable: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+          }),
+        ).toBeNull();
+        // The same record, read as the process claims to be, would have been granted.
+        expect(
+          desktopAppGrantOffer(['click', '@sforged:e1'], {
+            platform: 'darwin',
+            stateRoot: folder,
+            ownExecutable: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+            processExecutable: () => forged,
+          }),
+        ).toMatchObject({ pid });
+      } finally {
+        child.kill();
+        rmSync(folder, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('reads nothing for a process instance that is not running', () => {
     const folder = root();

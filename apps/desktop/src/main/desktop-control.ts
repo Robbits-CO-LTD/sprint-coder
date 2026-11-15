@@ -1599,13 +1599,14 @@ const MAC_APPLICATION_FOLDERS = [
 
 // Apps `launch` refuses on macOS besides `desktopControlNamesTool`, by the bundle's file name
 // without `.app` (lower case, letters and digits only) and by bundle id (lower case): terminals,
-// script hosts, the settings, the keychain and password managers, the installer. The same kinds as
-// on Windows; a convenience, never a boundary (the card is).
+// script hosts, the settings, the keychain and password managers, the installer, Activity Monitor
+// (as Task Manager on Windows). The same kinds as on Windows; a convenience, never a boundary (the
+// card is).
 const MAC_REFUSED_APP_NAMES = new Set(
   [
     'terminal iterm iterm2 ghostty warp alacritty kitty wezterm hyper tabby',
     'scripteditor automator shortcuts systemsettings systempreferences',
-    'keychainaccess passwords 1password 1password7 installer',
+    'keychainaccess passwords 1password 1password7 installer activitymonitor',
   ]
     .join(' ')
     .split(' '),
@@ -1615,7 +1616,7 @@ const MAC_REFUSED_BUNDLE_IDS = new Set(
     'com.apple.terminal com.googlecode.iterm2 com.mitchellh.ghostty dev.warp.warp-stable',
     'com.apple.scripteditor2 com.apple.automator com.apple.shortcuts com.apple.systempreferences',
     'com.apple.keychainaccess com.apple.passwords com.1password.1password',
-    'com.agilebits.onepassword7 com.apple.installer',
+    'com.agilebits.onepassword7 com.apple.installer com.apple.activitymonitor',
   ]
     .join(' ')
     .split(' '),
@@ -1624,7 +1625,7 @@ const MAC_REFUSED_BUNDLE_IDS = new Set(
 /**
  * Whether a macOS app, by its bundle's file name (`Terminal.app` or `Terminal`) or its bundle id,
  * is one `launch` refuses: a terminal, shell, script host, the settings, the keychain or a
- * password manager, or the installer. Also used to keep such an app out of an app-wide Task grant.
+ * password manager, the installer, or Activity Monitor. Also used to keep such an app out of an app-wide Task grant.
  */
 export function desktopControlMacNamesTool(name: string): boolean {
   const lower = name.trim().toLowerCase();
@@ -1749,7 +1750,8 @@ function macLaunchBundleRefusal(app: string, lookup: DesktopControlLookup): stri
 // Read with `plutil`, since many bundles keep a binary Info.plist; kept per file version.
 const bundleIdentifierCache = new Map<string, Readonly<{ version: string; id: string | null }>>();
 
-function cachedBundleIdentifier(bundle: string): string | null {
+/** The `CFBundleIdentifier` of a macOS app bundle, or `null` when it cannot be read. */
+export function cachedBundleIdentifier(bundle: string): string | null {
   const plist = posix.join(bundle, 'Contents', 'Info.plist');
   try {
     const stats = statSync(plist, { bigint: true });

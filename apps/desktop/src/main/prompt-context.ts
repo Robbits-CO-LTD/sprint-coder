@@ -380,7 +380,7 @@ function renderDesktopControl(command: string, macos: boolean): string[] {
     ...(macos
       ? [
           '- 端末（Terminal・iTerm・Ghostty・Warp など）の窓を開くこと・操作すること、システム設定、キーチェーンやパスワードの管理（キーチェーンアクセス・パスワード・1Password など）、ログイン・パスワードの画面や欄、Sprint Coder 自身の窓の操作はしない。頼まれても断る。',
-          '- 結果が PERM_DENIED の時は、Sprint Coder に macOS の許可が無い。操作を繰り返さず、利用者に「システム設定 > プライバシーとセキュリティ > アクセシビリティ（画面の撮影は画面収録）で Sprint Coder を許可してから、もう一度依頼してください」と伝える。',
+          '- 結果が PERM_DENIED の時は、Sprint Coder（開発版では、Electron か起動に使ったアプリ）に macOS の許可が無い。操作を繰り返さず、利用者に「システム設定 > プライバシーとセキュリティ > アクセシビリティ（画面の撮影は画面収録）で Sprint Coder を許可してから、もう一度依頼してください。開発版では、一覧に出る Electron か、起動に使ったアプリ（npm start を実行した端末や IDE）を許可してください」と伝える。',
           '- macOS では、クリップボードへの書き込み（clipboard-set・clipboard-clear）と launch の --url はまだ使えない（拒否される）。ブラウザーの page は、ブラウザーを launch してから page の中の操作で開く。',
         ]
       : [

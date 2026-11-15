@@ -1,7 +1,8 @@
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { existsSync } from 'node:fs';
 import { appendFile, copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
@@ -424,6 +425,91 @@ describe('the shipped desktop-control executable on macOS', () => {
       await expect(
         prepareExecutionImage(identity, true, { desktopControlWorkspaceRoots: roots }),
       ).rejects.toThrow('macOS cannot safely launch this mutable native execution image');
+    },
+  );
+
+  // The real build in this checkout (only read here): the same file Main resolves by default.
+  const BUILD_FOLDER = ['apps', 'desktop', 'desktop-control', 'build', 'Release'];
+  const REAL_BUILD = join(
+    resolve(__dirname, '..', '..', '..', '..'),
+    ...BUILD_FOLDER,
+    'sprint-coder-desktop-control',
+  );
+  const realBuilt =
+    process.platform === 'darwin' &&
+    process.arch === 'arm64' &&
+    existsSync(REAL_BUILD) &&
+    existsSync(`${REAL_BUILD}.sha256`);
+
+  it.runIf(realBuilt)(
+    'starts the real sealed build from its own path when it lies outside the Workspace',
+    async () => {
+      const canonical = await realpath(REAL_BUILD);
+      const identity = await sealExecutablePath(canonical);
+      const workspace = await realpath(await mkdtemp(join(tmpdir(), 'sc-dc-workspace-')));
+      onTestFinished(() => rm(workspace, { recursive: true, force: true }));
+      const image = await prepareExecutionImage(identity, true, {
+        desktopControlWorkspaceRoots: [workspace],
+      });
+      try {
+        expect(image.launchPath).toBe(canonical);
+        expect(image.argvPrefix).toEqual([]);
+        expect(image.digest).toBe(identity.digest);
+      } finally {
+        await image.close();
+      }
+      // Inside a root of the Workspace, the same file is refused.
+      await expect(
+        prepareExecutionImage(identity, true, {
+          desktopControlWorkspaceRoots: [dirname(canonical)],
+        }),
+      ).rejects.toThrow('macOS cannot safely launch this mutable native execution image');
+    },
+  );
+
+  it.runIf(realBuilt)('refuses a copy of the real build at any other path', async () => {
+    const folder = await realpath(await mkdtemp(join(tmpdir(), 'sc-dc-image-')));
+    onTestFinished(() => rm(folder, { recursive: true, force: true }));
+    const copy = join(folder, 'sprint-coder-desktop-control');
+    await copyFile(REAL_BUILD, copy);
+    await copyFile(`${REAL_BUILD}.sha256`, `${copy}.sha256`);
+    await expect(
+      prepareExecutionImage(await sealExecutablePath(copy), true, {
+        desktopControlWorkspaceRoots: roots,
+      }),
+    ).rejects.toThrow('macOS cannot safely launch this mutable native execution image');
+  });
+
+  it.runIf(realBuilt)(
+    'refuses the real build’s bytes when its seal does not match them',
+    async () => {
+      // A copy of the build at the place Main resolves under another repository root, judged by
+      // the real rule with only that root changed. The build in this checkout is not touched.
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'sc-dc-repository-')));
+      onTestFinished(() => rm(root, { recursive: true, force: true }));
+      await mkdir(join(root, ...BUILD_FOLDER), { recursive: true });
+      const copy = join(root, ...BUILD_FOLDER, 'sprint-coder-desktop-control');
+      await copyFile(REAL_BUILD, copy);
+      await copyFile(`${REAL_BUILD}.sha256`, `${copy}.sha256`);
+      const real = desktopControlModule.runsOutsideCommandSandbox;
+      const judge = vi.spyOn(desktopControlModule, 'runsOutsideCommandSandbox');
+      onTestFinished(() => judge.mockRestore());
+      judge.mockImplementation((executable, digest, workspaceRoots) =>
+        real(executable, digest, workspaceRoots, { repositoryRoot: root }),
+      );
+      const identity = await sealExecutablePath(copy);
+      // With its own seal, the copy there is the shipped file.
+      const image = await prepareExecutionImage(identity, true, {
+        desktopControlWorkspaceRoots: roots,
+      });
+      await image.close();
+      expect(image.launchPath).toBe(copy);
+      // A seal that names other bytes: refused.
+      await writeFile(`${copy}.sha256`, `${'0'.repeat(64)}\n`);
+      await expect(
+        prepareExecutionImage(identity, true, { desktopControlWorkspaceRoots: roots }),
+      ).rejects.toThrow('macOS cannot safely launch this mutable native execution image');
+      expect(judge).toHaveBeenCalled();
     },
   );
 

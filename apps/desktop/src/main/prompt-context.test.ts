@@ -401,6 +401,10 @@ describe('prompt context compiler', () => {
     expect(text).toContain(
       'システム設定 > プライバシーとセキュリティ > アクセシビリティ（画面の撮影は画面収録）で Sprint Coder を許可してから、もう一度依頼してください',
     );
+    // A development run's permission belongs to Electron or the app that started it.
+    expect(text).toContain(
+      '開発版では、一覧に出る Electron か、起動に使ったアプリ（npm start を実行した端末や IDE）を許可してください',
+    );
     expect(text).toContain('PERM_DENIED');
     expect(text).toContain('clipboard-set・clipboard-clear');
     expect(text).toContain('launch の --url はまだ使えない');
