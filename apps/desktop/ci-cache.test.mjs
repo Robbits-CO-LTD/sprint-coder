@@ -350,10 +350,12 @@ describe('CI scope wiring', () => {
       headRepo,
       actor = 'maintainer',
       author = 'maintainer',
+      desktopControl = 'false',
     ) => {
       const expression = workflow.jobs.classify.outputs[output];
       return JSON.parse(
         runInNewContext(expression.slice(3, -2), {
+          steps: { scope: { outputs: { desktop_control_rust_required: desktopControl } } },
           vars: { SPRINT_CODER_MSI_CI_ENABLED: enabled },
           github: {
             repository,
@@ -388,6 +390,15 @@ describe('CI scope wiring', () => {
       ).toEqual([fallback]);
       expect(route(output, 'true', 'pull_request_target', repository)).toEqual([fallback]);
     }
+    // MSI lacks the desktop-control toolchain: a push that must build it uses a hosted
+    // runner like a PR, while sandbox-only pushes and full runs keep MSI.
+    expect(
+      route('rust_runner', 'true', 'push', repository, 'maintainer', 'maintainer', 'true'),
+    ).toEqual(['windows-2022']);
+    expect(
+      route('common_runner', 'true', 'push', repository, 'maintainer', 'maintainer', 'true'),
+    ).toEqual(labels);
+    expect(workflow.jobs.classify.outputs.common_runner).not.toContain('steps.');
     for (const job of ['quality', 'package-tests'])
       expect(workflow.jobs[job]['runs-on']).toBe(
         '${{ fromJSON(needs.classify.outputs.common_runner) }}',
