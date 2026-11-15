@@ -60,6 +60,17 @@ macOS（Apple シリコン）の Sprint Coder で、AI がデスクトップ操�
 
 PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、指揮と検証は Claude（AGENTS.md の役割分担）。
 
+進み具合（2026-11-16）:
+
+| 段階 | 状態 | PR・Issue |
+| --- | --- | --- |
+| 1 | 完了 | #1316（upstream の `crates/macos` の取り込み）、#1317 |
+| 2 | 完了 | #1318 |
+| 3 | 完了。公証を通した配布物での確認は未実施 | #1319、[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315) |
+| 4 | 未着手 | [Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) |
+
+実装の担当は、段階 1 の最初の実装が Codex、それ以後（段階 1 のレビュー指摘の修正、段階 2、段階 3）は Opus 5.5。オーナーの指示（2026-11-15）による。
+
 ### 段階 1: macOS 用の実行ファイルを build できるようにする（機能は無効のまま）
 
 - `crates/macos` を upstream の 1.2.0 からそのまま取り込む（1 つ目の commit。中身は upstream と同一）。
@@ -120,6 +131,8 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 - `launch --url`（ブラウザーの一覧の Mac 版）。
 - フルアクセスの説明文の「エクスプローラー」を macOS では Finder にする。
 - Website と release の本文の「Windows だけ」の記載。配布する時に直す。
+
+上の 5 つ（Website と release の本文を除く）は [Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) で追う。
 
 ## 5. 対象外
 
@@ -188,7 +201,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 - Project を選んでいない Task で頼むと、AI は「デスクトップ操作の道具が渡されていない」と答える。Project を選ぶよう案内していない。
 - アプリの名前で指す読み取り（`snapshot --app …`）は、「このアプリは Task 中許可」の後も毎回カードが出る。アプリ単位の許可は、ref と窓の id で指した操作だけが対象。
-- `launch` を bundle ID で指した時、最初の 1 回は標準のアプリの場所の bundle を全部読むので、数秒かかることがある（Main の thread を止める）。
+- `launch` を bundle ID で指した時は、Spotlight（`mdfind`）で bundle を探す。Spotlight の索引が無い Mac や、索引から外した場所のアプリは「見つからない」と断る（名前で指せば起動できる）。検索は同期で、最長 2 秒 Main の thread を止める。
 - 標準のアプリの場所のサブフォルダーにあるアプリは、「見つからない」と断る。
 - 実行ファイルのパスに日本語などを含むアプリで、アプリ単位の許可が出るかは未確認（読めない時は出さない）。
 
@@ -197,3 +210,17 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 - Claude CLI での実 AI の試験は未実施。`open` で起動した開発版が、Claude Code を「ログインが必要」と表示した。原因は調べていない。
 - 物理の pointer とキーボード（`--headed`）、drag の実機の確認は未実施。
 - 実 AI の試験の記録: `tasks/evidence/macos-desktop-control-real-ai-20261116.md`
+
+### 段階 3 の独立レビューと手元の package の確認で出て、残したもの
+
+配布に関わるもの:
+
+- 公証を通した配布物での確認は未実施。公証は、オーナーの合図まで行わない。配布物ができた後に人が確かめる手順は、[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315) のコメントにある。
+- 手元の package（ad-hoc 署名）では、中身（実行ファイル、封印、署名）と起動までを確かめた。package したアプリでの実際の操作は未実施。ad-hoc 署名のアプリは build のたびに識別が変わり、macOS の権限を付け直す必要があるため。
+- v0.8.0 の tag の commit には、macOS のデスクトップ操作は入っていない。macOS 版は、次の版で通常の workflow から出す（Issue #1315 に書いた）。
+- 本番の署名では、sandbox runner に `@electron/osx-sign` の既定の entitlements が付いている（以前から。今回は変えていない）。デスクトップ操作の実行ファイルは、entitlements を空にしている。
+- 封印のファイルの mode は 0600（sandbox runner の封印と同じ）。ある利用者が入れたアプリを、同じ Mac の別の利用者が使う時に封印を読めるかは未確認。
+
+試験と CI:
+
+- `crates/macos` だけを変えた PR では、macOS の compile が走らない（PR の CI は Windows の compile だけ）。全試験（`gh workflow run ci.yml --ref main`）と release の workflow では build する。
