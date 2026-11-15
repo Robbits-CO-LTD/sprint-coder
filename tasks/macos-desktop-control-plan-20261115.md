@@ -217,10 +217,26 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 - 公証を通した配布物での確認は未実施。公証は、オーナーの合図まで行わない。配布物ができた後に人が確かめる手順は、[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315) のコメントにある。
 - 手元の package（ad-hoc 署名）では、中身（実行ファイル、封印、署名）と起動までを確かめた。package したアプリでの実際の操作は未実施。ad-hoc 署名のアプリは build のたびに識別が変わり、macOS の権限を付け直す必要があるため。
-- v0.8.0 の tag の commit には、macOS のデスクトップ操作は入っていない。macOS 版は、次の版で通常の workflow から出す（Issue #1315 に書いた）。
+- v0.8.0 の tag の commit には、macOS のデスクトップ操作は入っていない。macOS 版を v0.8.0 に足すか、次の版で出すかは、オーナーが決める（未決）。次の版で通常の workflow から出す方を勧めると、Issue #1315 に書いた。
 - 本番の署名では、sandbox runner に `@electron/osx-sign` の既定の entitlements が付いている（以前から。今回は変えていない）。デスクトップ操作の実行ファイルは、entitlements を空にしている。
 - 封印のファイルの mode は 0600（sandbox runner の封印と同じ）。ある利用者が入れたアプリを、同じ Mac の別の利用者が使う時に封印を読めるかは未確認。
 
 試験と CI:
 
 - `crates/macos` だけを変えた PR では、macOS の compile が走らない（PR の CI は Windows の compile だけ）。全試験（`gh workflow run ci.yml --ref main`）と release の workflow では build する。
+
+### 段階 3 の後の確認（2026-11-16）で出たもの
+
+直したもの:
+
+- main の全試験で、試験が 4 件失敗した（macOS で 2 件、Windows で 2 件）。どれも試験の側の問題で、#1321 で直した。PR の CI は静的な検査だけなので、OS ごとの試験の失敗は、全試験を流すまで見えない。
+- 配布物と同じ署名（hardened runtime、entitlements なし）を付けた実行ファイルで、読み取り・入力・撮影・起動・クリック・終了が動くことを確かめた。記録: `tasks/evidence/macos-desktop-control-hardened-cli-20261116.md`
+- macOS のシステムのダイアログ（画面収録の確認など）が最前面にある間、アプリを指定しない `list-windows` と `--window-id` を使うコマンドが全部 TIMEOUT になっていた。#1322 で直した。
+
+残したもの:
+
+- 画面収録の確認のダイアログは、`screenshot` を使うと macOS が定期的に出す。止められない。配布版では「Sprint Coder」の名前で出る。利用者が答えるまで、画面に残る。
+- 宛先を指定しない `press` は、最前面のアプリへ届く。システムのダイアログが最前面にある時は、そのダイアログへ届き得る（承認カードは出る）。自身の窓の拒否は、Sprint Coder の窓だけが対象。
+- 通知の command（`osascript` を使う）が、hardened runtime の配布物で動くかは未確認。
+- `cargo clippy -- -D warnings` は、`crates/core` の既存の警告 2 件（`snapshot/window_capture.rs`）で止まる。CI では clippy を流していない。
+- upstream の agent-desktop にも同じ不具合がある（v1.3.1 の後でも同じ作り）。upstream への報告はしていない。
