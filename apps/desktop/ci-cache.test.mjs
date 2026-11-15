@@ -225,15 +225,18 @@ describe('CI cache reuse and fallback', () => {
     expect(condition(windowsBuild.if, { sandbox: {}, validation: {} })).toBe(true);
   });
 
-  it('builds desktop control only on Windows, on a miss or an invalid hit, keyed by its source', () => {
+  it('builds desktop control only on Windows and macOS, on a miss or an invalid hit, keyed by its source', () => {
     const builds = desktopControlAction.runs.steps.filter((step) =>
       step.name.startsWith('Build desktop-control on'),
     );
-    expect(builds).toHaveLength(1);
-    const [build] = builds;
-    expect(build.shell).toBe('pwsh');
+    expect(builds).toHaveLength(2);
+    const build = builds.find((step) => step.shell === 'pwsh');
     expect(build.run).toContain('npm run build:desktop-control');
     expect(build.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
+    const macBuild = builds.find((step) => step.shell === 'bash');
+    expect(macBuild.run).toContain('set -euo pipefail');
+    expect(macBuild.run).toContain('node ci-cache.mjs reset-desktop-control');
+    expect(macBuild.run).toContain('npm run build:desktop-control');
     for (const [hit, valid, expected] of [
       ['', '', true],
       ['false', 'true', true],
@@ -243,11 +246,25 @@ describe('CI cache reuse and fallback', () => {
       const outputs = { 'desktop-control': { 'cache-hit': hit }, validation: { valid } };
       expect(condition(build.if, outputs, 'Windows')).toBe(expected);
       for (const os of ['Linux', 'macOS']) expect(condition(build.if, outputs, os)).toBe(false);
+      expect(condition(macBuild.if, outputs, 'macOS')).toBe(expected);
+      for (const os of ['Linux', 'Windows'])
+        expect(condition(macBuild.if, outputs, os)).toBe(false);
     }
+    const compiler = desktopControlAction.runs.steps.find((step) => step.id === 'compiler');
+    for (const [os, expected] of [
+      ['Windows', true],
+      ['macOS', true],
+      ['Linux', false],
+    ])
+      expect(condition(compiler.if, {}, os)).toBe(expected);
     const restore = desktopControlAction.runs.steps.find((step) => step.id === 'desktop-control');
     expect(condition(restore.if, { compiler: { cacheable: 'false' } })).toBe(false);
     expect(condition(restore.if, { compiler: { cacheable: 'true' } })).toBe(true);
+    expect(condition(restore.if, { compiler: { cacheable: 'true' } }, 'macOS')).toBe(true);
+    expect(condition(restore.if, { compiler: { cacheable: 'false' } }, 'macOS')).toBe(false);
     expect(condition(restore.if, { compiler: { cacheable: 'true' } }, 'Linux')).toBe(false);
+    // The runner OS is part of the key, so a Windows build is never restored on macOS.
+    expect(restore.with.key).toContain('${{ runner.os }}-${{ runner.arch }}');
     expect(restore.with.path).toBe('apps/desktop/desktop-control/build/Release');
     // The vendored source, its lock and pinned toolchain, but never its own build output.
     expect(restore.with.key).toContain("'apps/desktop/desktop-control/**'");
@@ -256,7 +273,8 @@ describe('CI cache reuse and fallback', () => {
     expect(restore.with.key).toContain("'build-desktop-control.mjs'");
     const verify = desktopControlAction.runs.steps.at(-1);
     expect(verify.run).toBe('node ci-cache.mjs assert-desktop-control');
-    for (const os of ['Linux', 'macOS']) expect(condition(verify.if, {}, os)).toBe(false);
+    expect(condition(verify.if, {}, 'Linux')).toBe(false);
+    for (const os of ['Windows', 'macOS']) expect(condition(verify.if, {}, os)).toBe(true);
     // Every Windows job that packages or runs the desktop tests prepares it first.
     for (const [job, consumer] of [
       ['package-windows-build', 'npx electron-forge package --platform=win32 --arch=x64'],
@@ -270,32 +288,45 @@ describe('CI cache reuse and fallback', () => {
       expect(prepare, job).toBeGreaterThan(-1);
       expect(steps.findIndex((step) => step.run?.startsWith(consumer))).toBeGreaterThan(prepare);
     }
-    for (const job of ['package-linux', 'package-macos', 'test-macos'])
-      expect(
-        workflow.jobs[job].steps.some(
-          (step) => step.uses === './.github/actions/prepare-desktop-control',
-        ),
-      ).toBe(false);
+    // So does every macOS job that packages or tests the desktop app (Apple silicon ships it).
+    for (const [job, consumer] of [
+      ['package-macos', 'npx electron-forge package'],
+      ['test-macos', 'npx vitest run --shard=${{ matrix.shard }}'],
+    ]) {
+      const steps = workflow.jobs[job].steps;
+      const prepare = steps.findIndex(
+        (step) => step.uses === './.github/actions/prepare-desktop-control',
+      );
+      expect(prepare, job).toBeGreaterThan(-1);
+      expect(steps.findIndex((step) => step.run?.startsWith(consumer))).toBeGreaterThan(prepare);
+    }
+    expect(
+      workflow.jobs['package-linux'].steps.some(
+        (step) => step.uses === './.github/actions/prepare-desktop-control',
+      ),
+    ).toBe(false);
   });
 
   it('accepts a cached desktop-control build only when its bytes match its seal', () => {
     const root = fixture();
-    expect(desktopControlCacheValid(root)).toBe(false);
+    expect(desktopControlCacheValid(root, 'win32')).toBe(false);
     const directory = join(root, 'apps/desktop/desktop-control/build/Release');
     const executable = join(directory, 'sprint-coder-desktop-control.exe');
     write(executable, 'fixture-desktop-control', 0o755);
-    expect(desktopControlCacheValid(root)).toBe(false);
+    expect(desktopControlCacheValid(root, 'win32')).toBe(false);
     write(
       `${executable}.sha256`,
       `${createHash('sha256').update('fixture-desktop-control').digest('hex')}\n`,
     );
-    expect(desktopControlCacheValid(root)).toBe(true);
+    expect(desktopControlCacheValid(root, 'win32')).toBe(true);
+    // The Windows build is not taken for the macOS one.
+    expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
     writeFileSync(executable, 'changed');
-    expect(desktopControlCacheValid(root)).toBe(false);
+    expect(desktopControlCacheValid(root, 'win32')).toBe(false);
     writeFileSync(`${executable}.sha256`, 'invalid');
-    expect(desktopControlCacheValid(root)).toBe(false);
+    expect(desktopControlCacheValid(root, 'win32')).toBe(false);
     // Not an executable that starts and reports a version.
-    expect(desktopControlProbeValid(root)).toBe(false);
+    expect(desktopControlProbeValid(root, 'win32')).toBe(false);
     resetDesktopControlOutput(root);
     expect(existsSync(directory)).toBe(false);
     const invoke = spawnSync(
@@ -308,6 +339,34 @@ describe('CI cache reuse and fallback', () => {
     );
     expect(invoke.status).not.toBe(0);
   });
+
+  // Windows reports no execute bits, so the macOS layout is checked on Unix hosts only.
+  it.skipIf(process.platform === 'win32')(
+    'accepts a cached macOS desktop-control build only when it is executable and matches its seal',
+    () => {
+      const root = fixture();
+      const directory = join(root, 'apps/desktop/desktop-control/build/Release');
+      const executable = join(directory, 'sprint-coder-desktop-control');
+      const content = '#!/bin/sh\necho "agent-desktop 1.2.0"\n';
+      write(executable, content, 0o644);
+      write(`${executable}.sha256`, `${createHash('sha256').update(content).digest('hex')}\n`);
+      // A sealed file that cannot be executed is not the build.
+      expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
+      chmodSync(executable, 0o755);
+      expect(desktopControlCacheValid(root, 'darwin')).toBe(true);
+      expect(desktopControlCacheValid(root, 'win32')).toBe(false);
+      expect(desktopControlProbeValid(root, 'darwin')).toBe(true);
+      const invoke = () =>
+        spawnSync(process.execPath, [join(repo, 'ci-cache.mjs'), 'assert-desktop-control'], {
+          cwd: root,
+          encoding: 'utf8',
+        });
+      expect(invoke().status).toBe(0);
+      writeFileSync(executable, '#!/bin/sh\nexit 1\n');
+      expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
+      expect(invoke().status).not.toBe(0);
+    },
+  );
 
   it('fails closed when build output or executable protocol is invalid', () => {
     const root = fixture();

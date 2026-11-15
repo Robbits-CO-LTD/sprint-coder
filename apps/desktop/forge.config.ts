@@ -20,8 +20,8 @@ import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
 import {
-  DESKTOP_CONTROL_EXECUTABLE,
   DESKTOP_CONTROL_VERSION,
+  desktopControlExecutableName,
   desktopControlPackaged,
 } from './src/main/desktop-control-build';
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
@@ -128,7 +128,7 @@ function sandboxRunnerResources(): string[] {
 }
 
 // Sprint Coder's desktop control ships the desktop-control executable built from the source in
-// desktop-control/ (build-desktop-control.mjs; Windows x64 only for now, see
+// desktop-control/ (build-desktop-control.mjs; Windows x64 and macOS arm64, see
 // src/main/desktop-control-build.ts), the `.sha256` manifest its build wrote beside it, and the
 // license of that third-party source. Like the sandbox runner, the files keep their build names.
 export function desktopControlSource(
@@ -136,7 +136,13 @@ export function desktopControlSource(
   arch: string = process.arch,
 ): string | null {
   if (!desktopControlPackaged(platform, arch)) return null;
-  return resolve(__dirname, 'desktop-control', 'build', 'Release', DESKTOP_CONTROL_EXECUTABLE);
+  return resolve(
+    __dirname,
+    'desktop-control',
+    'build',
+    'Release',
+    desktopControlExecutableName(platform),
+  );
 }
 
 export function desktopControlResources(
@@ -166,13 +172,27 @@ export function verifyDesktopControlBinary(executable: string): void {
     );
 }
 
+/** The desktop-control executable inside a packaged Windows app directory or macOS `.app`. */
+export function packagedDesktopControlExecutable(
+  appPath: string,
+  platform: 'darwin' | 'win32',
+): string {
+  return platform === 'win32'
+    ? join(appPath, 'resources', desktopControlExecutableName(platform))
+    : join(appPath, 'Contents', 'Resources', desktopControlExecutableName(platform));
+}
+
 /**
- * Seals the packaged desktop-control executable's final bytes, after Packager's Authenticode
- * signing changed them (as for the sandbox runner). The copy was checked against its build-time
- * seal before signing, in afterCopyExtraResources.
+ * Seals the packaged desktop-control executable's final bytes, after code signing changed them
+ * (Packager's Authenticode signing on Windows, Mach-O signing on macOS; as for the sandbox
+ * runner). The copy was checked against its build-time seal before signing, in
+ * afterCopyExtraResources.
  */
-export function refreshPackagedDesktopControlDigest(appPath: string): string {
-  const executable = join(appPath, 'resources', DESKTOP_CONTROL_EXECUTABLE);
+export function refreshPackagedDesktopControlDigest(
+  appPath: string,
+  platform: 'darwin' | 'win32' = 'win32',
+): string {
+  const executable = packagedDesktopControlExecutable(appPath, platform);
   if (!lstatSync(executable).isFile())
     throw new Error('Packaged desktop-control executable was not found');
   const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
@@ -193,6 +213,16 @@ export function refreshPackagedSandboxRunnerDigest(
   const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
   writeFileSync(`${executable}.sha256`, `${digest}\n`, { mode: 0o600 });
   return digest;
+}
+
+/** The one `.app` bundle Packager wrote into a macOS staging or output directory. */
+export function singleMacAppBundle(directory: string): string {
+  const appBundles = readdirSync(directory, { withFileTypes: true }).filter(
+    (entry) => entry.isDirectory() && entry.name.endsWith('.app'),
+  );
+  if (appBundles.length !== 1)
+    throw new Error(`Expected one macOS app bundle in packaged output, found ${appBundles.length}`);
+  return join(directory, appBundles[0]!.name);
 }
 
 function resealMacAppBundle(appPath: string): void {
@@ -349,6 +379,21 @@ function isPackagedMacNode(path: string): boolean {
   return path.endsWith('/Contents/Resources/node');
 }
 
+function isPackagedMacDesktopControl(path: string): boolean {
+  return path.endsWith(`/Contents/Resources/${desktopControlExecutableName('darwin')}`);
+}
+
+/**
+ * Per-file options for @electron/osx-sign. Its default gives every other Mach-O hardened runtime
+ * plus Electron's default.darwin.plist (JIT, camera, microphone, location, ...), and it always
+ * passes `--entitlements`, so the desktop-control executable gets an explicitly empty set.
+ */
+export function macSignOptionsForFile(file: string) {
+  if (isPackagedMacNode(file)) return { entitlements: bundledNodeEntitlements };
+  if (isPackagedMacDesktopControl(file)) return { entitlements: [], hardenedRuntime: true };
+  return {};
+}
+
 function signAdhocBundle(appPath: string): void {
   const targets: string[] = [];
   const visit = (directory: string): void => {
@@ -420,8 +465,7 @@ const config: ForgeConfig = {
       : {
           osxSign: {
             identity: macCodeSignIdentity,
-            optionsForFile: (file) =>
-              isPackagedMacNode(file) ? { entitlements: bundledNodeEntitlements } : {},
+            optionsForFile: macSignOptionsForFile,
           },
         }),
     ...(windowsSign === undefined ? {} : { windowsSign }),
@@ -435,14 +479,18 @@ const config: ForgeConfig = {
         }
       },
     ],
-    // Runs before Packager's Windows signing, right after the extraResource copies: the copied
-    // desktop-control executable must still be the bytes its build sealed. Only Windows x64 ships
-    // it, and its resources sit directly under the build path.
+    // Runs before Packager's Windows or macOS signing, right after the extraResource copies: the
+    // copied desktop-control executable must still be the bytes its build sealed. Windows
+    // resources sit directly under the build path; on macOS the build path holds the `.app`.
     afterCopyExtraResources: [
       (buildPath, _electronVersion, platform, arch, done) => {
         try {
           if (desktopControlPackaged(platform, arch))
-            verifyDesktopControlBinary(join(buildPath, 'resources', DESKTOP_CONTROL_EXECUTABLE));
+            verifyDesktopControlBinary(
+              platform === 'win32'
+                ? packagedDesktopControlExecutable(buildPath, 'win32')
+                : packagedDesktopControlExecutable(singleMacAppBundle(buildPath), 'darwin'),
+            );
           done();
         } catch (error) {
           done(error instanceof Error ? error : new Error(String(error)));
@@ -482,19 +530,15 @@ const config: ForgeConfig = {
       // SPRINT_CODER_CODESIGN_IDENTITY. Verify the complete signed graph after Packager has run
       // @electron/osx-sign; never replace its ordered per-file signatures with `--deep`.
       for (const outputPath of packageResult.outputPaths) {
-        const appBundles = readdirSync(outputPath, { withFileTypes: true }).filter(
-          (entry) => entry.isDirectory() && entry.name.endsWith('.app'),
-        );
-        if (appBundles.length !== 1)
-          throw new Error(
-            `Expected one macOS app bundle in packaged output, found ${appBundles.length}`,
-          );
-        const appPath = join(outputPath, appBundles[0]!.name);
+        const appPath = singleMacAppBundle(outputPath);
         if (macCodeSignIdentity === '-') signAdhocBundle(appPath);
         // Mach-O signing mutates the sandbox runner after its build-time digest is generated.
         // Seal the signed bytes, then refresh only the outer app signature so CodeResources
         // covers the new manifest without rewriting the already-signed nested executable.
         refreshPackagedSandboxRunnerDigest(appPath);
+        // The same for the desktop-control executable.
+        if (desktopControlPackaged('darwin', packageResult.arch))
+          refreshPackagedDesktopControlDigest(appPath, 'darwin');
         resealMacAppBundle(appPath);
         execFileSync(
           '/usr/bin/codesign',

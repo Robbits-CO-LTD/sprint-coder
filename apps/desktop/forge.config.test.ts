@@ -23,6 +23,7 @@ import config, {
   DMG_ICON_SIZE,
   DMG_WINDOW_SIZE,
   FONT_LICENSE_RESOURCES,
+  macSignOptionsForFile,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
   refreshPackagedDesktopControlDigest,
@@ -46,6 +47,13 @@ const DESKTOP_CONTROL_SOURCE = resolve(
   'build',
   'Release',
   'sprint-coder-desktop-control.exe',
+);
+const MAC_DESKTOP_CONTROL_SOURCE = resolve(
+  __dirname,
+  'desktop-control',
+  'build',
+  'Release',
+  'sprint-coder-desktop-control',
 );
 const sha256 = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 
@@ -291,16 +299,21 @@ describe('macOS sandbox runner sealing', () => {
 describe('desktop-control resources', () => {
   const LICENSE = resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt');
 
-  it('ships only the Windows x64 build output, its seal and its license, under their build names', () => {
+  it('ships only the Windows x64 and macOS arm64 build output, its seal and its license, under their build names', () => {
     expect(desktopControlSource('win32', 'x64')).toBe(DESKTOP_CONTROL_SOURCE);
     expect(desktopControlResources('win32', 'x64')).toEqual([
       DESKTOP_CONTROL_SOURCE,
       `${DESKTOP_CONTROL_SOURCE}.sha256`,
       LICENSE,
     ]);
+    expect(desktopControlSource('darwin', 'arm64')).toBe(MAC_DESKTOP_CONTROL_SOURCE);
+    expect(desktopControlResources('darwin', 'arm64')).toEqual([
+      MAC_DESKTOP_CONTROL_SOURCE,
+      `${MAC_DESKTOP_CONTROL_SOURCE}.sha256`,
+      LICENSE,
+    ]);
     for (const [platform, arch] of [
       ['win32', 'arm64'],
-      ['darwin', 'arm64'],
       ['darwin', 'x64'],
       ['linux', 'x64'],
     ] as const) {
@@ -309,8 +322,17 @@ describe('desktop-control resources', () => {
     }
     const extra = (config.packagerConfig?.extraResource ?? []) as string[];
     const shipped = [DESKTOP_CONTROL_SOURCE, `${DESKTOP_CONTROL_SOURCE}.sha256`, LICENSE];
-    expect(extra.filter((path) => shipped.includes(path))).toEqual(
-      process.platform === 'win32' && process.arch === 'x64' ? shipped : [],
+    const macShipped = [
+      MAC_DESKTOP_CONTROL_SOURCE,
+      `${MAC_DESKTOP_CONTROL_SOURCE}.sha256`,
+      LICENSE,
+    ];
+    expect(extra.filter((path) => shipped.includes(path) || macShipped.includes(path))).toEqual(
+      process.platform === 'win32' && process.arch === 'x64'
+        ? shipped
+        : process.platform === 'darwin' && process.arch === 'arm64'
+          ? macShipped
+          : [],
     );
     expect(config.packagerConfig?.afterCopyExtraResources).toHaveLength(1);
     // The source and its Cargo output never enter the package.
@@ -354,6 +376,50 @@ describe('desktop-control resources', () => {
     }
   });
 
+  it('checks the copied macOS bytes inside the staged .app before signing, in the real hook', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-mac-copy-'));
+    const [hook] = config.packagerConfig!.afterCopyExtraResources!;
+    const runHook = (platform: string, arch: string) =>
+      new Promise<void>((done, fail) =>
+        hook!(root, '0.0.0', platform, arch, (error) => (error ? fail(error) : done())),
+      );
+    try {
+      // Packager hands the hook its staging directory, which holds the renamed .app.
+      await expect(runHook('darwin', 'arm64')).rejects.toThrow('Expected one macOS app bundle');
+      const resources = join(root, 'Sprint Coder.app', 'Contents', 'Resources');
+      mkdirSync(resources, { recursive: true });
+      const shipped = join(resources, 'sprint-coder-desktop-control');
+      writeFileSync(shipped, 'built-desktop-control');
+      writeFileSync(`${shipped}.sha256`, `${sha256('built-desktop-control')}\n`);
+      await expect(runHook('darwin', 'arm64')).resolves.toBeUndefined();
+      appendFileSync(shipped, 'x');
+      await expect(runHook('darwin', 'arm64')).rejects.toThrow('does not match its sealed digest');
+      // Intel macOS does not ship it.
+      await expect(runHook('darwin', 'x64')).resolves.toBeUndefined();
+      rmSync(shipped);
+      await expect(runHook('darwin', 'arm64')).rejects.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('signs the macOS executable with hardened runtime and an empty entitlement set', () => {
+    const app = '/out/Sprint Coder-darwin-arm64/Sprint Coder.app';
+    expect(macSignOptionsForFile(`${app}/Contents/Resources/sprint-coder-desktop-control`)).toEqual(
+      { entitlements: [], hardenedRuntime: true },
+    );
+    // The bundled Node keeps its own entitlements; other files keep osx-sign's defaults.
+    expect(macSignOptionsForFile(`${app}/Contents/Resources/node`)).toEqual({
+      entitlements: resolve(__dirname, 'entitlements.node.plist'),
+    });
+    expect(macSignOptionsForFile(`${app}/Contents/Resources/sprint-coder-sandbox-runner`)).toEqual(
+      {},
+    );
+    expect(
+      macSignOptionsForFile(`${app}/Contents/Resources/sprint-coder-desktop-control.sha256`),
+    ).toEqual({});
+  });
+
   it('fails the build when the executable is not the bytes its manifest seals', () => {
     const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-seal-'));
     try {
@@ -381,6 +447,14 @@ describe('desktop-control resources', () => {
     },
   );
 
+  it.runIf(
+    process.platform === 'darwin' &&
+      process.arch === 'arm64' &&
+      existsSync(MAC_DESKTOP_CONTROL_SOURCE),
+  )('has a real macOS build output that agrees with its seal', () => {
+    expect(() => verifyDesktopControlBinary(MAC_DESKTOP_CONTROL_SOURCE)).not.toThrow();
+  });
+
   it('reseals the packaged executable from its post-signing bytes', () => {
     const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-reseal-'));
     try {
@@ -395,6 +469,30 @@ describe('desktop-control resources', () => {
       );
       rmSync(shipped);
       expect(() => refreshPackagedDesktopControlDigest(root)).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reseals the macOS executable inside the .app from its post-signing bytes', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-mac-reseal-'));
+    try {
+      const appPath = join(root, 'Sprint Coder.app');
+      const resources = join(appPath, 'Contents', 'Resources');
+      mkdirSync(resources, { recursive: true });
+      const shipped = join(resources, 'sprint-coder-desktop-control');
+      writeFileSync(shipped, 'signed-desktop-control');
+      writeFileSync(`${shipped}.sha256`, `${'0'.repeat(64)}\n`);
+      expect(refreshPackagedDesktopControlDigest(appPath, 'darwin')).toBe(
+        sha256('signed-desktop-control'),
+      );
+      expect(readFileSync(`${shipped}.sha256`, 'utf8')).toBe(
+        `${sha256('signed-desktop-control')}\n`,
+      );
+      // The Windows layout is not looked for inside a macOS bundle.
+      expect(() => refreshPackagedDesktopControlDigest(appPath)).toThrow();
+      rmSync(shipped);
+      expect(() => refreshPackagedDesktopControlDigest(appPath, 'darwin')).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

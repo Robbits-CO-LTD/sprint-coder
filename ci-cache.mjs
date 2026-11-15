@@ -127,22 +127,28 @@ export function resetSandboxOutput(root) {
 
 const DESKTOP_CONTROL_RELEASE = 'apps/desktop/desktop-control/build/Release';
 
-/** @param {string} root */
-function desktopControlPath(root) {
-  return join(root, DESKTOP_CONTROL_RELEASE, 'sprint-coder-desktop-control.exe');
+/** @param {string} root @param {string} platform */
+function desktopControlPath(root, platform) {
+  return join(
+    root,
+    DESKTOP_CONTROL_RELEASE,
+    platform === 'win32' ? 'sprint-coder-desktop-control.exe' : 'sprint-coder-desktop-control',
+  );
 }
 
 /**
- * The cached desktop-control build is a regular file whose bytes match its own seal.
- * @param {string} root
+ * The cached desktop-control build is a regular file whose bytes match its own seal (and, off
+ * Windows, that can be executed).
+ * @param {string} root @param {string} [platform]
  */
-export function desktopControlCacheValid(root) {
+export function desktopControlCacheValid(root, platform = process.platform) {
   try {
-    const executable = desktopControlPath(root);
+    const executable = desktopControlPath(root, platform);
     for (const path of [executable, `${executable}.sha256`]) {
       const entry = lstatSync(path);
       if (!entry.isFile() || entry.isSymbolicLink()) return false;
     }
+    if (platform !== 'win32' && (lstatSync(executable).mode & 0o111) === 0) return false;
     const expected = readFileSync(`${executable}.sha256`, 'utf8').trim();
     const actual = createHash('sha256').update(readFileSync(executable)).digest('hex');
     return /^[a-f0-9]{64}$/u.test(expected) && expected === actual;
@@ -153,11 +159,11 @@ export function desktopControlCacheValid(root) {
 
 /**
  * The executable starts and reports its version.
- * @param {string} root
+ * @param {string} root @param {string} [platform]
  */
-export function desktopControlProbeValid(root) {
+export function desktopControlProbeValid(root, platform = process.platform) {
   try {
-    const probe = spawnSync(desktopControlPath(root), ['--version'], {
+    const probe = spawnSync(desktopControlPath(root, platform), ['--version'], {
       encoding: 'utf8',
       timeout: 10_000,
       maxBuffer: 64 * 1024,

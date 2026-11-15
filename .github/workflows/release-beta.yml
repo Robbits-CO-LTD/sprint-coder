@@ -177,7 +177,8 @@ jobs:
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
 
-      # Builds only on Windows x64 (the only target that ships desktop control).
+      # Builds on Windows x64 and macOS arm64 (the targets that ship desktop control). The crate's
+      # rust-toolchain.toml has the runner's rustup select its pinned Rust.
       - name: Build desktop control
         run: npm run build:desktop-control
 
