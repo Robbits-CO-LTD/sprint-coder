@@ -253,22 +253,24 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/macos/src/adapter.rs` | 拒否する process を持つようにし、`refusing_windows_of` と操作中の範囲を足した。範囲は入れ子と unwind でも元に戻す |
 | `crates/macos/src/lib.rs` | `RefusedWindowOwner` と環境変数の名前を公開した |
 | `crates/macos/src/system/mod.rs` | 自己ウィンドウの拒否と起動先の制限の module を登録した |
-| `crates/macos/src/system/own_window.rs` | 新しいファイル。Windows と同じ環境変数の読み方・PID の再利用の判断・拒否の code と kind と suggestion。AX の所有者、前面の app、座標の窓を、その都度読む。座標は、上から順に、click を受ける最初の普通の窓（layer 0・alpha が 0 より大きい・持ち主が読める）までの窓と AX の hit test で判定する（上の透明な窓や overlay にだまされない）。対象の無い key は workspace と AX の両方の前面の app で判定する |
+| `crates/macos/src/system/own_window.rs` | 新しいファイル。Windows と同じ環境変数の読み方・PID の再利用の判断・拒否の code と kind と suggestion。AX の所有者、前面の app、座標の窓を、その都度読む。座標は、上から順に、click を受ける最初の普通の窓（layer 0・alpha が 0 より大きい・持ち主が読める）までの窓と AX の hit test で判定する（上の透明な窓や overlay にだまされない）。対象の無い key は workspace と AX の両方の前面の app で判定する。拒否が Sprint Coder 自身によるものかを見分ける関数を持つ |
 | `crates/macos/src/system/own_window_tests.rs` | 新しいファイル。変数、読めない所有者、instance の違い、拒否の形、範囲の復元、座標、途中まで届いた時の証拠の試験。座標の窓の並び（透明な overlay・別アプリの普通の窓・menu level・読めない窓）、AX の hit test、前面の app の 2 つの読み取りの判定の試験 |
 | `crates/macos/src/actions/adapter.rs` | 部品の全 action と scroll-into-view の前に所有者を確認する。対象の無い key は前面を確認する |
 | `crates/macos/src/input/adapter.rs` | mouse・drag・key の入口で確認する。操作中の拒否の範囲を低い入力層まで渡す |
-| `crates/macos/src/tree/properties/ax_ipc.rs` | AX の action と属性の書き込みの直前に、実際の部品の PID を読み直す。menu・focus・窓の変更・renderer の有効化もこの経路を通る |
+| `crates/macos/src/tree/properties/ax_ipc.rs` | AX の action と属性の書き込みの直前に、実際の部品の PID を読み直す。menu・focus・窓の変更・renderer の有効化もこの経路を通る。PID の読み取りは読み取り用の短い待ち時間を部品に設定するので、確認の後で書き込み用の待ち時間を設定し直してから native の呼び出しをする（upstream と同じ待ち時間で動く） |
 | `crates/macos/src/input/keyboard/keyboard_event.rs` | 各 key の押下と文字の各 chunk を送信の直前に確認する。対になる解放と異常時の解放は確認せずに必ず送る。対象 PID が無い時は前面の app を読む。unit test では実際の入力を送らない |
 | `crates/macos/src/input/mouse/mod.rs` | 物理的な pointer の送信を共通の確認に通す。連続 click の各押下の前も座標の窓を読む。対になる解放と異常時の解放は確認せずに必ず送る。unit test では実際の入力を送らない |
 | `crates/macos/src/input/mouse/mouse_drag.rs` | drag の押下と drop を確認する。途中の点と drop の前の待機は確認しない（Windows と同じ）。drop が拒否された時は元の位置で離す。異常時の戻しと解放は確認せずに必ず送る。押下が送れた後で解放の guard を有効にする |
 | `crates/macos/src/input/mouse/mouse_tests.rs` | click の解放が、拒否の範囲の中でも確認されずに送られることの試験 |
-| `crates/macos/src/input/mouse/mouse_drag_state.rs` | 途中の自己ウィンドウ拒否でも Windows と同じ suggestion を保つ。拒否し得る異常時の解放は、送信済みの欄を省く |
+| `crates/macos/src/input/mouse/mouse_drag_state.rs` | 途中の自己ウィンドウ拒否でも Windows と同じ suggestion を保つ。drop が拒否された時も元の位置で離すので、異常時の解放を送った欄（`emergency_release_posted`・`emergency_release_acknowledged`）を他のエラーと同じく載せる |
 | `crates/macos/src/input/mouse/mouse_move.rs` | pointer の近づけと最終位置の各送信を確認する |
 | `crates/macos/src/input/mouse/mouse_scroll.rs` | wheel の各 chunk を送る直前に確認する |
 | `crates/macos/src/actions/delivery_tracker.rs` | 途中の拒否には、すでに入力が届いたことと件数を載せる。拒否の code・kind・suggestion は保つ |
 | `crates/macos/src/system/adapter.rs` | focus-window・launch・close-app・窓の全変更・app 宛ての key・renderer の有効化・通知の各操作へ拒否の範囲を渡し、名指した相手を先に確認する。通知の list は開閉と復帰の副作用だけを確認する |
 | `crates/macos/src/system/appkit_bridge.rs` | app を終了させる native 呼び出しの直前にも PID を確認する |
-| `crates/macos/src/notifications/nc_session.rs` | 通知を開く AppleScript の前に ControlCenter の所有者を確認する。閉じる key と前の app への復帰は、入力層と AX 層で確認する |
+| `crates/macos/src/notifications/nc_session.rs` | 通知を開く AppleScript の前に ControlCenter の所有者を確認する。閉じる Escape は前面へ送り、前面が Sprint Coder 自身か読めずに拒否された時は Notification Center の process へ直接送る。前の app への復帰は、それが Sprint Coder 自身なら失敗にせず飛ばす（読めない変数・所有者は今までどおり拒否する）。通知への操作が済んだ後で後始末だけが失敗した時は、何も送っていないとは報告せず、操作が済んだことと結果を載せる |
+| `crates/macos/src/notifications/actions.rs` | 1 行目に変更の注記を足した。dismiss・dismiss all・action の後始末に、操作が済んだことを保つ合わせ方を使う |
+| `crates/macos/src/notifications/nc_session_tests.rs` | 1 行目に変更の注記を足した。操作の後の後始末の失敗・拒否が「何も送っていない」にならないことと、Sprint Coder 自身への復帰を飛ばすことの試験 |
 | `crates/macos/src/system/launch.rs` | core に増えた結果の欄を埋める。既存 instance につないだ時だけ attached、新しく始めた process の窓を得た時だけ new_instance、activate は実際の前面との照合を返す。窓が無い時は前面を読まずに false、前面の読み取りの失敗も false にして、起動後のエラーにしない。attach でも実行中の bundle の場所と拒否の PID を確認する |
 | `crates/macos/src/system/launch_tests.rs` | activate の結果が、窓が無い時・前面を読めない時に false で返ることの試験 |
 | `crates/macos/src/system/launch_location.rs` | 新しいファイル。symlink 解決後の bundle を標準のアプリの場所だけに限る。home は実効 uid の password database から読む。OS 所有の Cryptex の場所も symlink 解決して照合する。場所の判定と symlink の試験を含む |

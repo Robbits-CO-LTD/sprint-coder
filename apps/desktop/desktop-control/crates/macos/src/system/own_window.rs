@@ -544,6 +544,16 @@ fn contains(rect: &agent_desktop_core::Rect, point: &agent_desktop_core::Point) 
 #[path = "own_window_tests.rs"]
 mod tests;
 
+/// Whether `error` refuses because the target is the refused process itself (not because an
+/// owner or the variable could not be read).
+pub(crate) fn is_own_refusal(error: &AdapterError) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details["kind"].as_str())
+        == Some("own_window_refused")
+}
+
 pub(crate) fn is_refusal(error: &AdapterError) -> bool {
     error
         .details

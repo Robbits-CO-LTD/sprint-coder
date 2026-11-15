@@ -47,7 +47,8 @@ impl DragDeliveryState {
                 "delivered_events".into(),
                 self.delivery.delivered_units().into(),
             );
-            if self.armed && !own_refusal {
+            // The guard's Drop lets the button go at the origin unjudged, also after a refusal.
+            if self.armed {
                 details.insert("emergency_release_posted".into(), true.into());
                 details.insert("emergency_release_acknowledged".into(), false.into());
             }
@@ -98,21 +99,16 @@ mod tests {
     }
 
     #[test]
-    fn own_window_refusal_does_not_claim_that_guarded_cleanup_was_posted() {
+    fn own_window_refusal_reports_the_emergency_release_at_the_origin() {
         let _scope =
             crate::system::own_window::enter(&crate::RefusedWindowOwner::Unreadable, "drag");
         let mut state = DragDeliveryState::default();
         state.arm();
         state.mark_down_posted();
         let error = state.enrich_error(crate::system::own_window::check_pid(Some(42)).unwrap_err());
-        assert!(
-            error
-                .details
-                .as_ref()
-                .unwrap()
-                .get("emergency_release_posted")
-                .is_none()
-        );
+        let details = error.details.as_ref().unwrap();
+        assert_eq!(details["emergency_release_posted"], true);
+        assert_eq!(details["emergency_release_acknowledged"], false);
         assert_eq!(
             error.suggestion.as_deref(),
             Some(crate::system::own_window::OWN_WINDOW_SUGGESTION)

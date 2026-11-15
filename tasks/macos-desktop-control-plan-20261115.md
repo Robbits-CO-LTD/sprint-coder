@@ -175,3 +175,25 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 - PR の CI では macOS の Rust を compile しない。release の前の全試験と release の workflow で build する。
 - CLI の試験（`cargo test -p agent-desktop`）は、取り込んでいない upstream のファイルを読むので compile できない。Windows と同じ。
+
+### 段階 2 の独立レビューと実機の試験で出て、残したもの
+
+安全に関わるもの:
+
+- 開発版では、実行ファイルと封印が repo の中の同じフォルダーにあり、どちらも書き換えられる。Sprint Coder の repo を Workspace にした AI が両方を書き換えると、別の Workspace の Turn がそれを囲いの外で動かし得る。Windows の開発版と同じ。配布版は、署名済みのアプリの中に入る。
+- アプリ単位の許可の判定に使う bundle ID は、その bundle の Info.plist の値をそのまま使う。署名は確かめていない。
+- 状態の置き場所を 0700 にする処理に、確認と変更の間の隙がある。入れ替えられた時は、その後の確認で使わない側に倒れる。
+
+使い勝手に関わるもの:
+
+- Project を選んでいない Task で頼むと、AI は「デスクトップ操作の道具が渡されていない」と答える。Project を選ぶよう案内していない。
+- アプリの名前で指す読み取り（`snapshot --app …`）は、「このアプリは Task 中許可」の後も毎回カードが出る。アプリ単位の許可は、ref と窓の id で指した操作だけが対象。
+- `launch` を bundle ID で指した時、最初の 1 回は標準のアプリの場所の bundle を全部読むので、数秒かかることがある（Main の thread を止める）。
+- 標準のアプリの場所のサブフォルダーにあるアプリは、「見つからない」と断る。
+- 実行ファイルのパスに日本語などを含むアプリで、アプリ単位の許可が出るかは未確認（読めない時は出さない）。
+
+試験:
+
+- Claude CLI での実 AI の試験は未実施。`open` で起動した開発版が、Claude Code を「ログインが必要」と表示した。原因は調べていない。
+- 物理の pointer とキーボード（`--headed`）、drag の実機の確認は未実施。
+- 実 AI の試験の記録: `tasks/evidence/macos-desktop-control-real-ai-20261116.md`
