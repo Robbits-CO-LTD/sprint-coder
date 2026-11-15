@@ -172,6 +172,23 @@ export function isWorkerActive(state: WorkerState): boolean {
   return workerTransitions[state].length > 0;
 }
 
+/**
+ * The states of a transition table that something still leads out of, in the table's order.
+ * Exported so the derivation itself can be checked against a table with a state added.
+ */
+export function nonTerminalStates<S extends string>(
+  transitions: Readonly<Record<S, readonly S[]>>,
+): readonly S[] {
+  return (Object.keys(transitions) as S[]).filter((state) => transitions[state].length > 0);
+}
+
+/**
+ * Every Worker state in which `isWorkerActive` holds. Persistence binds this into the queries that
+ * look for Workers still at work (issue #1283), so the stored records and the machine never disagree
+ * on which states those are.
+ */
+export const activeWorkerStates: readonly WorkerState[] = nonTerminalStates(workerTransitions);
+
 export function transitionTeamMessage(
   from: TeamMessageState,
   to: TeamMessageState,
