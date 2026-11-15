@@ -1,10 +1,14 @@
-import { basename } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { basename, posix } from 'node:path';
 import {
   desktopControlArgvMode,
+  desktopControlMacNamesTool,
   desktopControlNamesTool,
+  macAppBundleOf,
   readBatchEntries,
   readDesktopControlCommand,
 } from './desktop-control';
+import { queryNativeProcessIdentity } from './native-process-identity';
 import {
   desktopControlOwnerReader,
   sameDesktopControlOwner,
@@ -37,6 +41,13 @@ export type DesktopAppGrantLookup = Readonly<{
   stateRoot?: string;
   /** The executable name of Sprint Coder itself, which is never granted. */
   ownExecutable?: string;
+  /** Whose rules apply (by default, those of the OS whose form the process instance has). */
+  platform?: NodeJS.Platform;
+  /**
+   * macOS: the path of the executable the process instance runs, or `null` when it cannot be read
+   * or the pid no longer belongs to that instance (`macProcessExecutable` by default).
+   */
+  processExecutable?: (owner: DesktopControlOwner) => string | null;
 }>;
 
 /** A granted app, and how the card names it. */
@@ -65,6 +76,33 @@ const NOT_GRANTED = new Set(
     .join(' ')
     .split(' '),
 );
+
+// The same kinds on macOS, by the outermost app bundle's file name without `.app`, in lower case:
+// the shell's own processes (Finder, Dock, the menu bar and Control Center, the login window), the
+// browsers, and editors with a built-in terminal. Terminals and the rest are refused by name as
+// `launch` refuses them (`desktopControlMacNamesTool`). The shown app name follows the person's
+// language, so it decides nothing here.
+const MAC_NOT_GRANTED = new Set([
+  'finder',
+  'dock',
+  'systemuiserver',
+  'controlcenter',
+  'loginwindow',
+  'safari',
+  'google chrome',
+  'microsoft edge',
+  'firefox',
+  'brave browser',
+  'arc',
+  'chromium',
+  'opera',
+  'vivaldi',
+  'visual studio code',
+  'cursor',
+  'windsurf',
+  'xcode',
+  'zed',
+]);
 
 type Target = Readonly<{ kind: 'ref' | 'window'; value: string }>;
 
@@ -283,6 +321,16 @@ function strictOptions(
 }
 
 function grantable(owner: DesktopControlOwner, lookup: DesktopAppGrantLookup): boolean {
+  // The executable writes the process instance in its own OS's form. Without a platform given, the
+  // Windows rules apply only to a Windows-form record off macOS or on it; every other record gets
+  // the macOS rules, where an instance that does not match withholds the grant.
+  const mac =
+    lookup.platform === undefined
+      ? process.platform === 'darwin'
+        ? !owner.instance.startsWith('windows-proc-v1:')
+        : owner.instance.startsWith('macos-proc-v1:')
+      : lookup.platform === 'darwin';
+  if (mac) return macGrantable(owner, lookup);
   const app = owner.app.toLowerCase();
   // `Code - Insiders.exe` reads as `code-insiders`.
   const stem = app
@@ -291,6 +339,51 @@ function grantable(owner: DesktopControlOwner, lookup: DesktopAppGrantLookup): b
     .replace(/\s*-\s*|\s+/gu, '-');
   const own = (lookup.ownExecutable ?? basename(process.execPath)).toLowerCase();
   return !NOT_GRANTED.has(stem) && app !== own && !desktopControlNamesTool(owner.app);
+}
+
+/**
+ * On macOS, judged by the app bundle the process runs from, read from its pid, never by the shown
+ * name. An app whose bundle cannot be read is not granted, so each of its runs keeps its card.
+ */
+function macGrantable(owner: DesktopControlOwner, lookup: DesktopAppGrantLookup): boolean {
+  const executable = (lookup.processExecutable ?? macProcessExecutable)(owner);
+  const bundle = executable === null ? null : macAppBundleOf(executable);
+  if (bundle === null) return false;
+  const file = posix.basename(bundle);
+  const stem = file.toLowerCase().replace(/\.app$/u, '');
+  const own = macAppBundleOf(lookup.ownExecutable ?? process.execPath);
+  return (
+    !MAC_NOT_GRANTED.has(stem) &&
+    stem !== 'sprint coder' &&
+    (own === null || posix.basename(own).toLowerCase() !== file.toLowerCase()) &&
+    !desktopControlMacNamesTool(file)
+  );
+}
+
+/**
+ * The executable path of the process, by `ps`, only while the pid still belongs to the same process
+ * instance (its start time, read natively before and after), so a reused pid is not read.
+ */
+function macProcessExecutable(owner: DesktopControlOwner): string | null {
+  // The executable's instance form is `macos-proc-v1:<seconds>:<microseconds>` of the native start
+  // time `darwin:<seconds>:<microseconds>`; any difference only withholds the grant.
+  const sameInstance = () => {
+    const start = /^darwin:([0-9]{1,20}):([0-9]{1,6})$/u.exec(
+      queryNativeProcessIdentity(owner.pid)?.startIdentity ?? '',
+    );
+    return start !== null && owner.instance === `macos-proc-v1:${start[1]!}:${start[2]!}`;
+  };
+  try {
+    if (!sameInstance()) return null;
+    const path = execFileSync('/bin/ps', ['-p', String(owner.pid), '-o', 'comm='], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return path.startsWith('/') && sameInstance() ? path : null;
+  } catch {
+    return null;
+  }
 }
 
 function keyOf(owner: DesktopControlOwner): DesktopAppGrantKey {

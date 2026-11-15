@@ -320,8 +320,9 @@ describe('the bound on a Team Worker’s desktop-control run', () => {
     await sessions.dispose();
   });
 
-  // Not on macOS: there the runner refuses to start a mutable executable such as the test's Node,
-  // and desktop control runs on Windows only. Windows and Linux run it.
+  // Not on macOS: there the runner refuses to start a mutable executable such as the test's Node
+  // (only the shipped desktop-control executable is let out, and only from a sandboxed runner), and
+  // the Team's Workers run desktop control on Windows only. Windows and Linux run it.
   it.skipIf(process.platform === 'darwin')(
     'leaves no process of a real run behind once its bound is reached',
     async () => {

@@ -14,6 +14,7 @@ import {
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
+import { runsOutsideCommandSandbox } from './desktop-control';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 
 export type SealedExecutableIdentity = Readonly<{
@@ -127,9 +128,19 @@ async function removePreparedExecutionDirectory(directory: string): Promise<void
   });
 }
 
+export type PrepareExecutionImageOptions = Readonly<{
+  /**
+   * The Turn's Workspace roots, given only for a sandboxed run that may be desktop control. On
+   * macOS they let the shipped desktop-control executable start from its own path; see
+   * `bundledMacDesktopControl`.
+   */
+  desktopControlWorkspaceRoots?: readonly string[];
+}>;
+
 export async function prepareExecutionImage(
   expected: SealedExecutableIdentity,
   allowScript = true,
+  options: PrepareExecutionImageOptions = {},
 ): Promise<PreparedExecutionImage> {
   const trustedWindowsPath =
     process.platform === 'win32' && (await isWindowsSystem32Image(expected.canonicalPath));
@@ -201,17 +212,26 @@ export async function prepareExecutionImage(
         ...(await prepareWindowsSideBySideImages(imageDirectory, expected.dependencies ?? [])),
       );
     const digest = sha256(heldBytes);
+    const shebang =
+      process.platform === 'win32' || (expected.mode & 0o111) === 0
+        ? undefined
+        : parseShebang(heldBytes);
+    const hasRelativeMachOLoaderPath = containsRelativeMachOLoaderPath(heldBytes);
     const trustedMacPath =
       process.platform === 'darwin' &&
       process.getuid?.() !== 0 &&
-      (await isRootOwnedSystemExecutable(expected.canonicalPath));
+      ((await isRootOwnedSystemExecutable(expected.canonicalPath)) ||
+        (shebang === undefined &&
+          !hasRelativeMachOLoaderPath &&
+          bundledMacDesktopControl(expected, digest, options.desktopControlWorkspaceRoots)));
     const trustedLinuxPath =
       process.platform === 'linux' &&
       process.getuid?.() !== 0 &&
       (await isRootOwnedNonWritableExecutable(expected.canonicalPath));
     // Linux exposes the sealed memfd through the Main process so descendants that reuse
     // process.execPath still resolve an immutable image. macOS has no equivalent and only permits
-    // root-owned, non-writable system images (or descriptor-fed scripts) below.
+    // root-owned, non-writable system images, the shipped desktop-control executable, or
+    // descriptor-fed scripts below.
     const descriptor = process.platform === 'linux' ? undefined : held?.fd;
     const baseLaunchPath = trustedWindowsPath
       ? expected.canonicalPath
@@ -223,11 +243,6 @@ export async function prepareExecutionImage(
           ? expected.canonicalPath
           : destination;
     const baseDescriptors = descriptor === undefined ? [] : [descriptor];
-    const shebang =
-      process.platform === 'win32' || (expected.mode & 0o111) === 0
-        ? undefined
-        : parseShebang(heldBytes);
-    const hasRelativeMachOLoaderPath = containsRelativeMachOLoaderPath(heldBytes);
     const hasRelativeElfLoaderPath = containsUnsafeElfLoaderPath(heldBytes);
     const trustedElfRuntime =
       process.platform !== 'linux' || trustedLinuxPath
@@ -353,6 +368,30 @@ export async function prepareExecutionImage(
     await removePreparedExecutionDirectory(directory);
     throw error;
   }
+}
+
+/**
+ * Whether, on macOS, the image is the desktop-control executable shipped with Sprint Coder, which
+ * then starts from its own path, as a root-owned system executable does: its canonical path is the
+ * one Main resolved itself (`resolveDesktopControlCommand`), the digest of the bytes held here is
+ * the one sealed in its `.sha256` manifest, and it lies outside every root of the Turn's Workspace
+ * (all three in `runsOutsideCommandSandbox`). The caller gives only the roots, never the verdict;
+ * without them nothing qualifies. Every other mutable native image stays refused below.
+ *
+ * As for the sandbox runner, the file is checked and then started by path, so the same user could
+ * still replace it in between; that window is accepted.
+ */
+function bundledMacDesktopControl(
+  expected: SealedExecutableIdentity,
+  digest: string,
+  workspaceRoots: readonly string[] | undefined,
+): boolean {
+  return (
+    process.platform === 'darwin' &&
+    workspaceRoots !== undefined &&
+    expected.interpreter === undefined &&
+    runsOutsideCommandSandbox(expected.canonicalPath, digest, workspaceRoots)
+  );
 }
 
 export function containsRelativeMachOLoaderPath(bytes: Buffer): boolean {

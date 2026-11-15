@@ -86,7 +86,13 @@ afterAll(() => {
   rmSync(stateRoot, { recursive: true, force: true });
 });
 
-const lookup = () => ({ stateRoot, taskId: 'task-grant', ownExecutable: 'Sprint Coder.exe' });
+// The Windows rules, wherever the tests run (macOS judges the app by its bundle, below).
+const lookup = () => ({
+  platform: 'win32' as const,
+  stateRoot,
+  taskId: 'task-grant',
+  ownExecutable: 'Sprint Coder.exe',
+});
 const offer = (argv: string[]) => desktopAppGrantOffer(argv, lookup());
 const covers = (argv: string[], granted: DesktopAppGrantKey[]) =>
   desktopAppGrantCovering(argv, granted, lookup()) !== null;
@@ -417,7 +423,10 @@ describe('desktop-control app-wide Task grant', () => {
       );
       names.forEach((app, index) =>
         expect(
-          desktopAppGrantOffer(['click', `@snames:e${index}`], { stateRoot: root }),
+          desktopAppGrantOffer(['click', `@snames:e${index}`], {
+            platform: 'win32',
+            stateRoot: root,
+          }),
           app,
         ).toBeNull(),
       );
@@ -476,6 +485,7 @@ describe('desktop-control app-wide Task grant', () => {
         }),
       );
       const known = desktopAppGrantOffer(['snapshot', '--window-id', 'w-500'], {
+        platform: 'win32',
         stateRoot: root,
         taskId: 'task-known',
       });
@@ -483,12 +493,14 @@ describe('desktop-control app-wide Task grant', () => {
       // Another Task's runs name nothing here, and a window without a process instance no app.
       expect(
         desktopAppGrantOffer(['snapshot', '--window-id', 'w-500'], {
+          platform: 'win32',
           stateRoot: root,
           taskId: 'task-other',
         }),
       ).toBeNull();
       expect(
         desktopAppGrantOffer(['snapshot', '--window-id', 'w-501'], {
+          platform: 'win32',
           stateRoot: root,
           taskId: 'task-known',
         }),
@@ -524,7 +536,7 @@ describe('desktop-control app-wide Task grant', () => {
           },
         }),
       );
-      const lookup = { stateRoot: root, taskId: 'task-attached' };
+      const lookup = { platform: 'win32' as const, stateRoot: root, taskId: 'task-attached' };
       const key = desktopAppGrantOffer(['snapshot', '--window-id', 'w-510'], lookup);
       expect(key).toMatchObject({
         pid: 610,
@@ -543,6 +555,93 @@ describe('desktop-control app-wide Task grant', () => {
       ).toBeNull();
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('desktop-control app-wide Task grant on macOS', () => {
+  const root = () => {
+    const folder = mkdtempSync(join(tmpdir(), 'sc-dc-app-grant-mac-'));
+    // The shown names follow the person's language; only the bundles decide.
+    const mac = (app: string, pid: number, window: string) => ({
+      ...part(app, pid, window),
+      process_instance: `macos-proc-v1:1763251200:${pid}`,
+    });
+    writeRefmap(folder, 'smac', {
+      '@e1': mac('テキストエディット', 900, 'w-90'),
+      '@e2': mac('Finder', 901, 'w-91'),
+      '@e3': mac('Google Chrome', 902, 'w-92'),
+      '@e4': mac('ターミナル', 903, 'w-93'),
+      '@e5': mac('Sprint Coder', 904, 'w-94'),
+      '@e6': mac('Code', 905, 'w-95'),
+      '@e7': mac('不明', 906, 'w-96'),
+      '@e8': mac('Notes', 907, 'w-97'),
+    });
+    return folder;
+  };
+  const executables: Record<number, string | null> = {
+    900: '/System/Applications/TextEdit.app/Contents/MacOS/TextEdit',
+    901: '/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder',
+    902: '/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)',
+    903: '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal',
+    904: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+    905: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
+    906: null,
+    907: '/usr/local/bin/notes-without-bundle',
+  };
+
+  it('grants by the app bundle the process runs from, never by the shown name', () => {
+    const folder = root();
+    try {
+      const seen: unknown[] = [];
+      const lookup = {
+        platform: 'darwin' as const,
+        stateRoot: folder,
+        ownExecutable: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+        processExecutable: (owner: { pid: number; instance: string }) => {
+          seen.push(owner);
+          return executables[owner.pid] ?? null;
+        },
+      };
+      const key = desktopAppGrantOffer(['click', '@smac:e1'], lookup);
+      expect(key).toMatchObject({ pid: 900, app: 'テキストエディット' });
+      expect(seen).toContainEqual(
+        expect.objectContaining({ pid: 900, instance: 'macos-proc-v1:1763251200:900' }),
+      );
+      expect(desktopAppGrantCovering(['click', '@smac:e1'], [key!], lookup)).toEqual(key);
+      // The shell, a browser (by its outermost bundle), a terminal, Sprint Coder, an editor, and
+      // a process whose bundle cannot be read or that runs from no bundle at all.
+      for (const ref of ['e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8'])
+        expect(desktopAppGrantOffer(['click', `@smac:${ref}`], lookup), ref).toBeNull();
+      // Without a platform given, the record's macOS process instance picks the macOS rules.
+      const byRecord = {
+        stateRoot: folder,
+        ownExecutable: lookup.ownExecutable,
+        processExecutable: lookup.processExecutable,
+      };
+      expect(desktopAppGrantOffer(['click', '@smac:e1'], byRecord)).toMatchObject({ pid: 900 });
+      expect(desktopAppGrantOffer(['click', '@smac:e3'], byRecord)).toBeNull();
+      // A bundle that can no longer be read stops covering.
+      expect(
+        desktopAppGrantCovering(['click', '@smac:e1'], [key!], {
+          ...lookup,
+          processExecutable: () => null,
+        }),
+      ).toBeNull();
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it('reads nothing for a process instance that is not running', () => {
+    const folder = root();
+    try {
+      // The real reader: no process has this pid and start time, so no bundle and no grant.
+      expect(
+        desktopAppGrantOffer(['click', '@smac:e1'], { platform: 'darwin', stateRoot: folder }),
+      ).toBeNull();
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
     }
   });
 });

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE,
-  desktopControlSupported,
+  desktopControlTeamCursorsEnabled,
 } from './desktop-control-build';
 import type { TeamCoordinator } from './team-coordinator';
 import {
@@ -93,8 +93,8 @@ const hire = (
   ) as Promise<Record<string, unknown>>;
 
 describe('the Team’s desktop cursors as Main and the Runtime Host start', () => {
-  // Where desktop control is not built (macOS, Linux), the cursors stay off whatever is given.
-  const built = desktopControlSupported(process.platform, process.arch);
+  // Only Windows x64 has the cursors: elsewhere (macOS, Linux) they stay off whatever is given.
+  const built = desktopControlTeamCursorsEnabled(undefined, process.platform, process.arch);
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();

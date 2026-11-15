@@ -1,8 +1,21 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
-import { DESKTOP_CONTROL_EXECUTABLE, desktopControlSupported } from './desktop-control-build';
+import {
+  desktopControlExecutableName,
+  desktopControlPackaged,
+  desktopControlSupported,
+} from './desktop-control-build';
 import {
   DESKTOP_CONTROL_URL_BROWSERS,
   desktopControlLaunchUrl,
@@ -23,8 +36,8 @@ import { secureLogger } from './secure-logger';
  * Only the shipped copy is used: the packaged app's resources, or, in a development run, the
  * build output in the repository. No environment variable or PATH lookup can point it
  * elsewhere. A file whose bytes are not the sealed ones is not the desktop-control executable,
- * and then the guidance is left out entirely. Windows x64 only for now; elsewhere this is always
- * `null`.
+ * and then the guidance is left out entirely. Windows x64 and Apple silicon macOS (whose package
+ * does not ship it yet, so only a development run has it there); elsewhere this is always `null`.
  */
 export type DesktopControlLookup = Readonly<{
   platform?: NodeJS.Platform;
@@ -47,6 +60,13 @@ export type DesktopControlLookup = Readonly<{
   environment?: Readonly<Record<string, string | undefined>>;
   /** Sprint Coder's own executable, which `launch` refuses (`process.execPath` by default). */
   ownExecutable?: string;
+  /**
+   * macOS: the folders `launch <name>` looks the app up in (`MAC_APPLICATION_FOLDERS` and the
+   * user's own Applications folder by default).
+   */
+  macApplicationFolders?: readonly string[];
+  /** macOS: the `CFBundleIdentifier` of an app bundle, or `null` when it cannot be read. */
+  bundleIdentifier?: (bundle: string) => string | null;
 }>;
 
 /**
@@ -58,20 +78,22 @@ function shippedCandidate(lookup: DesktopControlLookup): Readonly<{
   packaged: boolean;
 }> | null {
   const platform = lookup.platform ?? process.platform;
-  if (!desktopControlSupported(platform, lookup.arch ?? process.arch)) return null;
+  const arch = lookup.arch ?? process.arch;
+  if (!desktopControlSupported(platform, arch)) return null;
+  const paths = platform === 'win32' ? win32 : posix;
+  const name = desktopControlExecutableName(platform);
   const packaged = lookup.packaged ?? __dirname.includes('app.asar');
   if (packaged) {
+    // Not shipped in this platform's package yet: off, and not reported as missing.
+    if (!desktopControlPackaged(platform, arch)) return null;
     const resources = lookup.resourcesPath ?? process.resourcesPath;
-    if (typeof resources !== 'string' || !win32.isAbsolute(resources))
+    if (typeof resources !== 'string' || !paths.isAbsolute(resources))
       return { path: '', packaged };
-    return { path: win32.join(resources, DESKTOP_CONTROL_EXECUTABLE), packaged };
+    return { path: paths.join(resources, name), packaged };
   }
   // `.vite/build` (the built main) and `src/main` (tests) are both four levels below the root.
   const root = lookup.repositoryRoot ?? resolve(__dirname, '..', '..', '..', '..');
-  return {
-    path: win32.join(root, ...DEVELOPMENT_BUILD_FOLDER, DESKTOP_CONTROL_EXECUTABLE),
-    packaged,
-  };
+  return { path: paths.join(root, ...DEVELOPMENT_BUILD_FOLDER, name), packaged };
 }
 
 /** The build output in the repository that a development run uses. */
@@ -101,9 +123,13 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 export function desktopControlUnavailableReason(lookup: DesktopControlLookup = {}): string | null {
   const candidate = shippedCandidate(lookup);
   if (candidate === null || shippedDesktopControl(lookup) !== null) return null;
+  const platform = lookup.platform ?? process.platform;
+  const name = desktopControlExecutableName(platform);
   const where = candidate.packaged
-    ? `resources\\${DESKTOP_CONTROL_EXECUTABLE}`
-    : [...DEVELOPMENT_BUILD_FOLDER, DESKTOP_CONTROL_EXECUTABLE].join('/');
+    ? platform === 'win32'
+      ? `resources\\${name}`
+      : `Contents/Resources/${name}`
+    : [...DEVELOPMENT_BUILD_FOLDER, name].join('/');
   let reason: string;
   if (candidate.path === '') reason = "the app's resources folder is unknown";
   else {
@@ -125,7 +151,7 @@ export function desktopControlUnavailableReason(lookup: DesktopControlLookup = {
 }
 
 /**
- * Logs once at startup why desktop control is off, on Windows x64 only (see
+ * Logs once at startup why desktop control is off, where it is built (see
  * `desktopControlUnavailableReason`); otherwise logs nothing.
  */
 export function reportDesktopControlAvailability(
@@ -366,7 +392,10 @@ export function desktopControlRefusedWindowOwner(
 let ownWindowOwner: string | undefined;
 
 /** Sprint Coder's own Main (whose process owns its windows) as that variable's value. */
-export function desktopControlOwnWindowOwner(): string {
+export function desktopControlOwnWindowOwner(platform: NodeJS.Platform = process.platform): string {
+  // macOS: the bare pid, so no detail of the instance's form can turn the refusal off; Main is the
+  // live ancestor of every run it starts, so its pid cannot be reused meanwhile.
+  if (platform === 'darwin') return String(process.pid);
   ownWindowOwner ??=
     desktopControlRefusedWindowOwner(
       process.pid,
@@ -392,8 +421,10 @@ let configuredStateRoot: string | null = null;
 /**
  * Sets the folder, under Sprint Coder's own data, where every desktop-control run outside the
  * sandbox keeps its snapshots. The approval card reads the names of the parts a ref points at from
- * there (`desktop-control-display.ts`). Called once at startup; until then, and in tests, runs keep
- * the binary's default folder in the user's home and the card reads that one.
+ * there (`desktop-control-display.ts`). Called once at startup; until then, and in tests, runs on
+ * Windows keep the binary's default folder in the user's home and the card reads that one. On
+ * macOS no run starts without this folder (`CommandRunner.run`): the folder must be a real
+ * directory (not a link) the user owns, and is made 0700 on every start; otherwise it is not used.
  *
  * The binary refuses a state folder whose DACL grants anyone but the user, SYSTEM and
  * Administrators any access, even read (checked on 1.2.0). A folder under a drive root inherits
@@ -404,20 +435,51 @@ let configuredStateRoot: string | null = null;
  */
 export function configureDesktopControlStateRoot(
   root: string | null,
-  makePrivate: (folder: string) => void = (folder) =>
-    applyWindowsAcl(folder, 'directory', 'secure'),
+  makePrivate: (folder: string) => void = process.platform === 'win32'
+    ? (folder) => applyWindowsAcl(folder, 'directory', 'secure')
+    : makePosixFolderPrivate,
 ): void {
   configuredStateRoot = null;
-  // Desktop control ships for Windows only, the one place its folder can be checked here.
-  if (root === null || process.platform !== 'win32' || !win32.isAbsolute(root)) return;
-  const folder = win32.normalize(root);
+  // Desktop control runs on Windows and macOS only, the places its folder can be checked here.
+  if (root === null) return;
+  const windows = process.platform === 'win32';
+  if (!windows && process.platform !== 'darwin') return;
+  const paths = windows ? win32 : posix;
+  if (!paths.isAbsolute(root)) return;
+  const folder = paths.normalize(root);
   try {
-    mkdirSync(folder, { recursive: true });
+    mkdirSync(folder, { recursive: true, ...(windows ? {} : { mode: 0o700 }) });
     makePrivate(folder);
   } catch {
+    if (!windows)
+      secureLogger.warn(
+        'Desktop control is off: its state folder could not be made private.',
+        undefined,
+        {
+          event: 'system.desktop_control.unavailable',
+        },
+      );
     return;
   }
   configuredStateRoot = folder;
+}
+
+/**
+ * Makes a POSIX folder private to the user, or throws: it must be a directory itself (not a
+ * symlink) owned by the user, and is left with mode 0700, checked again after the change.
+ */
+export function makePosixFolderPrivate(folder: string): void {
+  const check = (privateOnly: boolean) => {
+    // `lstat`, so a symlink is never a directory here.
+    const stats = lstatSync(folder);
+    if (!stats.isDirectory() || stats.uid !== process.getuid?.())
+      throw new Error('The state folder is not a directory the user owns');
+    if (privateOnly && (stats.mode & 0o077) !== 0)
+      throw new Error('The state folder is not private');
+  };
+  check(false);
+  chmodSync(folder, 0o700);
+  check(true);
 }
 
 /** The configured state folder, or `null` for the binary's default. */
@@ -429,7 +491,8 @@ export function desktopControlStateRoot(): string | null {
  * The folder a desktop-control run outside the sandbox keeps its state in, and the one its approval
  * card reads: the configured one, or else Sprint Coder's own inherited variable (an absolute path
  * with a drive letter), then the binary's folder in the home. `desktopControlEnvironment` passes
- * this to every run, so the run never looks anywhere else.
+ * this to every run, so the run never looks anywhere else. On macOS no run starts unless the folder
+ * was configured (`CommandRunner.run`), so a run there never falls back to the home.
  */
 export function desktopControlStateFolder(): string {
   if (configuredStateRoot !== null) return configuredStateRoot;
@@ -774,8 +837,9 @@ const INERT_COMMANDS = new Set([
 // alias and the full name of `skills list`), with the references each carries. The binary prints
 // only text compiled into it (`crates/core/src/commands/skills.rs`), never a file on disk, and
 // answers any other reference with an error; that answer is not relied on here: only these exact
-// names, in lower case, keep no card. `platform` is the Windows guide, the only one the binary is
-// shipped for. Tested against the guides in `desktop-control/skills`.
+// names, in lower case, keep no card. `platform` is the guide of the OS the binary was built for:
+// the Windows one here, and the macOS one on macOS (`desktopControlSkillReferences`). Tested against
+// the guides in `desktop-control/skills`.
 const DESKTOP_REFERENCES = [
   'commands-observation',
   'commands-interaction',
@@ -814,6 +878,15 @@ export const DESKTOP_CONTROL_SKILL_REFERENCES: ReadonlyMap<string, readonly stri
   ['jev-desktop', []],
 ]);
 
+/** The references of a skill `skills get` prints on this platform, or `undefined` for none. */
+export function desktopControlSkillReferences(
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] | undefined {
+  if (name === 'platform' && platform === 'darwin') return MACOS_REFERENCES;
+  return DESKTOP_CONTROL_SKILL_REFERENCES.get(name);
+}
+
 /**
  * Whether `skills get` names a known skill, and at most one of its references either as its name
  * (`workflows`) or as its path in the guide (`references/workflows.md`), with no option beside a
@@ -822,9 +895,10 @@ export const DESKTOP_CONTROL_SKILL_REFERENCES: ReadonlyMap<string, readonly stri
 function inertSkillRead(
   positionals: readonly string[],
   options: ReadonlyMap<string, string>,
+  platform: NodeJS.Platform,
 ): boolean {
   if (positionals.length === 0) return true;
-  const references = DESKTOP_CONTROL_SKILL_REFERENCES.get(positionals[0]!);
+  const references = desktopControlSkillReferences(positionals[0]!, platform);
   if (references === undefined || positionals.length > 2) return false;
   const reference = positionals[1];
   if (reference === undefined) return true;
@@ -850,7 +924,10 @@ function inertPositionals(command: string, positionals: readonly string[]): bool
  * approval card. Any option shared by every command (`--headed`, `--session`, `-w` …) keeps the
  * card, and so does every other command, `batch` included.
  */
-export function desktopControlArgvIsInert(argv: readonly string[]): boolean {
+export function desktopControlArgvIsInert(
+  argv: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string' || read.global || read.separated) return false;
   if (read.help.length > 0) {
@@ -868,7 +945,7 @@ export function desktopControlArgvIsInert(argv: readonly string[]): boolean {
     INERT_COMMANDS.has(read.command) &&
     (read.command === 'skills get'
       ? // Only the exact names of the bundled guides and their references.
-        inertSkillRead(read.positionals, read.options)
+        inertSkillRead(read.positionals, read.options, platform)
       : // No path separator, dot, colon, space, control character or leading dash in any of them.
         read.positionals.every((token) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(token)) &&
         inertPositionals(read.command, read.positionals))
@@ -1100,12 +1177,15 @@ export function desktopControlArgvRefusal(
   const { key, positionals } = read;
   // Help and version print and exit without acting.
   if (read.help.length > 0 || key === undefined) return null;
+  const platform = lookup.platform ?? process.platform;
+  if (platform === 'darwin' && MAC_UNAVAILABLE_COMMANDS.has(key)) return macUnavailable(key);
   if (key === 'screenshot' && positionals.length > 0)
     return refusal('screenshot の保存先は指定できない');
   if (key === 'launch') {
     if (positionals.length !== 1)
       return refusal('launch に渡せるのはアプリ名か Workspace の外の絶対パス 1 つだけ');
     if ((read.counts.get('--url') ?? 0) > 1) return refusal('launch の --url は 1 つだけ');
+    if (platform === 'darwin' && read.options.has('--url')) return macUnavailable('launch --url');
     return (
       launchTargetRefusal(positionals[0]!, workspaceRoots, lookup) ??
       launchUrlRefusal(positionals[0]!, read.options.get('--url'))
@@ -1275,6 +1355,14 @@ function refusal(reason: string): string {
   return `デスクトップ操作の実行を拒否した: ${reason}。`;
 }
 
+// Not on macOS yet: writing the clipboard needs an executable of its own there, and `--url` is
+// sealed for the Windows browsers only.
+const MAC_UNAVAILABLE_COMMANDS = new Set(['clipboard-set', 'clipboard-clear']);
+
+function macUnavailable(what: string): string {
+  return refusal(`${what} は macOS ではまだ使えない`);
+}
+
 function optionName(token: string): string {
   const equals = token.indexOf('=');
   return equals < 0 ? token : token.slice(0, equals);
@@ -1291,6 +1379,7 @@ function launchTargetRefusal(
   if (app === '') return refusal('launch の対象が空');
   if (/^[a-z][a-z0-9+.-]+:/iu.test(app) && !/^[a-z]:[\\/]/iu.test(app))
     return refusal(`launch で URI（${app}）は開けない`);
+  if (platform === 'darwin') return macLaunchNameRefusal(app, lookup);
   if (/[\\/]/u.test(app)) {
     if (!paths.isAbsolute(app) || app.startsWith('\\\\') || app.startsWith('//'))
       return refusal('launch のパスは Workspace の外の絶対パスだけ');
@@ -1371,6 +1460,11 @@ function batchRefusal(
     if (COMMAND_OPTIONS[command] === undefined || WITH_SUBCOMMANDS.has(command))
       return refusal(`batch の中の ${command} を判定できない`);
     const fields = (args ?? {}) as Record<string, unknown>;
+    if ((lookup.platform ?? process.platform) === 'darwin') {
+      if (MAC_UNAVAILABLE_COMMANDS.has(command)) return macUnavailable(`batch の中の ${command}`);
+      if (command === 'launch' && fields['url'] !== undefined)
+        return macUnavailable('batch の中の launch の url');
+    }
     if (command === 'launch') {
       const unknown = Object.keys(fields).find((name) => !BATCH_LAUNCH_KEYS.has(name));
       if (unknown !== undefined) return refusal(`batch の中の launch の ${unknown} は使えない`);
@@ -1419,13 +1513,18 @@ function batchRefusal(
  *
  * A `--url` (`url` in a batch) is replaced by its canonical form the same way, on any platform
  * (`desktopControlLaunchUrl`), so the card shows and the browser gets that exact string.
+ *
+ * On macOS nothing is replaced: the name is only looked up and judged (`macLaunchBundlesRefusal`),
+ * and the result is the refusal or `null`.
  */
 export function desktopControlLaunchByName(
   argv: readonly string[],
   workspaceRoots: readonly string[],
   lookup: DesktopControlLookup = {},
 ): { argv: readonly string[] } | { refusal: string } | null {
-  const byName = (lookup.platform ?? process.platform) === 'win32';
+  const platform = lookup.platform ?? process.platform;
+  if (platform === 'darwin') return macLaunchBundlesRefusal(argv, lookup);
+  const byName = platform === 'win32';
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string' || read.help.length > 0 || read.positionals.length !== 1)
     return null;
@@ -1482,6 +1581,193 @@ export function desktopControlLaunchByName(
   if (!replaced) return null;
   const json = JSON.stringify(next);
   return { argv: argv.map((token, at) => (at === index ? json : token)) };
+}
+
+/**
+ * The standard places of apps on macOS, which the desktop-control executable also limits `launch`
+ * to (it refuses an app it resolves elsewhere), with the Utilities folders inside them. The user's
+ * own `~/Applications` is added when it is read.
+ */
+const MAC_APPLICATION_FOLDERS = [
+  '/Applications',
+  '/Applications/Utilities',
+  '/System/Applications',
+  '/System/Applications/Utilities',
+  '/System/Library/CoreServices',
+  '/System/Cryptexes/App/System/Applications',
+];
+
+// Apps `launch` refuses on macOS besides `desktopControlNamesTool`, by the bundle's file name
+// without `.app` (lower case, letters and digits only) and by bundle id (lower case): terminals,
+// script hosts, the settings, the keychain and password managers, the installer. The same kinds as
+// on Windows; a convenience, never a boundary (the card is).
+const MAC_REFUSED_APP_NAMES = new Set(
+  [
+    'terminal iterm iterm2 ghostty warp alacritty kitty wezterm hyper tabby',
+    'scripteditor automator shortcuts systemsettings systempreferences',
+    'keychainaccess passwords 1password 1password7 installer',
+  ]
+    .join(' ')
+    .split(' '),
+);
+const MAC_REFUSED_BUNDLE_IDS = new Set(
+  [
+    'com.apple.terminal com.googlecode.iterm2 com.mitchellh.ghostty dev.warp.warp-stable',
+    'com.apple.scripteditor2 com.apple.automator com.apple.shortcuts com.apple.systempreferences',
+    'com.apple.keychainaccess com.apple.passwords com.1password.1password',
+    'com.agilebits.onepassword7 com.apple.installer',
+  ]
+    .join(' ')
+    .split(' '),
+);
+
+/**
+ * Whether a macOS app, by its bundle's file name (`Terminal.app` or `Terminal`) or its bundle id,
+ * is one `launch` refuses: a terminal, shell, script host, the settings, the keychain or a
+ * password manager, or the installer. Also used to keep such an app out of an app-wide Task grant.
+ */
+export function desktopControlMacNamesTool(name: string): boolean {
+  const lower = name.trim().toLowerCase();
+  const stem = lower.endsWith('.app') ? lower.slice(0, -'.app'.length) : lower;
+  return (
+    desktopControlNamesTool(name) ||
+    MAC_REFUSED_APP_NAMES.has(stem.replace(/[^a-z0-9]/gu, '')) ||
+    MAC_REFUSED_BUNDLE_IDS.has(stem)
+  );
+}
+
+/** The outermost `.app` bundle a path lies in, or `null` when it is in none. */
+export function macAppBundleOf(path: string): string | null {
+  const parts = posix.normalize(path).split('/');
+  const at = parts.findIndex((part) => part.toLowerCase().endsWith('.app'));
+  return at < 0 ? null : parts.slice(0, at + 1).join('/');
+}
+
+/** Whether a macOS app named by its bundle's file name, or a bundle, is Sprint Coder itself. */
+function macNamesSprintCoder(name: string, lookup: DesktopControlLookup, bundle?: string): boolean {
+  const stem = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/\.app$/u, '');
+  const own = lookup.ownExecutable ?? process.execPath;
+  // Packaged, `Sprint Coder.app`; in a development run, the Electron app that runs it.
+  const ownBundle = macAppBundleOf(own);
+  const names = new Set(['sprint coder', stem(posix.basename(own))]);
+  if (ownBundle !== null) names.add(stem(posix.basename(ownBundle)));
+  if (names.has(stem(name))) return true;
+  return (
+    bundle !== undefined &&
+    ownBundle !== null &&
+    comparisonKey(bundle, lookup).toLowerCase() === comparisonKey(ownBundle, lookup).toLowerCase()
+  );
+}
+
+/** Why `launch <name>` on macOS may not run, judged on the name alone, or `null`. */
+function macLaunchNameRefusal(app: string, lookup: DesktopControlLookup): string | null {
+  if (/[\\/]/u.test(app))
+    return refusal(
+      'macOS の launch には、アプリの名前（TextEdit など、.app を除いた名前）か bundle ID（com.apple.TextEdit など）だけを渡す。パスは渡せない',
+    );
+  if (macNamesSprintCoder(app, lookup))
+    return refusal('launch で Sprint Coder 自身は起動できない（Sprint Coder の窓は操作できない）');
+  if (desktopControlMacNamesTool(app))
+    return refusal(`${app} は起動できない（端末・shell・設定・パスワードの道具）`);
+  return null;
+}
+
+const MAC_BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
+
+/**
+ * Why the `launch` of these arguments (each `launch` of a batch too) may not run on macOS, or
+ * `null`. The name is looked up among the apps in the standard places (`MAC_APPLICATION_FOLDERS`),
+ * by the bundle's file name without letter case, or by bundle id when no file name matches. Every
+ * bundle it may name is judged by its file name and bundle id, never by the shown name, which
+ * follows the person's language: one refused kind refuses the run. The arguments stay as given;
+ * the executable resolves the name again and refuses an app outside those places itself.
+ */
+function macLaunchBundlesRefusal(
+  argv: readonly string[],
+  lookup: DesktopControlLookup,
+): { refusal: string } | null {
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string' || read.help.length > 0 || read.positionals.length !== 1)
+    return null;
+  const apps =
+    read.key === 'launch'
+      ? [read.positionals[0]!]
+      : read.key === 'batch'
+        ? (readBatchEntries(read.positionals) ?? []).flatMap(({ command, args }) =>
+            command === 'launch' && typeof args['app'] === 'string' ? [args['app']] : [],
+          )
+        : [];
+  for (const app of apps) {
+    const reason = macLaunchBundleRefusal(app.trim(), lookup);
+    if (reason !== null) return { refusal: reason };
+  }
+  return null;
+}
+
+function macLaunchBundleRefusal(app: string, lookup: DesktopControlLookup): string | null {
+  const byName = macLaunchNameRefusal(app, lookup);
+  if (byName !== null || app === '') return byName;
+  const folders = lookup.macApplicationFolders ?? [
+    ...MAC_APPLICATION_FOLDERS,
+    posix.join(homedir(), 'Applications'),
+  ];
+  const identifier = lookup.bundleIdentifier ?? cachedBundleIdentifier;
+  const bundles = folders.flatMap((folder) => {
+    try {
+      return readdirSync(folder)
+        .filter((entry) => entry.toLowerCase().endsWith('.app'))
+        .map((entry) => posix.join(folder, entry));
+    } catch {
+      return [];
+    }
+  });
+  const wanted = app.toLowerCase().replace(/\.app$/u, '');
+  let found = bundles.filter((bundle) => posix.basename(bundle).toLowerCase() === `${wanted}.app`);
+  if (found.length === 0 && MAC_BUNDLE_ID.test(app))
+    found = bundles.filter((bundle) => identifier(bundle)?.toLowerCase() === app.toLowerCase());
+  if (found.length === 0)
+    return refusal(
+      `「${app}」というアプリが、macOS の標準のアプリの場所（/Applications・/System/Applications・~/Applications など）に見つからない。そこにある .app の名前（.app を除いた名前。TextEdit など）で launch する`,
+    );
+  for (const bundle of found) {
+    const file = posix.basename(bundle);
+    if (macNamesSprintCoder(file, lookup, bundle))
+      return refusal(
+        'launch で Sprint Coder 自身は起動できない（Sprint Coder の窓は操作できない）',
+      );
+    const id = identifier(bundle);
+    if (desktopControlMacNamesTool(file) || (id !== null && desktopControlMacNamesTool(id)))
+      return refusal(`${app} は起動できない（端末・shell・設定・パスワードの道具）`);
+  }
+  return null;
+}
+
+// Read with `plutil`, since many bundles keep a binary Info.plist; kept per file version.
+const bundleIdentifierCache = new Map<string, Readonly<{ version: string; id: string | null }>>();
+
+function cachedBundleIdentifier(bundle: string): string | null {
+  const plist = posix.join(bundle, 'Contents', 'Info.plist');
+  try {
+    const stats = statSync(plist, { bigint: true });
+    if (!stats.isFile()) return null;
+    const version = [stats.dev, stats.ino, stats.size, stats.mtimeNs].join(':');
+    const cached = bundleIdentifierCache.get(plist);
+    if (cached?.version === version) return cached.id;
+    const output = execFileSync(
+      '/usr/bin/plutil',
+      ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', plist],
+      { encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    const id = MAC_BUNDLE_ID.test(output) ? output : null;
+    bundleIdentifierCache.set(plist, { version, id });
+    return id;
+  } catch {
+    return null;
+  }
 }
 
 /** The canonical form of a `--url`, `undefined` without one, or why it is refused. */
