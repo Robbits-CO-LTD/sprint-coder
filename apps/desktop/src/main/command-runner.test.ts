@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -2114,6 +2114,13 @@ describe('rejectWindowsSandboxedNodeTestIsolation node version instruction', () 
 });
 
 describe('desktop control outside the command sandbox', () => {
+  // macOS runs desktop control only with Sprint Coder's private state folder.
+  beforeEach(async () => {
+    if (process.platform === 'darwin')
+      desktopControlModule.configureDesktopControlStateRoot(join(await workspace(), 'state'));
+  });
+  afterEach(() => desktopControlModule.configureDesktopControlStateRoot(null));
+
   it('starts a command outside the sandbox only when the desktop-control judgment says so', async () => {
     const root = await workspace();
     const prepare = () =>
@@ -2308,6 +2315,64 @@ describe('desktop control outside the command sandbox', () => {
     }
   }, 30_000);
 
+  it.runIf(process.platform === 'darwin')(
+    'starts a native desktop-control image on macOS from its own path, only sandboxed and with its state folder',
+    async () => {
+      const root = await workspace();
+      // A native image outside the Workspace, as the development build is (an ad hoc signed copy
+      // of a system tool, which macOS starts from any path).
+      const folder = await workspace();
+      const executable = join(await realpath(folder), 'sprint-coder-desktop-control');
+      await copyFile('/bin/echo', executable);
+      execFileSync('/usr/bin/codesign', ['-s', '-', '-f', executable], { stdio: 'ignore' });
+      const prepare = () =>
+        prepareExecutionSpec({ workspacePath: root, executable, argv: ['status'] });
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const runnerPath = vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath');
+      try {
+        const spec = await prepare();
+        const chunks: CommandOutputChunk[] = [];
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(spec, {
+            desktopControlWorkspaceRoots: [root],
+            onChunk: (chunk) => void chunks.push(chunk),
+          }),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        expect(chunks.map(({ text }) => text).join('')).toBe('status\n');
+        // The image was judged by Main before it was prepared, on its bytes.
+        expect(judge).toHaveBeenCalledWith(executable, executionSpecContentDigest(spec), [root]);
+        expect(runnerPath).not.toHaveBeenCalled();
+
+        // Unsandboxed, the roots are not passed on, and the image is refused as before.
+        judge.mockClear();
+        await expect(
+          new CommandRunner().run(await prepare(), { desktopControlWorkspaceRoots: [root] }),
+        ).rejects.toMatchObject({
+          code: 'EXECUTION_IDENTITY_CHANGED',
+          message: expect.stringMatching(/cannot safely launch/i),
+        });
+        expect(judge).not.toHaveBeenCalled();
+
+        // Without the private state folder, nothing starts.
+        desktopControlModule.configureDesktopControlStateRoot(null);
+        const beforeSpawn = vi.fn();
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(await prepare(), {
+            desktopControlWorkspaceRoots: [root],
+            beforeSpawn,
+          }),
+        ).rejects.toThrow('操作の記録を置く Sprint Coder のフォルダーを用意できなかった');
+        expect(beforeSpawn).not.toHaveBeenCalled();
+      } finally {
+        judge.mockRestore();
+        runnerPath.mockRestore();
+      }
+    },
+    20_000,
+  );
+
   it('refuses a launch into a Worker’s worktree through a link before it starts, with the roots it is given', async () => {
     const root = await workspace();
     // A Worker's worktree, a root given through a link to it (a junction on Windows, a symlink
@@ -2351,7 +2416,12 @@ describe('desktop control outside the command sandbox', () => {
               desktopControlWorkspaceRoots: [root, worktree],
               beforeSpawn,
             }),
-          ).rejects.toThrow('Workspace の中の実行ファイルは起動できない');
+          ).rejects.toThrow(
+            // macOS takes no path at all.
+            process.platform === 'darwin'
+              ? 'パスは渡せない'
+              : 'Workspace の中の実行ファイルは起動できない',
+          );
           expect(beforeSpawn).not.toHaveBeenCalled();
         }
       expect(judge).toHaveBeenCalled();

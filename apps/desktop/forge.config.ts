@@ -22,7 +22,7 @@ import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
 import {
   DESKTOP_CONTROL_EXECUTABLE,
   DESKTOP_CONTROL_VERSION,
-  desktopControlSupported,
+  desktopControlPackaged,
 } from './src/main/desktop-control-build';
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
@@ -135,7 +135,7 @@ export function desktopControlSource(
   platform: string = process.platform,
   arch: string = process.arch,
 ): string | null {
-  if (!desktopControlSupported(platform, arch)) return null;
+  if (!desktopControlPackaged(platform, arch)) return null;
   return resolve(__dirname, 'desktop-control', 'build', 'Release', DESKTOP_CONTROL_EXECUTABLE);
 }
 
@@ -441,7 +441,7 @@ const config: ForgeConfig = {
     afterCopyExtraResources: [
       (buildPath, _electronVersion, platform, arch, done) => {
         try {
-          if (desktopControlSupported(platform, arch))
+          if (desktopControlPackaged(platform, arch))
             verifyDesktopControlBinary(join(buildPath, 'resources', DESKTOP_CONTROL_EXECUTABLE));
           done();
         } catch (error) {
@@ -455,7 +455,7 @@ const config: ForgeConfig = {
       assertNativePackagingHost(platform);
       verifyBundledNodeResources(arch);
       // The resources above were chosen for the build host's architecture.
-      if (desktopControlSupported(platform, arch)) {
+      if (desktopControlPackaged(platform, arch)) {
         if (arch !== process.arch)
           throw new Error(`desktop-control for ${platform}-${arch} must be packaged on ${arch}`);
         verifyDesktopControlBinary(desktopControlSource(platform, arch)!);
@@ -469,7 +469,7 @@ const config: ForgeConfig = {
           for (const outputPath of packageResult.outputPaths) {
             refreshPackagedSandboxRunnerDigest(outputPath, 'win32');
             // The same for the desktop-control executable, which signing changes too.
-            if (desktopControlSupported('win32', packageResult.arch))
+            if (desktopControlPackaged('win32', packageResult.arch))
               refreshPackagedDesktopControlDigest(outputPath);
           }
         return;

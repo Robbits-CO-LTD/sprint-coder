@@ -1,7 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   configureDesktopControlStateRoot,
@@ -187,6 +196,36 @@ describe('desktop-control state folder', () => {
       expect(makePrivate).toHaveBeenCalledTimes(2);
       // A relative folder is not taken.
       configureDesktopControlStateRoot('relative', makePrivate);
+      expect(desktopControlStateRoot()).toBeNull();
+    },
+  );
+
+  it.runIf(process.platform === 'darwin')(
+    'on macOS makes the folder 0700 on every start, points every run at it, and refuses a link or a file',
+    () => {
+      const mac = { platform: 'darwin' as const, realpath: (path: string) => path };
+      const root = temporaryRoot();
+      configureDesktopControlStateRoot(root);
+      expect(desktopControlStateRoot()).toBe(root);
+      expect(statSync(root).mode & 0o777).toBe(0o700);
+      // The agent's own value never wins.
+      expect(
+        desktopControlEnvironment({ A: '1', AGENT_DESKTOP_HOME: '/elsewhere' }, [], mac),
+      ).toEqual({ A: '1', AGENT_DESKTOP_HOME: root });
+      // Repaired on the next start.
+      chmodSync(root, 0o755);
+      configureDesktopControlStateRoot(root);
+      expect(statSync(root).mode & 0o777).toBe(0o700);
+      // A link to a folder, or a file, is not taken; nor is a relative path.
+      const link = join(dirname(root), 'link');
+      symlinkSync(root, link);
+      configureDesktopControlStateRoot(link);
+      expect(desktopControlStateRoot()).toBeNull();
+      const file = join(dirname(root), 'file');
+      writeFileSync(file, '');
+      configureDesktopControlStateRoot(file);
+      expect(desktopControlStateRoot()).toBeNull();
+      configureDesktopControlStateRoot('relative');
       expect(desktopControlStateRoot()).toBeNull();
     },
   );

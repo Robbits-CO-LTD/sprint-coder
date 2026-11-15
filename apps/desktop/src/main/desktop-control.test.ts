@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -13,8 +14,10 @@ import {
   desktopControlEnvironment,
   desktopControlExpectedWindowOwner,
   desktopControlLaunchByName,
+  desktopControlMacNamesTool,
   desktopControlOwnWindowOwner,
   desktopControlRefusedWindowOwner,
+  desktopControlSkillReferences,
   desktopControlStateFolder,
   isDesktopControlExecutable,
   isShippedDesktopControlPath,
@@ -26,6 +29,8 @@ import {
   DESKTOP_CONTROL_EXECUTABLE,
   DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE,
   DESKTOP_CONTROL_VERSION,
+  desktopControlExecutableName,
+  desktopControlPackaged,
   desktopControlSupported,
   desktopControlTeamCursorsEnabled,
 } from './desktop-control-build';
@@ -261,11 +266,15 @@ describe('desktop-control run environment', () => {
     expect(desktopControlRefusedWindowOwner(83584, `win32:${'9'.repeat(20)}`)).toBe('83584');
     for (const pid of [0, -1, 1.5, 2 ** 32, Number.NaN])
       expect(desktopControlRefusedWindowOwner(pid, 'win32:10000000')).toBeNull();
+    // A macOS start time is not turned into an instance: the pid alone.
+    expect(desktopControlRefusedWindowOwner(83584, 'darwin:1763251200:123456')).toBe('83584');
     // Main's own process, read once.
     const own = desktopControlOwnWindowOwner();
     expect(own === String(process.pid) || own.startsWith(`${process.pid}:windows-proc-v1:`)).toBe(
       true,
     );
+    // On macOS, always the bare pid.
+    expect(desktopControlOwnWindowOwner('darwin')).toBe(String(process.pid));
     expect(desktopControlOwnWindowOwner()).toBe(own);
   });
 });
@@ -326,19 +335,25 @@ describe('launching Sprint Coder itself', () => {
 });
 
 describe('desktop-control build', () => {
-  it('is built and shipped for Windows x64 only, from the 1.2.0 source, under one name', () => {
+  it('runs on Windows x64 and Apple silicon macOS, ships for Windows x64 only, from the 1.2.0 source', () => {
     expect(DESKTOP_CONTROL_VERSION).toBe('1.2.0');
     expect(DESKTOP_CONTROL_EXECUTABLE).toBe('sprint-coder-desktop-control.exe');
+    expect(desktopControlExecutableName('win32')).toBe('sprint-coder-desktop-control.exe');
+    expect(desktopControlExecutableName('darwin')).toBe('sprint-coder-desktop-control');
     expect(desktopControlSupported('win32', 'x64')).toBe(true);
+    expect(desktopControlSupported('darwin', 'arm64')).toBe(true);
+    expect(desktopControlPackaged('win32', 'x64')).toBe(true);
+    expect(desktopControlPackaged('darwin', 'arm64')).toBe(false);
     for (const [platform, arch] of [
       ['win32', 'arm64'],
       ['win32', 'ia32'],
-      ['darwin', 'arm64'],
       ['darwin', 'x64'],
       ['linux', 'x64'],
       ['__proto__', 'x'],
-    ] as const)
+    ] as const) {
       expect(desktopControlSupported(platform, arch)).toBe(false);
+      expect(desktopControlPackaged(platform, arch)).toBe(false);
+    }
   });
 
   it('has the Team’s desktop cursors on by default, off only with 0, and never where it is not built', () => {
@@ -427,7 +442,7 @@ describe('desktop-control lookup', () => {
     expect(isDesktopControlExecutable(PACKAGED, SEALED, rebuilt)).toBe(false);
   });
 
-  it('is off on macOS, Linux and architectures it is not built for', () => {
+  it('is off on Intel macOS, Linux and architectures it is not built for', () => {
     const contentDigest = () => SEALED;
     const sealedDigest = () => SEALED;
     for (const platform of ['darwin', 'linux'] as const)
@@ -856,7 +871,21 @@ describe('desktop-control runs that touch no other app', () => {
     [['permissions']],
   ])('%j needs no card', (argv) => {
     expect(desktopControlArgvRefusal(argv, roots, lookup)).toBeNull();
-    expect(desktopControlArgvIsInert(argv)).toBe(true);
+    expect(desktopControlArgvIsInert(argv, 'win32')).toBe(true);
+  });
+
+  it('reads `platform` as the macOS guide on macOS', () => {
+    expect(desktopControlSkillReferences('platform', 'darwin')).toEqual(['troubleshooting']);
+    expect(desktopControlSkillReferences('platform', 'win32')).toEqual(
+      DESKTOP_CONTROL_SKILL_REFERENCES.get('agent-desktop-windows'),
+    );
+    expect(
+      desktopControlArgvIsInert(['skills', 'get', 'platform', 'troubleshooting'], 'darwin'),
+    ).toBe(true);
+    // A Windows reference under the macOS guide keeps the card.
+    expect(
+      desktopControlArgvIsInert(['skills', 'get', 'platform', 'chromium-and-electron'], 'darwin'),
+    ).toBe(false);
   });
 
   it.each([
@@ -1083,8 +1112,8 @@ describe('desktop-control launch by a Start menu name', () => {
       expect(byName(argv)).toBeNull();
   });
 
-  it('does nothing off Windows or when the Start menu is not read', () => {
-    expect(byName(['launch', 'RabbitMail'], { ...lookup, platform: 'darwin' })).toBeNull();
+  it('does nothing on Linux or when the Start menu is not read', () => {
+    expect(byName(['launch', 'RabbitMail'], { ...lookup, platform: 'linux' })).toBeNull();
     expect(
       byName(['launch', 'RabbitMail'], { ...lookup, startMenuShortcuts: () => null }),
     ).toBeNull();
@@ -1169,5 +1198,281 @@ describe('desktop-control launch by a Start menu name', () => {
     expect(
       byName(batch([{ command: 'launch', args: { app: 'Windows PowerShell' } }])),
     ).toMatchObject({ refusal: expect.stringContaining('powershell.exe は起動できない') });
+  });
+});
+
+describe('desktop control on Apple silicon macOS', () => {
+  const ROOT = '/Users/me/repo';
+  const BUILD = `${ROOT}/apps/desktop/desktop-control/build/Release/sprint-coder-desktop-control`;
+  const mac = {
+    platform: 'darwin' as const,
+    arch: 'arm64',
+    packaged: false,
+    repositoryRoot: ROOT,
+    contentDigest: digests({ [BUILD]: SEALED }),
+    sealedDigest: digests({ [BUILD]: SEALED }),
+    realpath: (path: string) => path,
+    ownExecutable: '/Applications/Sprint Coder.app/Contents/MacOS/Sprint Coder',
+  };
+
+  it('uses the development build, under its macOS name, joined as a POSIX path', () => {
+    expect(resolveDesktopControlCommand(mac)).toBe(BUILD);
+    expect(isDesktopControlExecutable(BUILD, SEALED, mac)).toBe(true);
+    expect(isDesktopControlExecutable(BUILD, OTHER, mac)).toBe(false);
+    expect(isDesktopControlExecutable(`${BUILD}.exe`, SEALED, mac)).toBe(false);
+    expect(runsOutsideCommandSandbox(BUILD, SEALED, ['/Users/me/work'], mac)).toBe(true);
+    // Inside a Workspace root (here the repository itself), it stays in the sandbox.
+    expect(runsOutsideCommandSandbox(BUILD, SEALED, [ROOT], mac)).toBe(false);
+    expect(runsOutsideCommandSandbox(BUILD, OTHER, ['/Users/me/work'], mac)).toBe(false);
+  });
+
+  it('is off, and says nothing, in a package, which does not ship it yet', () => {
+    const packagedMac = {
+      ...mac,
+      packaged: true,
+      resourcesPath: '/Applications/Sprint Coder.app/Contents/Resources',
+      contentDigest: () => SEALED,
+      sealedDigest: () => SEALED,
+    };
+    expect(resolveDesktopControlCommand(packagedMac)).toBeNull();
+    const messages: string[] = [];
+    reportDesktopControlAvailability(packagedMac, (message) => messages.push(message));
+    expect(messages).toEqual([]);
+  });
+
+  it('tells a development run how to build it, by its macOS name', () => {
+    const messages: string[] = [];
+    reportDesktopControlAvailability(
+      { ...mac, contentDigest: () => null, sealedDigest: () => null },
+      (message) => messages.push(message),
+    );
+    expect(messages).toEqual([
+      'Desktop control is off: the executable has not been built (apps/desktop/desktop-control/build/Release/sprint-coder-desktop-control and its .sha256 manifest are missing). Run `npm run build:desktop-control` at the repository root, then restart.',
+    ]);
+  });
+
+  it('refuses what macOS cannot do yet before any card, alone or in a batch', () => {
+    const refused = (argv: string[]) => desktopControlArgvRefusal(argv, ['/Users/me/work'], mac);
+    const later = 'は macOS ではまだ使えない';
+    expect(refused(['clipboard-set', 'text'])).toContain(`clipboard-set ${later}`);
+    expect(refused(['clipboard-clear'])).toContain(`clipboard-clear ${later}`);
+    expect(refused(['launch', 'Safari', '--url', 'https://example.com/'])).toContain(
+      `launch --url ${later}`,
+    );
+    expect(
+      refused(['batch', JSON.stringify([{ command: 'clipboard-set', args: { text: 'x' } }])]),
+    ).toContain(`batch の中の clipboard-set ${later}`);
+    expect(
+      refused([
+        'batch',
+        JSON.stringify([
+          { command: 'launch', args: { app: 'Safari', url: 'https://example.com/' } },
+        ]),
+      ]),
+    ).toContain(`batch の中の launch の url ${later}`);
+    // Windows keeps them.
+    const windows = { ...mac, platform: 'win32' as const };
+    expect(desktopControlArgvRefusal(['clipboard-clear'], ['C:\\work'], windows)).toBeNull();
+  });
+
+  it('launches by app name or bundle id only, never a path, and never Sprint Coder or a tool', () => {
+    const refused = (app: string) =>
+      desktopControlArgvRefusal(['launch', app], ['/Users/me/work'], mac);
+    for (const app of ['TextEdit', 'Calculator', 'com.apple.TextEdit', 'Google Chrome'])
+      expect(refused(app), app).toBeNull();
+    for (const app of ['/Applications/TextEdit.app', 'Applications/TextEdit.app', '/bin/sh'])
+      expect(refused(app), app).toContain('パスは渡せない');
+    for (const app of ['Sprint Coder', 'sprint coder.app', 'SPRINT CODER'])
+      expect(refused(app), app).toContain('Sprint Coder 自身は起動できない');
+    // A development run's Electron app is Sprint Coder too.
+    expect(
+      desktopControlArgvRefusal(['launch', 'Electron'], [], {
+        ...mac,
+        ownExecutable: '/repo/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
+      }),
+    ).toContain('Sprint Coder 自身は起動できない');
+    for (const app of [
+      'Terminal',
+      'iTerm',
+      'Ghostty',
+      'Warp',
+      'Script Editor',
+      'Automator',
+      'Shortcuts',
+      'System Settings',
+      'Keychain Access',
+      'Passwords',
+      '1Password',
+      'Installer',
+      'com.apple.Terminal',
+      'com.apple.keychainaccess',
+    ])
+      expect(refused(app), app).toContain('は起動できない');
+  });
+
+  it('knows the macOS tools by bundle file name and bundle id', () => {
+    for (const name of [
+      'Terminal.app',
+      'iTerm.app',
+      'Script Editor.app',
+      'Keychain Access.app',
+      '1Password 7.app',
+      'com.googlecode.iterm2',
+      'com.apple.ScriptEditor2',
+      'com.1password.1password',
+      'com.apple.installer',
+    ])
+      expect(desktopControlMacNamesTool(name), name).toBe(true);
+    for (const name of ['TextEdit.app', 'Calculator', 'com.apple.TextEdit', 'Notes.app'])
+      expect(desktopControlMacNamesTool(name), name).toBe(false);
+  });
+
+  describe('looking the app up among the standard places', () => {
+    const folders = () => {
+      const base = mkdtempSync(join(tmpdir(), 'sc-dc-apps-'));
+      const applications = join(base, 'Applications');
+      const system = join(base, 'System', 'Applications');
+      for (const bundle of [
+        join(applications, 'TextEdit Copy.app'),
+        join(applications, 'Utility.app'),
+        join(applications, 'Sprint Coder.app'),
+        join(system, 'TextEdit.app'),
+        join(system, 'Terminal.app'),
+        join(system, 'Twin.app'),
+        join(applications, 'twin.app'),
+      ])
+        mkdirSync(bundle, { recursive: true });
+      return {
+        base,
+        applications,
+        system,
+        remove: () => rmSync(base, { recursive: true, force: true }),
+      };
+    };
+    const ids: Record<string, string> = {
+      'TextEdit.app': 'com.apple.TextEdit',
+      'Utility.app': 'com.apple.Terminal',
+      'Terminal.app': 'com.apple.Terminal',
+      'Twin.app': 'com.example.twin',
+      'twin.app': 'com.apple.keychainaccess',
+      'Sprint Coder.app': 'com.example.sprint-coder',
+    };
+
+    it('judges each bundle by its file name and bundle id, and leaves the arguments as given', () => {
+      const place = folders();
+      try {
+        const lookup = {
+          ...mac,
+          ownExecutable: join(place.applications, 'Sprint Coder.app', 'Contents', 'MacOS', 'X'),
+          macApplicationFolders: [place.applications, place.system, join(place.base, 'none')],
+          bundleIdentifier: (bundle: string) => ids[bundle.split('/').pop()!] ?? null,
+          bundlesWithIdentifier: (id: string) =>
+            [place.applications, place.system].flatMap((folder) =>
+              readdirSync(folder)
+                .filter((file) => ids[file]?.toLowerCase() === id.toLowerCase())
+                .map((file) => join(folder, file)),
+            ),
+        };
+        const launch = (argv: string[]) => desktopControlLaunchByName(argv, [], lookup);
+        // Found by file name, without letter case: nothing replaced.
+        expect(launch(['launch', 'TextEdit'])).toBeNull();
+        expect(launch(['launch', 'textedit'])).toBeNull();
+        expect(launch(['launch', '--no-attach', 'TextEdit Copy'])).toBeNull();
+        // By bundle id when no file name matches.
+        expect(launch(['launch', 'com.apple.TextEdit'])).toBeNull();
+        // Not in the standard places.
+        expect(launch(['launch', 'Missing App'])).toEqual({
+          refusal:
+            'デスクトップ操作の実行を拒否した: 「Missing App」というアプリが、macOS の標準のアプリの場所（/Applications・/System/Applications・~/Applications など）に見つからない。そこにある .app の名前（.app を除いた名前。TextEdit など）で launch する。',
+        });
+        expect(launch(['launch', 'com.example.missing'])).toMatchObject({
+          refusal: expect.stringContaining('見つからない'),
+        });
+        // Refused by the bundle's file name, or by its bundle id whatever the file is called.
+        expect(launch(['launch', 'Terminal'])).toMatchObject({
+          refusal: expect.stringContaining('は起動できない'),
+        });
+        expect(launch(['launch', 'Utility'])).toMatchObject({
+          refusal: expect.stringContaining('Utility は起動できない'),
+        });
+        // Two bundles of the name: one refused refuses the run.
+        expect(launch(['launch', 'Twin'])).toMatchObject({
+          refusal: expect.stringContaining('は起動できない'),
+        });
+        // Sprint Coder's own bundle, also when named by its bundle id.
+        expect(launch(['launch', 'com.example.sprint-coder'])).toMatchObject({
+          refusal: expect.stringContaining('Sprint Coder 自身は起動できない'),
+        });
+        // The same in a batch.
+        expect(
+          launch([
+            'batch',
+            JSON.stringify([
+              { command: 'launch', args: { app: 'TextEdit' } },
+              { command: 'launch', args: { app: 'Utility' } },
+            ]),
+          ]),
+        ).toMatchObject({ refusal: expect.stringContaining('Utility は起動できない') });
+        expect(
+          launch(['batch', JSON.stringify([{ command: 'launch', args: { app: 'TextEdit' } }])]),
+        ).toBeNull();
+        expect(launch(['list-windows', '--app', 'Missing App'])).toBeNull();
+      } finally {
+        place.remove();
+      }
+    });
+
+    it('looks a bundle id up once and confirms only the bundles the lookup names', () => {
+      const place = folders();
+      try {
+        const textEdit = join(place.system, 'TextEdit.app');
+        const terminal = join(place.system, 'Terminal.app');
+        const outside = join(place.base, 'Elsewhere', 'TextEdit.app');
+        const nested = join(place.applications, 'Utility.app', 'Contents', 'TextEdit.app');
+        // Terminal.app under an id the name check alone lets through: refused by its file name.
+        const local: Record<string, string> = { ...ids, 'Terminal.app': 'com.example.shell' };
+        const identifier = vi.fn((bundle: string) => local[bundle.split('/').pop()!] ?? null);
+        const run = (app: string, hinted: readonly string[] | null) => {
+          identifier.mockClear();
+          const bundlesWithIdentifier = vi.fn((_id: string) => hinted);
+          const result = desktopControlLaunchByName(['launch', app], [], {
+            ...mac,
+            ownExecutable: join(place.applications, 'Sprint Coder.app', 'Contents', 'MacOS', 'X'),
+            macApplicationFolders: [place.applications, place.system],
+            bundleIdentifier: identifier,
+            bundlesWithIdentifier,
+          });
+          expect(bundlesWithIdentifier).toHaveBeenCalledTimes(1);
+          expect(bundlesWithIdentifier).toHaveBeenCalledWith(app);
+          return result;
+        };
+        const notFound = { refusal: expect.stringContaining('bundle ID のアプリが') };
+        // Found in a standard folder and confirmed by its own bundle id: judged, then allowed.
+        expect(run('com.apple.TextEdit', [textEdit])).toBeNull();
+        expect(identifier.mock.calls.map(([bundle]) => bundle)).toEqual([textEdit, textEdit]);
+        // Outside the standard folders, or deeper than their top level: not found.
+        expect(run('com.apple.TextEdit', [outside, nested])).toEqual(notFound);
+        expect(identifier).not.toHaveBeenCalled();
+        // A stale index naming a bundle whose bundle id is another: not found.
+        expect(run('com.apple.TextEdit', [join(place.applications, 'TextEdit Copy.app')])).toEqual(
+          notFound,
+        );
+        // Nothing from the lookup (no index, an error, the time limit): not found, and no other
+        // bundle is read.
+        for (const hinted of [null, []]) {
+          expect(run('com.apple.TextEdit', hinted)).toEqual(notFound);
+          expect(identifier).not.toHaveBeenCalled();
+        }
+        // A refused kind reached by bundle id is still refused.
+        expect(run('com.example.shell', [terminal])).toMatchObject({
+          refusal: expect.stringContaining('com.example.shell は起動できない'),
+        });
+        expect(
+          run('com.example.sprint-coder', [join(place.applications, 'Sprint Coder.app')]),
+        ).toMatchObject({ refusal: expect.stringContaining('Sprint Coder 自身は起動できない') });
+      } finally {
+        place.remove();
+      }
+    });
   });
 });

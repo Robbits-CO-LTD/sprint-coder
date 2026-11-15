@@ -34,6 +34,7 @@ import {
   desktopControlEnvironment,
   desktopControlOwnWindowOwner,
   desktopControlScopeOptionRefusal,
+  desktopControlStateRoot,
   runsOutsideCommandSandbox,
   type DesktopControlSessionVariables,
 } from './desktop-control';
@@ -845,7 +846,10 @@ export class CommandRunner {
   }
 
   async run(spec: ExecutionSpec, options: RunOptions = {}): Promise<CommandResult> {
-    const executionImage = await this.revalidate(spec);
+    const executionImage = await this.revalidate(
+      spec,
+      this.sandboxed ? options.desktopControlWorkspaceRoots : undefined,
+    );
     const preparedIdentity = issuedSpecs.get(spec);
     if (preparedIdentity === undefined)
       throw new CommandRunnerError(
@@ -875,8 +879,10 @@ export class CommandRunner {
       // Decided after revalidation on the digest of the sealed image that is about to start, never
       // on a path resolved again here. On Windows that digest is of the bytes read through the
       // handle that holds the private launch copy against writes, renames and deletes; on Linux of
-      // the sealed memfd the process starts from. It must also equal the bytes sealed at prepare.
-      // An image with an argv prefix runs through an interpreter and never qualifies.
+      // the sealed memfd the process starts from; on macOS of the private copy read before the
+      // shipped file is started from its own path (see `prepareExecutionImage`). It must also equal
+      // the bytes sealed at prepare. An image with an argv prefix runs through an interpreter and
+      // never qualifies.
       const desktopControl =
         this.sandboxed &&
         options.desktopControlWorkspaceRoots !== undefined &&
@@ -895,6 +901,13 @@ export class CommandRunner {
         : null;
       if (desktopControlRefusal !== null)
         throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
+      // On macOS the run keeps its state only in Sprint Coder's private folder, never in the
+      // binary's default folder in the home (`configureDesktopControlStateRoot`).
+      if (desktopControl && process.platform === 'darwin' && desktopControlStateRoot() === null)
+        throw new CommandRunnerError(
+          'EXECUTION_SPEC_INVALID',
+          'デスクトップ操作の実行を拒否した: 操作の記録を置く Sprint Coder のフォルダーを用意できなかった。',
+        );
       // A run that may move the pointer (any but one that only prints or reads the screen) raises
       // the activity before it is spawned, which tells every window before this returns: they then
       // refuse drops from outside, so a drag it lets go over Sprint Coder lands nothing there. It is
@@ -1471,7 +1484,14 @@ export class CommandRunner {
     }
   }
 
-  private async revalidate(spec: ExecutionSpec): Promise<PreparedExecutionImage> {
+  /**
+   * `desktopControlWorkspaceRoots` lets macOS start the shipped desktop-control executable from its
+   * own path (`prepareExecutionImage` judges that itself); it is passed only for a sandboxed run.
+   */
+  private async revalidate(
+    spec: ExecutionSpec,
+    desktopControlWorkspaceRoots?: readonly string[],
+  ): Promise<PreparedExecutionImage> {
     const identity = issuedSpecs.get(spec);
     if (!validateExecutionSpec(spec) || identity === undefined)
       throw new CommandRunnerError(
@@ -1482,7 +1502,11 @@ export class CommandRunner {
       await revalidatePathGuard(identity.pathGuard);
       if (spec.executionIdentityDigest !== sealedExecutableIdentityDigest(identity.executable))
         throw new Error('Approved execution identity changed');
-      return await prepareExecutionImage(identity.executable);
+      return await prepareExecutionImage(
+        identity.executable,
+        true,
+        desktopControlWorkspaceRoots === undefined ? {} : { desktopControlWorkspaceRoots },
+      );
     } catch (error) {
       throw new CommandRunnerError('EXECUTION_IDENTITY_CHANGED', errorMessage(error));
     }
