@@ -1,6 +1,7 @@
 import { modelSelectionForRuntime } from './connection-identity';
 import { isAssistantPreferencesFragment } from './assistant-preferences-prompt';
 import { isTeamUsageOfferFragment } from './team-usage-mode';
+import { isWithdrawnApprovalsFragment } from './context-reminder';
 import { randomUUID } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 import type {
@@ -1147,10 +1148,15 @@ export function reserveTeamWorkerContext(context: PreparedContext): PreparedCont
   return { ...context, fragments };
 }
 
-/** Sealed for the Leader alone: the reply style (for what the Leader tells the user) and the
- * 「Team の使い方」 guidance (whether the Leader itself may decide to hire). */
+/** Sealed for the Leader alone: the reply style (for what the Leader tells the user), the
+ * 「Team の使い方」 guidance (whether the Leader itself may decide to hire), and the notice of the
+ * previous Turn's withdrawn calls (the Leader's to retry or drop, issue #1303). */
 function isLeaderOnlyFragment(fragment: { id: string }): boolean {
-  return isAssistantPreferencesFragment(fragment) || isTeamUsageOfferFragment(fragment);
+  return (
+    isAssistantPreferencesFragment(fragment) ||
+    isTeamUsageOfferFragment(fragment) ||
+    isWithdrawnApprovalsFragment(fragment)
+  );
 }
 
 /**

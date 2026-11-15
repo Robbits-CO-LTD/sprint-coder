@@ -30,6 +30,7 @@ import {
   codexDynamicToolResponseFromMcp,
   codexDynamicToolResponseFromManaged,
   codexInitializeCapabilities,
+  CODEX_MANAGED_TOOL_GUIDANCE,
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 import type { RuntimeCanonicalEvent, RuntimeFailureDiagnostic } from './protocol';
@@ -1022,6 +1023,17 @@ describe('Codex runtime probe', () => {
 
   it('uses the interactive app-server transport for the immutable managed profile', () => {
     expect(buildCodexArgs('auto').slice(0, 3)).toEqual(['app-server', '--listen', 'stdio://']);
+  });
+
+  it('tells Codex to wait for a host call that waits on its approval card (issue #1303)', () => {
+    // A card still waiting when the turn ends is withdrawn and its call never runs, so the turn
+    // must not end while one waits, including an exec cell that returned before the call did.
+    expect(CODEX_MANAGED_TOOL_GUIDANCE).toContain(
+      'While a host call has not returned, do not end the turn',
+    );
+    expect(CODEX_MANAGED_TOOL_GUIDANCE).toContain(
+      'If exec returns "Script running with cell ID ..." while a host\ncall inside it waits, call wait with that cell ID',
+    );
   });
 
   it('never asks the native runtime for approval', () => {

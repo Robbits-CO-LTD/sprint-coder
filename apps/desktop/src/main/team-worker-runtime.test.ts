@@ -151,6 +151,7 @@ import {
 import type { RuntimeTeamMcpOption, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
+import { WITHDRAWN_APPROVALS_FRAGMENT_ID_PREFIX } from './context-reminder';
 
 afterEach(() => {
   runtimeHostMock.failures.clear();
@@ -2020,6 +2021,42 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(inherited.fragments).toEqual([]);
     expect(inherited.projectItems).toEqual(sealed.projectItems);
     expect(inherited.projectSnapshotDigest).toBe(sealed.projectSnapshotDigest);
+  });
+
+  it("keeps the notice of the Leader's withdrawn calls from a forked Worker (issue #1303)", () => {
+    const history = {
+      id: 'history-1',
+      taskId: 'task-1',
+      source: 'history' as const,
+      trust: 'user' as const,
+      tokenEstimate: 2,
+      content: 'parent conversation',
+      createdAt: '2026-07-31T00:00:00.000Z',
+      messageId: 'message-1' as string | null,
+    };
+    const notice = {
+      ...history,
+      id: `${WITHDRAWN_APPROVALS_FRAGMENT_ID_PREFIX}turn-0`,
+      source: 'background' as const,
+      trust: 'assistant' as const,
+      content: 'In the previous Turn, these calls were NOT run',
+      messageId: null,
+    };
+    const sealed = {
+      fragments: [history, notice],
+      projectItems: [],
+      projectSnapshotDigest: null,
+      usageEvents: [],
+      compacted: false,
+    };
+
+    const inherited = applyWorkerContextInheritance(
+      { ...worker(false), contextInheritancePolicy: 'full_fork' },
+      sealed,
+    );
+    expect(inherited.fragments).toEqual([history]);
+    // The seal itself is left as it was sealed.
+    expect(sealed.fragments).toEqual([history, notice]);
   });
 
   it('passes a caller-bound MCP only to a Manager and releases it after the turn', async () => {
