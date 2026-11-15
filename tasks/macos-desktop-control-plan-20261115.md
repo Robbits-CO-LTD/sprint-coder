@@ -223,7 +223,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 試験と CI:
 
-- `crates/macos` だけを変えた PR では、macOS の compile が走らない（PR の CI は Windows の compile だけ）。全試験（`gh workflow run ci.yml --ref main`）と release の workflow では build する。
+- `crates/macos` だけを変えた PR では、macOS の compile が走らない（PR の CI は Windows の compile だけ）。全試験（`gh workflow run ci.yml --ref main`）と release の workflow では build する。デスクトップ操作の OS ごとの挙動を変えた PR は、merge の後に全試験を流して確かめる。
 
 ### 段階 3 の後の確認（2026-11-16）で出たもの
 
@@ -232,6 +232,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 - main の全試験で、試験が 4 件失敗した（macOS で 2 件、Windows で 2 件）。どれも試験の側の問題で、#1321 で直した。PR の CI は静的な検査だけなので、OS ごとの試験の失敗は、全試験を流すまで見えない。
 - 配布物と同じ署名（hardened runtime、entitlements なし）を付けた実行ファイルで、読み取り・入力・撮影・起動・クリック・終了が動くことを確かめた。記録: `tasks/evidence/macos-desktop-control-hardened-cli-20261116.md`
 - macOS のシステムのダイアログ（画面収録の確認など）が最前面にある間、アプリを指定しない `list-windows` と `--window-id` を使うコマンドが全部 TIMEOUT になっていた。#1322 で直した。
+- 2 つを merge した後の main（`3f7b01d4`）で、全試験が全部成功した（[run 43743633302](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/43743633302)）。macOS の runner での実行ファイルの build、macOS・Windows・Linux の試験、3 つの OS の配布物の確認を含む。
 
 残したもの:
 
