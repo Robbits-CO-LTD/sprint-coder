@@ -55,8 +55,11 @@ impl WindowsAdapter {
         self.refused_owner.check(operation, owners)
     }
 
-    /// The same for an operation on what a handle names (`own_window::handle_owners`).
-    fn refuse_own_handle(
+    /// The same for an operation on what a handle names (`own_window::handle_owners`), and by
+    /// the window in front too when the part's window may not take the foreground, so what the
+    /// action makes (an on-screen keyboard's key) would reach that window
+    /// (`RefusedWindowOwner::check_front_for_part`).
+    pub(crate) fn refuse_own_handle(
         &self,
         operation: &'static str,
         handle: &NativeHandle,
@@ -66,10 +69,12 @@ impl WindowsAdapter {
             return Ok(());
         }
         match own_window::handle_owners(handle, deadline) {
-            Some(owners) => self.refuse_own_window(operation, || owners),
+            Some(owners) => self.refuse_own_window(operation, || owners)?,
             // Not a part at all: the action refuses it without sending anything.
-            None => Ok(()),
+            None => return Ok(()),
         }
+        self.refused_owner
+            .check_front_for_part(operation, handle, deadline)
     }
 
     /// Records that the Chromium settle has run for `process`, scoped to its
@@ -331,6 +336,8 @@ impl ActionOps for WindowsAdapter {
         lease: &InteractionLease,
     ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
         self.refuse_own_window("run_menu_command", || own_window::window_owners(window))?;
+        self.refused_owner
+            .check_front_for_window("run_menu_command", window)?;
         crate::actions::win32_menu::run_menu_command(entry, window, deadline, lease)
     }
 

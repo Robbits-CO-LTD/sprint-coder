@@ -224,6 +224,31 @@ pub(crate) fn may_not_take_foreground(windows: &ClickedWindows) -> bool {
         || (root.ex_style & WS_EX_TOPMOST != 0 && root.ex_style & WS_EX_LAYERED != 0)
 }
 
+/// The same question for an action on a part (a ref), read narrower than for a click at a point:
+/// only a window that says it never takes the foreground (`WS_EX_NOACTIVATE` on the part's window,
+/// its root or its root owner: on-screen and touch keyboards, IME candidate windows), or one whose
+/// window or styles cannot be read. Tool windows, disabled and layered topmost roots are left out
+/// here: the taskbar (`Shell_TrayWnd`, a topmost tool window) and the desktop (`Progman`, a tool
+/// window) are among them, and pressing a taskbar button by its ref while Sprint Coder is in front
+/// is ordinary use, which brings another app's window to the front.
+pub(crate) fn part_window_may_not_take_foreground(windows: Option<&ClickedWindows>) -> bool {
+    let Some(windows) = windows else {
+        return true;
+    };
+    let (Some(leaf), Some(root)) = (windows.leaf, windows.root) else {
+        return true;
+    };
+    let owner = match windows.root_owner {
+        Some(None) => return true,
+        Some(Some(owner)) => Some(owner),
+        None => None,
+    };
+    [Some(leaf), Some(root), owner]
+        .into_iter()
+        .flatten()
+        .any(|window| window.ex_style & WS_EX_NOACTIVATE != 0)
+}
+
 fn current_instance(pid: u32) -> Option<String> {
     crate::system::process_identity::token_for_pid(agent_desktop_core::ProcessId::from(pid))
         .ok()
@@ -383,20 +408,37 @@ mod facts {
         })
     }
 
-    /// The same for a click on this window: read from it, its root and its root owner.
-    pub(crate) fn hwnd_may_not_take_foreground(hwnd: isize) -> bool {
+    /// The styles of this window, of its root and of its root owner; `None` for no window.
+    pub(crate) fn clicked_windows(hwnd: isize) -> Option<super::ClickedWindows> {
         let leaf = hwnd as HWND;
         if leaf.is_null() {
-            return true;
+            return None;
         }
         let root = unsafe { GetAncestor(leaf, GA_ROOT) };
         let root = if root.is_null() { leaf } else { root };
         let owner = unsafe { GetAncestor(leaf, GA_ROOTOWNER) };
-        super::may_not_take_foreground(&super::ClickedWindows {
+        Some(super::ClickedWindows {
             leaf: styles(leaf),
             root: styles(root),
             root_owner: (!owner.is_null() && owner != root).then(|| styles(owner)),
         })
+    }
+
+    /// The same for a click on this window: read from it, its root and its root owner.
+    pub(crate) fn hwnd_may_not_take_foreground(hwnd: isize) -> bool {
+        clicked_windows(hwnd).is_none_or(|windows| super::may_not_take_foreground(&windows))
+    }
+
+    /// Whether an action on this part may leave the window in front where it is
+    /// (`super::part_window_may_not_take_foreground`), read from the first window it lives in.
+    pub(crate) fn element_window_may_not_take_foreground(
+        element: &UIAElement,
+        deadline: Deadline,
+    ) -> bool {
+        let window = crate::actions::list_item_click::read_element_window(element, deadline)
+            .hwnd
+            .and_then(clicked_windows);
+        super::part_window_may_not_take_foreground(window.as_ref())
     }
 
     /// The owners of a listed window: the pid it was listed with and the live owner of its handle.
@@ -458,9 +500,16 @@ mod facts {
     pub(crate) fn element_owners(_element: &UIAElement, _deadline: Deadline) -> Vec<Option<u32>> {
         Vec::new()
     }
+
+    pub(crate) fn element_window_may_not_take_foreground(
+        _element: &UIAElement,
+        _deadline: Deadline,
+    ) -> bool {
+        true
+    }
 }
 
-pub(crate) use facts::{element_owners, window_owners};
+pub(crate) use facts::{element_owners, element_window_may_not_take_foreground, window_owners};
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) use facts::{hwnd_may_not_take_foreground, hwnd_owners};
 
@@ -538,6 +587,76 @@ pub(crate) fn handle_owners(
     crate::tree::element::uia_element(handle)
         .ok()
         .map(|element| element_owners(element, deadline))
+}
+
+/// Whether an action on what a handle names may leave the window in front where it is, so what
+/// it makes (an on-screen keyboard's key) reaches that window: for a part, when the window it
+/// lives in may not take the foreground (`part_window_may_not_take_foreground`). The empty handle
+/// is judged by the window in front already (`handle_owners`), and a handle that is not a part is
+/// refused by the action itself.
+pub(crate) fn handle_may_leave_front(
+    handle: &agent_desktop_core::NativeHandle,
+    deadline: agent_desktop_core::Deadline,
+) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+    crate::tree::element::uia_element(handle)
+        .ok()
+        .is_some_and(|element| element_window_may_not_take_foreground(element, deadline))
+}
+
+impl RefusedWindowOwner {
+    /// Refuses an action on a part when Sprint Coder is in front and the part's window may not
+    /// take the foreground (`handle_may_leave_front`); read only when something is refused.
+    pub(crate) fn check_front_for_part(
+        &self,
+        operation: &'static str,
+        handle: &agent_desktop_core::NativeHandle,
+        deadline: agent_desktop_core::Deadline,
+    ) -> Result<(), AdapterError> {
+        if !self.is_active() || !handle_may_leave_front(handle, deadline) {
+            return Ok(());
+        }
+        self.check_front(operation)
+    }
+
+    /// The same for a command run in a listed window's menu (`run_menu_command`), by that window.
+    pub(crate) fn check_front_for_window(
+        &self,
+        operation: &'static str,
+        window: &agent_desktop_core::WindowInfo,
+    ) -> Result<(), AdapterError> {
+        if !self.is_active() || !window_may_leave_front(window) {
+            return Ok(());
+        }
+        self.check_front(operation)
+    }
+
+    fn check_front(&self, operation: &'static str) -> Result<(), AdapterError> {
+        let front = foreground_owners();
+        refusal(
+            operation,
+            self.judge(&front, current_instance),
+            Some("foreground"),
+        )
+        .map_or(Ok(()), Err)
+    }
+}
+
+fn window_may_leave_front(window: &agent_desktop_core::WindowInfo) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let windows = crate::system::window::window_ops::parse_window_id(&window.id)
+            .ok()
+            .and_then(facts::clicked_windows);
+        part_window_may_not_take_foreground(windows.as_ref())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        true
+    }
 }
 
 #[cfg(test)]

@@ -765,3 +765,159 @@ fn the_styles_of_a_real_window_decide_whether_a_click_may_leave_the_front_alone(
     assert!(hwnd_may_not_take_foreground(0));
     assert!(!ordinary.visible());
 }
+
+#[test]
+fn a_part_is_judged_by_the_window_in_front_only_in_a_window_that_never_takes_it() {
+    let plain = WindowStyles {
+        style: 0x10CF_0000,
+        ex_style: 0x0000_0100,
+    };
+    let with = |ex: u32, style: u32| WindowStyles {
+        style: plain.style | style,
+        ex_style: plain.ex_style | ex,
+    };
+    let ordinary = ClickedWindows {
+        leaf: Some(plain),
+        root: Some(plain),
+        root_owner: None,
+    };
+    assert!(!part_window_may_not_take_foreground(Some(&ordinary)));
+    // Narrower than for a click at a point: the taskbar (a topmost tool window), the desktop (a
+    // tool window), tool palettes, disabled and layered topmost roots are not judged by the front.
+    for root in [
+        with(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, 0),
+        with(WS_EX_TOOLWINDOW, 0),
+        with(WS_EX_TOPMOST | WS_EX_LAYERED, 0),
+        with(0, WS_DISABLED),
+    ] {
+        assert!(!part_window_may_not_take_foreground(Some(
+            &ClickedWindows {
+                root: Some(root),
+                ..ordinary
+            }
+        )));
+    }
+    let no_activate = with(WS_EX_NOACTIVATE, 0);
+    for windows in [
+        ClickedWindows {
+            leaf: Some(no_activate),
+            ..ordinary
+        },
+        ClickedWindows {
+            root: Some(no_activate),
+            ..ordinary
+        },
+        ClickedWindows {
+            root_owner: Some(Some(no_activate)),
+            ..ordinary
+        },
+        ClickedWindows {
+            leaf: None,
+            ..ordinary
+        },
+        ClickedWindows {
+            root_owner: Some(None),
+            ..ordinary
+        },
+    ] {
+        assert!(
+            part_window_may_not_take_foreground(Some(&windows)),
+            "{windows:?}"
+        );
+    }
+    // No window could be read for the part.
+    assert!(part_window_may_not_take_foreground(None));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_ref_in_a_window_that_never_takes_the_front_is_refused_while_sprint_coder_is_in_front() {
+    use crate::tree::automation::automation_client;
+    use crate::tree::element::UIAElement;
+    use uiautomation::types::Handle;
+
+    crate::tree::fixture::ensure_test_apartment();
+    // Sprint Coder stands for a process that is not this one. The windows are this process's,
+    // hidden and never activated, and only the window in front is put in place.
+    let sprint_coder = u32::MAX - 9;
+    let other = u32::MAX - 11;
+    let adapter = WindowsAdapter::new().refusing_windows_of(process(sprint_coder, None));
+    let front = |pid: u32| fake::PointerFacts {
+        foreground: vec![Some(pid)],
+        ..Default::default()
+    };
+    let part = |hwnd: isize| -> NativeHandle {
+        let element = automation_client()
+            .expect("client")
+            .element_from_handle(Handle::from(hwnd))
+            .expect("element");
+        UIAElement::from(element).into_native_handle()
+    };
+    let info = |hwnd: isize| WindowInfo {
+        id: format!("w-{}", hwnd as usize),
+        title: String::new(),
+        app: "test.exe".to_string(),
+        pid: ProcessId::from(std::process::id()),
+        process_instance: None,
+        bounds: None,
+        state: Default::default(),
+    };
+    let menu_item = |window: &WindowInfo| -> agent_desktop_core::RefEntry {
+        serde_json::from_value(serde_json::json!({
+            "pid": std::process::id(),
+            "process_instance": null,
+            "role": "menuitem",
+            "name": "Save",
+            "proven_in_menu": {
+                "steps": [
+                    { "name": "File", "position": 0, "submenu": true },
+                    { "name": "Save", "position": 1, "submenu": false },
+                ],
+                "command_id": 1002,
+            },
+            "bounds_hash": null,
+            "available_actions": ["click"],
+            "source_app": window.app,
+            "source_window_id": window.id,
+            "source_surface": "menubar",
+        }))
+        .expect("a menu item ref")
+    };
+    // What each operation is refused by, if by Sprint Coder at all, with `pid` in front.
+    let outcomes = |hwnd: isize, pid: u32| -> Vec<Option<String>> {
+        let handle = part(hwnd);
+        let window = info(hwnd);
+        fake::with(front(pid), || {
+            vec![
+                own_refusal_target(adapter.execute_action(
+                    &handle,
+                    agent_desktop_core::actions::action_request::ActionRequest::headless(
+                        agent_desktop_core::Action::Expand,
+                    ),
+                    &lease(),
+                )),
+                own_refusal_target(adapter.scroll_into_view(&handle, &lease())),
+                own_refusal_target(adapter.run_menu_command(
+                    &menu_item(&window),
+                    &window,
+                    Deadline::standard().unwrap(),
+                    &lease(),
+                )),
+            ]
+        })
+    };
+    let refused = vec![Some("foreground".to_string()); 3];
+    let passed = vec![None; 3];
+
+    // The kind of window an on-screen keyboard is: refused while Sprint Coder is in front.
+    let keyboard = hidden_window::spawn_with(WS_EX_NOACTIVATE);
+    assert_eq!(outcomes(keyboard.hwnd, sprint_coder), refused);
+    assert_eq!(outcomes(keyboard.hwnd, other), passed);
+    // An ordinary window and tool windows (the kind the taskbar is): never judged by the front.
+    for ex_style in [0, WS_EX_TOOLWINDOW, WS_EX_TOOLWINDOW | WS_EX_TOPMOST] {
+        let window = hidden_window::spawn_with(ex_style);
+        assert_eq!(outcomes(window.hwnd, sprint_coder), passed, "{ex_style:#x}");
+        assert!(!window.visible());
+    }
+    assert!(!keyboard.visible());
+}
