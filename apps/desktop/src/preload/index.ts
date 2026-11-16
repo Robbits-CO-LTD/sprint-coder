@@ -404,8 +404,9 @@ const api: SprintCoderApi = {
     },
   },
   theme: {
-    set: (theme) => {
-      if (isThemeId(theme)) ipcRenderer.send(WINDOW_THEME_CHANNELS.set, theme);
+    set: async (theme) => {
+      if (!isThemeId(theme)) return { saved: false };
+      return ipcRenderer.invoke(WINDOW_THEME_CHANNELS.set, theme);
     },
   },
   tasks: {

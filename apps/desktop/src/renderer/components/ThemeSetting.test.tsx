@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { SprintCoderApi } from '@sprint-coder/contracts';
-import { activeTheme, setTheme } from '../lib/theme';
+import { activeTheme, retryThemeSave, setTheme } from '../lib/theme';
 import { ThemeSetting } from './ThemeSetting';
 
 let container: HTMLDivElement;
@@ -13,11 +13,14 @@ const set = vi.fn<SprintCoderApi['theme']['set']>();
 beforeEach(async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   document.documentElement.removeAttribute('data-theme');
-  set.mockClear();
+  set.mockReset().mockResolvedValue({ saved: true });
   Object.defineProperty(window, 'sprintCoder', {
     configurable: true,
     value: { theme: { set } } as unknown as SprintCoderApi,
   });
+  retryThemeSave();
+  await Promise.resolve();
+  set.mockClear();
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -77,4 +80,20 @@ it('still changes the page where Main cannot be told', async () => {
   Reflect.deleteProperty(window, 'sprintCoder');
   await act(async () => radio('gray').click());
   expect(document.documentElement.getAttribute('data-theme')).toBe('gray');
+});
+
+it('shows a save failure and retries the same selection, hiding the normal hint until saved', async () => {
+  set.mockResolvedValueOnce({ saved: false });
+  await act(async () => radio('white').click());
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    'テーマを保存できませんでした。今の表示には反映されていますが、次に開いた時は前のテーマに戻ります。',
+  );
+  expect(container.querySelector('.settings-hint')).toBeNull();
+  const retry = container.querySelector('button')!;
+  expect(retry.textContent).toBe('もう一度保存');
+  await act(async () => retry.click());
+  expect(set.mock.calls).toEqual([['white'], ['white']]);
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(container.querySelector('button')).toBeNull();
+  expect(container.querySelector('.settings-hint')).not.toBeNull();
 });

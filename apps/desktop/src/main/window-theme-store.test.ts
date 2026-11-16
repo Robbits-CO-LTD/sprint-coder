@@ -1,8 +1,8 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readStoredTheme, writeStoredTheme } from './window-theme-store';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readStoredTheme, saveStoredTheme, writeStoredTheme } from './window-theme-store';
 
 let directory = '';
 beforeEach(() => {
@@ -38,4 +38,18 @@ describe("the profile's theme file", () => {
     writeFileSync(path, '{"theme":');
     expect(readStoredTheme(path)).toBe('black');
   });
+});
+
+it('reports a failed write without losing the previous file and saves after the cause is removed', () => {
+  const path = join(directory, 'theme.json');
+  const warn = vi.fn();
+  writeStoredTheme(path, 'gray');
+  mkdirSync(`${path}.tmp`);
+  expect(saveStoredTheme(path, 'white', warn)).toEqual({ saved: false });
+  expect(warn).toHaveBeenCalledOnce();
+  expect(readStoredTheme(path)).toBe('gray');
+  rmSync(`${path}.tmp`, { recursive: true });
+  expect(saveStoredTheme(path, 'white', warn)).toEqual({ saved: true });
+  expect(readStoredTheme(path)).toBe('white');
+  expect(warn).toHaveBeenCalledOnce();
 });

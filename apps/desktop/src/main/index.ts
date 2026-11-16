@@ -82,7 +82,7 @@ import {
   WINDOW_THEME_CHANNELS,
   type ThemeId,
 } from '../window-theme';
-import { readStoredTheme, writeStoredTheme } from './window-theme-store';
+import { readStoredTheme, saveStoredTheme } from './window-theme-store';
 
 const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
@@ -130,17 +130,15 @@ ipcMain.handle(WINDOW_CONTROL_CHANNELS.getMaximized, (event) => {
 ipcMain.on(WINDOW_THEME_CHANNELS.get, (event) => {
   event.returnValue = currentWindowTheme();
 });
-ipcMain.on(WINDOW_THEME_CHANNELS.set, (event, theme: unknown) => {
+ipcMain.handle(WINDOW_THEME_CHANNELS.set, (event, theme: unknown) => {
   const window = trustedMainWindowTarget(event);
-  if (window === null || !isThemeId(theme)) return;
+  if (window === null || !isThemeId(theme)) return { saved: false };
   windowTheme = theme;
   applyWindowTheme(theme, window, nativeTheme);
-  try {
-    writeStoredTheme(windowThemePath(), theme);
-  } catch (error) {
+  return saveStoredTheme(windowThemePath(), theme, (error) => {
     // The window already shows the theme; only the next launch would not remember it.
     secureLogger.warn('The chosen theme could not be saved', error);
-  }
+  });
 });
 ipcMain.handle(IPC_CHANNELS.updateCheckNow, async (event) => {
   if (trustedMainWindowTarget(event) === null || autoUpdateController === null)
