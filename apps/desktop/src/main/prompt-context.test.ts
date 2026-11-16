@@ -371,6 +371,88 @@ describe('prompt context compiler', () => {
     ).toBe(readOnly.digest);
   });
 
+  it('tells a primary Turn without a Project that desktop control needs one, without the CLI guidance', () => {
+    const noProject: RuntimeWorkspaceSet = { primaryRootId: null, roots: [], digest: 'empty' };
+    const command =
+      '/Applications/Sprint Coder.app/Contents/Resources/sprint-coder-desktop-control';
+    const base = {
+      workspace: noProject,
+      toolCatalog: catalog([]),
+      workspaceRules: [],
+      vcs: [],
+      // promptWriteAccess makes a Turn without a Workspace read-only at every preset.
+      writeScope: 'read-only' as const,
+      desktopControlCommand: command,
+    };
+    for (const platform of ['darwin', 'win32'] as const) {
+      const guided = compilePromptGuidance({
+        ...base,
+        platform,
+        desktopControlProjectGuidance: true,
+      });
+      expect(guided.context.desktopControlNeedsProject).toBe(true);
+      expect(guided.context).not.toHaveProperty('desktopControl');
+      expect(guided.content).toContain('Sprint Coder のデスクトップ操作（このTurnでは使えない）:');
+      expect(guided.content).toContain('デスクトップ操作は Project を選んだ Task でだけ使える');
+      expect(guided.content).toContain(
+        '道具が無いとだけ答えず、Project（作業フォルダー）を選んだ Task で、もう一度頼むよう案内する',
+      );
+      expect(guided.content).toContain('使えるふりをせず');
+      // The how-to section, with the command, stays out.
+      expect(guided.content).not.toContain('skills get desktop');
+      expect(guided.content).not.toContain(JSON.stringify(command));
+      // Other callers (Team Workers, the Runtime Host fallback) do not ask for it and keep their
+      // prompt and digest.
+      const unasked = compilePromptGuidance({ ...base, platform });
+      expect(unasked.context).not.toHaveProperty('desktopControlNeedsProject');
+      expect(unasked.content).not.toContain('デスクトップ操作');
+      expect(unasked.digest).not.toBe(guided.digest);
+    }
+
+    // Desktop control is not available in this build: nothing to point to.
+    const unavailable = compilePromptGuidance({
+      ...base,
+      desktopControlCommand: null,
+      desktopControlProjectGuidance: true,
+    });
+    expect(unavailable.context).not.toHaveProperty('desktopControlNeedsProject');
+    expect(unavailable.content).not.toContain('デスクトップ操作');
+
+    // A subagent without a Workspace is not told either.
+    const subagent = compilePromptGuidance({
+      ...base,
+      agent: { role: 'subagent', mode: 'read-only' },
+      desktopControlProjectGuidance: true,
+    });
+    expect(subagent.context).not.toHaveProperty('desktopControlNeedsProject');
+    expect(subagent.content).not.toContain('デスクトップ操作');
+
+    // A Workspace whose access is only read-only: no hint, same digest as before.
+    const withWorkspace = { ...base, workspace };
+    const readOnly = compilePromptGuidance({
+      ...withWorkspace,
+      desktopControlProjectGuidance: true,
+    });
+    expect(readOnly.context).not.toHaveProperty('desktopControlNeedsProject');
+    expect(readOnly.context).not.toHaveProperty('desktopControl');
+    expect(readOnly.content).not.toContain('デスクトップ操作');
+    expect(readOnly.digest).toBe(compilePromptGuidance(withWorkspace).digest);
+
+    // A Workspace and write access: the usual section, unchanged by the flag.
+    const writable = compilePromptGuidance({
+      ...withWorkspace,
+      writeScope: 'workspace-write',
+      desktopControlProjectGuidance: true,
+    });
+    expect(writable.context.desktopControl).toEqual({ command });
+    expect(writable.context).not.toHaveProperty('desktopControlNeedsProject');
+    expect(writable.content).not.toContain('このTurnでは使えない');
+    expect(writable.content).toContain('skills get desktop');
+    expect(writable.digest).toBe(
+      compilePromptGuidance({ ...withWorkspace, writeScope: 'workspace-write' }).digest,
+    );
+  });
+
   it('tells the agent on macOS how apps are named there, which keys, permissions and what is not there yet', () => {
     const base = { workspace, toolCatalog: catalog([]), workspaceRules: [], vcs: [] };
     const command =

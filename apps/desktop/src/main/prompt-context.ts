@@ -63,6 +63,12 @@ export type CanonicalPromptContext = Readonly<{
    * shipped binary matches its pin (Windows only for now), so every other Turn keeps its digest.
    */
   desktopControl?: Readonly<{ command: string }>;
+  /**
+   * Set when desktop control is available on this machine but this primary Turn has no Workspace
+   * (Project), so the agent is told to point the person to a Task with a Project instead of only
+   * saying the tool is missing. It changes only the prompt; the tools stay as they were.
+   */
+  desktopControlNeedsProject?: true;
 }>;
 
 export type CompiledPromptGuidance = Readonly<{
@@ -91,6 +97,11 @@ export function compilePromptGuidance(input: {
    * it), so it gets the CLI even when it cannot write.
    */
   desktopControlGranted?: boolean;
+  /**
+   * Whether a primary Turn without a Workspace is told that desktop control needs a Project. Only
+   * the Task's own Turn sets it, so Team Workers and other callers keep their prompt and digest.
+   */
+  desktopControlProjectGuidance?: boolean;
 }): CompiledPromptGuidance {
   const requestedAgent = input.agent ?? {
     role: 'primary',
@@ -126,6 +137,15 @@ export function compilePromptGuidance(input: {
       : input.desktopControlCommand === undefined
         ? resolveDesktopControlCommand()
         : input.desktopControlCommand;
+  // Same condition that leaves the command tool out of the catalog: no Workspace root at all.
+  const desktopControlNeedsProject =
+    input.desktopControlProjectGuidance === true &&
+    requestedAgent.role === 'primary' &&
+    input.workspace.roots.length === 0 &&
+    desktopControlCommand === null &&
+    (input.desktopControlCommand === undefined
+      ? resolveDesktopControlCommand()
+      : input.desktopControlCommand) !== null;
   const context: CanonicalPromptContext = {
     version: PROMPT_CONTEXT_VERSION,
     agent: {
@@ -160,6 +180,7 @@ export function compilePromptGuidance(input: {
     ...(desktopControlCommand === null
       ? {}
       : { desktopControl: { command: desktopControlCommand } }),
+    ...(desktopControlNeedsProject ? { desktopControlNeedsProject: true as const } : {}),
   };
   const content = renderPromptGuidance(context);
   return Object.freeze({ context, content, digest: digestCanonical(context) });
@@ -338,6 +359,13 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
     lines.push(
       '',
       ...renderDesktopControl(context.desktopControl.command, context.environment.os === 'darwin'),
+    );
+  else if (context.desktopControlNeedsProject === true)
+    lines.push(
+      '',
+      'Sprint Coder のデスクトップ操作（このTurnでは使えない）:',
+      '- この Task には Project（作業フォルダー）が選ばれていないので、デスクトップ操作（起動中のほかのアプリを見る・操作すること）の道具はこの Turn に渡されていない。デスクトップ操作は Project を選んだ Task でだけ使える。',
+      '- 利用者にほかのアプリを開く・操作するよう頼まれたら、道具が無いとだけ答えず、Project（作業フォルダー）を選んだ Task で、もう一度頼むよう案内する。使えるふりをせず、開いた・操作したなどの結果を作らない。',
     );
   return lines.join('\n');
 }
