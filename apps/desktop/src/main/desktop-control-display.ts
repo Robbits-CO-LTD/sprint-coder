@@ -249,7 +249,7 @@ const LAUNCH_FRONT_NOTE = '起動した窓が前面に出ます。';
 // macOS `launch --url` in the background: only a browser it starts is kept from the front
 // (`activates = NO`); a running browser is asked to open the page, and may come forward itself.
 const MAC_URL_LAUNCH_NOTE =
-  'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。';
+  'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
 // Minimizing hands the front to another window, so it is never covered by an app-wide grant.
 const MINIMIZE_NOTE = '窓を最小化します。最小化すると、次の窓が手前に来ます。';

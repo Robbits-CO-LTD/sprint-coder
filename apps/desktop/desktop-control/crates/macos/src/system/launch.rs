@@ -76,21 +76,35 @@ pub(crate) fn launch_app_impl(
     // the instances it may be passed to are read before it starts. Nothing here refuses the
     // launch: what cannot be read only leaves fewer candidates.
     let handoff = (!options.attach_if_running).then(|| read_handoff(id, &initial, &path, deadline));
+    // Such a launch without `--activate` also watches the front while it waits, and gives it back
+    // when an instance it may be passed to takes it (`launch_front`); any other launch reads
+    // nothing more and waits exactly as before.
+    let front =
+        super::launch_front::FrontGuard::begin(handoff.as_ref(), options.activate, deadline);
+    let pause = |wait: Duration| super::launch_front::pause(front.as_ref(), wait);
 
     let launched = match crate::system::launch_workspace::open(id, &path, options, deadline) {
         Err(error) => {
-            return after_open_error(
+            let outcome = after_open_error(
                 error,
                 handoff.as_ref(),
-                |handoff| watch_live(handoff, HANDOFF_WATCH.min(deadline.remaining()), deadline),
+                |handoff| {
+                    watch_live_pausing(
+                        handoff,
+                        HANDOFF_WATCH.min(deadline.remaining()),
+                        deadline,
+                        &pause,
+                    )
+                },
                 id,
                 options.activate,
             );
+            return super::launch_front::finish(front.as_ref(), outcome);
         }
         Ok(launched) => launched,
     };
     validate_launched_target(&target, &launched).map_err(after_launch)?;
-    let window = settled_window(launched.0, &launched.1, options, deadline);
+    let window = settled_window(launched.0, &launched.1, options, deadline, &pause);
     // A process that cannot be read is taken as still running.
     let gone_now = || {
         !super::process::process_identity::matches_instance(launched.0, &launched.1).unwrap_or(true)
@@ -107,18 +121,31 @@ pub(crate) fn launch_app_impl(
             // runs without a window pays at most this, within the deadline.
             let grace = STARTUP_GRACE.min(deadline.remaining());
             exits_within(watch_rounds(grace), gone_now, || {
-                std::thread::sleep(HANDOFF_POLL.min(deadline.remaining()));
+                pause(HANDOFF_POLL.min(deadline.remaining()));
             })
         },
-        |handoff| watch_live(handoff, HANDOFF_WATCH.min(deadline.remaining()), deadline),
+        |handoff| {
+            watch_live_pausing(
+                handoff,
+                HANDOFF_WATCH.min(deadline.remaining()),
+                deadline,
+                &pause,
+            )
+        },
         id,
         &launched,
         options.activate,
     ) {
-        AfterWait::Window(window) => window.map_err(after_launch)?,
-        AfterWait::Outcome(outcome) => return outcome,
+        AfterWait::Window(window) => window,
+        AfterWait::Outcome(outcome) => {
+            return super::launch_front::finish(front.as_ref(), outcome);
+        }
     };
-    result_from_launched(&launched, window, id, &target, options, deadline).map_err(after_launch)
+    let result = window.map_err(after_launch).and_then(|window| {
+        result_from_launched(&launched, window, id, &target, options, deadline)
+            .map_err(after_launch)
+    });
+    super::launch_front::finish(front.as_ref(), result)
 }
 
 /// The smallest window, in points each way, counted as a new window of an instance a launch was
@@ -295,7 +322,7 @@ pub(crate) fn counts_as_shown(on_screen: bool, width: f64, height: f64) -> bool 
 
 /// Every layer-0 window of a process now (on screen or not), or `None` when they cannot be read.
 #[cfg(target_os = "macos")]
-fn window_list(pid: i32, deadline: Deadline) -> Option<Vec<WindowSeen>> {
+pub(crate) fn window_list(pid: i32, deadline: Deadline) -> Option<Vec<WindowSeen>> {
     let records = crate::system::window::cg_window::window_records_until(
         deadline_instant(deadline).ok()?,
         crate::system::window::cg_window::WindowRecordScope::Pid(pid),
@@ -428,14 +455,27 @@ fn still_runs(pid: i32, instance: Option<&str>) -> Option<bool> {
     super::process::process_identity::matches_instance(pid, instance?).ok()
 }
 
-#[cfg(target_os = "macos")]
+/// `watch_live_pausing` with plain sleeps between its looks.
+#[cfg(all(target_os = "macos", test))]
 fn watch_live(handoff: &Handoff, watch: Duration, deadline: Deadline) -> HandoffWatch {
+    watch_live_pausing(handoff, watch, deadline, &std::thread::sleep)
+}
+
+/// The live watch, waiting between its looks with `pause` (which reads the front meanwhile when
+/// the launch watches it).
+#[cfg(target_os = "macos")]
+fn watch_live_pausing(
+    handoff: &Handoff,
+    watch: Duration,
+    deadline: Deadline,
+    pause: &dyn Fn(Duration),
+) -> HandoffWatch {
     let seen = watch_handoff(
         &handoff.candidates,
         watch_rounds(watch),
         |candidate| still_runs(candidate.pid, Some(&candidate.process_instance)),
         |pid| window_list(pid, deadline),
-        || std::thread::sleep(HANDOFF_POLL.min(deadline.remaining())),
+        || pause(HANDOFF_POLL.min(deadline.remaining())),
     );
     unless_another_runs(seen, &handoff.others, |other| {
         still_runs(other.pid, other.process_instance.as_deref())
@@ -606,6 +646,7 @@ fn settled_window(
     process_instance: &str,
     options: &LaunchOptions,
     deadline: Deadline,
+    pause: &dyn Fn(Duration),
 ) -> Result<Option<WindowInfo>, AdapterError> {
     let mut poll_interval = Duration::from_millis(25);
     let mut grace_ends_at = None;
@@ -629,7 +670,7 @@ fn settled_window(
         if remaining.is_zero() {
             return last_read_failure.map_or(Ok(None), Err);
         }
-        std::thread::sleep(poll_interval.min(remaining));
+        pause(poll_interval.min(remaining));
         poll_interval = (poll_interval * 3 / 2).min(Duration::from_millis(250));
     }
 }
