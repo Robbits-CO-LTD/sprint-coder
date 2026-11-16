@@ -162,6 +162,27 @@ bool agent_desktop_open_application(
             return true;
         }
         NSString *bundleID = [NSBundle bundleWithURL:url].bundleIdentifier;
+        // A launch limited to some bundle ids (`launch --url`): the bundle about to open must
+        // carry one of them, read here from the bundle itself, or nothing opens.
+        NSArray *allowedIDs = request[@"bundle_ids"];
+        if (allowedIDs != nil && !isStringArray(allowedIDs)) {
+            completeError(holder, @"Invalid launch request fields", 2, 0);
+            return true;
+        }
+        if (allowedIDs.count > 0) {
+            BOOL allowed = NO;
+            for (NSString *allowedID in allowedIDs) {
+                if (bundleID != nil &&
+                    [bundleID caseInsensitiveCompare:allowedID] == NSOrderedSame) {
+                    allowed = YES;
+                    break;
+                }
+            }
+            if (!allowed) {
+                completeError(holder, @"The application's bundle id is not one this launch allows", 5, 0);
+                return true;
+            }
+        }
         for (NSRunningApplication *running in workspace.runningApplications) {
             if ((bundleID != nil && [running.bundleIdentifier isEqualToString:bundleID]) ||
                 [running.bundleURL.URLByResolvingSymlinksInPath isEqual:url.URLByResolvingSymlinksInPath]) {

@@ -1,8 +1,16 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, system::launch_options::LaunchOptions};
 
+/// The bundle a launch of `id` opens: resolved without launching, and only in a standard place.
+pub(crate) fn launch_path(id: &str) -> Result<std::path::PathBuf, AdapterError> {
+    let path = resolved_path(id, None)?;
+    super::launch_location::require(&path)
+}
+
+/// Opens the bundle at `path` (from `launch_path`).
 pub(crate) fn open(
     id: &str,
+    path: &std::path::Path,
     options: &LaunchOptions,
     deadline: Deadline,
 ) -> Result<(i32, String), AdapterError> {
@@ -14,8 +22,6 @@ pub(crate) fn open(
     crate::system::cocoa_runtime::ensure_cocoa_multithreaded().map_err(|error| {
         error.with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
     })?;
-    let path = resolved_path(id, None)?;
-    let path = super::launch_location::require(&path)?;
     let request = serde_json::to_vec(&serde_json::json!({
         "identifier": id,
         "resolved_path": path,
@@ -26,6 +32,7 @@ pub(crate) fn open(
         "prompts": false,
         "substitution": false,
         "new_instance": creates_new_instance(options),
+        "bundle_ids": options.bundle_ids,
     }))
     .map_err(|error| {
         AdapterError::internal(format!("Encode launch request: {error}"))

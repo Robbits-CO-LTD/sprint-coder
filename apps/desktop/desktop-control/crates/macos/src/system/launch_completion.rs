@@ -140,9 +140,30 @@ unsafe extern "C" fn release_context(context: *mut c_void) {
     });
 }
 
+/// The bridge's `errorKind` when the bundle about to open does not carry a bundle id the launch
+/// allows (`LaunchOptions::bundle_ids`).
+const BUNDLE_ID_REFUSED: u8 = 5;
+
+pub(crate) fn bundle_id_refused() -> AdapterError {
+    AdapterError::new(
+        ErrorCode::PolicyDenied,
+        "The application's bundle id is not one of the browsers this launch is for; nothing was launched",
+    )
+    .with_details(serde_json::json!({
+        "kind": "launch_bundle_id_refused",
+        "physical_delivery_started": false,
+        "retryable": false,
+    }))
+    .with_suggestion("Name a known browser installed in a standard application folder.")
+    .with_disposition(DeliverySemantics::not_delivered())
+}
+
 fn validate_result(
     result: &crate::system::launch_callback_result::LaunchCallbackResult,
 ) -> LaunchResult {
+    if result.pid <= 0 && result.error_kind == BUNDLE_ID_REFUSED && result.delivery_started == 0 {
+        return Err(bundle_id_refused());
+    }
     if result.pid <= 0 {
         let code = if result.error_kind == 1 {
             ErrorCode::AppNotFound
@@ -315,6 +336,36 @@ mod tests {
         let error = state.wait(Deadline::after(100).unwrap()).unwrap_err();
         assert_eq!(error.code, ErrorCode::PolicyDenied);
         assert_eq!(error.details.unwrap()["kind"], "launch_location_refused");
+    }
+
+    #[test]
+    fn a_bundle_whose_id_the_launch_does_not_allow_is_refused_before_opening() {
+        let refused = crate::system::launch_callback_result::LaunchCallbackResult {
+            application: std::ptr::null_mut(),
+            pid: 0,
+            launch_time: 0.0,
+            terminated: 1,
+            delivery_started: 0,
+            error_kind: BUNDLE_ID_REFUSED,
+            error: std::ptr::null(),
+            error_len: 0,
+        };
+        let error = validate_result(&refused).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert_eq!(error.details.unwrap()["kind"], "launch_bundle_id_refused");
+        assert_eq!(
+            serde_json::to_value(error.disposition).unwrap(),
+            serde_json::to_value(DeliverySemantics::not_delivered()).unwrap()
+        );
+        // The same kind after delivery started is not read as a refusal before opening.
+        let started = crate::system::launch_callback_result::LaunchCallbackResult {
+            delivery_started: 1,
+            ..refused
+        };
+        assert_ne!(
+            validate_result(&started).unwrap_err().code,
+            ErrorCode::PolicyDenied
+        );
     }
 
     #[test]

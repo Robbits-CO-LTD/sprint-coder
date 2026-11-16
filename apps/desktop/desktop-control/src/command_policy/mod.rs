@@ -142,6 +142,13 @@ pub(crate) fn requires_permission_report(cmd: &Commands) -> bool {
 
 fn validate_args(cmd: &Commands) -> Result<(), AppError> {
     match cmd {
+        // The browser and the URL of `launch --url` are judged before any permission is read, so
+        // a refused one ends the same way, with nothing launched, whatever is granted.
+        Commands::Launch(args) => {
+            if let Some(url) = &args.url {
+                crate::dispatch::launch_url::launch_url_args(&args.app, url)?;
+            }
+        }
         Commands::Snapshot(args) => {
             if let Some(root) = &args.root {
                 if args.surface != crate::cli_args::Surface::Window {
@@ -222,7 +229,6 @@ fn validate_args(cmd: &Commands) -> Result<(), AppError> {
         | Commands::MouseDown(_)
         | Commands::MouseUp(_)
         | Commands::MouseWheel(_)
-        | Commands::Launch(_)
         | Commands::CloseApp(_)
         | Commands::ListWindows(_)
         | Commands::ListDisplays

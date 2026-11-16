@@ -30,8 +30,9 @@ const FIREFOX_BROWSERS: &[&str] = &["firefox", "librewolf", "waterfox"];
 
 /// The browsers `--url` is for on macOS: the bundle's file name without `.app` and its bundle id
 /// (`CFBundleIdentifier`), as `launch` takes an app there. A browser whose id is not known is left
-/// out. Main judges the bundle the name resolves to by its id against the same table
-/// (`launch_url_mac_apps.json`), so an id listed wrongly refuses that browser rather than passing
+/// out. Main judges the bundles the name may resolve to by their ids against the same table
+/// (`launch_url_mac_apps.json`), and the macOS adapter judges the one it opens by its id
+/// (`launch_url_bundle_ids`), so an id listed wrongly refuses that browser rather than passing
 /// another app.
 const MAC_URL_BROWSER_TABLE: &[(&str, &str, BrowserFamily)] = &[
     (
@@ -87,15 +88,39 @@ pub(crate) fn browser_family(app: &str) -> Option<BrowserFamily> {
     }
 }
 
-/// The browser a macOS app id names: a bundle's file name (with or without `.app`) or a bundle id
-/// of `MAC_URL_BROWSER_TABLE`, ASCII letters in any case, nothing trimmed.
+/// The browser a macOS app id names: a bundle's file name (with or without a lower-case `.app`,
+/// the only suffix the macOS adapter reads as a file name) or a bundle id of
+/// `MAC_URL_BROWSER_TABLE`, ASCII letters in any case otherwise, nothing trimmed.
 pub(crate) fn mac_browser_family(app: &str) -> Option<BrowserFamily> {
     let lower = app.to_ascii_lowercase();
-    let name = lower.strip_suffix(".app").unwrap_or(&lower);
+    let name = app.strip_suffix(".app").unwrap_or(app).to_ascii_lowercase();
     MAC_URL_BROWSER_TABLE
         .iter()
         .find(|(file, id, _)| name == file.to_ascii_lowercase() || lower == id.to_ascii_lowercase())
         .map(|(_, _, family)| *family)
+}
+
+/// On macOS, the bundle ids the bundle a `--url` launch of `app` opens may have: those of the
+/// browsers of the same kind (`mac_browser_family`), whose switch it is given. The macOS adapter
+/// reads the id of the bundle it resolved right before opening it and refuses any other, so the
+/// app that starts is judged by its id there too, not only by the name it was given. Empty on
+/// other OSes, where nothing reads it.
+pub(crate) fn launch_url_bundle_ids(app: &str) -> Vec<String> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    mac_family_bundle_ids(app)
+}
+
+pub(crate) fn mac_family_bundle_ids(app: &str) -> Vec<String> {
+    let Some(family) = mac_browser_family(app) else {
+        return Vec::new();
+    };
+    MAC_URL_BROWSER_TABLE
+        .iter()
+        .filter(|(_, _, of)| *of == family)
+        .map(|(_, id, _)| (*id).to_owned())
+        .collect()
 }
 
 /// The whole command line a `--url` launch passes after the executable: the browser's fixed

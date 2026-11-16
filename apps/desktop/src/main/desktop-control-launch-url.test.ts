@@ -285,11 +285,12 @@ describe('launch --url: the arguments Main lets run', () => {
 });
 
 describe('launch --url: the approval card', () => {
-  const card = (argv: readonly string[]) => {
+  const card = (argv: readonly string[], platform: NodeJS.Platform = 'win32') => {
     // No snapshot is read for a launch; the folder does not exist.
     const action = desktopControlApprovalAction(argv, {
       stateRoot: join(tmpdir(), 'sc-dc-launch-url-no-state'),
       names: false,
+      platform,
     });
     expect(desktopApprovalActionSchema.parse(action)).toEqual(action);
     return action;
@@ -319,6 +320,33 @@ describe('launch --url: the approval card', () => {
       allowTaskGrant: true,
     });
     expect(card(['launch', CHROME]).textRole).toBeUndefined();
+  });
+
+  it('on macOS says only what it can about the front: a running browser may come forward', () => {
+    const notes = card(
+      ['launch', 'Google Chrome', '--url', 'https://example.com/'],
+      'darwin',
+    ).notes;
+    expect(notes).toEqual([
+      expect.stringContaining('ブラウザーの新しい窓で開きます') as unknown as string,
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
+    ]);
+    const batch = card(
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'launch', args: { app: 'Firefox', url: 'https://example.com/' } },
+        ]),
+      ],
+      'darwin',
+    );
+    expect(batch.notes).toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
+    );
+    // A plain launch on macOS keeps its note.
+    expect(card(['launch', 'TextEdit'], 'darwin').notes).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
   });
 
   it('keeps the host of a long URL whole and cuts the middle of the rest', () => {

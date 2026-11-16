@@ -496,7 +496,9 @@ describe('prompt context compiler', () => {
       'Google Chrome・Microsoft Edge・Brave Browser・Vivaldi・Opera・Chromium・Firefox のどれかを、.app を除いた名前か bundle ID（com.google.Chrome など）で渡す',
     );
     expect(text).toContain('Safari には --url を付けられない');
-    expect(text).toContain('handed_off: true で window が無いことがある');
+    expect(text).toContain('handed_off: true で、window は必ず無い');
+    expect(text).toContain('その is_focused を確かめてから');
+    expect(text).toContain('delivery_uncertain');
     expect(text).toContain('Terminal・iTerm・Ghostty・Warp など');
     // Nothing of Windows.
     for (const windowsOnly of [

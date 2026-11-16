@@ -222,3 +222,23 @@ fn the_mac_table_names_each_browser_once_by_name_and_by_id() {
         }
     }
 }
+
+#[test]
+fn a_mac_url_launch_limits_the_bundle_that_opens_to_the_browsers_of_its_kind() {
+    let chromium = mac_family_bundle_ids("Google Chrome");
+    assert!(chromium.contains(&"com.google.Chrome".to_owned()));
+    assert!(chromium.contains(&"com.microsoft.edgemac".to_owned()));
+    assert!(!chromium.contains(&"org.mozilla.firefox".to_owned()));
+    assert_eq!(
+        mac_family_bundle_ids("org.mozilla.firefox"),
+        ["org.mozilla.firefox"]
+    );
+    for app in ["TextEdit", "Safari", "Firefox.APP", ""] {
+        assert!(mac_family_bundle_ids(app).is_empty(), "{app:?}");
+    }
+    // Only macOS reads the limit; elsewhere it stays empty.
+    assert_eq!(
+        launch_url_bundle_ids("Google Chrome").is_empty(),
+        !cfg!(target_os = "macos")
+    );
+}

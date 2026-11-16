@@ -398,3 +398,29 @@ fn batch_session_ended_skip_covers_a_following_entry_of_the_same_session() {
     assert!(env["data"].get("stopped").is_none(), "{env}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn launch_url_refuses_an_app_that_is_not_a_known_browser_before_launching_on_macos() {
+    // Neither name starts anything: both are refused before any permission is read.
+    for app in ["TextEdit", "Safari"] {
+        let output = binary()
+            .args(["launch", app, "--url", "https://example.com/"])
+            .output()
+            .expect("binary starts");
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{app}");
+        assert_eq!(envelope["error"]["code"], "INVALID_ARGS", "{app}");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("only for a known browser"),
+            "{app}"
+        );
+        assert_eq!(
+            envelope["error"]["disposition"]["delivery"], "not_delivered",
+            "{app}"
+        );
+    }
+}

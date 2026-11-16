@@ -156,6 +156,7 @@ pub(crate) fn build_launch_options(
         attach_if_running: !launch.no_attach,
         activate: launch.activate,
         cdp_port: launch.cdp,
+        bundle_ids: Vec::new(),
     })
 }
 
@@ -184,6 +185,8 @@ fn url_launch_options(
         attach_if_running: false,
         activate: launch.activate,
         cdp_port: None,
+        // On macOS the bundle that opens is checked again by its bundle id, right before it does.
+        bundle_ids: super::launch_url::launch_url_bundle_ids(&launch.app),
     })
 }
 

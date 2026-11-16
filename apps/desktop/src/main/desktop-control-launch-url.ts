@@ -182,13 +182,15 @@ export const DESKTOP_CONTROL_MAC_URL_BROWSERS: readonly {
 ];
 
 /**
- * The browser a macOS `launch` names, by a bundle's file name (with or without `.app`) or a bundle
- * id of `DESKTOP_CONTROL_MAC_URL_BROWSERS`, or `null`. Read as the executable reads it
- * (`mac_browser_family`): ASCII letters in any case, nothing trimmed (`launch_url_mac_apps.json`).
+ * The browser a macOS `launch` names, by a bundle's file name (with or without a lower-case `.app`,
+ * the only suffix the executable reads as a file name) or a bundle id of
+ * `DESKTOP_CONTROL_MAC_URL_BROWSERS`, or `null`. Read as the executable reads it
+ * (`mac_browser_family`): ASCII letters in any case otherwise, nothing trimmed
+ * (`launch_url_mac_apps.json`).
  */
 export function desktopControlMacUrlBrowser(app: string): DesktopControlUrlBrowserFamily | null {
   const lower = asciiLower(app);
-  const name = lower.endsWith('.app') ? lower.slice(0, -'.app'.length) : lower;
+  const name = asciiLower(app.endsWith('.app') ? app.slice(0, -'.app'.length) : app);
   return (
     DESKTOP_CONTROL_MAC_URL_BROWSERS.find(
       (browser) => name === asciiLower(browser.name) || lower === asciiLower(browser.bundleId),

@@ -5,7 +5,7 @@ mod cursor_overlay;
 mod disposition;
 mod interaction;
 mod keyboard_mouse;
-mod launch_url;
+pub(crate) mod launch_url;
 mod notifications;
 mod observation;
 mod overlay_skipped;

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -22,6 +23,10 @@ pub struct LaunchOptions {
     /// requested `0` to a real free port before the adapter ever sees it, so
     /// by the time `launch_app` runs, this is either absent or one exact port.
     pub cdp_port: Option<u16>,
+    /// macOS: when not empty, the bundle the launch resolves to must have one of these bundle ids
+    /// (letter case ignored), read right before it is opened; otherwise nothing is launched.
+    /// Empty places no such limit. Other adapters do not read it.
+    pub bundle_ids: Vec<String>,
 }
 
 impl Default for LaunchOptions {
@@ -34,6 +39,7 @@ impl Default for LaunchOptions {
             attach_if_running: true,
             activate: false,
             cdp_port: None,
+            bundle_ids: Vec::new(),
         }
     }
 }
