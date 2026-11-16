@@ -23,7 +23,7 @@ Windows と macOS arm64 用の CLI の build に要る部分。
 
 `crates/linux`、`crates/ffi`、`apps`（説明のサイト）、`npm`、`benchmarks`、`probes`、`assets`、`docs`、`tests`、`scripts`、`.github`、`.githooks`、`.agents`、`.claude`、`.git`、root の説明の文書（`README.md`、`AGENTS.md`、`CHANGELOG.md`、`CONCEPTS.md`、`CONTRIBUTING.md` など）、`clippy.toml`、`deny.toml`、`.gitleaks.toml` など build に要らない設定。
 
-macOS のソースは取り込み済み。macOS（Apple シリコン）では、アプリ側で有効にしてあり、配布物にも実行ファイルを入れている。macOS でまだ無いのは、clipboard helper、カーソルの表示（Team のカーソルを含む）、`launch --url` で、別の段階で扱う。
+macOS のソースは取り込み済み。macOS（Apple シリコン）では、アプリ側で有効にしてあり、配布物にも実行ファイルを入れている。macOS でまだ無いのは、clipboard helper と `launch --url` で、別の段階で扱う。カーソルの表示（Team のカーソルを含む）は 2026-11-16 に有効にした（下の表の `crates/macos/src/system/cursor_overlay/` の行）。
 
 ## 取り込んだ後に消したもの
 
@@ -295,6 +295,13 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `../../../build-desktop-control.mjs` | repo root の build script。darwin-arm64 では CLI の package だけを build し（`-p` で CLI の package を指定する。既定の members にある Windows の crate は macOS で compile できないため）、拡張子なし・実行可の出力と同じ形式の封印を作る。Windows の cargo 引数・出力・封印は今までどおり。macOS では、出来た実行ファイルの中に相対の読み込みパスの文字列（`@rpath/`・`@loader_path/`・`@executable_path/`）があれば build を失敗させる（アプリの起動の規則がその文字列を見て拒否するため） |
 | `VENDORED.md` | macOS の取り込みと、この段階の manifest・lock・ソース・試験の変更を記録した |
 | `crates/macos/src/system/window/window_inventory_global.rs`・`cg_window_exact.rs`・`cg_window_exact_tests.rs`・`window_inventory_global_focus_tests.rs`・`cg_window.rs`（1 行目に変更の注記を足した）、新しい `crates/macos/src/system/window/window_inventory_global_focus_layer.rs` | macOS のシステムのダイアログ（画面収録の確認など。持ち主は最前面の `com.apple.UserNotificationCenter`、CoreGraphics の layer は 8）が最前面にある間、アプリを指定しない `list-windows` と `--window-id` を使うコマンドが、`frontmost_window_join` のやり直しを期限まで繰り返して TIMEOUT になっていた。一覧は layer 0 の窓だけを持つので、AX のフォーカスのある窓（ダイアログ）がどの記録とも合わなかった。最前面のアプリのフォーカスの読み取りの直後に、その窓の番号で CoreGraphics にその 1 つの窓だけを問い合わせ（`exact_window_owner_layer_until`。`CGWindowListCreateDescriptionFromArray` で、layer を問わず持ち主の pid と layer を読む）、窓が実在し、持ち主が最前面のアプリと同じ pid で、layer が 0 でない時だけ、フォーカスを「一覧の中に無い」とする（`read_frontmost_in_inventory`。どの窓も `is_focused: false`、`focused_only` は空）。番号が読めない・CoreGraphics に無い・layer 0・別の pid・問い合わせの失敗の時は、フォーカスをそのままにし、今までどおり `frontmost_window_join` でやり直す。`cg_window.rs` は `int_field` を crate の `system` の中から使えるようにしただけ。試験: 判定の全部の場合、一覧の成功と `focused_only` の空、確かめられない時のやり直し、layer 0 のフォーカスが今までどおり合うこと、1 つの窓の読み取りの欠け・重複・番号の違い |
+| `crates/macos/src/system/cursor_overlay/spawn.rs`（1 行目に変更の注記を足した） | 描画のプロセスを起動する前の確かめで、自分の実行ファイルと見なす名前（file stem）に、Sprint Coder が同梱する名前 `sprint-coder-desktop-control` を足した（`is_own_image`。取り込み元の名前も今までどおり。どちらも完全に一致する時だけ）。同梱の名前では `update` が何もせずに成功を返し、カーソルが描かれなかった。また `Retire` を、その agent の socket 1 つにだけ session の `Disable` を送る形にした（`retire_agent`・`retire_at`。Windows と同じく、探さない・起動しない。聞いている描画のプロセスが無ければ何もせずに成功）。変更前のコードのままでは、`Retire` が描画の制御として送られ、描画のプロセスが無ければ新しく起動して、終わった Worker のカーソルを描くことになっていた（macOS ではカーソルを切っていたので、実際には起きていない） |
+| `crates/macos/src/system/cursor_overlay/child.rs`（1 行目に変更の注記を足した） | 描画のプロセスは、起動の最初に `host_watch` で host を見張り、見張れなければ始めない。1 秒ごとの session の確かめで host が終わっていれば、session の終わりと同じく自分で終わる。自分の agent 宛ての `Retire` を受けた時も `Disable` と同じく消えて終わる（`ends_renderer`。変更前のコードのままでは、指示の無い制御として挨拶のカーソルを描くことになっていた） |
+| `crates/macos/src/system/cursor_overlay/mod.rs`（1 行目に変更の注記を足した） | `host_watch` を足した |
+| `crates/macos/src/system/cursor_overlay/host_watch.rs`（新しく足した） | 環境変数 `SPRINT_CODER_DESKTOP_HOST_PID` の process（Sprint Coder の Main）の終わりを、描画のプロセスの起動の時に kqueue（`EVFILT_PROC`・`NOTE_EXIT`、`EV_RECEIPT` で登録の成否を読む）で見張り、終わったかを答える。登録は pid ではなく process に結び付くので、後で同じ pid を持つ別の process を host と見誤らない。終わりの知らせは 1 回しか来ないので、読んだら覚えておく。変数が無ければ見張らない（従来どおり session だけで終わる）。値が読めない（正の `pid_t` でない）・登録できない（終わった process、zombie を含む）時は、host は既に無いと見なし、描画のプロセスを始めない。`SPRINT_CODER_DESKTOP_CONTROL_IMAGE` は読まない（macOS では同梱の実行ファイルをそのパスから直接動かし、実行ごとの写しを使わないため） |
+| `crates/macos/src/system/cursor_overlay/host_watch_tests.rs`（新しく足した） | 上の試験。値の読み方、試験が起動した `/bin/sleep` を見張り、生きている間は終わっていない・止めた後は終わったと答え続けること、reap の前でも終わったと答えること、既に終わった process と zombie は最初から終わったと答えること |
+| `crates/macos/src/system/cursor_overlay/spawn_tests.rs`（1 行目に変更の注記を足した） | 同梱の名前と upstream の名前が通り、似た別の名前・folder の名前・空は通らないことの試験。`Retire` が、聞いている描画のプロセスが無ければ何も作らずに成功し、聞いていればその socket に session の `Disable` を送って受け取りの返事を待つことの試験 |
+| `crates/macos/src/system/cursor_overlay/child_tests.rs`（1 行目に変更の注記を足した） | `Retire` と `Disable` が描かずに描画のプロセスを終わらせ、`Hide` は終わらせないことの試験 |
 
 ## build と試験
 

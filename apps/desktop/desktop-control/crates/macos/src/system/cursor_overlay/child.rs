@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, CURSOR_IDLE_REST_MS, CursorMotion, CursorMotionProfile, CursorOverlayConfig,
     CursorOverlayControl, CursorOverlayInstruction, CursorOverlayStyle, CursorPhase, CursorPose,
@@ -35,6 +36,12 @@ pub(crate) fn entry_from_env() -> Option<Result<(), AdapterError>> {
 }
 
 fn run() -> Result<(), AdapterError> {
+    // Registered first, while the host is still waiting on the command that
+    // started this renderer, so its id still names the host.
+    let mut host = super::host_watch::HostWatch::from_env();
+    if host.host_gone() {
+        return Ok(());
+    }
     let initial = read_control(std::io::stdin())?;
     if !session_active(initial.session_id(), initial.agent_id()) {
         return Ok(());
@@ -61,7 +68,8 @@ fn run() -> Result<(), AdapterError> {
     let mut checked_session = quiet_since;
     loop {
         if checked_session.elapsed() >= Duration::from_secs(1) {
-            if !session_active(initial.session_id(), initial.agent_id()) {
+            // The host's exit ends the renderer as the session's end does.
+            if host.host_gone() || !session_active(initial.session_id(), initial.agent_id()) {
                 return cleanup(socket);
             }
             checked_session = std::time::Instant::now();
@@ -81,7 +89,9 @@ fn run() -> Result<(), AdapterError> {
                 {
                     continue;
                 }
-                if control.is_disable() {
+                // A retire reaches only its own agent's renderer (checked above)
+                // and ends it as a disable does.
+                if ends_renderer(&control) {
                     drop(listener);
                     cleanup(socket)?;
                     let _ = stream.write_all(&[1]);
@@ -144,9 +154,16 @@ fn prepare_stream(stream: &UnixStream) -> std::io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(1)))
 }
 
+/// Whether a control ends the renderer rather than drawing: a disable, or a
+/// retire (which carries no instruction and would otherwise be drawn as a
+/// fresh greeting cursor).
+fn ends_renderer(control: &CursorOverlayControl) -> bool {
+    control.is_disable() || control.is_retire()
+}
+
 fn handle(control: &CursorOverlayControl, state: &mut OverlayState) -> Result<bool, AdapterError> {
     control.validate()?;
-    if control.is_disable() {
+    if ends_renderer(control) {
         return Ok(false);
     }
     if let Some(image_changed) = absorb_settings(control, state) {

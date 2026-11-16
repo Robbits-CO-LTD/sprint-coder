@@ -1,5 +1,23 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use std::thread;
+
+/// A retire carries no instruction; drawn, it would put up a fresh greeting
+/// cursor for the agent that just finished. It ends the renderer instead, as a
+/// disable does, before anything reaches the screen.
+#[test]
+fn a_retire_ends_the_renderer_like_a_disable_and_draws_nothing() {
+    let retire = CursorOverlayControl::retire("run-retire".into(), "worker-a".into());
+    let disable = CursorOverlayControl::disable("run-retire".into());
+    assert!(ends_renderer(&retire));
+    assert!(ends_renderer(&disable));
+    assert!(!ends_renderer(&CursorOverlayControl::hide(
+        "run-retire".into()
+    )));
+    let mut state = OverlayState::default();
+    assert!(!handle(&retire, &mut state).expect("a retire is handled"));
+    assert!(!handle(&disable, &mut state).expect("a disable is handled"));
+}
 
 #[test]
 fn accepted_stream_waits_for_a_delayed_control() {

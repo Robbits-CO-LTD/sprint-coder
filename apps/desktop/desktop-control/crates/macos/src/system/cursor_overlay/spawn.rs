@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, CURSOR_ARRIVAL_TIMEOUT_MS, CursorOverlayControl, ErrorCode,
 };
@@ -13,8 +14,25 @@ use super::child::{MARKER, SOCKET_ENV};
 
 const MAX_INSTRUCTION_BYTES: usize = 4 * 1024;
 
+/// The file stem the upstream build carries.
+const IMAGE_STEM: &str = "agent-desktop";
+/// The stem the same binary carries when Sprint Coder ships it.
+const BUNDLED_IMAGE_STEM: &str = "sprint-coder-desktop-control";
+
+/// Whether `path` is this tool's own binary, which alone may be started again as
+/// the renderer (a library host running under another image must not be). Only
+/// the final component counts, and it must be one of the two names exactly.
+fn is_own_image(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|stem| stem == IMAGE_STEM || stem == BUNDLED_IMAGE_STEM)
+}
+
 pub(crate) fn update(control: &CursorOverlayControl) -> Result<(), AdapterError> {
     control.validate()?;
+    if control.is_retire() {
+        return retire_agent(control);
+    }
     if control.is_disable() || (control.is_transient() && control.agent_id().is_none()) {
         return broadcast(control);
     }
@@ -48,6 +66,25 @@ pub(crate) fn update(control: &CursorOverlayControl) -> Result<(), AdapterError>
         return Ok(());
     }
     spawn(&socket, control, deadline)
+}
+
+/// Takes down the one renderer of the agent a `Retire` names, as the Windows
+/// renderer does: a session `Disable` goes to that agent's socket alone, a form
+/// every renderer of this protocol ends on. Nothing is discovered or started,
+/// so an agent with no renderer listening has nothing to take down.
+fn retire_agent(control: &CursorOverlayControl) -> Result<(), AdapterError> {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let socket = super::endpoint::path(control.session_id(), control.agent_id())?;
+    retire_at(&socket, control, deadline)
+}
+
+fn retire_at(
+    socket: &Path,
+    control: &CursorOverlayControl,
+    deadline: Instant,
+) -> Result<(), AdapterError> {
+    let disable = CursorOverlayControl::disable(control.session_id().to_owned());
+    send_until(socket, &disable, deadline).map(|_| ())
 }
 
 fn broadcast(control: &CursorOverlayControl) -> Result<(), AdapterError> {
@@ -97,7 +134,7 @@ fn spawn(
         AdapterError::internal("Could not locate the cursor overlay executable")
             .with_platform_detail(error.to_string())
     })?;
-    if executable.file_stem().and_then(|name| name.to_str()) != Some("agent-desktop") {
+    if !is_own_image(&executable) {
         return Ok(());
     }
     let payload = serde_json::to_vec(control).map_err(|error| {
