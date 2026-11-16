@@ -93,7 +93,8 @@ const hire = (
   ) as Promise<Record<string, unknown>>;
 
 describe('the Team’s desktop cursors as Main and the Runtime Host start', () => {
-  // Only Windows x64 has the cursors: elsewhere (macOS, Linux) they stay off whatever is given.
+  // Only Windows x64 and Apple silicon macOS have the cursors: elsewhere they stay off whatever is
+  // given.
   const built = desktopControlTeamCursorsEnabled(undefined, process.platform, process.arch);
   afterEach(() => {
     vi.unstubAllEnvs();

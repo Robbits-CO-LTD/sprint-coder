@@ -1,9 +1,49 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #pragma once
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 
 extern const CGFloat ADRippleSize;
+extern const NSWindowLevel ADCursorLevel;
+extern const NSWindowLevel ADEffectLevel;
+
+/// Names the window the cursor is drawn at the height of (`named` false for
+/// none; named with number 0 for one whose number could not be read, which
+/// hides the overlay) and reads where that puts the overlay; true when the
+/// named window changed.
+bool ADSetAnchor(bool named, uint32_t number);
+bool ADAnchored(void);
+/// Whether the named window is not on the screen now, so the overlay is held off it.
+bool ADPlacementHidden(void);
+/// On the screen, or held off it only while the named window is not.
+bool ADShown(NSWindow *window);
+/// Takes `window` off the screen for good (not held to come back).
+void ADHide(NSWindow *window);
+void ADForgetHeld(void);
+/// Reads again where the named window puts the overlay.
+void ADResolvePlacement(void);
+/// Where an overlay window goes among the others: the effects lowest, then the
+/// ripple, the cursor and, on top, its label.
+typedef enum {
+    ADRankHighlight = 0,
+    ADRankTrail = 1,
+    ADRankCaret = 2,
+    ADRankRipple = 3,
+    ADRankCursor = 4,
+    ADRankBubble = 5,
+} ADRank;
+/// Whether every window in `visible` (the shown windows, lowest rank first)
+/// already sits where the placement wants it.
+bool ADPlacementSettled(NSArray<NSWindow *> *visible);
+/// Shows `window` where the placement wants it: at `freeLevel` above every window
+/// when none is named, at the named window's height otherwise, where every
+/// window shown there is stacked again in the order of its `rank`.
+void ADPlace(NSWindow *window, NSWindowLevel freeLevel, ADRank rank);
+/// Places again the effect windows that are shown (or held).
+void ADPlaceEffectsShown(void);
+/// The effect windows that are shown (or held), lowest rank first.
+NSArray<NSWindow *> *ADEffectWindowsShown(void);
 
 typedef struct {
     double fill[3];
