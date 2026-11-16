@@ -15,6 +15,10 @@ mod system;
 mod trace;
 mod window_owner;
 
+/// macOS only: `command_policy` judges a `launch --url` with it before the permission refusal.
+#[cfg(target_os = "macos")]
+pub(crate) use parse::build_launch_options;
+
 #[cfg(test)]
 mod test_support;
 

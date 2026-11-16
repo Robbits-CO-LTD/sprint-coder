@@ -35,6 +35,8 @@ export type DesktopControlDisplayLookup = Readonly<{
   names?: boolean;
   /** The Task whose earlier runs' windows may name a window id. */
   taskId?: string;
+  /** The OS the run is on; by default this one. */
+  platform?: NodeJS.Platform;
 }>;
 
 type Kind = DesktopActionStep['kind'];
@@ -244,6 +246,10 @@ const FRONT_NOTE = '対象の窓が前面に出ます。';
 const LAUNCH_NOTE =
   '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。';
 const LAUNCH_FRONT_NOTE = '起動した窓が前面に出ます。';
+// macOS `launch --url` in the background: only a browser it starts is kept from the front
+// (`activates = NO`); a running browser is asked to open the page, and may come forward itself.
+const MAC_URL_LAUNCH_NOTE =
+  'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
 // Minimizing hands the front to another window, so it is never covered by an app-wide grant.
 const MINIMIZE_NOTE = '窓を最小化します。最小化すると、次の窓が手前に来ます。';
@@ -464,7 +470,7 @@ export function desktopControlApprovalAction(
         : knownWindows.get(lookup.taskId),
     );
     if (lookup.names === false) snapshots.disable();
-    const action = describe(argv, snapshots);
+    const action = describe(argv, snapshots, lookup.platform ?? process.platform);
     return desktopApprovalActionSchema.parse(action);
   } catch {
     // Never in the way of the approval itself: the card then says it could not describe the run.
@@ -486,7 +492,11 @@ export function desktopControlApprovalAction(
   }
 }
 
-function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopApprovalAction {
+function describe(
+  argv: readonly string[],
+  snapshots: SnapshotReader,
+  platform: NodeJS.Platform,
+): DesktopApprovalAction {
   const mode = displayMode(desktopControlArgvMode(argv));
   const read = readDesktopControlCommand(argv);
   const notes: string[] = [];
@@ -603,9 +613,16 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
   if (mode === 'background' && commands.some((command) => PART_OPERATIONS.has(command)))
     notes.unshift(BEHIND_NOTE);
   // A launch that opens a URL is decided on its own card every time, never by a Task grant.
-  const urlLaunch = all.some((step) => step.textRole === 'url') || launchesUrl(read);
-  if (all.some((step) => step.kind === 'launch' && step.mode !== 'foreground'))
+  const urls = urlLaunches(read, mode);
+  const urlLaunch = all.some((step) => step.textRole === 'url') || urls.any;
+  const behind = all.filter((step) => step.kind === 'launch' && step.mode !== 'foreground');
+  // On macOS a URL launch has its own note; a plain launch beside it in a batch keeps its own.
+  const macUrl = platform === 'darwin' && urlLaunch;
+  if (behind.length > 0 && (!macUrl || behind.some((step) => step.textRole !== 'url')))
     notes.unshift(LAUNCH_NOTE);
+  // Also for one a long batch does not list: the note is about the run, not the steps shown.
+  if (macUrl && (urls.behind || behind.some((step) => step.textRole === 'url')))
+    notes.unshift(MAC_URL_LAUNCH_NOTE);
   if (urlLaunch) notes.unshift(URL_NOTE);
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
@@ -791,14 +808,32 @@ function cutNote({ step }: { step: DesktopActionStep }): string {
   return step.textRole === 'url' ? URL_CUT_NOTE : TEXT_CUT_NOTE;
 }
 
-/** Whether the run has a `launch` with a URL anywhere, shown or not. */
-function launchesUrl(read: ReturnType<typeof readDesktopControlCommand>): boolean {
-  if (read === null || read.help) return false;
-  if (read.command === 'launch') return read.options.has('--url');
-  if (read.command !== 'batch') return false;
-  return (readBatchEntries(read.positionals) ?? []).some(
+/**
+ * Whether the run has a `launch` with a URL anywhere, shown or not, and whether one of them is not
+ * brought to the front (as the steps of a batch are judged: all of a `--headed` batch are).
+ */
+function urlLaunches(
+  read: ReturnType<typeof readDesktopControlCommand>,
+  mode: Mode,
+): { any: boolean; behind: boolean } {
+  if (read === null || read.help) return { any: false, behind: false };
+  if (read.command === 'launch') {
+    const any = read.options.has('--url');
+    return { any, behind: any && mode !== 'foreground' };
+  }
+  if (read.command !== 'batch') return { any: false, behind: false };
+  const urls = (readBatchEntries(read.positionals) ?? []).filter(
     ({ command, args }) => command === 'launch' && args['url'] !== undefined,
   );
+  const headed = mode === 'foreground' && read.options.has('--headed');
+  return {
+    any: urls.length > 0,
+    behind:
+      !headed &&
+      urls.some(
+        ({ command, args }) => desktopControlBatchEntryMode(command, args) !== 'foreground',
+      ),
+  };
 }
 
 /**

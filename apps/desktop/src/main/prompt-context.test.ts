@@ -489,7 +489,25 @@ describe('prompt context compiler', () => {
     );
     expect(text).toContain('PERM_DENIED');
     expect(text).toContain('clipboard-set・clipboard-clear');
-    expect(text).toContain('launch の --url はまだ使えない');
+    expect(text).not.toContain('launch の --url はまだ使えない');
+    // launch --url by the macOS names of the browsers, never Safari.
+    expect(text).toContain('launch <ブラウザー名> --url <URL>');
+    expect(text).toContain(
+      'Google Chrome・Microsoft Edge・Brave Browser・Vivaldi・Opera・Chromium・Firefox のどれかを、.app を除いた名前か bundle ID（com.google.Chrome など）で渡す',
+    );
+    expect(text).toContain('Safari には --url を付けられない');
+    expect(text).toContain('handed_off: true で、window は必ず無い');
+    expect(text).toContain('その is_focused を確かめてから');
+    // A browser that takes the front is given it back, and the result says whether it was.
+    expect(text).toContain('直前に前面だったアプリや窓を前面に戻す');
+    expect(text).toContain(
+      '結果の suggestion に書かれる（delivery_uncertain の時は details.front にも）',
+    );
+    expect(text).toContain(
+      '新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがある',
+    );
+    expect(text).not.toContain('ブラウザーが自分で前に出ることがある');
+    expect(text).toContain('delivery_uncertain');
     expect(text).toContain('Terminal・iTerm・Ghostty・Warp など');
     // Nothing of Windows.
     for (const windowsOnly of [
@@ -497,8 +515,7 @@ describe('prompt context compiler', () => {
       'calc・charmap',
       'PowerShell',
       'UAC',
-      'Microsoft Edge',
-      '--url <URL>',
+      'スタートメニューの名前。Google Chrome・Microsoft Edge',
     ])
       expect(text, windowsOnly).not.toContain(windowsOnly);
     // And the Windows guidance keeps its own lines.

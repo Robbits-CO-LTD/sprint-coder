@@ -10,9 +10,12 @@ import {
 } from './desktop-control';
 import { desktopControlApprovalAction } from './desktop-control-display';
 import {
+  DESKTOP_CONTROL_MAC_URL_BROWSERS,
   DESKTOP_CONTROL_URL_BROWSERS,
   DESKTOP_CONTROL_URL_MAX,
   desktopControlLaunchUrl,
+  desktopControlMacUrlBrowser,
+  desktopControlMacUrlBrowserById,
   desktopControlUrlBrowser,
   launchUrlShapeRefusal,
 } from './desktop-control-launch-url';
@@ -146,6 +149,49 @@ describe('launch --url: the browser', () => {
   });
 });
 
+describe('launch --url: the browser on macOS', () => {
+  it('knows the same browsers, by name and bundle id, as the executable', () => {
+    const table = /MAC_URL_BROWSER_TABLE: &\[[^\]]*\] = &\[([\s\S]*?)\n\];/u.exec(
+      EXECUTABLE_BROWSERS,
+    );
+    expect(table).not.toBeNull();
+    const listed = [
+      ...table![1]!.matchAll(
+        /\(\s*"([^"]+)",\s*"([^"]+)",\s*BrowserFamily::(Chromium|Firefox),?\s*\)/gu,
+      ),
+    ].map(([, name, bundleId, family]) => ({ name, bundleId, family: family!.toLowerCase() }));
+    expect(listed).toEqual(DESKTOP_CONTROL_MAC_URL_BROWSERS);
+  });
+
+  it('judges every app of the shared macOS table as the executable does, nothing trimmed', () => {
+    const apps = JSON.parse(
+      readFileSync(
+        join(
+          __dirname,
+          '..',
+          '..',
+          'desktop-control',
+          'src',
+          'dispatch',
+          'launch_url_mac_apps.json',
+        ),
+        'utf8',
+      ),
+    ) as { app: string; family: string | null }[];
+    expect(apps.length).toBeGreaterThan(15);
+    for (const { app, family } of apps)
+      expect(desktopControlMacUrlBrowser(app), JSON.stringify(app)).toBe(family);
+  });
+
+  it('reads a bundle id as the browser it belongs to, letter case ignored', () => {
+    expect(desktopControlMacUrlBrowserById('com.google.Chrome')).toBe('chromium');
+    expect(desktopControlMacUrlBrowserById('COM.GOOGLE.CHROME')).toBe('chromium');
+    expect(desktopControlMacUrlBrowserById('org.mozilla.firefox')).toBe('firefox');
+    for (const id of [null, 'com.apple.Safari', 'com.google.Chrome.helper', 'Google Chrome', ''])
+      expect(desktopControlMacUrlBrowserById(id), String(id)).toBeNull();
+  });
+});
+
 describe('launch --url: the arguments Main lets run', () => {
   it('runs a browser with one acceptable URL, in the background unless --activate', () => {
     for (const argv of [
@@ -239,11 +285,12 @@ describe('launch --url: the arguments Main lets run', () => {
 });
 
 describe('launch --url: the approval card', () => {
-  const card = (argv: readonly string[]) => {
+  const card = (argv: readonly string[], platform: NodeJS.Platform = 'win32') => {
     // No snapshot is read for a launch; the folder does not exist.
     const action = desktopControlApprovalAction(argv, {
       stateRoot: join(tmpdir(), 'sc-dc-launch-url-no-state'),
       names: false,
+      platform,
     });
     expect(desktopApprovalActionSchema.parse(action)).toEqual(action);
     return action;
@@ -273,6 +320,85 @@ describe('launch --url: the approval card', () => {
       allowTaskGrant: true,
     });
     expect(card(['launch', CHROME]).textRole).toBeUndefined();
+  });
+
+  it('on macOS says only what it can about the front: a running browser may come forward', () => {
+    const notes = card(
+      ['launch', 'Google Chrome', '--url', 'https://example.com/'],
+      'darwin',
+    ).notes;
+    expect(notes).toEqual([
+      expect.stringContaining('ブラウザーの新しい窓で開きます') as unknown as string,
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。',
+    ]);
+    const batch = card(
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'launch', args: { app: 'Firefox', url: 'https://example.com/' } },
+        ]),
+      ],
+      'darwin',
+    );
+    expect(batch.notes).toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。',
+    );
+    // A plain launch beside it in a batch keeps its own note.
+    const mixed = card(
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'launch', args: { app: 'Firefox', url: 'https://example.com/' } },
+          { command: 'launch', args: { app: 'TextEdit' } },
+        ]),
+      ],
+      'darwin',
+    );
+    expect(mixed.notes).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
+    expect(mixed.notes).toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。',
+    );
+    // A URL launch a long batch does not list still gets the note; one only in front does not.
+    const plain = Array.from({ length: 20 }, () => ({
+      command: 'launch',
+      args: { app: 'TextEdit' },
+    }));
+    const url = { app: 'Firefox', url: 'https://example.com/' };
+    const hidden = card(
+      ['batch', JSON.stringify([...plain, { command: 'launch', args: url }])],
+      'darwin',
+    );
+    expect(hidden.steps).toHaveLength(20);
+    expect(hidden.stepsOmitted).toBe(1);
+    expect(hidden.notes).toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。',
+    );
+    expect(hidden.notes).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
+    const hiddenFront = card(
+      [
+        'batch',
+        JSON.stringify([...plain, { command: 'launch', args: { ...url, activate: true } }]),
+      ],
+      'darwin',
+    );
+    expect(hiddenFront.stepsOmitted).toBe(1);
+    expect(hiddenFront.notes).not.toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。',
+    );
+    // On Windows the same long batch reads as before: no macOS note.
+    expect(
+      card(['batch', JSON.stringify([...plain, { command: 'launch', args: url }])]).notes,
+    ).not.toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。',
+    );
+    // A plain launch on macOS keeps its note.
+    expect(card(['launch', 'TextEdit'], 'darwin').notes).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
   });
 
   it('keeps the host of a long URL whole and cuts the middle of the rest', () => {

@@ -319,6 +319,25 @@ pub(crate) fn check_variable() -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// The one pass through the refusal, for giving the front back after a launch: a running
+/// browser the launch was passed to took the front from the app that had it, which is often
+/// Sprint Coder itself (its approval card was just pressed). Giving the front back is not
+/// operating Sprint Coder for the AI, so, while the returned scope lives, nothing is refused;
+/// its only user (`launch_front::bring_app_back`) sets the app's `AXFrontmost` and nothing
+/// else. A variable that cannot be read still refuses, as every operation.
+pub(crate) fn front_return_pass() -> Result<ActingScope, AdapterError> {
+    let acting = ACTING.with(|cell| cell.borrow().clone());
+    let operation = match acting {
+        Some(acting) if acting.owner == RefusedWindowOwner::Unreadable => {
+            return Err(refusal(acting.operation, Verdict::Unreadable, None)
+                .unwrap_or_else(|| AdapterError::internal("Missing refusal")));
+        }
+        Some(acting) => acting.operation,
+        None => "launch_app",
+    };
+    Ok(enter(&RefusedWindowOwner::Nobody, operation))
+}
+
 pub(crate) fn check_named_app(
     identifier: &str,
     deadline: std::time::Instant,

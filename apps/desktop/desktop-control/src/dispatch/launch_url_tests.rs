@@ -28,7 +28,11 @@ fn every_canonical_url_main_seals_is_taken_unchanged() {
             case.url
         );
         assert_eq!(
-            launch_url_args("C:\\Fake\\chrome.exe", canonical).unwrap(),
+            launch_url_args_on(false, "C:\\Fake\\chrome.exe", canonical).unwrap(),
+            vec!["--new-window".to_owned(), canonical.clone()]
+        );
+        assert_eq!(
+            launch_url_args_on(true, "Google Chrome", canonical).unwrap(),
             vec!["--new-window".to_owned(), canonical.clone()]
         );
     }
@@ -43,7 +47,15 @@ fn every_url_main_refuses_is_refused_here_as_given() {
             case.url
         );
         assert_eq!(
-            launch_url_args("chrome", &case.url).unwrap_err().code(),
+            launch_url_args_on(false, "chrome", &case.url)
+                .unwrap_err()
+                .code(),
+            "INVALID_ARGS"
+        );
+        assert_eq!(
+            launch_url_args_on(true, "Google Chrome", &case.url)
+                .unwrap_err()
+                .code(),
             "INVALID_ARGS"
         );
     }
@@ -127,7 +139,7 @@ fn only_known_browsers_take_a_url_by_their_file_name() {
     ] {
         assert_eq!(browser_family(app), None, "{app}");
         assert_eq!(
-            launch_url_args(app, "https://example.com/")
+            launch_url_args_on(false, app, "https://example.com/")
                 .unwrap_err()
                 .code(),
             "INVALID_ARGS"
@@ -167,7 +179,66 @@ fn the_host_and_its_labels_are_bounded_as_dns_bounds_them() {
 #[test]
 fn firefox_gets_its_own_new_window_switch() {
     assert_eq!(
-        launch_url_args("C:\\Fake\\firefox.exe", "https://example.com/").unwrap(),
+        launch_url_args_on(false, "C:\\Fake\\firefox.exe", "https://example.com/").unwrap(),
         vec!["-new-window".to_owned(), "https://example.com/".to_owned()]
+    );
+    assert_eq!(
+        launch_url_args_on(true, "org.mozilla.firefox", "https://example.com/").unwrap(),
+        vec!["-new-window".to_owned(), "https://example.com/".to_owned()]
+    );
+}
+
+/// The macOS names Main's `desktopControlMacUrlBrowser` is tested against too: a bundle's file
+/// name (with or without `.app`) or bundle id, letter case ignored, nothing trimmed.
+#[test]
+fn every_mac_app_of_the_shared_table_is_judged_as_main_judges_it() {
+    #[derive(serde::Deserialize)]
+    struct App {
+        app: String,
+        family: Option<String>,
+    }
+    let apps: Vec<App> =
+        serde_json::from_str(include_str!("launch_url_mac_apps.json")).expect("the table reads");
+    assert!(apps.len() > 15);
+    for App { app, family } in &apps {
+        let judged = mac_browser_family(app).map(|family| match family {
+            BrowserFamily::Chromium => "chromium",
+            BrowserFamily::Firefox => "firefox",
+        });
+        assert_eq!(judged, family.as_deref(), "{app:?}");
+        let args = launch_url_args_on(true, app, "https://example.com/");
+        assert_eq!(args.is_ok(), family.is_some(), "{app:?}");
+    }
+}
+
+#[test]
+fn the_mac_table_names_each_browser_once_by_name_and_by_id() {
+    for (index, (file, id, _)) in MAC_URL_BROWSER_TABLE.iter().enumerate() {
+        assert!(!file.ends_with(".app") && !file.contains('/'), "{file}");
+        assert!(id.contains('.') && !id.contains(' '), "{id}");
+        for (other_file, other_id, _) in &MAC_URL_BROWSER_TABLE[index + 1..] {
+            assert!(!file.eq_ignore_ascii_case(other_file), "{file}");
+            assert!(!id.eq_ignore_ascii_case(other_id), "{id}");
+        }
+    }
+}
+
+#[test]
+fn a_mac_url_launch_limits_the_bundle_that_opens_to_the_browsers_of_its_kind() {
+    let chromium = mac_family_bundle_ids("Google Chrome");
+    assert!(chromium.contains(&"com.google.Chrome".to_owned()));
+    assert!(chromium.contains(&"com.microsoft.edgemac".to_owned()));
+    assert!(!chromium.contains(&"org.mozilla.firefox".to_owned()));
+    assert_eq!(
+        mac_family_bundle_ids("org.mozilla.firefox"),
+        ["org.mozilla.firefox"]
+    );
+    for app in ["TextEdit", "Safari", "Firefox.APP", ""] {
+        assert!(mac_family_bundle_ids(app).is_empty(), "{app:?}");
+    }
+    // Only macOS reads the limit; elsewhere it stays empty.
+    assert_eq!(
+        launch_url_bundle_ids("Google Chrome").is_empty(),
+        !cfg!(target_os = "macos")
     );
 }

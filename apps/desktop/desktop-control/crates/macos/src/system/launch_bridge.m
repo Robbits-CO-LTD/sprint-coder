@@ -162,6 +162,27 @@ bool agent_desktop_open_application(
             return true;
         }
         NSString *bundleID = [NSBundle bundleWithURL:url].bundleIdentifier;
+        // A launch limited to some bundle ids (`launch --url`): the bundle about to open must
+        // carry one of them, read here from the bundle itself, or nothing opens.
+        NSArray *allowedIDs = request[@"bundle_ids"];
+        if (allowedIDs != nil && !isStringArray(allowedIDs)) {
+            completeError(holder, @"Invalid launch request fields", 2, 0);
+            return true;
+        }
+        if (allowedIDs.count > 0) {
+            BOOL allowed = NO;
+            for (NSString *allowedID in allowedIDs) {
+                if (bundleID != nil &&
+                    [bundleID caseInsensitiveCompare:allowedID] == NSOrderedSame) {
+                    allowed = YES;
+                    break;
+                }
+            }
+            if (!allowed) {
+                completeError(holder, @"The application's bundle id is not one this launch allows", 5, 0);
+                return true;
+            }
+        }
         for (NSRunningApplication *running in workspace.runningApplications) {
             if ((bundleID != nil && [running.bundleIdentifier isEqualToString:bundleID]) ||
                 [running.bundleURL.URLByResolvingSymlinksInPath isEqual:url.URLByResolvingSymlinksInPath]) {
@@ -240,6 +261,20 @@ char *agent_desktop_copy_application_path(const uint8_t *bytes, size_t length, b
             }
             const char *path = url.path.fileSystemRepresentation;
             return path == NULL ? NULL : strdup(path);
+        } @catch (NSException *exception) {
+            (void)exception;
+            return NULL;
+        }
+    }
+}
+
+char *agent_desktop_copy_bundle_identifier(const uint8_t *bytes, size_t length) {
+    @autoreleasepool {
+        @try {
+            NSString *path = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
+            NSString *identifier = path == nil ? nil : [NSBundle bundleWithPath:path].bundleIdentifier;
+            const char *text = identifier.UTF8String;
+            return text == NULL ? NULL : strdup(text);
         } @catch (NSException *exception) {
             (void)exception;
             return NULL;
