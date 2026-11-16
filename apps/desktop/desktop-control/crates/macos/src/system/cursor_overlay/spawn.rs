@@ -14,27 +14,48 @@ use super::child::{MARKER, SOCKET_ENV};
 
 const MAX_INSTRUCTION_BYTES: usize = 4 * 1024;
 
-/// The file stem the upstream build carries.
-const IMAGE_STEM: &str = "agent-desktop";
-/// The stem the same binary carries when Sprint Coder ships it.
-const BUNDLED_IMAGE_STEM: &str = "sprint-coder-desktop-control";
+/// The file name the upstream build carries.
+const IMAGE_NAME: &str = "agent-desktop";
+/// The file name the same binary carries when Sprint Coder ships it.
+const BUNDLED_IMAGE_NAME: &str = "sprint-coder-desktop-control";
 
 /// Whether `path` is this tool's own binary, which alone may be started again as
 /// the renderer (a library host running under another image must not be). Only
-/// the final component counts, and it must be one of the two names exactly.
+/// the final component counts, and the whole of it must be one of the two names
+/// exactly: the binary has no extension on macOS, so `….old` is another file.
 fn is_own_image(path: &Path) -> bool {
-    path.file_stem()
+    path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|stem| stem == IMAGE_STEM || stem == BUNDLED_IMAGE_STEM)
+        .is_some_and(|name| name == IMAGE_NAME || name == BUNDLED_IMAGE_NAME)
+}
+
+/// Where `update` sends a control.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    /// To the one agent a retire names, never starting a renderer.
+    RetireAgent,
+    /// To every renderer of the session.
+    Broadcast,
+    /// To the renderer of the control's agent, started when there is none.
+    Agent,
+}
+
+fn route(control: &CursorOverlayControl) -> Route {
+    if control.is_retire() {
+        Route::RetireAgent
+    } else if control.is_disable() || (control.is_transient() && control.agent_id().is_none()) {
+        Route::Broadcast
+    } else {
+        Route::Agent
+    }
 }
 
 pub(crate) fn update(control: &CursorOverlayControl) -> Result<(), AdapterError> {
     control.validate()?;
-    if control.is_retire() {
-        return retire_agent(control);
-    }
-    if control.is_disable() || (control.is_transient() && control.agent_id().is_none()) {
-        return broadcast(control);
+    match route(control) {
+        Route::RetireAgent => return retire_agent(control),
+        Route::Broadcast => return broadcast(control),
+        Route::Agent => {}
     }
     if !control.is_transient()
         && !super::child::session_active(control.session_id(), control.agent_id())
@@ -65,16 +86,25 @@ pub(crate) fn update(control: &CursorOverlayControl) -> Result<(), AdapterError>
     if !super::child::session_active(control.session_id(), control.agent_id()) {
         return Ok(());
     }
+    // A mark an earlier retire of this agent left is for a renderer of that
+    // time; the renderer started now is wanted.
+    super::endpoint::take_retired_mark(&socket);
     spawn(&socket, control, deadline)
 }
 
 /// Takes down the one renderer of the agent a `Retire` names, as the Windows
 /// renderer does: a session `Disable` goes to that agent's socket alone, a form
-/// every renderer of this protocol ends on. Nothing is discovered or started,
-/// so an agent with no renderer listening has nothing to take down.
+/// every renderer of this protocol ends on. Nothing is discovered or started.
+///
+/// Under the startup lock, so a renderer another command is starting for the
+/// agent has bound (and is told) before this looks. A command stopped while it
+/// started one releases the lock with its death, before that renderer binds;
+/// so when no one is listening, a mark is left that such a renderer ends on.
 fn retire_agent(control: &CursorOverlayControl) -> Result<(), AdapterError> {
     let deadline = Instant::now() + Duration::from_secs(4);
     let socket = super::endpoint::path(control.session_id(), control.agent_id())?;
+    let lock_path = super::endpoint::lock_path()?;
+    let _lock = startup_lock(&lock_path, deadline)?;
     retire_at(&socket, control, deadline)
 }
 
@@ -84,7 +114,83 @@ fn retire_at(
     deadline: Instant,
 ) -> Result<(), AdapterError> {
     let disable = CursorOverlayControl::disable(control.session_id().to_owned());
-    send_until(socket, &disable, deadline).map(|_| ())
+    if send_until(socket, &disable, deadline)? {
+        return Ok(());
+    }
+    super::endpoint::leave_retired_mark(socket)
+}
+
+/// The descriptors above stderr this process holds open without close-on-exec,
+/// read before the renderer is forked. They are what a command's host handed
+/// down (a supervisor's pipes): the standard library opens its own with
+/// close-on-exec, so only inherited ones are left without it.
+fn inherited_descriptors() -> Vec<libc::c_int> {
+    let pid = unsafe { libc::getpid() };
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let Ok(needed) = usize::try_from(needed) else {
+        return Vec::new();
+    };
+    // Room for descriptors opened between the calls; a list that fills the
+    // buffer may have been cut short, so it is read again into a larger one.
+    let mut capacity = needed / entry + 32;
+    let entries = loop {
+        let mut entries = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0
+            };
+            capacity
+        ];
+        let Ok(bytes) = libc::c_int::try_from(capacity * entry) else {
+            return Vec::new();
+        };
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                bytes,
+            )
+        };
+        let Ok(written) = usize::try_from(written) else {
+            return Vec::new();
+        };
+        if written < capacity * entry {
+            entries.truncate(written / entry);
+            break entries;
+        }
+        capacity *= 2;
+    };
+    entries
+        .into_iter()
+        .map(|entry| entry.proc_fd)
+        .filter(|fd| *fd > 2)
+        .filter(|fd| {
+            let flags = unsafe { libc::fcntl(*fd, libc::F_GETFD) };
+            flags != -1 && flags & libc::FD_CLOEXEC == 0
+        })
+        .collect()
+}
+
+/// Makes the started process hold no descriptor but its stdin, stdout and
+/// stderr. Without this the renderer kept the pipes of the command that
+/// started it, and the command's host waited for those to close long after
+/// the command had ended. Set to close on exec in the forked child rather
+/// than closed, so the standard library's own pipe that reports a failed exec
+/// stays as it is; only `fcntl` runs between fork and exec.
+fn close_inherited_on_exec(command: &mut Command) {
+    let descriptors = inherited_descriptors();
+    unsafe {
+        command.pre_exec(move || {
+            for fd in &descriptors {
+                libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            Ok(())
+        });
+    }
 }
 
 fn broadcast(control: &CursorOverlayControl) -> Result<(), AdapterError> {
@@ -147,7 +253,9 @@ fn spawn(
             "Cursor overlay instruction exceeds the transport limit",
         ));
     }
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    close_inherited_on_exec(&mut command);
+    let mut child = command
         .env(MARKER, super::endpoint::PROTOCOL_VERSION)
         .env(SOCKET_ENV, socket)
         .process_group(0)

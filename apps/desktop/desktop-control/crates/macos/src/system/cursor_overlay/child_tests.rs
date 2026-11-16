@@ -19,6 +19,158 @@ fn a_retire_ends_the_renderer_like_a_disable_and_draws_nothing() {
     assert!(!handle(&disable, &mut state).expect("a disable is handled"));
 }
 
+fn agent_control(agent: &str) -> CursorOverlayControl {
+    let instruction = instruction(Point { x: 1.0, y: 2.0 }, false);
+    CursorOverlayControl::present("run-a".into(), instruction).with_agent_id(Some(agent.into()))
+}
+
+/// A renderer acts only on its own session and agent; a retire for another
+/// agent of the same session is dropped, while a session-wide disable, hide or
+/// show (which names no agent) is taken.
+#[test]
+fn a_renderer_takes_its_own_agents_controls_and_drops_another_agents_retire() {
+    let initial = agent_control("worker-a");
+    assert!(addressed_to(
+        &initial,
+        &CursorOverlayControl::retire("run-a".into(), "worker-a".into())
+    ));
+    assert!(!addressed_to(
+        &initial,
+        &CursorOverlayControl::retire("run-a".into(), "worker-b".into())
+    ));
+    assert!(!addressed_to(
+        &initial,
+        &CursorOverlayControl::retire("run-b".into(), "worker-a".into())
+    ));
+    assert!(!addressed_to(&initial, &agent_control("worker-b")));
+    for shared in [
+        CursorOverlayControl::disable("run-a".into()),
+        CursorOverlayControl::hide("run-a".into()),
+        CursorOverlayControl::show("run-a".into()),
+    ] {
+        assert!(addressed_to(&initial, &shared));
+    }
+    assert!(!addressed_to(
+        &initial,
+        &CursorOverlayControl::disable("run-b".into())
+    ));
+}
+
+fn in_window(window: Option<&str>, phase: CursorPhase) -> CursorOverlayInstruction {
+    instruction(Point { x: 1.0, y: 2.0 }, false)
+        .with_window(window.map(str::to_owned))
+        .with_phase(phase)
+}
+
+/// The cursor is drawn at the height of the window the instruction names; a
+/// bare coordinate puts it back above every window, and a caret-follow keeps
+/// the window of the caret it moves, as on Windows. A named id that is not a
+/// window number hides it instead of putting it above every window.
+#[test]
+fn the_anchor_follows_the_named_window_and_a_caret_follow_keeps_it() {
+    assert_eq!(
+        next_anchor(
+            &in_window(Some("w-4242"), CursorPhase::Travel),
+            Anchor::Free
+        ),
+        Anchor::Window(4242)
+    );
+    assert_eq!(
+        next_anchor(&in_window(None, CursorPhase::Travel), Anchor::Window(4242)),
+        Anchor::Free
+    );
+    assert_eq!(
+        next_anchor(
+            &in_window(None, CursorPhase::CaretFollow),
+            Anchor::Window(4242)
+        ),
+        Anchor::Window(4242)
+    );
+    assert_eq!(
+        next_anchor(
+            &in_window(None, CursorPhase::CaretFollow),
+            Anchor::Unreadable
+        ),
+        Anchor::Unreadable
+    );
+    assert_eq!(
+        next_anchor(
+            &in_window(Some("w-7"), CursorPhase::CaretFollow),
+            Anchor::Window(4242)
+        ),
+        Anchor::Window(7)
+    );
+    for unreadable in [
+        "4242",
+        "w-",
+        "w-abc",
+        "w-0",
+        "w--1",
+        "w-+12",
+        "h-12",
+        "w-99999999999",
+    ] {
+        for phase in [CursorPhase::Effect, CursorPhase::CaretFollow] {
+            assert_eq!(
+                next_anchor(&in_window(Some(unreadable), phase), Anchor::Window(1)),
+                Anchor::Unreadable,
+                "{unreadable}"
+            );
+        }
+    }
+}
+
+/// A named window always reaches the native side as named, so an unreadable
+/// one is hidden there and never drawn above every window.
+#[test]
+fn a_named_window_reaches_the_native_side_as_named() {
+    use super::super::bridge::anchor_arguments;
+    assert_eq!(anchor_arguments(Anchor::Free), (false, 0));
+    assert_eq!(anchor_arguments(Anchor::Window(27560)), (true, 27560));
+    assert_eq!(anchor_arguments(Anchor::Unreadable), (true, 0));
+}
+
+/// At rest the renderer sleeps until the next host and session check instead
+/// of waking every frame; awake it waits a frame.
+#[test]
+fn a_resting_renderer_sleeps_until_the_next_check() {
+    assert_eq!(idle_wait(false, Duration::ZERO), AWAKE_WAIT);
+    assert_eq!(idle_wait(true, Duration::ZERO), CHECK_EVERY);
+    assert_eq!(
+        idle_wait(true, Duration::from_millis(400)),
+        Duration::from_millis(600)
+    );
+    assert_eq!(idle_wait(true, Duration::from_secs(5)), AWAKE_WAIT);
+}
+
+/// The periodic check ends the renderer once the host is gone or the session
+/// is over, and not otherwise.
+#[test]
+fn the_periodic_check_ends_with_the_host_or_the_session() {
+    use super::super::host_watch::{HostRequest, HostWatch};
+    let mut unwatched = HostWatch::for_request(HostRequest::Unwatched);
+    assert!(!checks_end_renderer(&mut unwatched, || true));
+    assert!(checks_end_renderer(&mut unwatched, || false));
+    let mut gone = HostWatch::for_request(HostRequest::Invalid);
+    assert!(checks_end_renderer(&mut gone, || true));
+}
+
+/// The renderer's rest follows the style's linger (Main gives 30 s), and the
+/// default without one.
+#[test]
+fn the_rest_follows_the_styles_linger() {
+    let mut state = OverlayState::default();
+    assert_eq!(
+        state.style.rest_after_ms(),
+        agent_desktop_core::CURSOR_IDLE_REST_MS
+    );
+    let mut style = CursorOverlayStyle::default();
+    style.set_linger_ms(Some(30_000));
+    let enable = CursorOverlayControl::enable("run-a".into(), style.validated().unwrap());
+    absorb_settings(&enable, &mut state);
+    assert_eq!(state.style.rest_after_ms(), 30_000);
+}
+
 #[test]
 fn accepted_stream_waits_for_a_delayed_control() {
     let unique = std::time::SystemTime::now()

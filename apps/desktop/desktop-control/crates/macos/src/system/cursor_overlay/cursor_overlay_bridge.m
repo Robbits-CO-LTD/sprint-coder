@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #import "cursor_overlay_chrome.h"
 #import <CoreGraphics/CoreGraphics.h>
 #import <stdbool.h>
@@ -97,7 +98,7 @@ static void ADDragPoll(void) {
         if (ADDragTrail) {
             ADTrailBegin(NSMakePoint(point.x, mainHeight - point.y));
         }
-    } else if (ADBubbleWindow.isVisible) {
+    } else if (ADShown(ADBubbleWindow)) {
         NSPoint origin = ADBubbleWindow.frame.origin;
         [ADBubbleWindow setFrameOrigin:NSMakePoint(origin.x + point.x - ADDragLast.x,
                                                    origin.y - point.y + ADDragLast.y)];
@@ -237,12 +238,13 @@ void agent_desktop_cursor_overlay_idle(void) {
 
 void agent_desktop_cursor_overlay_stop(void) {
     ADDragCancel();
-    [ADCursorWindow orderOut:nil];
-    [ADBubbleWindow orderOut:nil];
-    [ADRipple orderOut:nil];
+    ADHide(ADCursorWindow);
+    ADHide(ADBubbleWindow);
+    ADHide(ADRipple);
     ADHighlightStop();
     ADCaretStop();
     ADTrailStop();
+    ADForgetHeld();
     ADCursorWindow = nil;
     ADPointer = nil;
     ADRipple = nil;
@@ -290,8 +292,8 @@ void agent_desktop_cursor_overlay_rest(void) {
             ADPump(app);
             [NSThread sleepForTimeInterval:0.012];
         }
-        [ADCursorWindow orderOut:nil];
-        [ADBubbleWindow orderOut:nil];
+        ADHide(ADCursorWindow);
+        ADHide(ADBubbleWindow);
         ADCaretStop();
         ADCursorWindow.alphaValue = 1.0;
         ADBubbleWindow.alphaValue = 1.0;
@@ -302,9 +304,9 @@ void agent_desktop_cursor_overlay_rest(void) {
 void agent_desktop_cursor_overlay_hide(void) {
     ADDragCancel();
     ADCaretStop();
-    [ADCursorWindow orderOut:nil];
-    [ADBubbleWindow orderOut:nil];
-    [ADRipple orderOut:nil];
+    ADHide(ADCursorWindow);
+    ADHide(ADBubbleWindow);
+    ADHide(ADRipple);
     ADHighlightStop();
     ADTrailStop();
 }
@@ -360,9 +362,74 @@ bool agent_desktop_cursor_overlay_drag_active(void) {
 }
 
 void agent_desktop_cursor_overlay_show(void) {
-    [ADCursorWindow orderFrontRegardless];
+    ADResolvePlacement();
+    ADPlace(ADCursorWindow, ADCursorLevel, true);
     if (ADBubbleText.stringValue.length > 0) {
-        [ADBubbleWindow orderFrontRegardless];
+        ADPlace(ADBubbleWindow, ADCursorLevel, true);
+    }
+}
+
+/// Puts every shown overlay window where the named window wants it: the
+/// effects first, directly above it, then the cursor and its label above them.
+static void ADRestackShown(void) {
+    for (NSWindow *window in ADEffectWindowsShown()) {
+        ADPlace(window, ADEffectLevel, false);
+    }
+    if (ADShown(ADRipple)) {
+        ADPlace(ADRipple, ADEffectLevel, false);
+    }
+    if (ADShown(ADCursorWindow)) {
+        ADPlace(ADCursorWindow, ADCursorLevel, true);
+    }
+    if (ADShown(ADBubbleWindow)) {
+        ADPlace(ADBubbleWindow, ADCursorLevel, true);
+    }
+}
+
+static NSArray<NSWindow *> *ADShownWindows(void) {
+    NSMutableArray<NSWindow *> *shown = [ADEffectWindowsShown() mutableCopy];
+    for (NSWindow *window in @[ ADRipple ?: NSNull.null, ADCursorWindow ?: NSNull.null,
+                                ADBubbleWindow ?: NSNull.null ]) {
+        if ([window isKindOfClass:NSWindow.class] && ADShown(window)) {
+            [shown addObject:window];
+        }
+    }
+    return shown;
+}
+
+/// Names the window the next drawing is at the height of (0 for none). A
+/// change moves the windows already shown at once.
+void agent_desktop_cursor_overlay_anchor(bool named, uint32_t number) {
+    @autoreleasepool {
+        if (ADSetAnchor(named, number)) {
+            ADRestackShown();
+        }
+    }
+}
+
+/// Called while the cursor is shown, every so often: the named window or the
+/// windows over it may have moved in the stacking order since. Windows that
+/// are already in place are left alone; with no window named nothing moves.
+void agent_desktop_cursor_overlay_restack(void) {
+    @autoreleasepool {
+        if (!ADAnchored()) {
+            return;
+        }
+        ADResolvePlacement();
+        NSArray<NSWindow *> *shown = ADShownWindows();
+        if (shown.count == 0 || ADPlacementSettled(shown)) {
+            return;
+        }
+        if (ADPlacementHidden()) {
+            bool onScreen = false;
+            for (NSWindow *window in shown) {
+                onScreen = onScreen || window.isVisible;
+            }
+            if (!onScreen) {
+                return;
+            }
+        }
+        ADRestackShown();
     }
 }
 
@@ -403,7 +470,7 @@ bool agent_desktop_cursor_overlay_run(const AgentDesktopCursorFrame *frames,
             }
             ADPointerImageApply(ADCursorWindow, ADPointer);
             bool pointsOnArrival = (config->flags & ADPointOnArrival) != 0;
-            [ADCursorWindow orderFrontRegardless];
+            ADPlace(ADCursorWindow, ADCursorLevel, true);
 
             bool showsBubble =
                 config->label != NULL && config->label[0] != '\0' && config->bubble[2] > 0.0;
@@ -411,7 +478,7 @@ bool agent_desktop_cursor_overlay_run(const AgentDesktopCursorFrame *frames,
             bool changedLabel = ![ADBubbleText.stringValue isEqualToString:nextLabel];
             ADBubbleText.stringValue = nextLabel;
             if (!showsBubble || changedLabel) {
-                [ADBubbleWindow orderOut:nil];
+                ADHide(ADBubbleWindow);
             }
             NSRect pillFrame = NSMakeRect(config->bubble[0],
                                           mainHeight - config->bubble[1] - config->bubble[3],
@@ -464,7 +531,7 @@ bool agent_desktop_cursor_overlay_run(const AgentDesktopCursorFrame *frames,
             if (showsBubble) {
                 ADShowBubble(ADBubbleText, bubbleFrame, changedLabel && !reduceMotion);
             } else {
-                [ADBubbleWindow orderOut:nil];
+                ADHide(ADBubbleWindow);
             }
             if ((config->flags & ADArrowAfterEffect) != 0) {
                 ADPointerImageRelease(ADCursorWindow, ADPointer, ADPointerReleaseSeconds);

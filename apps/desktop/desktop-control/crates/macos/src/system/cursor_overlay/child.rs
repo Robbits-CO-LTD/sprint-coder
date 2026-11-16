@@ -1,8 +1,7 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
-    AdapterError, CURSOR_IDLE_REST_MS, CursorMotion, CursorMotionProfile, CursorOverlayConfig,
-    CursorOverlayControl, CursorOverlayInstruction, CursorOverlayStyle, CursorPhase, CursorPose,
-    ErrorCode, Point,
+    AdapterError, CursorMotion, CursorMotionProfile, CursorOverlayConfig, CursorOverlayControl,
+    CursorOverlayInstruction, CursorOverlayStyle, CursorPhase, CursorPose, ErrorCode, Point,
 };
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -23,7 +22,32 @@ struct OverlayState {
     moves: u64,
     at: Option<Point>,
     resting: bool,
+    /// The window the cursor is drawn at the height of, as the last
+    /// instruction named it.
+    anchor: Anchor,
 }
+
+/// The window an instruction names for the cursor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Anchor {
+    /// None (a bare coordinate, the greeting): drawn above every window.
+    #[default]
+    Free,
+    /// This CoreGraphics window number: drawn at its height while it is on the
+    /// screen, hidden while it is not.
+    Window(u32),
+    /// A window was named but its id is not a window number: hidden, as a
+    /// window that cannot be confirmed on the screen is.
+    Unreadable,
+}
+
+/// How often the shown cursor is put back at its window's height, as the
+/// Windows renderer does between actions.
+const RESTACK_EVERY: Duration = Duration::from_millis(1_500);
+/// How often the host and the session are checked.
+const CHECK_EVERY: Duration = Duration::from_secs(1);
+/// How long an awake renderer waits for the next control between frames.
+const AWAKE_WAIT: Duration = Duration::from_millis(8);
 
 pub(crate) fn entry_from_env() -> Option<Result<(), AdapterError>> {
     match std::env::var(MARKER) {
@@ -48,6 +72,12 @@ fn run() -> Result<(), AdapterError> {
     }
     let socket = socket_path(&initial)?;
     prepare_socket(&socket)?;
+    // A retire that found no renderer listening (this one, not yet bound)
+    // leaves a mark: a renderer started for an agent that has since finished
+    // draws nothing.
+    if super::endpoint::take_retired_mark(&socket) {
+        return cleanup(socket);
+    }
     let mut state = OverlayState::default();
     if !handle(&initial, &mut state)? {
         return cleanup(socket);
@@ -64,12 +94,20 @@ fn run() -> Result<(), AdapterError> {
         AdapterError::internal("Could not configure the cursor overlay session socket")
             .with_platform_detail(error.to_string())
     })?;
+    // Checked again once bound: a retire that came between the check above and
+    // the bind found no one to tell, and its mark is there by now.
+    if super::endpoint::take_retired_mark(&socket) {
+        drop(listener);
+        return cleanup(socket);
+    }
     let mut quiet_since = std::time::Instant::now();
     let mut checked_session = quiet_since;
+    let mut restacked = quiet_since;
     loop {
-        if checked_session.elapsed() >= Duration::from_secs(1) {
-            // The host's exit ends the renderer as the session's end does.
-            if host.host_gone() || !session_active(initial.session_id(), initial.agent_id()) {
+        if checked_session.elapsed() >= CHECK_EVERY {
+            if checks_end_renderer(&mut host, || {
+                session_active(initial.session_id(), initial.agent_id())
+            }) {
                 return cleanup(socket);
             }
             checked_session = std::time::Instant::now();
@@ -82,11 +120,7 @@ fn run() -> Result<(), AdapterError> {
                 let Ok(control) = read_control(&mut stream) else {
                     continue;
                 };
-                if control.session_id() != initial.session_id()
-                    || (control.agent_id() != initial.agent_id()
-                        && !(control.agent_id().is_none()
-                            && (control.is_transient() || control.is_disable())))
-                {
+                if !addressed_to(&initial, &control) {
                     continue;
                 }
                 // A retire reaches only its own agent's renderer (checked above)
@@ -104,6 +138,7 @@ fn run() -> Result<(), AdapterError> {
                 quiet_since = std::time::Instant::now();
                 if std::mem::take(&mut state.resting) {
                     bridge::show();
+                    restacked = std::time::Instant::now();
                 }
                 let outcome = handle(&control, &mut state);
                 if outcome.is_ok() && control.expects_acknowledgement() {
@@ -117,12 +152,19 @@ fn run() -> Result<(), AdapterError> {
                 bridge::idle();
                 if !state.resting
                     && !bridge::drag_active()
-                    && quiet_since.elapsed().as_millis() >= u128::from(CURSOR_IDLE_REST_MS)
+                    && quiet_since.elapsed().as_millis() >= u128::from(state.style.rest_after_ms())
                 {
                     bridge::rest();
                     state.resting = true;
                 }
-                wait_for_connection(&listener, Duration::from_millis(8));
+                if !state.resting && restacked.elapsed() >= RESTACK_EVERY {
+                    bridge::restack();
+                    restacked = std::time::Instant::now();
+                }
+                wait_for_connection(
+                    &listener,
+                    idle_wait(state.resting, checked_session.elapsed()),
+                );
             }
             Err(error) => {
                 let _ = cleanup(socket);
@@ -133,6 +175,56 @@ fn run() -> Result<(), AdapterError> {
             }
         }
     }
+}
+
+/// Whether the periodic check ends the renderer: the host has exited, or the
+/// session (or this agent's place in it) is over.
+fn checks_end_renderer(
+    host: &mut super::host_watch::HostWatch,
+    session_active: impl FnOnce() -> bool,
+) -> bool {
+    host.host_gone() || !session_active()
+}
+
+/// How long the idle loop waits for the next control. Awake, a frame; at rest
+/// nothing is drawn, so it sleeps until the next host and session check (a
+/// control still wakes it at once).
+fn idle_wait(resting: bool, since_check: Duration) -> Duration {
+    if resting {
+        CHECK_EVERY.saturating_sub(since_check).max(AWAKE_WAIT)
+    } else {
+        AWAKE_WAIT
+    }
+}
+
+/// Whether a control sent to this renderer's socket is for it: its session,
+/// and its own agent, except a session-wide hide, show or disable (which names
+/// no agent). A retire always names its agent, so one for another agent is
+/// dropped.
+fn addressed_to(initial: &CursorOverlayControl, control: &CursorOverlayControl) -> bool {
+    control.session_id() == initial.session_id()
+        && (control.agent_id() == initial.agent_id()
+            || (control.agent_id().is_none() && (control.is_transient() || control.is_disable())))
+}
+
+/// The window an instruction puts the cursor at the height of: the window it
+/// names (`w-<number>`), or none for a bare coordinate - except a caret-follow,
+/// which only moves the caret an earlier instruction placed and keeps its
+/// window, as the Windows renderer does. A named id that is not a window
+/// number hides the cursor rather than putting it above every window.
+fn next_anchor(instruction: &CursorOverlayInstruction, previous: Anchor) -> Anchor {
+    let Some(id) = instruction.window() else {
+        return if instruction.phase() == CursorPhase::CaretFollow {
+            previous
+        } else {
+            Anchor::Free
+        };
+    };
+    id.strip_prefix("w-")
+        .filter(|number| number.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|number| number.parse::<u32>().ok())
+        .filter(|number| *number != 0)
+        .map_or(Anchor::Unreadable, Anchor::Window)
 }
 
 /// Waits up to `timeout` for the next control, waking as soon as one
@@ -181,6 +273,8 @@ fn handle(control: &CursorOverlayControl, state: &mut OverlayState) -> Result<bo
     }
     let owned;
     let instruction = if let Some(instruction) = control.instruction() {
+        state.anchor = next_anchor(instruction, state.anchor);
+        bridge::set_anchor(state.anchor);
         instruction
     } else {
         let greeting_over_image = control.is_enable() && state.style.image().is_some();

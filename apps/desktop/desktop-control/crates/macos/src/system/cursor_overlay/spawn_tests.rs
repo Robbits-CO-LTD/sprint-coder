@@ -23,6 +23,10 @@ fn another_binary_is_not_an_own_image() {
         "Electron",
         // The names are matched exactly, as the upstream guard does.
         "Sprint-Coder-Desktop-Control",
+        // The whole file name counts: a copy with an extension is another file.
+        "sprint-coder-desktop-control.old",
+        "agent-desktop.bak",
+        "sprint-coder-desktop-control.exe",
     ] {
         assert!(
             !is_own_image(&Path::new("/tmp/agent-desktop").join(name)),
@@ -47,15 +51,115 @@ fn private_socket_path(tag: &str) -> std::path::PathBuf {
     ))
 }
 
-/// With no renderer listening for the agent, a retire has nothing to take down
-/// and starts nothing.
 #[test]
-fn a_retire_with_no_renderer_listening_succeeds_without_starting_one() {
+fn a_retire_goes_to_its_agent_alone_and_a_disable_to_the_whole_session() {
+    let instruction = agent_desktop_core::CursorOverlayInstruction::new(
+        agent_desktop_core::Point { x: 1.0, y: 2.0 },
+        &agent_desktop_core::CursorOverlayConfig::enabled(None, 8).unwrap(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        route(&CursorOverlayControl::retire(
+            "run".into(),
+            "worker-a".into()
+        )),
+        Route::RetireAgent
+    );
+    assert_eq!(
+        route(&CursorOverlayControl::disable("run".into())),
+        Route::Broadcast
+    );
+    assert_eq!(
+        route(&CursorOverlayControl::hide("run".into())),
+        Route::Broadcast
+    );
+    assert_eq!(
+        route(&CursorOverlayControl::hide("run".into()).with_agent_id(Some("worker-a".into()))),
+        Route::Agent
+    );
+    assert_eq!(
+        route(&CursorOverlayControl::present("run".into(), instruction)),
+        Route::Agent
+    );
+}
+
+/// With no renderer listening for the agent, a retire starts nothing and
+/// leaves the mark a renderer still starting for that agent ends on.
+#[test]
+fn a_retire_with_no_renderer_listening_leaves_the_mark_and_starts_nothing() {
     let path = private_socket_path("none");
+    let mark = path.with_extension("retired");
     let retire = CursorOverlayControl::retire("run-retire".into(), "worker-a".into());
     retire_at(&path, &retire, Instant::now() + Duration::from_secs(1))
         .expect("nothing to take down");
     assert!(!path.exists(), "a retire never creates the agent's socket");
+    assert!(mark.exists(), "the mark is left");
+    // A second retire keeps the one mark.
+    retire_at(&path, &retire, Instant::now() + Duration::from_secs(1)).expect("again");
+    assert!(super::super::endpoint::take_retired_mark(&path));
+    assert!(!mark.exists());
+    assert!(!super::super::endpoint::take_retired_mark(&path));
+}
+
+/// A socket file a renderer left behind refuses the connection: nobody is
+/// listening, so the retire succeeds and leaves the mark.
+#[test]
+fn a_retire_at_a_stale_socket_succeeds_and_leaves_the_mark() {
+    let path = private_socket_path("stale");
+    drop(UnixListener::bind(&path).unwrap());
+    assert!(path.exists(), "the stale socket file is there");
+    let retire = CursorOverlayControl::retire("run-retire".into(), "worker-a".into());
+    let result = retire_at(&path, &retire, Instant::now() + Duration::from_secs(1));
+    let marked = super::super::endpoint::take_retired_mark(&path);
+    let _ = std::fs::remove_file(&path);
+    result.expect("nothing listening to take down");
+    assert!(marked);
+}
+
+/// A descriptor this process holds without close-on-exec (the shape of a
+/// command host's pipe) does not reach the process started with the same
+/// preparation as the renderer.
+#[test]
+fn a_started_process_holds_no_inherited_descriptor() {
+    let mut created = [0; 2];
+    assert_eq!(unsafe { libc::pipe(created.as_mut_ptr()) }, 0);
+    // Moved far above the low numbers the other tests of this process open and
+    // close at the same time, so none of them can close or reuse these.
+    // `F_DUPFD` gives copies without close-on-exec.
+    let mut pipe = [0; 2];
+    for (index, fd) in created.into_iter().enumerate() {
+        pipe[index] = unsafe { libc::fcntl(fd, libc::F_DUPFD, 900 + index as libc::c_int) };
+        assert!(pipe[index] >= 900, "a high copy of the pipe");
+        unsafe { libc::close(fd) };
+        assert_eq!(unsafe { libc::fcntl(pipe[index], libc::F_GETFD) }, 0);
+    }
+    let probe = |prepared: bool| {
+        let mut command = Command::new("/bin/sh");
+        if prepared {
+            close_inherited_on_exec(&mut command);
+        }
+        let output = command
+            .args(["-c", "for fd in \"$0\" \"$1\"; do if (: <&\"$fd\") 2>/dev/null; then echo open; else echo closed; fi; done"])
+            .arg(pipe[0].to_string())
+            .arg(pipe[1].to_string())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .expect("the probe runs");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let unprepared = probe(false);
+    let prepared = probe(true);
+    unsafe {
+        libc::close(pipe[0]);
+        libc::close(pipe[1]);
+    }
+    assert_eq!(
+        unprepared, "open\nopen\n",
+        "the probe sees an inherited descriptor"
+    );
+    assert_eq!(prepared, "closed\nclosed\n");
 }
 
 /// A retire reaches the agent's renderer as a session `Disable`, which every
