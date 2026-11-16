@@ -125,12 +125,14 @@ fn a_started_process_holds_no_inherited_descriptor() {
     let mut created = [0; 2];
     assert_eq!(unsafe { libc::pipe(created.as_mut_ptr()) }, 0);
     // Moved far above the low numbers the other tests of this process open and
-    // close at the same time, so none of them can close or reuse these.
-    // `F_DUPFD` gives copies without close-on-exec.
+    // close at the same time, so none of them can close or reuse these: 900,
+    // or just under the open-file limit when it is lower (macOS' default soft
+    // limit in a Terminal is 256). `F_DUPFD` gives copies without close-on-exec.
+    let base = high_descriptor_base();
     let mut pipe = [0; 2];
     for (index, fd) in created.into_iter().enumerate() {
-        pipe[index] = unsafe { libc::fcntl(fd, libc::F_DUPFD, 900 + index as libc::c_int) };
-        assert!(pipe[index] >= 900, "a high copy of the pipe");
+        pipe[index] = unsafe { libc::fcntl(fd, libc::F_DUPFD, base + index as libc::c_int) };
+        assert!(pipe[index] >= base, "a high copy of the pipe");
         unsafe { libc::close(fd) };
         assert_eq!(unsafe { libc::fcntl(pipe[index], libc::F_GETFD) }, 0);
     }
@@ -160,6 +162,21 @@ fn a_started_process_holds_no_inherited_descriptor() {
         "the probe sees an inherited descriptor"
     );
     assert_eq!(prepared, "closed\nclosed\n");
+}
+
+/// The lowest number `a_started_process_holds_no_inherited_descriptor` moves
+/// its pipe to: 900, or 16 under the soft open-file limit when that is lower.
+fn high_descriptor_base() -> libc::c_int {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+        0
+    );
+    let below_limit = limit.rlim_cur.saturating_sub(16);
+    libc::c_int::try_from(below_limit.min(900)).unwrap_or(900)
 }
 
 /// A retire reaches the agent's renderer as a session `Disable`, which every

@@ -3,6 +3,7 @@ mod bridge;
 mod child;
 mod endpoint;
 mod host_watch;
+mod placement;
 mod spawn;
 
 pub(crate) use child::entry_from_env;

@@ -137,6 +137,10 @@ fn run() -> Result<(), AdapterError> {
                 }
                 quiet_since = std::time::Instant::now();
                 if std::mem::take(&mut state.resting) {
+                    // The window this control names is set before the cursor
+                    // comes back, so it never shows for a moment where the
+                    // last one (or none, above every window) put it.
+                    adopt_anchor(&control, &mut state);
                     bridge::show();
                     restacked = std::time::Instant::now();
                 }
@@ -227,6 +231,16 @@ fn next_anchor(instruction: &CursorOverlayInstruction, previous: Anchor) -> Anch
         .map_or(Anchor::Unreadable, Anchor::Window)
 }
 
+/// Takes the window a control's instruction names as the one the cursor is
+/// drawn at the height of, and tells the renderer. A control without an
+/// instruction keeps the window it has.
+fn adopt_anchor(control: &CursorOverlayControl, state: &mut OverlayState) {
+    if let Some(instruction) = control.instruction() {
+        state.anchor = next_anchor(instruction, state.anchor);
+        bridge::set_anchor(state.anchor);
+    }
+}
+
 /// Waits up to `timeout` for the next control, waking as soon as one
 /// connects, so a control is drawn within the frame it was sent in rather
 /// than after a fixed sleep.
@@ -273,8 +287,7 @@ fn handle(control: &CursorOverlayControl, state: &mut OverlayState) -> Result<bo
     }
     let owned;
     let instruction = if let Some(instruction) = control.instruction() {
-        state.anchor = next_anchor(instruction, state.anchor);
-        bridge::set_anchor(state.anchor);
+        adopt_anchor(control, state);
         instruction
     } else {
         let greeting_over_image = control.is_enable() && state.style.image().is_some();

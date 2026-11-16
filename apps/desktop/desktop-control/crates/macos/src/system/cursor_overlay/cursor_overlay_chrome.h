@@ -23,12 +23,26 @@ void ADHide(NSWindow *window);
 void ADForgetHeld(void);
 /// Reads again where the named window puts the overlay.
 void ADResolvePlacement(void);
-/// Whether every window in `visible` already sits where the placement wants it.
+/// Where an overlay window goes among the others: the effects lowest, then the
+/// ripple, the cursor and, on top, its label.
+typedef enum {
+    ADRankHighlight = 0,
+    ADRankTrail = 1,
+    ADRankCaret = 2,
+    ADRankRipple = 3,
+    ADRankCursor = 4,
+    ADRankBubble = 5,
+} ADRank;
+/// Whether every window in `visible` (the shown windows, lowest rank first)
+/// already sits where the placement wants it.
 bool ADPlacementSettled(NSArray<NSWindow *> *visible);
 /// Shows `window` where the placement wants it: at `freeLevel` above every window
-/// when none is named, at the named window's height otherwise. `cursorBand`
-/// windows (the cursor and its label) go above the effects.
-void ADPlace(NSWindow *window, NSWindowLevel freeLevel, bool cursorBand);
+/// when none is named, at the named window's height otherwise, where every
+/// window shown there is stacked again in the order of its `rank`.
+void ADPlace(NSWindow *window, NSWindowLevel freeLevel, ADRank rank);
+/// Places again the effect windows that are shown (or held).
+void ADPlaceEffectsShown(void);
+/// The effect windows that are shown (or held), lowest rank first.
 NSArray<NSWindow *> *ADEffectWindowsShown(void);
 
 typedef struct {

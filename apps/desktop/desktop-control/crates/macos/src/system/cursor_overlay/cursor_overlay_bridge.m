@@ -363,26 +363,25 @@ bool agent_desktop_cursor_overlay_drag_active(void) {
 
 void agent_desktop_cursor_overlay_show(void) {
     ADResolvePlacement();
-    ADPlace(ADCursorWindow, ADCursorLevel, true);
+    ADPlace(ADCursorWindow, ADCursorLevel, ADRankCursor);
     if (ADBubbleText.stringValue.length > 0) {
-        ADPlace(ADBubbleWindow, ADCursorLevel, true);
+        ADPlace(ADBubbleWindow, ADCursorLevel, ADRankBubble);
     }
 }
 
-/// Puts every shown overlay window where the named window wants it: the
-/// effects first, directly above it, then the cursor and its label above them.
+/// Puts every shown overlay window where the named window wants it, in the
+/// order of their ranks: the effects directly above it, the cursor and its
+/// label above them.
 static void ADRestackShown(void) {
-    for (NSWindow *window in ADEffectWindowsShown()) {
-        ADPlace(window, ADEffectLevel, false);
-    }
+    ADPlaceEffectsShown();
     if (ADShown(ADRipple)) {
-        ADPlace(ADRipple, ADEffectLevel, false);
+        ADPlace(ADRipple, ADEffectLevel, ADRankRipple);
     }
     if (ADShown(ADCursorWindow)) {
-        ADPlace(ADCursorWindow, ADCursorLevel, true);
+        ADPlace(ADCursorWindow, ADCursorLevel, ADRankCursor);
     }
     if (ADShown(ADBubbleWindow)) {
-        ADPlace(ADBubbleWindow, ADCursorLevel, true);
+        ADPlace(ADBubbleWindow, ADCursorLevel, ADRankBubble);
     }
 }
 
@@ -470,7 +469,7 @@ bool agent_desktop_cursor_overlay_run(const AgentDesktopCursorFrame *frames,
             }
             ADPointerImageApply(ADCursorWindow, ADPointer);
             bool pointsOnArrival = (config->flags & ADPointOnArrival) != 0;
-            ADPlace(ADCursorWindow, ADCursorLevel, true);
+            ADPlace(ADCursorWindow, ADCursorLevel, ADRankCursor);
 
             bool showsBubble =
                 config->label != NULL && config->label[0] != '\0' && config->bubble[2] > 0.0;

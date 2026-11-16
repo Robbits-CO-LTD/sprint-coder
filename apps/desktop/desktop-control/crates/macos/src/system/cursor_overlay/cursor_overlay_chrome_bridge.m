@@ -29,34 +29,73 @@ static NSUInteger ADTrailPointCount = 0;
 // Where the overlay's windows go in the stacking order (Sprint Coder).
 //
 // With no window named (a bare coordinate, the greeting), the windows sit
-// above every window, as before. With one named, they sit at that window's
-// height: directly above the window and the windows of its own process just
-// above it (its menus and popups), below the first window of any other process
-// that covers them. So the cursor is hidden where the user's window covers the
-// worked-in window, and seen where it is seen. A named window that is not on
-// the screen now (closed, minimized, its app hidden, on another Space), or that
-// cannot be confirmed to be (the list cannot be read, the id is not a window
-// number), hides them: they are held out of the screen and shown again above it
-// once it is back. A named window never puts them at the front or the back of
-// the current Space. Nothing here activates an app, raises or reorders another
-// process's window, or makes an overlay window key: only the overlay's own
-// windows are ordered, and only relative to the others.
+// above every window of the current Space, as before, but stay on the Space
+// they were shown on and never join a full-screen app's Space. With one named,
+// they sit at that window's height; `placement.rs` decides where from the
+// on-screen window list read here (see `resolve`): directly above the named
+// window and its sheets and popovers, at its level and never higher, below the
+// first window of any other process that covers them. So the cursor is hidden
+// where the user's window covers the worked-in window, and seen where it is
+// seen. A named window that is not on the screen now (closed, minimized, its
+// app hidden, on another Space), or that cannot be confirmed to be (the list
+// cannot be read, the id is not a window number), hides them: they are held
+// out of the screen and shown again above it once it is back. A named window
+// never puts them at the front or the back of the current Space. Nothing here
+// activates an app, raises or reorders another process's window, or makes an
+// overlay window key: only the overlay's own windows are ordered, and only
+// relative to the others. They are always stacked in the order of their rank,
+// the effects lowest and the cursor and its label on top.
 typedef enum {
     ADPlacementFree = 0,
-    ADPlacementAbove,
-    ADPlacementGone,
+    ADPlacementAbove = 1,
+    ADPlacementGone = 2,
 } ADPlacementKind;
+
+// The records `placement.rs` reads (`ListedWindow`, `Placement`).
+typedef struct {
+    uint32_t number;
+    int32_t pid;
+    int64_t layer;
+    double bounds[4];
+    double alpha;
+    uint8_t flags;
+} ADListedWindow;
+
+typedef struct {
+    uint8_t kind;
+    uint32_t target;
+    int64_t level;
+} ADPlacementAnswer;
+
+static const uint8_t ADListedHasPid = 1 << 0;
+static const uint8_t ADListedHasLayer = 1 << 1;
+static const uint8_t ADListedHasBounds = 1 << 2;
+static const uint8_t ADListedOverlay = 1 << 3;
+static const uint8_t ADListedOwn = 1 << 4;
+
+extern void agent_desktop_cursor_overlay_resolve(const ADListedWindow *windows,
+                                                 size_t count,
+                                                 bool named,
+                                                 uint32_t number,
+                                                 ADPlacementAnswer *output);
+extern bool agent_desktop_cursor_overlay_settled(const ADListedWindow *windows,
+                                                 size_t count,
+                                                 uint32_t target,
+                                                 const uint32_t *mine,
+                                                 size_t mineCount);
 
 static bool ADAnchorNamed = false;
 static CGWindowID ADAnchorNumber = 0;
 // The overlay windows that are meant to be shown but are held off the screen
-// while the named window is not on it, with whether each is of the cursor band.
+// while the named window is not on it, with their rank.
 static __strong NSMapTable<NSWindow *, NSNumber *> *ADHeld = nil;
+// The overlay windows shown at the named window's height, with their rank.
+static __strong NSMapTable<NSWindow *, NSNumber *> *ADStacked = nil;
 static ADPlacementKind ADPlacementState = ADPlacementFree;
 static CGWindowID ADPlacementTarget = 0;
 static NSWindowLevel ADPlacementLevel = NSNormalWindowLevel;
-static CGWindowID ADPlacementTop = 0;
-static __strong NSSet<NSNumber *> *ADPlacementOurs = nil;
+// The window list the placement was read from, for `ADPlacementSettled`.
+static __strong NSData *ADListed = nil;
 
 static bool ADNumberOf(NSDictionary *entry, NSString *key, long long *value) {
     id number = entry[key];
@@ -73,8 +112,8 @@ static bool ADBoundsOf(NSDictionary *entry, CGRect *bounds) {
            CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)dictionary, bounds);
 }
 
-static bool ADIsOverlayProcess(NSDictionary *entry, pid_t pid) {
-    if (pid == getpid()) {
+static bool ADIsOverlayProcess(NSDictionary *entry, bool hasPid, pid_t pid) {
+    if (hasPid && pid == getpid()) {
         return true;
     }
     // Another agent's renderer is the same executable in another process.
@@ -83,103 +122,90 @@ static bool ADIsOverlayProcess(NSDictionary *entry, pid_t pid) {
            [name isEqualToString:NSProcessInfo.processInfo.processName];
 }
 
-void ADResolvePlacement(void) {
-    ADPlacementOurs = nil;
-    if (!ADAnchorNamed) {
-        ADPlacementState = ADPlacementFree;
-        return;
-    }
-    // Hidden unless the named window is found on the screen now.
-    ADPlacementState = ADPlacementGone;
-    if (ADAnchorNumber == 0) {
-        return;
-    }
+/// The on-screen window list, front to back, as `placement.rs` reads it; nil
+/// when it cannot be read.
+static NSData *ADReadWindows(void) {
     CFArrayRef raw = CGWindowListCopyWindowInfo(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
     if (raw == NULL) {
-        return;
+        return nil;
     }
     NSArray *windows = CFBridgingRelease(raw);
+    NSMutableData *listed = [NSMutableData dataWithLength:windows.count * sizeof(ADListedWindow)];
+    ADListedWindow *records = listed.mutableBytes;
     NSString *numberKey = (__bridge NSString *)kCGWindowNumber;
     NSString *ownerKey = (__bridge NSString *)kCGWindowOwnerPID;
     NSString *layerKey = (__bridge NSString *)kCGWindowLayer;
     NSString *alphaKey = (__bridge NSString *)kCGWindowAlpha;
-    NSInteger anchorIndex = NSNotFound;
     for (NSUInteger index = 0; index < windows.count; index += 1) {
-        long long number = 0;
-        if ([windows[index] isKindOfClass:NSDictionary.class] &&
-            ADNumberOf(windows[index], numberKey, &number) && number == ADAnchorNumber) {
-            anchorIndex = (NSInteger)index;
-            break;
-        }
-    }
-    if (anchorIndex == NSNotFound) {
-        return;
-    }
-    NSDictionary *anchor = windows[(NSUInteger)anchorIndex];
-    long long anchorPid = 0;
-    long long layer = 0;
-    CGRect covered = CGRectNull;
-    if (!ADNumberOf(anchor, ownerKey, &anchorPid) || !ADNumberOf(anchor, layerKey, &layer) ||
-        !ADBoundsOf(anchor, &covered)) {
-        return;
-    }
-    const long long anchorLayer = layer;
-    const CGRect anchorBounds = covered;
-    // The list runs front to back: walk toward the front from the anchor.
-    NSInteger topIndex = anchorIndex;
-    for (NSInteger index = anchorIndex - 1; index >= 0; index -= 1) {
-        NSDictionary *entry = windows[(NSUInteger)index];
+        ADListedWindow *record = &records[index];
+        record->alpha = 1.0;
+        NSDictionary *entry = windows[index];
         if (![entry isKindOfClass:NSDictionary.class]) {
             continue;
         }
-        long long pid = 0;
-        double alphaValue = [entry[alphaKey] isKindOfClass:NSNumber.class]
-                                ? [entry[alphaKey] doubleValue]
-                                : 1.0;
+        long long value = 0;
+        if (ADNumberOf(entry, numberKey, &value) && value > 0 && value <= UINT32_MAX) {
+            record->number = (uint32_t)value;
+        }
+        bool hasPid = ADNumberOf(entry, ownerKey, &value) && value > 0 && value <= INT32_MAX;
+        if (hasPid) {
+            record->pid = (int32_t)value;
+            record->flags |= ADListedHasPid;
+        }
+        if (ADNumberOf(entry, layerKey, &value)) {
+            record->layer = (int64_t)value;
+            record->flags |= ADListedHasLayer;
+        }
         CGRect bounds = CGRectNull;
-        if (!ADNumberOf(entry, ownerKey, &pid) || !ADBoundsOf(entry, &bounds)) {
-            continue;
+        if (ADBoundsOf(entry, &bounds)) {
+            record->bounds[0] = bounds.origin.x;
+            record->bounds[1] = bounds.origin.y;
+            record->bounds[2] = bounds.size.width;
+            record->bounds[3] = bounds.size.height;
+            record->flags |= ADListedHasBounds;
         }
-        if (ADIsOverlayProcess(entry, (pid_t)pid) || alphaValue <= 0.0) {
-            continue;
+        if ([entry[alphaKey] isKindOfClass:NSNumber.class]) {
+            record->alpha = [entry[alphaKey] doubleValue];
         }
-        long long entryLayer = 0;
-        // The named window's own menus, popups and panels (a higher level), and
-        // its sheets and popovers (inside its frame). Another document window
-        // of the same app at the same level covers it like any other window.
-        if (pid == anchorPid && ADNumberOf(entry, layerKey, &entryLayer) &&
-            (entryLayer > anchorLayer ||
-             CGRectContainsRect(CGRectInset(anchorBounds, -1.0, -1.0), bounds))) {
-            topIndex = index;
-            layer = entryLayer;
-            covered = CGRectUnion(covered, bounds);
-            continue;
+        if (ADIsOverlayProcess(entry, hasPid, (pid_t)record->pid)) {
+            record->flags |= ADListedOverlay;
         }
-        if (CGRectIntersectsRect(bounds, covered)) {
-            break;
+        if (hasPid && (pid_t)record->pid == getpid()) {
+            record->flags |= ADListedOwn;
         }
     }
-    long long top = 0;
-    if (!ADNumberOf(windows[(NSUInteger)topIndex], numberKey, &top)) {
+    return listed;
+}
+
+void ADResolvePlacement(void) {
+    ADListed = nil;
+    ADPlacementAnswer answer = {.kind = ADPlacementGone, .target = 0, .level = 0};
+    NSData *listed = nil;
+    if (ADAnchorNamed && ADAnchorNumber != 0) {
+        listed = ADReadWindows();
+    }
+    // An unread list reaches `resolve` as an empty one, which hides a named
+    // window's overlay.
+    agent_desktop_cursor_overlay_resolve(listed.bytes,
+                                         listed.length / sizeof(ADListedWindow),
+                                         ADAnchorNamed,
+                                         ADAnchorNumber,
+                                         &answer);
+    switch (answer.kind) {
+    case ADPlacementFree:
+        ADPlacementState = ADPlacementFree;
+        return;
+    case ADPlacementAbove:
+        ADPlacementState = ADPlacementAbove;
+        ADPlacementTarget = (CGWindowID)answer.target;
+        ADPlacementLevel = (NSWindowLevel)answer.level;
+        ADListed = listed;
+        return;
+    default:
+        ADPlacementState = ADPlacementGone;
         return;
     }
-    NSMutableSet<NSNumber *> *ours = [NSMutableSet set];
-    for (NSInteger index = topIndex - 1; index >= 0; index -= 1) {
-        NSDictionary *entry = windows[(NSUInteger)index];
-        long long pid = 0;
-        long long number = 0;
-        if (![entry isKindOfClass:NSDictionary.class] || !ADNumberOf(entry, ownerKey, &pid) ||
-            pid != getpid() || !ADNumberOf(entry, numberKey, &number)) {
-            break;
-        }
-        [ours addObject:@(number)];
-    }
-    ADPlacementState = ADPlacementAbove;
-    ADPlacementTarget = (CGWindowID)top;
-    ADPlacementLevel = (NSWindowLevel)layer;
-    ADPlacementTop = (CGWindowID)top;
-    ADPlacementOurs = ours;
 }
 
 bool ADSetAnchor(bool named, uint32_t number) {
@@ -207,43 +233,51 @@ void ADHide(NSWindow *window) {
         return;
     }
     [ADHeld removeObjectForKey:window];
+    [ADStacked removeObjectForKey:window];
     [window orderOut:nil];
 }
 
 void ADForgetHeld(void) {
     [ADHeld removeAllObjects];
+    [ADStacked removeAllObjects];
 }
 
 bool ADPlacementSettled(NSArray<NSWindow *> *visible) {
-    if (ADPlacementState != ADPlacementAbove || ADPlacementOurs == nil ||
-        ADHeld.count > 0) {
+    if (ADPlacementState != ADPlacementAbove || ADListed == nil || ADHeld.count > 0) {
         return false;
     }
-    NSMutableSet<NSNumber *> *numbers = [NSMutableSet set];
-    for (NSWindow *window in visible) {
-        if (window.level != ADPlacementLevel) {
+    NSMutableData *numbers = [NSMutableData dataWithLength:visible.count * sizeof(uint32_t)];
+    uint32_t *mine = numbers.mutableBytes;
+    for (NSUInteger index = 0; index < visible.count; index += 1) {
+        NSWindow *window = visible[index];
+        if (window.level != ADPlacementLevel || window.windowNumber <= 0) {
             return false;
         }
-        [numbers addObject:@(window.windowNumber)];
+        mine[index] = (uint32_t)window.windowNumber;
     }
-    return [numbers isEqualToSet:ADPlacementOurs];
+    return agent_desktop_cursor_overlay_settled(ADListed.bytes,
+                                                ADListed.length / sizeof(ADListedWindow),
+                                                (uint32_t)ADPlacementTarget,
+                                                mine,
+                                                visible.count);
 }
 
-void ADPlace(NSWindow *window, NSWindowLevel freeLevel, bool cursorBand) {
-    if (window == nil) {
-        return;
+/// Every overlay window shown at the named window's height, from the lowest
+/// rank to the highest, each directly above the one before and the first
+/// directly above the target. Whichever window is placed, and whatever placed
+/// it (an action, a new named window, the periodic restack), the effects end
+/// under the cursor and its label.
+static void ADStack(void) {
+    NSMutableArray<NSWindow *> *windows = [NSMutableArray array];
+    for (int rank = ADRankHighlight; rank <= ADRankBubble; rank += 1) {
+        for (NSWindow *window in ADStacked) {
+            if ([[ADStacked objectForKey:window] intValue] == rank) {
+                [windows addObject:window];
+            }
+        }
     }
-    if (ADPlacementState != ADPlacementGone) {
-        [ADHeld removeObjectForKey:window];
-    }
-    switch (ADPlacementState) {
-    case ADPlacementFree:
-        window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                    NSWindowCollectionBehaviorFullScreenAuxiliary;
-        window.level = freeLevel;
-        [window orderFrontRegardless];
-        return;
-    case ADPlacementAbove:
+    NSInteger below = (NSInteger)ADPlacementTarget;
+    for (NSWindow *window in windows) {
         // Belongs to the Space it is shown on (the named window's, which is on
         // the screen now), never every Space, and is not an auxiliary of a
         // full-screen app's Space: on a Space switch it stays behind, and a
@@ -251,21 +285,38 @@ void ADPlace(NSWindow *window, NSWindowLevel freeLevel, bool cursorBand) {
         // that is itself in full screen therefore gets no cursor (hidden).
         window.collectionBehavior = NSWindowCollectionBehaviorDefault;
         window.level = ADPlacementLevel;
-        // Effects go directly above the named window; the cursor and its label
-        // above every overlay window already placed, as their levels did.
-        CGWindowID below = cursorBand && ADPlacementTop != (CGWindowID)window.windowNumber
-                               ? ADPlacementTop
-                               : ADPlacementTarget;
-        [window orderWindow:NSWindowAbove relativeTo:(NSInteger)below];
-        if (cursorBand) {
-            ADPlacementTop = (CGWindowID)window.windowNumber;
+        [window orderWindow:NSWindowAbove relativeTo:below];
+        below = window.windowNumber;
+    }
+}
+
+void ADPlace(NSWindow *window, NSWindowLevel freeLevel, ADRank rank) {
+    if (window == nil) {
+        return;
+    }
+    switch (ADPlacementState) {
+    case ADPlacementFree:
+        [ADHeld removeObjectForKey:window];
+        [ADStacked removeObjectForKey:window];
+        // The Space it is shown on only, and never a full-screen app's Space.
+        window.collectionBehavior = NSWindowCollectionBehaviorDefault;
+        window.level = freeLevel;
+        [window orderFrontRegardless];
+        return;
+    case ADPlacementAbove:
+        [ADHeld removeObjectForKey:window];
+        if (ADStacked == nil) {
+            ADStacked = [NSMapTable weakToStrongObjectsMapTable];
         }
+        [ADStacked setObject:@(rank) forKey:window];
+        ADStack();
         return;
     case ADPlacementGone:
+        [ADStacked removeObjectForKey:window];
         if (ADHeld == nil) {
             ADHeld = [NSMapTable weakToStrongObjectsMapTable];
         }
-        [ADHeld setObject:@(cursorBand) forKey:window];
+        [ADHeld setObject:@(rank) forKey:window];
         [window orderOut:nil];
         return;
     }
@@ -302,7 +353,7 @@ static void ADTrailRender(void) {
     ADTrailLayer.path = localPath;
     CGPathRelease(localPath);
     if (!ADTrailWindow.isVisible) {
-        ADPlace(ADTrailWindow, ADEffectLevel, false);
+        ADPlace(ADTrailWindow, ADEffectLevel, ADRankTrail);
     }
 }
 
@@ -343,8 +394,8 @@ NSWindow *ADWindow(NSRect frame) {
     window.releasedWhenClosed = NO;
     window.hidesOnDeactivate = NO;
     window.level = ADCursorLevel;
-    window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                NSWindowCollectionBehaviorFullScreenAuxiliary;
+    // The Space it is shown on only, never every Space or a full-screen app's.
+    window.collectionBehavior = NSWindowCollectionBehaviorDefault;
     NSView *view = [[NSView alloc]
         initWithFrame:NSMakeRect(0.0, 0.0, frame.size.width, frame.size.height)];
     view.wantsLayer = YES;
@@ -395,7 +446,7 @@ NSWindow *ADRippleWindow(void) {
 
 void ADRipplePlay(NSWindow *window) {
     NSArray<CALayer *> *layers = window.contentView.layer.sublayers;
-    ADPlace(window, ADEffectLevel, false);
+    ADPlace(window, ADEffectLevel, ADRankRipple);
     for (NSUInteger index = 0; index < layers.count; index += 1) {
         CAShapeLayer *layer = (CAShapeLayer *)layers[index];
         [layer removeAllAnimations];
@@ -466,7 +517,7 @@ void ADHighlightShow(NSRect frame, double seconds) {
                                            @[ @0.0, @0.12, @0.22, @1.0 ],
                                            seconds)
                              forKey:@"agent-highlight-pop"];
-    ADPlace(ADHighlightWindow, ADEffectLevel, false);
+    ADPlace(ADHighlightWindow, ADEffectLevel, ADRankHighlight);
 }
 
 static __strong NSWindow *ADCaretWindow = nil;
@@ -484,7 +535,7 @@ void ADCaretShow(NSRect frame) {
     ADCaretBar.backgroundColor = ADColor(ADCurrentStyle.accent, 1.0);
     [ADCaretWindow setFrame:frame display:NO];
     ADCaretBar.frame = CGRectMake(0.0, 0.0, frame.size.width, frame.size.height);
-    ADPlace(ADCaretWindow, ADEffectLevel, false);
+    ADPlace(ADCaretWindow, ADEffectLevel, ADRankCaret);
     [CATransaction flush];
 }
 
@@ -496,6 +547,18 @@ void ADCaretStop(void) {
     ADHide(ADCaretWindow);
     ADCaretWindow = nil;
     ADCaretBar = nil;
+}
+
+void ADPlaceEffectsShown(void) {
+    if (ADShown(ADHighlightWindow)) {
+        ADPlace(ADHighlightWindow, ADEffectLevel, ADRankHighlight);
+    }
+    if (ADShown(ADTrailWindow)) {
+        ADPlace(ADTrailWindow, ADEffectLevel, ADRankTrail);
+    }
+    if (ADShown(ADCaretWindow)) {
+        ADPlace(ADCaretWindow, ADEffectLevel, ADRankCaret);
+    }
 }
 
 NSArray<NSWindow *> *ADEffectWindowsShown(void) {
@@ -603,5 +666,5 @@ void ADShowBubble(NSTextField *text, NSRect frame, bool changed) {
         [surface addAnimation:fade forKey:@"agent-bubble-fade"];
         [surface addAnimation:pop forKey:@"agent-bubble-pop"];
     }
-    ADPlace(bubble, ADCursorLevel, true);
+    ADPlace(bubble, ADCursorLevel, ADRankBubble);
 }
