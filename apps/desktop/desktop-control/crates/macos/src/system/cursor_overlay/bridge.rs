@@ -71,8 +71,8 @@ unsafe extern "C" {
     fn agent_desktop_cursor_overlay_rest();
     fn agent_desktop_cursor_overlay_show();
     fn agent_desktop_cursor_overlay_stop();
-    fn agent_desktop_cursor_overlay_anchor(named: bool, number: u32);
-    fn agent_desktop_cursor_overlay_restack();
+    fn sc_cursor_overlay_anchor(named: bool, number: u32);
+    fn sc_cursor_overlay_restack();
 }
 
 pub(super) fn is_caret(instruction: &CursorOverlayInstruction) -> bool {
@@ -279,7 +279,7 @@ pub(super) fn show() {
 /// the screen now, and an unreadable one hides it.
 pub(super) fn set_anchor(anchor: super::child::Anchor) {
     let (named, number) = anchor_arguments(anchor);
-    unsafe { agent_desktop_cursor_overlay_anchor(named, number) }
+    unsafe { sc_cursor_overlay_anchor(named, number) }
 }
 
 /// What the native side is given: whether a window is named, and its number
@@ -295,7 +295,7 @@ pub(super) fn anchor_arguments(anchor: super::child::Anchor) -> (bool, u32) {
 /// Puts the shown cursor back at the named window's height when the windows
 /// have moved in the stacking order since it was drawn.
 pub(super) fn restack() {
-    unsafe { agent_desktop_cursor_overlay_restack() }
+    unsafe { sc_cursor_overlay_restack() }
 }
 
 #[cfg(test)]

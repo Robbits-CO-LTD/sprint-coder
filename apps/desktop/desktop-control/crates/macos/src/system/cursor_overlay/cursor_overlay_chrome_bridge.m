@@ -28,23 +28,25 @@ static NSUInteger ADTrailPointCount = 0;
 
 // Where the overlay's windows go in the stacking order (Sprint Coder).
 //
-// With no window named (a bare coordinate, the greeting), the windows sit
-// above every window of the current Space, as before, but stay on the Space
-// they were shown on and never join a full-screen app's Space. With one named,
-// they sit at that window's height; `placement.rs` decides where from the
-// on-screen window list read here (see `resolve`): directly above the named
-// window and its sheets and popovers, at its level and never higher, below the
-// first window of any other process that covers them. So the cursor is hidden
-// where the user's window covers the worked-in window, and seen where it is
-// seen. A named window that is not on the screen now (closed, minimized, its
-// app hidden, on another Space), or that cannot be confirmed to be (the list
-// cannot be read, the id is not a window number), hides them: they are held
-// out of the screen and shown again above it once it is back. A named window
-// never puts them at the front or the back of the current Space. Nothing here
-// activates an app, raises or reorders another process's window, or makes an
-// overlay window key: only the overlay's own windows are ordered, and only
-// relative to the others. They are always stacked in the order of their rank,
-// the effects lowest and the cursor and its label on top.
+// With no window named (a bare coordinate, the greeting), the windows sit above
+// every window of the current Space, as before, but stay on the Space they were
+// shown on and never join a full-screen app's Space. With one named, they sit
+// at that window's height; `placement.rs` decides where from the on-screen
+// window list read here (see `resolve`): directly above the named window, at
+// its level and never higher, below every window in front of it. So the cursor
+// is hidden where the user's window covers the worked-in window, and seen where
+// it is seen. The named window's own sheets and popovers are separate windows
+// in front of it, so the cursor is hidden under them too: keeping it off the
+// user's windows, another window of the same app included, comes first. A named
+// window that is not on the screen now (closed, minimized, its app hidden, on
+// another Space), or that cannot be confirmed to be (the list cannot be read,
+// the id is not a window number), hides them: they are held out of the screen
+// and shown again above it once it is back. A named window never puts them at
+// the front or the back of the current Space. Nothing here activates an app,
+// raises or reorders another process's window, or makes an overlay window key:
+// only the overlay's own windows are ordered, and only relative to the others.
+// They are always stacked in the order of their rank, the effects lowest and
+// the cursor and its label on top.
 typedef enum {
     ADPlacementFree = 0,
     ADPlacementAbove = 1,
@@ -67,22 +69,27 @@ typedef struct {
     int64_t level;
 } ADPlacementAnswer;
 
+_Static_assert(sizeof(ADListedWindow) == 64,
+               "ADListedWindow must match ListedWindow in placement.rs");
+_Static_assert(sizeof(ADPlacementAnswer) == 16,
+               "ADPlacementAnswer must match Placement in placement.rs");
+
 static const uint8_t ADListedHasPid = 1 << 0;
 static const uint8_t ADListedHasLayer = 1 << 1;
 static const uint8_t ADListedHasBounds = 1 << 2;
 static const uint8_t ADListedOverlay = 1 << 3;
 static const uint8_t ADListedOwn = 1 << 4;
 
-extern void agent_desktop_cursor_overlay_resolve(const ADListedWindow *windows,
-                                                 size_t count,
-                                                 bool named,
-                                                 uint32_t number,
-                                                 ADPlacementAnswer *output);
-extern bool agent_desktop_cursor_overlay_settled(const ADListedWindow *windows,
-                                                 size_t count,
-                                                 uint32_t target,
-                                                 const uint32_t *mine,
-                                                 size_t mineCount);
+extern void sc_cursor_overlay_resolve(const ADListedWindow *windows,
+                                      size_t count,
+                                      bool named,
+                                      uint32_t number,
+                                      ADPlacementAnswer *output);
+extern bool sc_cursor_overlay_settled(const ADListedWindow *windows,
+                                      size_t count,
+                                      uint32_t target,
+                                      const uint32_t *mine,
+                                      size_t mineCount);
 
 static bool ADAnchorNamed = false;
 static CGWindowID ADAnchorNumber = 0;
@@ -187,11 +194,11 @@ void ADResolvePlacement(void) {
     }
     // An unread list reaches `resolve` as an empty one, which hides a named
     // window's overlay.
-    agent_desktop_cursor_overlay_resolve(listed.bytes,
-                                         listed.length / sizeof(ADListedWindow),
-                                         ADAnchorNamed,
-                                         ADAnchorNumber,
-                                         &answer);
+    sc_cursor_overlay_resolve(listed.bytes,
+                              listed.length / sizeof(ADListedWindow),
+                              ADAnchorNamed,
+                              ADAnchorNumber,
+                              &answer);
     switch (answer.kind) {
     case ADPlacementFree:
         ADPlacementState = ADPlacementFree;
@@ -255,11 +262,11 @@ bool ADPlacementSettled(NSArray<NSWindow *> *visible) {
         }
         mine[index] = (uint32_t)window.windowNumber;
     }
-    return agent_desktop_cursor_overlay_settled(ADListed.bytes,
-                                                ADListed.length / sizeof(ADListedWindow),
-                                                (uint32_t)ADPlacementTarget,
-                                                mine,
-                                                visible.count);
+    return sc_cursor_overlay_settled(ADListed.bytes,
+                                     ADListed.length / sizeof(ADListedWindow),
+                                     (uint32_t)ADPlacementTarget,
+                                     mine,
+                                     visible.count);
 }
 
 /// Every overlay window shown at the named window's height, from the lowest

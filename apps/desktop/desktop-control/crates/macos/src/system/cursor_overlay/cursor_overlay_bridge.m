@@ -398,7 +398,7 @@ static NSArray<NSWindow *> *ADShownWindows(void) {
 
 /// Names the window the next drawing is at the height of (0 for none). A
 /// change moves the windows already shown at once.
-void agent_desktop_cursor_overlay_anchor(bool named, uint32_t number) {
+void sc_cursor_overlay_anchor(bool named, uint32_t number) {
     @autoreleasepool {
         if (ADSetAnchor(named, number)) {
             ADRestackShown();
@@ -409,7 +409,7 @@ void agent_desktop_cursor_overlay_anchor(bool named, uint32_t number) {
 /// Called while the cursor is shown, every so often: the named window or the
 /// windows over it may have moved in the stacking order since. Windows that
 /// are already in place are left alone; with no window named nothing moves.
-void agent_desktop_cursor_overlay_restack(void) {
+void sc_cursor_overlay_restack(void) {
     @autoreleasepool {
         if (!ADAnchored()) {
             return;

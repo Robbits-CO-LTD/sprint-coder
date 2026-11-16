@@ -1,4 +1,4 @@
-// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
+// Changed by Sprint Coder (new file); see VENDORED.md in apps/desktop/desktop-control.
 //! Where the overlay's windows go in the stacking order, decided from the
 //! window list the renderer reads (CoreGraphics' on-screen list, front to
 //! back). The Objective-C side reads the list into `ListedWindow` records,
@@ -49,6 +49,10 @@ pub(super) struct Placement {
     pub(super) level: i64,
 }
 
+// The Objective-C side declares the same records; it asserts the same sizes.
+const _: () = assert!(core::mem::size_of::<ListedWindow>() == 64);
+const _: () = assert!(core::mem::size_of::<Placement>() == 16);
+
 impl Placement {
     const FREE: Self = Self {
         kind: FREE,
@@ -62,47 +66,20 @@ impl Placement {
     };
 }
 
-fn max_x(rect: &[f64; 4]) -> f64 {
-    rect[0] + rect[2]
-}
-
-fn max_y(rect: &[f64; 4]) -> f64 {
-    rect[1] + rect[3]
-}
-
-/// Whether `inner` lies inside `outer` grown by a point on every side.
-fn inside(outer: &[f64; 4], inner: &[f64; 4]) -> bool {
-    inner[0] >= outer[0] - 1.0
-        && inner[1] >= outer[1] - 1.0
-        && max_x(inner) <= max_x(outer) + 1.0
-        && max_y(inner) <= max_y(outer) + 1.0
-}
-
-/// Whether the two frames share some area (touching edges do not).
-fn overlaps(a: &[f64; 4], b: &[f64; 4]) -> bool {
-    a[0] < max_x(b) && b[0] < max_x(a) && a[1] < max_y(b) && b[1] < max_y(a)
-}
-
-fn union(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
-    let x = a[0].min(b[0]);
-    let y = a[1].min(b[1]);
-    [x, y, max_x(a).max(max_x(b)) - x, max_y(a).max(max_y(b)) - y]
-}
-
 /// Where the overlay goes for the window an instruction names.
 ///
 /// With none named (`named` false) it goes above every window. With one named,
-/// it is hidden unless that window is in the list now (number 0, which no
-/// window has, is one that could not be read). Otherwise it goes directly above
-/// the named window and the windows of the same process at the same level that
-/// lie inside its frame (its sheets and popovers - or another document window
-/// of the same app that happens to fit inside it), at the named window's level,
-/// and never higher: windows of the same process at a higher level (its menus
-/// and panels) are passed like any other window, so the overlay may be hidden
-/// under them, but it is never left above the user's window once that is
-/// brought to the front. The walk toward the front skips the renderers' own
-/// windows and transparent ones, and stops at the first other window that
-/// covers what it has passed.
+/// it is hidden unless that window is in the list now with its owner, level
+/// and frame read (number 0, which no window has, is one that could not be
+/// read). Otherwise it goes directly above the named window, at the named
+/// window's level, and no window in front of it is looked at: whatever is in
+/// front stays in front, so the overlay is never above a window the user is
+/// using, another window of the same app included, and is never left above
+/// one once the user brings it to the front.
+///
+/// The cost: the named window's own sheets and popovers are separate windows
+/// in front of it, so the overlay is hidden under them. Keeping it off the
+/// user's windows comes first.
 pub(super) fn resolve(windows: &[ListedWindow], named: bool, number: u32) -> Placement {
     if !named {
         return Placement::FREE;
@@ -110,43 +87,15 @@ pub(super) fn resolve(windows: &[ListedWindow], named: bool, number: u32) -> Pla
     if number == 0 {
         return Placement::GONE;
     }
-    let Some(anchor_index) = windows.iter().position(|window| window.number == number) else {
+    let Some(anchor) = windows.iter().find(|window| window.number == number) else {
         return Placement::GONE;
     };
-    let anchor = &windows[anchor_index];
     if !anchor.has(HAS_PID) || !anchor.has(HAS_LAYER) || !anchor.has(HAS_BOUNDS) {
-        return Placement::GONE;
-    }
-    let mut top = anchor_index;
-    let mut covered = anchor.bounds;
-    for index in (0..anchor_index).rev() {
-        let entry = &windows[index];
-        if !entry.has(HAS_PID) || !entry.has(HAS_BOUNDS) {
-            continue;
-        }
-        if entry.has(OVERLAY) || entry.alpha <= 0.0 {
-            continue;
-        }
-        if entry.pid == anchor.pid
-            && entry.has(HAS_LAYER)
-            && entry.layer == anchor.layer
-            && inside(&anchor.bounds, &entry.bounds)
-        {
-            top = index;
-            covered = union(&covered, &entry.bounds);
-            continue;
-        }
-        if overlaps(&entry.bounds, &covered) {
-            break;
-        }
-    }
-    let target = windows[top].number;
-    if target == 0 {
         return Placement::GONE;
     }
     Placement {
         kind: ABOVE,
-        target,
+        target: number,
         level: anchor.layer,
     }
 }
@@ -183,7 +132,7 @@ pub(super) fn settled(windows: &[ListedWindow], target: u32, mine: &[u32]) -> bo
 /// `windows` points to `count` records (or is null with `count` 0), and
 /// `output` to a writable `Placement`.
 #[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn agent_desktop_cursor_overlay_resolve(
+pub(super) unsafe extern "C" fn sc_cursor_overlay_resolve(
     windows: *const ListedWindow,
     count: usize,
     named: bool,
@@ -208,7 +157,7 @@ pub(super) unsafe extern "C" fn agent_desktop_cursor_overlay_resolve(
 /// `windows` points to `count` records and `mine` to `mine_count` numbers
 /// (either may be null with its count 0).
 #[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn agent_desktop_cursor_overlay_settled(
+pub(super) unsafe extern "C" fn sc_cursor_overlay_settled(
     windows: *const ListedWindow,
     count: usize,
     target: u32,

@@ -139,8 +139,11 @@ fn run() -> Result<(), AdapterError> {
                 if std::mem::take(&mut state.resting) {
                     // The window this control names is set before the cursor
                     // comes back, so it never shows for a moment where the
-                    // last one (or none, above every window) put it.
-                    adopt_anchor(&control, &mut state);
+                    // last one (or none, above every window) put it. Only a
+                    // control that passes its checks may move it, as in `handle`.
+                    if control.validate().is_ok() {
+                        adopt_anchor(&control, &mut state);
+                    }
                     bridge::show();
                     restacked = std::time::Instant::now();
                 }

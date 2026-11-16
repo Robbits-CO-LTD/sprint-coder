@@ -1,4 +1,4 @@
-// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
+// Changed by Sprint Coder (new file); see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 const READ: u8 = HAS_PID | HAS_LAYER | HAS_BOUNDS;
@@ -77,92 +77,87 @@ fn the_overlay_sits_directly_above_the_named_window_under_the_users() {
     assert_eq!(resolve(&windows, true, 7), above(7, 0));
 }
 
-/// The same app's menu or panel (a higher level) is not passed: the overlay
-/// keeps the named window's level, so when the user brings their own window to
-/// the front it is never left above it. It may be hidden under that menu.
+/// Another window of the same app (same process, same level, inside the named
+/// window's frame) in front of it is one the user may be using: the overlay
+/// stays directly above the named window, under it, and never above it.
 #[test]
-fn a_higher_level_window_of_the_same_app_is_not_passed_and_the_level_is_kept() {
+fn a_same_level_window_of_the_same_app_inside_the_frame_stays_above_the_overlay() {
+    let users_window = window(5, WORKED, 0, [300.0, 100.0, 400.0, 300.0]);
+    let windows = [users_window, window(7, WORKED, 0, ANCHOR)];
+    let placement = resolve(&windows, true, 7);
+    assert_eq!(placement, above(7, 0));
+    assert_ne!(placement.target, 5);
+    // The same with nothing else on the screen and the window filling the frame.
+    let filling = window(5, WORKED, 0, ANCHOR);
+    assert_eq!(
+        resolve(&[filling, window(7, WORKED, 0, ANCHOR)], true, 7),
+        above(7, 0)
+    );
+}
+
+/// The same app's menu or panel (a higher level) in front does not change the
+/// answer: the target is the named window and the level is its level, so the
+/// overlay may be hidden under the menu but is never left above a window the
+/// user brings to the front.
+#[test]
+fn a_higher_level_window_of_the_same_app_keeps_the_named_window_and_its_level() {
     let windows = [
         window(1, USER, 0, [0.0, 0.0, 50.0, 50.0]),
         window(3, WORKED, 101, [150.0, 150.0, 200.0, 300.0]),
         window(4, WORKED, 3, [120.0, 120.0, 100.0, 100.0]),
         window(7, WORKED, 0, ANCHOR),
     ];
-    let placement = resolve(&windows, true, 7);
-    assert_eq!(placement, above(7, 0));
-    // A higher-level window of the same app that covers nothing is passed over
-    // by the walk, but still never sets the level.
+    assert_eq!(resolve(&windows, true, 7), above(7, 0));
+    // The named window's own level is kept, whatever it is.
     let windows = [
-        window(3, WORKED, 101, [2000.0, 2000.0, 10.0, 10.0]),
-        window(5, WORKED, 0, [200.0, 200.0, 300.0, 200.0]),
-        window(7, WORKED, 0, ANCHOR),
+        window(3, WORKED, 101, [150.0, 150.0, 200.0, 300.0]),
+        window(7, WORKED, 8, ANCHOR),
     ];
-    assert_eq!(resolve(&windows, true, 7), above(5, 0));
+    assert_eq!(resolve(&windows, true, 7), above(7, 8));
 }
 
-/// The named window's sheets and popovers (same process, same level, inside its
-/// frame) are passed, and the overlay goes above them. So is another document
-/// window of the same app that happens to lie inside it.
+/// Unread records, the renderers' own windows and transparent windows in front
+/// do not change the answer either.
 #[test]
-fn a_same_level_window_of_the_same_app_inside_the_frame_is_passed() {
-    let sheet = window(5, WORKED, 0, [300.0, 100.0, 400.0, 300.0]);
-    let windows = [sheet, window(7, WORKED, 0, ANCHOR)];
-    assert_eq!(resolve(&windows, true, 7), above(5, 0));
-    // Up to a point outside the frame still counts as inside.
-    let edge = window(5, WORKED, 0, [99.5, 99.5, 801.0, 601.0]);
-    assert_eq!(
-        resolve(&[edge, window(7, WORKED, 0, ANCHOR)], true, 7),
-        above(5, 0)
-    );
-    // Outside the frame it is another window over the named one.
-    let outside = window(5, WORKED, 0, [50.0, 50.0, 400.0, 300.0]);
-    assert_eq!(
-        resolve(&[outside, window(7, WORKED, 0, ANCHOR)], true, 7),
-        above(7, 0)
-    );
-    // Another app's window inside the frame is not family.
-    let foreign = window(5, USER, 0, [300.0, 100.0, 400.0, 300.0]);
-    assert_eq!(
-        resolve(&[foreign, window(7, WORKED, 0, ANCHOR)], true, 7),
-        above(7, 0)
-    );
-}
-
-/// The walk stops at the first other window over what it passed, skipping the
-/// renderers' own windows, transparent windows and windows that cover nothing.
-#[test]
-fn the_walk_skips_overlays_transparent_and_distant_windows_and_stops_at_a_cover() {
+fn unread_overlay_and_transparent_windows_in_front_do_not_change_the_answer() {
+    let unread = ListedWindow {
+        flags: HAS_LAYER,
+        ..window(1, USER, 0, ANCHOR)
+    };
+    let unnumbered = window(0, WORKED, 0, [300.0, 100.0, 400.0, 300.0]);
     let transparent = ListedWindow {
         alpha: 0.0,
-        ..window(2, USER, 0, ANCHOR)
+        ..window(2, WORKED, 0, [300.0, 100.0, 400.0, 300.0])
     };
     let windows = [
-        window(5, WORKED, 0, [300.0, 100.0, 400.0, 300.0]),
-        window(1, USER, 0, [0.0, 0.0, 200.0, 200.0]),
+        unread,
+        unnumbered,
         mine(20),
         other_agent(30),
         transparent,
         window(9, USER, 0, [3000.0, 3000.0, 100.0, 100.0]),
         window(7, WORKED, 0, ANCHOR),
     ];
-    // The sheet is in front of the user's window that covers the named one, so
-    // the walk stops before reaching it.
     assert_eq!(resolve(&windows, true, 7), above(7, 0));
 }
 
-/// A window whose owner or frame could not be read is skipped, as before.
+/// A named window whose owner, level or frame could not be read hides the
+/// overlay, wherever it is in the list.
 #[test]
-fn an_unread_entry_in_front_is_skipped() {
-    let unread = ListedWindow {
-        flags: HAS_LAYER,
-        ..window(1, USER, 0, ANCHOR)
-    };
-    let windows = [
-        unread,
-        window(5, WORKED, 0, [300.0, 100.0, 400.0, 300.0]),
-        window(7, WORKED, 0, ANCHOR),
-    ];
-    assert_eq!(resolve(&windows, true, 7), above(5, 0));
+fn a_named_window_that_cannot_be_read_hides_the_overlay() {
+    for flags in [
+        HAS_LAYER | HAS_BOUNDS,
+        HAS_PID | HAS_BOUNDS,
+        HAS_PID | HAS_LAYER,
+        0,
+    ] {
+        let unread = ListedWindow {
+            flags,
+            ..window(7, WORKED, 0, ANCHOR)
+        };
+        let windows = [window(1, USER, 0, [0.0, 0.0, 50.0, 50.0]), unread];
+        assert_eq!(resolve(&windows, true, 7), Placement::GONE, "flags {flags}");
+    }
 }
 
 /// In place: this renderer's windows directly in front of the target, in the
@@ -232,7 +227,7 @@ fn two_renderers_naming_the_same_window_both_count_as_settled() {
         window(7, WORKED, 0, ANCHOR),
     ];
     assert!(settled(&interleaved, 7, &[20, 22]));
-    // Both resolve to the same target, since the walk skips renderer windows.
+    // Both resolve to the same target: the named window.
     assert_eq!(resolve(&interleaved, true, 7), above(7, 0));
 }
 
@@ -244,18 +239,12 @@ fn the_entry_points_read_the_records() {
         window(7, WORKED, 0, ANCHOR),
     ];
     let mut output = Placement::GONE;
-    unsafe {
-        agent_desktop_cursor_overlay_resolve(windows.as_ptr(), windows.len(), true, 7, &mut output)
-    };
-    assert_eq!(output, above(5, 0));
-    unsafe { agent_desktop_cursor_overlay_resolve(std::ptr::null(), 0, true, 7, &mut output) };
+    unsafe { sc_cursor_overlay_resolve(windows.as_ptr(), windows.len(), true, 7, &mut output) };
+    assert_eq!(output, above(7, 0));
+    unsafe { sc_cursor_overlay_resolve(std::ptr::null(), 0, true, 7, &mut output) };
     assert_eq!(output.kind, GONE);
     let stacked = [mine(20), window(7, WORKED, 0, ANCHOR)];
     let shown = [20_u32];
-    assert!(unsafe {
-        agent_desktop_cursor_overlay_settled(stacked.as_ptr(), 2, 7, shown.as_ptr(), 1)
-    });
-    assert!(!unsafe {
-        agent_desktop_cursor_overlay_settled(stacked.as_ptr(), 2, 7, std::ptr::null(), 0)
-    });
+    assert!(unsafe { sc_cursor_overlay_settled(stacked.as_ptr(), 2, 7, shown.as_ptr(), 1) });
+    assert!(!unsafe { sc_cursor_overlay_settled(stacked.as_ptr(), 2, 7, std::ptr::null(), 0) });
 }
