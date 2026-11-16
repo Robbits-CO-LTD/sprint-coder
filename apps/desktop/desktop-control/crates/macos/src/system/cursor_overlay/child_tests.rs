@@ -62,6 +62,22 @@ fn in_window(window: Option<&str>, phase: CursorPhase) -> CursorOverlayInstructi
         .with_phase(phase)
 }
 
+/// A resting renderer comes back only for a control that passes its checks. One
+/// that fails them (here an agent id that is not one) is refused, so it neither
+/// shows the cursor again nor moves it; a renderer that is awake is not woken.
+#[test]
+fn only_a_control_that_passes_its_checks_wakes_a_resting_renderer() {
+    let valid = presented("run-a", in_window(Some("w-7"), CursorPhase::Travel));
+    let invalid = presented("run-a", in_window(Some("w-9"), CursorPhase::Travel))
+        .with_agent_id(Some("not an agent/id".into()));
+    assert!(valid.validate().is_ok());
+    assert!(invalid.validate().is_err());
+    assert!(wakes(true, &valid));
+    assert!(!wakes(true, &invalid));
+    assert!(!wakes(false, &valid));
+    assert!(wakes(true, &CursorOverlayControl::show("run-a".into())));
+}
+
 /// The cursor is drawn at the height of the window the instruction names; a
 /// bare coordinate puts it back above every window, and a caret-follow keeps
 /// the window of the caret it moves, as on Windows. A named id that is not a

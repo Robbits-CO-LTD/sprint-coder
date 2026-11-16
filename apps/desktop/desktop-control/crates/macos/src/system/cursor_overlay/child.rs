@@ -136,14 +136,12 @@ fn run() -> Result<(), AdapterError> {
                     continue;
                 }
                 quiet_since = std::time::Instant::now();
-                if std::mem::take(&mut state.resting) {
+                if wakes(state.resting, &control) {
+                    state.resting = false;
                     // The window this control names is set before the cursor
                     // comes back, so it never shows for a moment where the
-                    // last one (or none, above every window) put it. Only a
-                    // control that passes its checks may move it, as in `handle`.
-                    if control.validate().is_ok() {
-                        adopt_anchor(&control, &mut state);
-                    }
+                    // last one (or none, above every window) put it.
+                    adopt_anchor(&control, &mut state);
                     bridge::show();
                     restacked = std::time::Instant::now();
                 }
@@ -261,6 +259,13 @@ fn prepare_stream(stream: &UnixStream) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))
+}
+
+/// Whether a control brings a resting renderer back: only one that passes its
+/// checks. One that fails them is refused by `handle`, so it must neither show
+/// the cursor again nor move it to another window; the renderer stays at rest.
+fn wakes(resting: bool, control: &CursorOverlayControl) -> bool {
+    resting && control.validate().is_ok()
 }
 
 /// Whether a control ends the renderer rather than drawing: a disable, or a
