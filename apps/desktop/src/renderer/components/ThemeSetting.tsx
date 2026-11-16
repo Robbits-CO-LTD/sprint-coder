@@ -1,5 +1,5 @@
 import { THEME_ATTRIBUTE, THEMES, type ThemeId } from '../../window-theme';
-import { setTheme, useTheme } from '../lib/theme';
+import { retryThemeSave, setTheme, useTheme, useThemeSaveFailed } from '../lib/theme';
 import { Check } from './icons';
 
 /**
@@ -12,6 +12,7 @@ import { Check } from './icons';
  */
 export function ThemeSetting() {
   const theme = useTheme();
+  const saveFailed = useThemeSaveFailed();
   return (
     <fieldset className="settings-group theme-setting" data-testid="settings-theme">
       <legend>テーマ</legend>
@@ -36,9 +37,20 @@ export function ThemeSetting() {
           </label>
         ))}
       </div>
-      <p className="settings-hint">
-        選ぶとすぐに切り替わります。次に開いた時も、同じテーマで始まります。
-      </p>
+      {saveFailed ? (
+        <>
+          <p className="settings-skill-error" role="alert">
+            テーマを保存できませんでした。今の表示には反映されていますが、次に開いた時は前のテーマに戻ります。
+          </p>
+          <button type="button" className="settings-secondary-button" onClick={retryThemeSave}>
+            もう一度保存
+          </button>
+        </>
+      ) : (
+        <p className="settings-hint">
+          選ぶとすぐに切り替わります。次に開いた時も、同じテーマで始まります。
+        </p>
+      )}
     </fieldset>
   );
 }

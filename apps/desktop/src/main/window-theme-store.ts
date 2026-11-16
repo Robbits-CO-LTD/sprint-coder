@@ -26,3 +26,17 @@ export function writeStoredTheme(path: string, theme: ThemeId): void {
   writeFileSync(temporary, serializeStoredTheme(theme), 'utf8');
   renameSync(temporary, path);
 }
+
+export function saveStoredTheme(
+  path: string,
+  theme: ThemeId,
+  onError: (error: unknown) => void,
+): { saved: boolean } {
+  try {
+    writeStoredTheme(path, theme);
+    return { saved: true };
+  } catch (error) {
+    onError(error);
+    return { saved: false };
+  }
+}

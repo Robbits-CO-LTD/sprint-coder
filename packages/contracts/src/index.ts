@@ -4737,7 +4737,7 @@ export interface SprintCoderApi {
   };
   /** Asks Main to keep the chosen theme for this profile and to recolour the window's own parts.
    * The themes and the page's side of a change are in apps/desktop (src/window-theme.ts). */
-  theme: { set(theme: string): void };
+  theme: { set(theme: string): Promise<{ saved: boolean }> };
   tasks: {
     list(): Promise<TaskSummary[]>;
     /** Receives non-persisted Task summary updates such as a completed generated title. */
