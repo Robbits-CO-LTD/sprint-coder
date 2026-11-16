@@ -460,9 +460,9 @@ pub(crate) fn after_open_error(
 /// After the wait for the window: on a fresh launch whose wait ended without a window (an error,
 /// the grace or the deadline) and whose process is gone (`gone`), judged as a possible hand-off
 /// (`after_exit`); otherwise the wait's outcome goes on as before. `gone` is given `true` when
-/// there are candidates the launch may be passed to: it then waits a short while for a process
-/// that is still running to exit (one passing the launch on may exit just after the wait), and
-/// a launch without candidates is not slowed.
+/// the launch may be passed on (`may_be_passed_on`): it then waits a short while for a process
+/// that is still running to exit (one passing the launch on may exit just after the wait). A
+/// launch that cannot be passed on (no instance of the same app ran) is not slowed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn after_wait(
     window: Result<Option<WindowInfo>, AdapterError>,
@@ -476,13 +476,19 @@ pub(crate) fn after_wait(
     let Some(handoff) = handoff else {
         return AfterWait::Window(window);
     };
-    if matches!(window, Ok(Some(_))) || !gone(!handoff.candidates.is_empty()) {
+    if matches!(window, Ok(Some(_))) || !gone(may_be_passed_on(handoff)) {
         return AfterWait::Window(window);
     }
     match after_exit(handoff, watch, id, launched.0, activate) {
         Some(outcome) => AfterWait::Outcome(outcome),
         None => AfterWait::Window(window),
     }
+}
+
+/// Whether a fresh launch may be passed to an instance that runs: there are candidates, or an
+/// instance of the same app ran that could not be made one (it gives the unconfirmed outcome).
+fn may_be_passed_on(handoff: &Handoff) -> bool {
+    !handoff.candidates.is_empty() || handoff.same_app_ran
 }
 
 /// The outcome of a fresh launch whose process `pid` exited without a window, or `None` for the

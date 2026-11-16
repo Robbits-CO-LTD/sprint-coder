@@ -779,7 +779,7 @@ fn a_process_that_exits_within_the_grace_is_gone() {
 }
 
 #[test]
-fn only_a_launch_with_candidates_waits_for_its_process_to_exit_after_the_wait() {
+fn only_a_launch_that_may_be_passed_on_waits_for_its_process_to_exit_after_the_wait() {
     let watched = Handoff {
         candidates: vec![candidate()],
         same_app_ran: true,
@@ -806,13 +806,31 @@ fn only_a_launch_with_candidates_waits_for_its_process_to_exit_after_the_wait() 
         }
         _ => panic!("expected a hand-off"),
     }
-    // Without candidates the process is only looked at once, as before.
+    // The same app ran but could not be watched: waited for too, and unconfirmed once gone.
+    match after_wait(
+        Ok(None),
+        Some(&unwatched),
+        |wait_for_exit| wait_for_exit,
+        |_| panic!("not watched"),
+        "Firefox",
+        &launched,
+        false,
+    ) {
+        AfterWait::Outcome(Err(error)) => {
+            assert_eq!(kind(&error), "launch_handoff_unconfirmed");
+        }
+        _ => panic!("expected the unconfirmed outcome"),
+    }
+    // Nothing of the same app ran: the process is only looked at once, as before.
     assert!(matches!(
         after_wait(
             Ok(None),
-            Some(&unwatched),
+            Some(&Handoff::default()),
             |wait_for_exit| {
-                assert!(!wait_for_exit, "a launch without candidates is not slowed");
+                assert!(
+                    !wait_for_exit,
+                    "a launch that cannot be passed on is not slowed"
+                );
                 false
             },
             |_| panic!("not watched"),
@@ -835,4 +853,50 @@ fn only_a_launch_with_candidates_waits_for_its_process_to_exit_after_the_wait() 
         ),
         AfterWait::Window(Ok(None))
     ));
+}
+
+/// The live watch itself asks whether the other instances of the same app still run: one that
+/// does (this test process stands for it) keeps a launch whose candidates are gone from being a
+/// failure to retry, and one that has exited does not.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_live_watch_asks_whether_another_instance_of_the_same_app_still_runs() {
+    use crate::system::process::process_identity::token_for_pid;
+    let deadline = || agent_desktop_core::Deadline::after(2_000).expect("deadline is valid");
+    let own = i32::try_from(std::process::id()).expect("pid fits");
+    let own_token = token_for_pid(own).expect("own process is readable");
+    assert!(own_token.is_some());
+    let running = Handoff {
+        same_app_ran: true,
+        others: vec![SameAppInstance {
+            pid: own,
+            process_instance: own_token,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        watch_live(&running, Duration::ZERO, deadline()),
+        HandoffWatch::NoNewWindow
+    );
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("sleep starts");
+    let pid = i32::try_from(child.id()).expect("pid fits");
+    let token = token_for_pid(pid).expect("child is readable");
+    assert!(token.is_some());
+    child.kill().expect("child is killed");
+    child.wait().expect("child is reaped");
+    let exited = Handoff {
+        same_app_ran: true,
+        others: vec![SameAppInstance {
+            pid,
+            process_instance: token,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        watch_live(&exited, Duration::ZERO, deadline()),
+        HandoffWatch::NoInstance
+    );
 }
