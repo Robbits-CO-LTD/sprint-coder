@@ -1,5 +1,5 @@
 import { projectFolderIdentity } from './project-folder-identity';
-import { FullAccessConfirmation } from './full-access-confirmation';
+import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
 import {
   app,
   clipboard,
@@ -3134,8 +3134,7 @@ export class IpcRouter {
                 type: 'warning',
                 title: 'フルアクセスを有効にしますか？',
                 message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
-                detail:
-                  'コマンドと、デスクトップ操作（ほかのアプリの窓を読む・押す・入力する、アプリの起動。ログイン済みのブラウザーやメールのアプリも含む）を、確認なしで実行します。管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。ただし、これらはファイル・コマンド・ネットワークの道具に効く保護で、デスクトップ操作が開いている窓（端末、エクスプローラー、パスワード管理のアプリ、ブラウザーなど）を読んだり入力したりすることは止めません。',
+                detail: fullAccessConfirmationDetail(process.platform),
                 buttons: ['キャンセル', 'フルアクセスを有効化'],
                 defaultId: 0,
                 cancelId: 0,

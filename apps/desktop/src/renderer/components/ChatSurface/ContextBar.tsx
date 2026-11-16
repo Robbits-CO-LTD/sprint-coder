@@ -71,6 +71,11 @@ export function PermissionChip({ taskId }: { taskId: string }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.permissions?.set === 'function';
+  // The desktop-control warning names the OS file manager; only macOS calls it something else.
+  const fileManagerName =
+    typeof window !== 'undefined' && window.sprintCoder?.windowControls?.platform === 'darwin'
+      ? 'Finder'
+      : 'エクスプローラー';
 
   useEffect(() => {
     if (!open) return;
@@ -154,8 +159,9 @@ export function PermissionChip({ taskId }: { taskId: string }) {
                 含む可能性があるものもredact済みの本文をProviderへ都度確認なしで渡します。管理deny、
                 秘密情報、provider
                 egress、Renderer非特権は常に維持されます。ただし、これらはファイル・
-                コマンド・ネットワークの道具に効く保護で、デスクトップ操作が開いている窓（端末、
-                エクスプローラー、パスワード管理のアプリ、ブラウザーなど）を読んだり入力したりすることは止めません。
+                コマンド・ネットワークの道具に効く保護で、デスクトップ操作が開いている窓（端末、{' '}
+                {fileManagerName}
+                、パスワード管理のアプリ、ブラウザーなど）を読んだり入力したりすることは止めません。
               </span>
               <button
                 data-testid="access-full-confirm"
