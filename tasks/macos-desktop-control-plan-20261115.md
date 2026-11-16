@@ -67,7 +67,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 | 1 | 完了 | #1316（upstream の `crates/macos` の取り込み）、#1317 |
 | 2 | 完了 | #1318 |
 | 3 | 完了。公証を通した配布物での確認は未実施 | #1319、[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315) |
-| 4 | 一部完了。権限の案内・Finder の文言・Project の案内・PR の CI は main に入った。Team のカーソル・`launch --url`・クリップボードの書き込みは PR を出して未 merge | #1330、#1331、#1332、#1334（main）。#1335、#1337、#1338（未 merge）。[Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) |
+| 4 | 一部完了。権限の案内・Finder の文言・Project の案内・PR の CI・Team のカーソル・`launch --url` は main に入った。クリップボードの書き込みは PR を出して未 merge | #1330、#1331、#1332、#1334、#1335、#1337（main）。#1338（未 merge）。[Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) |
 
 実装の担当は、段階 1 の最初の実装が Codex、それ以後（段階 1 のレビュー指摘の修正、段階 2、段階 3、段階 4）は Opus 5.5。オーナーの指示（2026-11-15）による。
 
@@ -126,9 +126,9 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 ### 段階 4: 残りを足す（影響の大きい順）
 
 - 権限の案内を画面に出す（設定の中に状態と「システム設定を開く」）。**完了**（#1334）。
-- Team のカーソルを macOS でも出す。PR #1335（未 merge）。
+- Team のカーソルを macOS でも出す。**完了**（#1335。残した制限は [Issue #1340](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1340)）。
 - クリップボードの書き込み（別の実行ファイルの同梱）。PR #1338（未 merge）。
-- `launch --url`（ブラウザーの一覧の Mac 版）。PR #1337（未 merge）。
+- `launch --url`（ブラウザーの一覧の Mac 版）。**完了**（#1337。動いているブラウザーが前面を取った時に、直前の前面へ戻す処理を含む。残した制限は [Issue #1341](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1341)）。
 - フルアクセスの説明文の「エクスプローラー」を macOS では Finder にする。**完了**（#1330）。
 - Website と release の本文の「Windows だけ」の記載。配布する時に直す。
 
@@ -254,8 +254,20 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 - 利用者が全画面のアプリ（別の Space）を使っている間は、デスクトップ操作が別の Space の窓を読めない（[Issue #1336](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1336)）。以前からの制限で、この日の確認で分かった。
 - 窓を名指さない操作（座標だけの操作など）のカーソルは、今も全部の窓の上に描く（Windows と同じ）。
-- macOS では、動いているブラウザーに URL を渡した時に、ブラウザーが自分から前に出るのを止められない（`launch --url`。#1337）。Windows にある「前面を取られたら戻す」処理が、macOS には無い。
+- macOS では、動いているブラウザーに URL を渡した時に、ブラウザーが自分から前に出るのを止められない（`launch --url`）。#1337 で、取られたら直前の前面へ戻す処理を足した（2026-11-17 に merge）。利用者がそのブラウザーで入力している最中は、戻せないことがある（[Issue #1341](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1341)）。
 - 別の利用者が入れたアプリと、root の持ち物として入ったアプリでは、クリップボードの書き込みが承認カードの後で断られる（#1338）。
 - Windows の batch にも、失敗した書き込みの後に貼り付けへ進む余地がある（macOS は #1338 で、書き込みを含む batch に `--stop-on-error` を求めるようにした）。
 - 開発版の確認で、計算機が 1 回前面になった記録がある。同じ順番のコマンドを 2 回再現したが起きず、原因は特定できていない（#1335 に記録）。
 - 設定の「システム設定を開く」（アクセシビリティ）は、macOS 27.0.1 では「デバイスの制御とデータへのアクセス」という画面を開く。macOS 26 以前でどの画面が開くかは確かめていない。
+
+### 段階 4 の続き（2026-11-17）で出たもの
+
+実機の記録は `tasks/evidence/macos-desktop-control-launch-url-20261117.md`。
+
+- Team のカーソルは、操作先のアプリ自身のシート・ポップオーバーの下では隠れ、操作先の窓が閉じた後も最長 1.5 秒残る（[Issue #1340](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1340)）。
+- `launch --url` の前面を戻す処理は、利用者がそのブラウザーで入力している最中に 1 回戻せなかった。入力がある時に、戻す先のアプリの上に Team のカーソルがあると戻さない（[Issue #1341](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1341)）。
+- Retina の display では、`screenshot` の結果（画像を文字にしたもの）が約 2 MB になり、AI が画像を使えなかった（[Issue #1342](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1342)）。
+- 同梱の Skill の文に取り込み元の名前が残っていて、AI が利用者への発言でその名前を書くことがある（Windows 版も同じ）。直すかどうかはオーナーの判断待ち。
+- フルアクセスの設定でも、AI が Project のメモリに書こうとした時の承認カードは出る（デスクトップ操作の承認とは別）。
+- 承認を待っている操作は、答えが無いまま時間がたつと取り消され、その Turn は失敗になる。
+
