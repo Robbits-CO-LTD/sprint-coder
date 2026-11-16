@@ -180,9 +180,24 @@ fn a_url_launch_on_macos_takes_a_browser_by_its_app_name_or_bundle_id() {
         assert_eq!(options.args, ["--new-window", "https://example.com/a?q=1"]);
         assert!(options.env.is_empty() && options.cwd.is_none() && options.cdp_port.is_none());
         assert!(!options.attach_if_running);
+        // The bundle that opens is limited to the Chromium-based browsers' bundle ids.
+        assert!(options.bundle_ids.contains(&"com.google.Chrome".to_owned()));
+        assert!(
+            !options
+                .bundle_ids
+                .contains(&"org.mozilla.firefox".to_owned())
+        );
     }
     let options = build_launch_options(&url_launch("Firefox", "https://example.com/")).unwrap();
     assert_eq!(options.args, ["-new-window", "https://example.com/"]);
+    assert_eq!(options.bundle_ids, ["org.mozilla.firefox"]);
+    // A launch without --url places no limit.
+    assert!(
+        build_launch_options(&launch_args(&[], &[]))
+            .unwrap()
+            .bundle_ids
+            .is_empty()
+    );
     // The Windows names are not how macOS names an app.
     for app in ["chrome", "C:\\x\\chrome.exe", "Safari", "TextEdit"] {
         assert_eq!(

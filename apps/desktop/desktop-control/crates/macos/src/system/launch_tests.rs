@@ -170,6 +170,46 @@ fn running(pid: u32, instance: &str, bundle_id: &str) -> AppInfo {
     }
 }
 
+fn shown(number: i64) -> WindowSeen {
+    WindowSeen {
+        number,
+        shown: true,
+    }
+}
+
+fn hidden(number: i64) -> WindowSeen {
+    WindowSeen {
+        number,
+        shown: false,
+    }
+}
+
+fn candidate() -> HandoffCandidate {
+    HandoffCandidate {
+        pid: 10,
+        process_instance: "macos-proc-v1:10:1".into(),
+        windows_before: vec![100, 101],
+    }
+}
+
+fn exited(pid: i64) -> AdapterError {
+    AdapterError::new(ErrorCode::AppUnresponsive, "exited")
+        .with_details(serde_json::json!({
+            "pid": pid,
+            "complete": false,
+            "kind": LAUNCHED_PROCESS_EXITED,
+        }))
+        .with_disposition(DeliverySemantics::delivered_unverified())
+}
+
+fn kind(error: &AdapterError) -> &str {
+    error.details.as_ref().unwrap()["kind"].as_str().unwrap()
+}
+
+fn delivery(error: &AdapterError) -> serde_json::Value {
+    serde_json::to_value(error.disposition).unwrap()
+}
+
 #[test]
 fn only_an_allowed_instance_of_the_same_bundle_may_take_the_launch() {
     let firefox = std::path::Path::new("/Applications/Firefox.app");
@@ -197,16 +237,10 @@ fn only_an_allowed_instance_of_the_same_bundle_may_take_the_launch() {
             }))
         },
         |pid| pid != 12,
-        |pid| (pid != 13).then(|| vec![100, 101]),
+        // Every window it had counts as one it had before, shown or not.
+        |pid| (pid != 13).then(|| vec![shown(100), hidden(101)]),
     );
-    assert_eq!(
-        candidates,
-        [HandoffCandidate {
-            pid: 10,
-            process_instance: "macos-proc-v1:10:1".into(),
-            windows_before: vec![100, 101],
-        }]
-    );
+    assert_eq!(candidates, [candidate()]);
     // A bundle outside the standard places gives no path, and so no candidate.
     assert!(
         handoff_candidates(&apps[..1], firefox, |_| None, |_| true, |_| Some(vec![])).is_empty()
@@ -214,55 +248,248 @@ fn only_an_allowed_instance_of_the_same_bundle_may_take_the_launch() {
 }
 
 #[test]
-fn a_hand_off_is_taken_only_when_the_instance_shows_a_new_window() {
-    let candidate = HandoffCandidate {
-        pid: 10,
-        process_instance: "macos-proc-v1:10:1".into(),
-        windows_before: vec![100],
-    };
-    let candidates = std::slice::from_ref(&candidate);
-    // A new window on the third look.
+fn an_instance_of_the_same_bundle_id_is_known_to_have_run_even_without_a_candidate() {
+    let apps = [running(10, "macos-proc-v1:10:1", "org.mozilla.firefox")];
+    assert!(same_app_ran(&apps, Some("org.mozilla.firefox")));
+    assert!(same_app_ran(&apps, Some("ORG.MOZILLA.FIREFOX")));
+    assert!(!same_app_ran(&apps, Some("org.mozilla.nightly")));
+    assert!(!same_app_ran(&[], Some("org.mozilla.firefox")));
+    // The bundle's id cannot be read: any app the launch named counts.
+    assert!(same_app_ran(&apps, None));
+    assert!(!same_app_ran(&[], None));
+}
+
+#[test]
+fn a_hand_off_is_taken_only_when_the_instance_shows_a_window_it_did_not_have() {
+    let candidates = [candidate()];
+    // A new shown window on the third look.
     let mut looks = 0;
     let mut waits = 0;
     let seen = watch_handoff(
-        candidates,
+        &candidates,
         30,
         |_| true,
         |_| {
             looks += 1;
             Some(if looks >= 3 {
-                vec![100, 200]
+                vec![shown(100), shown(200)]
             } else {
-                vec![100]
+                vec![shown(100)]
             })
         },
         || waits += 1,
     );
     assert_eq!(seen, HandoffWatch::NewWindow);
     assert_eq!((looks, waits), (3, 2));
-    // The same windows the whole time, or one closed: not confirmed.
-    assert_eq!(
-        watch_handoff(candidates, 5, |_| true, |_| Some(vec![100]), || {}),
-        HandoffWatch::NoNewWindow
-    );
-    assert_eq!(
-        watch_handoff(candidates, 5, |_| true, |_| Some(vec![]), || {}),
-        HandoffWatch::NoNewWindow
-    );
+    for now in [
+        // The same windows, or one closed.
+        vec![shown(100), hidden(101)],
+        vec![],
+        // A window it had but did not show (another Space, minimized) shown again.
+        vec![shown(100), shown(101)],
+        // A new window not shown, or too small to count (a helper window).
+        vec![shown(100), hidden(200)],
+    ] {
+        let now = now.clone();
+        assert_eq!(
+            watch_handoff(&candidates, 5, |_| true, |_| Some(now.clone()), || {}),
+            HandoffWatch::NoNewWindow,
+            "{now:?}"
+        );
+    }
     // Windows that cannot be read do not confirm it.
     assert_eq!(
-        watch_handoff(candidates, 5, |_| true, |_| None, || {}),
+        watch_handoff(&candidates, 5, |_| true, |_| None, || {}),
         HandoffWatch::NoNewWindow
     );
-    // The instance is gone: the launch's own outcome stands.
+    // The instance is gone, or there is none.
     assert_eq!(
-        watch_handoff(candidates, 5, |_| false, |_| Some(vec![100, 200]), || {}),
+        watch_handoff(&candidates, 5, |_| false, |_| Some(vec![shown(200)]), || {}),
         HandoffWatch::NoInstance
     );
     assert_eq!(
-        watch_handoff(&[], 5, |_| true, |_| Some(vec![1]), || {}),
+        watch_handoff(&[], 5, |_| true, |_| Some(vec![shown(1)]), || {}),
         HandoffWatch::NoInstance
     );
+}
+
+#[test]
+fn an_exit_while_the_same_app_runs_is_handed_off_or_unconfirmed_never_a_failure_to_retry() {
+    let watched = Handoff {
+        candidates: vec![candidate()],
+        same_app_ran: true,
+    };
+    let unwatched = Handoff {
+        candidates: vec![],
+        same_app_ran: true,
+    };
+    let unrelated = Handoff::default();
+    let never = |_: &Handoff| -> HandoffWatch { panic!("nothing to watch") };
+    // New window: handed off.
+    let result = after_exit(
+        &watched,
+        |_| HandoffWatch::NewWindow,
+        "Firefox",
+        42,
+        None,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(result.handed_off);
+    // Watched, no new window: unconfirmed.
+    let error = after_exit(
+        &watched,
+        |_| HandoffWatch::NoNewWindow,
+        "Firefox",
+        42,
+        None,
+        false,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(kind(&error), "launch_handoff_unconfirmed");
+    // The same app ran but could not be watched: unconfirmed too, without watching.
+    let error = after_exit(&unwatched, never, "Firefox", 42, None, false)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(kind(&error), "launch_handoff_unconfirmed");
+    assert_eq!(
+        delivery(&error),
+        serde_json::to_value(DeliverySemantics::uncertain()).unwrap()
+    );
+    // Nothing of the same app ran, or its instances are gone: the launch's own outcome.
+    assert!(after_exit(&unrelated, never, "Firefox", 42, None, false).is_none());
+    assert!(
+        after_exit(
+            &watched,
+            |_| HandoffWatch::NoInstance,
+            "Firefox",
+            42,
+            None,
+            false
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn an_open_error_is_judged_as_a_hand_off_only_on_a_fresh_launch_whose_process_exited() {
+    let watched = Handoff {
+        candidates: vec![candidate()],
+        same_app_ran: true,
+    };
+    let result = after_open_error(
+        exited(42),
+        Some(&watched),
+        |_| HandoffWatch::NewWindow,
+        "Google Chrome",
+        true,
+    )
+    .unwrap();
+    assert!(result.handed_off && result.window.is_none());
+    assert_eq!(result.pid, agent_desktop_core::ProcessId::new(42));
+    assert_eq!(result.activated, Some(false));
+    // An attach (no hand-off read) or another error: returned as it is.
+    let error = after_open_error(
+        exited(42),
+        None,
+        |_| HandoffWatch::NewWindow,
+        "Firefox",
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(kind(&error), LAUNCHED_PROCESS_EXITED);
+    let error = after_open_error(
+        crate::system::launch_completion::bundle_id_refused(),
+        Some(&watched),
+        |_| panic!("not an exit"),
+        "Firefox",
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::PolicyDenied);
+    // The instance is gone too: the original error.
+    let error = after_open_error(
+        exited(42),
+        Some(&watched),
+        |_| HandoffWatch::NoInstance,
+        "Firefox",
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(kind(&error), LAUNCHED_PROCESS_EXITED);
+}
+
+#[test]
+fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
+    let watched = Handoff {
+        candidates: vec![candidate()],
+        same_app_ran: true,
+    };
+    let launched = (42, "macos-proc-v1:42:1".to_owned());
+    let goes_on = |outcome: AfterWait| matches!(outcome, AfterWait::Window(_));
+    // An attach or a launch without a hand-off read: never judged.
+    assert!(goes_on(after_wait(
+        Ok(None),
+        None,
+        || panic!("not read"),
+        |_| panic!("not watched"),
+        "Firefox",
+        &launched,
+        false
+    )));
+    // The process still runs, or a window came: as before.
+    assert!(goes_on(after_wait(
+        Ok(None),
+        Some(&watched),
+        || false,
+        |_| panic!("not watched"),
+        "Firefox",
+        &launched,
+        false
+    )));
+    let window = WindowInfo::for_process(&running(42, "macos-proc-v1:42:1", "org.mozilla.firefox"));
+    assert!(goes_on(after_wait(
+        Ok(Some(window)),
+        Some(&watched),
+        || panic!("not read"),
+        |_| panic!("not watched"),
+        "Firefox",
+        &launched,
+        false
+    )));
+    // Gone after an error or an empty wait, with a new window of the instance: handed off.
+    for wait in [Ok(None), Err(launch_target_gone(42))] {
+        match after_wait(
+            wait,
+            Some(&watched),
+            || true,
+            |_| HandoffWatch::NewWindow,
+            "Firefox",
+            &launched,
+            false,
+        ) {
+            AfterWait::Outcome(Ok(result)) => {
+                assert!(result.handed_off);
+                assert_eq!(
+                    result.process_instance.as_deref(),
+                    Some("macos-proc-v1:42:1")
+                );
+            }
+            _ => panic!("expected a hand-off"),
+        }
+    }
+    // Gone, and the instances are gone too: the wait's own outcome.
+    assert!(goes_on(after_wait(
+        Err(launch_target_gone(42)),
+        Some(&watched),
+        || true,
+        |_| HandoffWatch::NoInstance,
+        "Firefox",
+        &launched,
+        false
+    )));
 }
 
 #[test]
@@ -280,23 +507,13 @@ fn each_watch_outcome_returns_what_can_be_said() {
     assert!(result.handed_off && result.attached);
     assert!(!result.new_instance && !result.existing_window && !result.running_without_window);
     assert!(result.window.is_none() && result.activated.is_none());
-    assert_eq!(result.pid, agent_desktop_core::ProcessId::new(42));
     assert!(result.suggestion.unwrap().contains("list-windows"));
-    // With --activate, the front is not confirmed.
-    let activated = handoff_outcome(HandoffWatch::NewWindow, "Google Chrome", 42, None, true)
-        .unwrap()
-        .unwrap();
-    assert_eq!(activated.activated, Some(false));
-    // Not confirmed: delivery uncertain, and told not to repeat the launch.
     let error = handoff_outcome(HandoffWatch::NoNewWindow, "Firefox", 42, None, false)
         .unwrap()
         .unwrap_err();
+    assert_eq!(kind(&error), "launch_handoff_unconfirmed");
     assert_eq!(
-        error.details.as_ref().unwrap()["kind"],
-        "launch_handoff_unconfirmed"
-    );
-    assert_eq!(
-        serde_json::to_value(error.disposition).unwrap(),
+        delivery(&error),
         serde_json::to_value(DeliverySemantics::uncertain()).unwrap()
     );
     assert!(
@@ -305,4 +522,13 @@ fn each_watch_outcome_returns_what_can_be_said() {
             .unwrap()
             .contains("Do not repeat the launch")
     );
+}
+
+#[test]
+fn only_an_on_screen_window_of_some_size_counts_as_shown() {
+    assert!(counts_as_shown(true, 800.0, 600.0));
+    assert!(counts_as_shown(true, 100.0, 100.0));
+    assert!(!counts_as_shown(false, 800.0, 600.0));
+    assert!(!counts_as_shown(true, 99.0, 600.0));
+    assert!(!counts_as_shown(true, 800.0, 20.0));
 }

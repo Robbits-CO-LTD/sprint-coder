@@ -402,7 +402,7 @@ fn batch_session_ended_skip_covers_a_following_entry_of_the_same_session() {
 #[cfg(target_os = "macos")]
 #[test]
 fn launch_url_refuses_an_app_that_is_not_a_known_browser_before_launching_on_macos() {
-    // Neither name starts anything: both are refused before any permission is read.
+    // Neither name starts anything: both are refused before the permission refusal.
     for app in ["TextEdit", "Safari"] {
         let output = binary()
             .args(["launch", app, "--url", "https://example.com/"])

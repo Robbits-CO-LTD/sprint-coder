@@ -343,6 +343,23 @@ describe('launch --url: the approval card', () => {
     expect(batch.notes).toContain(
       'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
     );
+    // A plain launch beside it in a batch keeps its own note.
+    const mixed = card(
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'launch', args: { app: 'Firefox', url: 'https://example.com/' } },
+          { command: 'launch', args: { app: 'TextEdit' } },
+        ]),
+      ],
+      'darwin',
+    );
+    expect(mixed.notes).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
+    expect(mixed.notes).toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
+    );
     // A plain launch on macOS keeps its note.
     expect(card(['launch', 'TextEdit'], 'darwin').notes).toContain(
       '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',

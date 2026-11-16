@@ -69,61 +69,75 @@ pub(crate) fn launch_app_impl(
         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
         return Ok(result_from_app(&app, window));
     }
-    let path = super::launch_workspace::launch_path(id).map_err(before_launch)?;
-    // The instances this launch may be passed to, read before it starts: running from the same
-    // bundle (so the same bundle id), in a standard place, not Sprint Coder itself.
-    let handoff = handoff_candidates(
-        &handoff_apps(id, &initial, deadline),
-        &path,
-        |pid| {
-            super::launch_workspace::resolved_path(id, Some(pid))
-                .and_then(|path| super::launch_location::require(&path))
-                .ok()
-        },
-        |pid| crate::system::own_window::check_pid(Some(pid)).is_ok(),
-        |pid| window_numbers(pid, deadline),
-    );
-    let target = launch_target(options, initial).map_err(before_launch)?;
+    let target = launch_target(options, initial.clone()).map_err(before_launch)?;
+    // Checked before opening exactly as before (`prepare`, the checks `open` always made).
+    let path = super::launch_workspace::prepare(id, deadline)?;
+    // Only a fresh start (`--no-attach`, `--url`) may be passed to an instance that runs; for it,
+    // the instances it may be passed to are read before it starts. Nothing here refuses the
+    // launch: what cannot be read only leaves fewer candidates.
+    let handoff = (!options.attach_if_running).then(|| read_handoff(id, &initial, &path, deadline));
 
     let launched = match crate::system::launch_workspace::open(id, &path, options, deadline) {
-        // Exited before it could be identified: only the error says so.
         Err(error) => {
-            let Some(pid) = exited_launch_pid(&error) else {
-                return Err(error);
-            };
-            return after_exit(id, pid, None, &handoff, options, deadline).unwrap_or(Err(error));
+            return after_open_error(
+                error,
+                handoff.as_ref(),
+                |handoff| watch_live(handoff, deadline),
+                id,
+                options.activate,
+            );
         }
         Ok(launched) => launched,
     };
     validate_launched_target(&target, &launched).map_err(after_launch)?;
     let window = settled_window(launched.0, &launched.1, options, deadline);
-    if !matches!(window, Ok(Some(_)))
-        // The wait ended without a window (an error, the grace or the deadline): judged by what
-        // is observed now, whichever way the wait ended. A process that cannot be read is
-        // taken as still running.
-        && !super::process::process_identity::matches_instance(launched.0, &launched.1)
-            .unwrap_or(true)
-        && let Some(outcome) = after_exit(
-            id,
-            launched.0,
-            Some(&launched.1),
-            &handoff,
-            options,
-            deadline,
-        )
-    {
-        return outcome;
-    }
-    let window = window.map_err(after_launch)?;
+    let window = match after_wait(
+        window,
+        handoff.as_ref(),
+        || {
+            // A process that cannot be read is taken as still running.
+            !super::process::process_identity::matches_instance(launched.0, &launched.1)
+                .unwrap_or(true)
+        },
+        |handoff| watch_live(handoff, deadline),
+        id,
+        &launched,
+        options.activate,
+    ) {
+        AfterWait::Window(window) => window.map_err(after_launch)?,
+        AfterWait::Outcome(outcome) => return outcome,
+    };
     result_from_launched(&launched, window, id, &target, options, deadline).map_err(after_launch)
 }
 
-/// An instance a launch may be passed to: its process, and the windows it showed before.
+/// The smallest window, in points each way, counted as a new window of an instance a launch was
+/// passed to: smaller ones (a browser's helper or status windows) are not taken as its answer.
+const MIN_NEW_WINDOW_POINTS: f64 = 100.0;
+
+/// A window of a process, as the hand-off watch reads it: its number, and whether it counts as
+/// a window shown to the user (on screen, layer 0, at least `MIN_NEW_WINDOW_POINTS` each way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowSeen {
+    pub(crate) number: i64,
+    pub(crate) shown: bool,
+}
+
+/// An instance a launch may be passed to: its process, and every window it had before (shown or
+/// not, on any Space, minimized or not), so a window it only shows again is not taken as new.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HandoffCandidate {
     pub(crate) pid: i32,
     pub(crate) process_instance: String,
     pub(crate) windows_before: Vec<i64>,
+}
+
+/// What a fresh launch read before it started, for a hand-off: the instances it may be passed to,
+/// and whether an instance of the same bundle id ran at all (also when no candidate could be made
+/// of it: its bundle or windows could not be read, or it runs from another copy of the bundle).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct Handoff {
+    pub(crate) candidates: Vec<HandoffCandidate>,
+    pub(crate) same_app_ran: bool,
 }
 
 /// What watching the candidates after the launched process exited showed.
@@ -133,8 +147,54 @@ pub(crate) enum HandoffWatch {
     NewWindow,
     /// A candidate still runs, but showed no new window in the time watched.
     NoNewWindow,
-    /// No candidate (none ran from the same bundle, or none still runs).
+    /// No candidate still runs.
     NoInstance,
+}
+
+/// What the launch does after the wait for its window.
+pub(crate) enum AfterWait {
+    /// Goes on with this outcome of the wait, as before.
+    Window(Result<Option<WindowInfo>, AdapterError>),
+    /// Ends with this.
+    Outcome(Result<LaunchResult, AdapterError>),
+}
+
+#[cfg(target_os = "macos")]
+fn read_handoff(
+    id: &str,
+    initial: &[AppInfo],
+    path: &std::path::Path,
+    deadline: Deadline,
+) -> Handoff {
+    let apps = handoff_apps(id, initial, deadline);
+    let bundle_id = super::launch_workspace::bundle_identifier(path);
+    Handoff {
+        same_app_ran: same_app_ran(&apps, bundle_id.as_deref()),
+        candidates: handoff_candidates(
+            &apps,
+            path,
+            |pid| {
+                super::launch_workspace::resolved_path(id, Some(pid))
+                    .and_then(|path| super::launch_location::require(&path))
+                    .ok()
+            },
+            |pid| crate::system::own_window::check_pid(Some(pid)).is_ok(),
+            |pid| window_list(pid, deadline),
+        ),
+    }
+}
+
+/// Whether one of `apps` (named by the launch) has the bundle id of the bundle it opens; any of
+/// them when that id cannot be read.
+pub(crate) fn same_app_ran(apps: &[AppInfo], bundle_id: Option<&str>) -> bool {
+    match bundle_id {
+        Some(id) => apps.iter().any(|app| {
+            app.bundle_id
+                .as_deref()
+                .is_some_and(|other| other.eq_ignore_ascii_case(id))
+        }),
+        None => !apps.is_empty(),
+    }
 }
 
 /// The running apps a launch of `id` may be passed to: those `id` names, and those its name
@@ -155,9 +215,14 @@ fn handoff_apps(id: &str, initial: &[AppInfo], deadline: Deadline) -> Vec<AppInf
     apps
 }
 
-/// The visible windows a process shows now, by window number, or `None` when they cannot be read.
+/// Whether a window counts as one shown to the user: on screen and not a small helper window.
+pub(crate) fn counts_as_shown(on_screen: bool, width: f64, height: f64) -> bool {
+    on_screen && width >= MIN_NEW_WINDOW_POINTS && height >= MIN_NEW_WINDOW_POINTS
+}
+
+/// Every layer-0 window of a process now (on screen or not), or `None` when they cannot be read.
 #[cfg(target_os = "macos")]
-fn window_numbers(pid: i32, deadline: Deadline) -> Option<Vec<i64>> {
+fn window_list(pid: i32, deadline: Deadline) -> Option<Vec<WindowSeen>> {
     let records = crate::system::window::cg_window::window_records_until(
         deadline_instant(deadline).ok()?,
         crate::system::window::cg_window::WindowRecordScope::Pid(pid),
@@ -166,8 +231,11 @@ fn window_numbers(pid: i32, deadline: Deadline) -> Option<Vec<i64>> {
     Some(
         records
             .into_iter()
-            .filter(|record| record.visible && record.window_number > 0)
-            .map(|record| record.window_number)
+            .filter(|record| record.window_number > 0)
+            .map(|record| WindowSeen {
+                number: record.window_number,
+                shown: counts_as_shown(record.visible, record.bounds.width, record.bounds.height),
+            })
             .collect(),
     )
 }
@@ -176,13 +244,12 @@ fn window_numbers(pid: i32, deadline: Deadline) -> Option<Vec<i64>> {
 /// from that same bundle (`bundle_path` gives a running process's bundle, only once it passed the
 /// checks of the standard places), is allowed (`allowed`: not Sprint Coder itself, as an attach
 /// checks), and its windows can be read now.
-#[cfg(target_os = "macos")]
 pub(crate) fn handoff_candidates(
     apps: &[AppInfo],
     launch_path: &std::path::Path,
     mut bundle_path: impl FnMut(i32) -> Option<std::path::PathBuf>,
     mut allowed: impl FnMut(i32) -> bool,
-    mut windows: impl FnMut(i32) -> Option<Vec<i64>>,
+    mut windows: impl FnMut(i32) -> Option<Vec<WindowSeen>>,
 ) -> Vec<HandoffCandidate> {
     apps.iter()
         .filter_map(|app| {
@@ -194,20 +261,19 @@ pub(crate) fn handoff_candidates(
             Some(HandoffCandidate {
                 pid,
                 process_instance,
-                windows_before: windows(pid)?,
+                windows_before: windows(pid)?.iter().map(|window| window.number).collect(),
             })
         })
         .collect()
 }
 
 /// Watches the candidates for up to `rounds` looks, `wait` between them: `NewWindow` as soon as
-/// one that still runs (`alive`) shows a window it did not have before.
-#[cfg(target_os = "macos")]
+/// one that still runs (`alive`) shows (`WindowSeen::shown`) a window it did not have before.
 pub(crate) fn watch_handoff(
     candidates: &[HandoffCandidate],
     rounds: usize,
     mut alive: impl FnMut(&HandoffCandidate) -> bool,
-    mut windows: impl FnMut(i32) -> Option<Vec<i64>>,
+    mut windows: impl FnMut(i32) -> Option<Vec<WindowSeen>>,
     mut wait: impl FnMut(),
 ) -> HandoffWatch {
     let mut seen_alive = false;
@@ -218,8 +284,9 @@ pub(crate) fn watch_handoff(
         for candidate in candidates.iter().filter(|candidate| alive(candidate)) {
             seen_alive = true;
             if windows(candidate.pid).is_some_and(|now| {
-                now.iter()
-                    .any(|number| !candidate.windows_before.contains(number))
+                now.iter().any(|window| {
+                    window.shown && !candidate.windows_before.contains(&window.number)
+                })
             }) {
                 return HandoffWatch::NewWindow;
             }
@@ -231,24 +298,12 @@ pub(crate) fn watch_handoff(
     HandoffWatch::NoNewWindow
 }
 
-/// The outcome of a launch whose process `pid` exited without a window, or `None` when no
-/// instance it may have been passed to runs (then the launch's own outcome stands).
 #[cfg(target_os = "macos")]
-fn after_exit(
-    id: &str,
-    pid: i32,
-    process_instance: Option<&str>,
-    candidates: &[HandoffCandidate],
-    options: &LaunchOptions,
-    deadline: Deadline,
-) -> Option<Result<LaunchResult, AdapterError>> {
-    if candidates.is_empty() {
-        return None;
-    }
+fn watch_live(handoff: &Handoff, deadline: Deadline) -> HandoffWatch {
     let watch = HANDOFF_WATCH.min(deadline.remaining());
     let rounds = usize::try_from(watch.as_millis() / HANDOFF_POLL.as_millis()).unwrap_or(1) + 1;
-    let seen = watch_handoff(
-        candidates,
+    watch_handoff(
+        &handoff.candidates,
         rounds,
         |candidate| {
             super::process::process_identity::matches_instance(
@@ -257,15 +312,76 @@ fn after_exit(
             )
             .unwrap_or(false)
         },
-        |candidate| window_numbers(candidate, deadline),
+        |pid| window_list(pid, deadline),
         || std::thread::sleep(HANDOFF_POLL.min(deadline.remaining())),
-    );
-    handoff_outcome(seen, id, pid, process_instance, options.activate)
+    )
+}
+
+/// After `open` failed: a process that exited before it could be identified, on a fresh launch,
+/// is judged as a possible hand-off (`after_exit`); any other error is returned as it is.
+pub(crate) fn after_open_error(
+    error: AdapterError,
+    handoff: Option<&Handoff>,
+    watch: impl FnOnce(&Handoff) -> HandoffWatch,
+    id: &str,
+    activate: bool,
+) -> Result<LaunchResult, AdapterError> {
+    let (Some(handoff), Some(pid)) = (handoff, exited_launch_pid(&error)) else {
+        return Err(error);
+    };
+    after_exit(handoff, watch, id, pid, None, activate).unwrap_or(Err(error))
+}
+
+/// After the wait for the window: on a fresh launch whose wait ended without a window (an error,
+/// the grace or the deadline) and whose process is gone (`gone`), judged as a possible hand-off
+/// (`after_exit`); otherwise the wait's outcome goes on as before.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn after_wait(
+    window: Result<Option<WindowInfo>, AdapterError>,
+    handoff: Option<&Handoff>,
+    gone: impl FnOnce() -> bool,
+    watch: impl FnOnce(&Handoff) -> HandoffWatch,
+    id: &str,
+    launched: &(i32, String),
+    activate: bool,
+) -> AfterWait {
+    let Some(handoff) = handoff else {
+        return AfterWait::Window(window);
+    };
+    if matches!(window, Ok(Some(_))) || !gone() {
+        return AfterWait::Window(window);
+    }
+    match after_exit(handoff, watch, id, launched.0, Some(&launched.1), activate) {
+        Some(outcome) => AfterWait::Outcome(outcome),
+        None => AfterWait::Window(window),
+    }
+}
+
+/// The outcome of a fresh launch whose process `pid` exited without a window, or `None` for the
+/// launch's own outcome: no instance of the same app ran before it, or the instances it may have
+/// been passed to are gone too. An instance of the same bundle id that ran but could not be
+/// watched gives the unconfirmed outcome, never a failure that invites a retry.
+pub(crate) fn after_exit(
+    handoff: &Handoff,
+    watch: impl FnOnce(&Handoff) -> HandoffWatch,
+    id: &str,
+    pid: i32,
+    process_instance: Option<&str>,
+    activate: bool,
+) -> Option<Result<LaunchResult, AdapterError>> {
+    let seen = if handoff.candidates.is_empty() {
+        if !handoff.same_app_ran {
+            return None;
+        }
+        HandoffWatch::NoNewWindow
+    } else {
+        watch(handoff)
+    };
+    handoff_outcome(seen, id, pid, process_instance, activate)
 }
 
 /// The result for what the watch showed: handed off, not confirmed (delivery uncertain, with
 /// guidance not to repeat the launch), or `None` for the launch's own outcome.
-#[cfg(target_os = "macos")]
 pub(crate) fn handoff_outcome(
     seen: HandoffWatch,
     id: &str,
@@ -299,7 +415,6 @@ pub(crate) fn handoff_outcome(
 }
 
 /// The started process's pid when `error` says it exited before it presented a window.
-#[cfg(target_os = "macos")]
 pub(crate) fn exited_launch_pid(error: &AdapterError) -> Option<i32> {
     let details = error.details.as_ref()?;
     if details.get("kind").and_then(serde_json::Value::as_str) != Some(LAUNCHED_PROCESS_EXITED) {
@@ -315,7 +430,6 @@ pub(crate) fn exited_launch_pid(error: &AdapterError) -> Option<i32> {
 /// A launch passed to the instance that was already running, which showed a new window: that
 /// window is not named (which one is the launch's is not proven). With `--activate`, it is not
 /// confirmed in front either (`activated: false`, as the field defines it without a window).
-#[cfg(target_os = "macos")]
 pub(crate) fn handed_off_result(
     id: &str,
     pid: agent_desktop_core::ProcessId,

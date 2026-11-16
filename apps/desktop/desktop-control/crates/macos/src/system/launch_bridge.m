@@ -267,3 +267,17 @@ char *agent_desktop_copy_application_path(const uint8_t *bytes, size_t length, b
         }
     }
 }
+
+char *agent_desktop_copy_bundle_identifier(const uint8_t *bytes, size_t length) {
+    @autoreleasepool {
+        @try {
+            NSString *path = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
+            NSString *identifier = path == nil ? nil : [NSBundle bundleWithPath:path].bundleIdentifier;
+            const char *text = identifier.UTF8String;
+            return text == NULL ? NULL : strdup(text);
+        } @catch (NSException *exception) {
+            (void)exception;
+            return NULL;
+        }
+    }
+}

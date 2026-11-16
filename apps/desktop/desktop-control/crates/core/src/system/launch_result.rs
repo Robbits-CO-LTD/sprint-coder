@@ -53,7 +53,9 @@ pub struct LaunchResult {
     /// then `true` too). A `window` beside it is one that instance showed
     /// after the launch started, owned by `window.pid` (with `existing_window`
     /// when it already had it); without a `window`, no such window was seen. Left out
-    /// when `false`.
+    /// when `false`. On macOS `window` is never given with it: there `handed_off` means a
+    /// window that instance did not have before was seen after the launch, without naming
+    /// which (one the user opened at the same time is not told apart).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
     /// `true` when a bare launch found the app already running with no

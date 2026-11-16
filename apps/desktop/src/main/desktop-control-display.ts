@@ -614,8 +614,12 @@ function describe(
     notes.unshift(BEHIND_NOTE);
   // A launch that opens a URL is decided on its own card every time, never by a Task grant.
   const urlLaunch = all.some((step) => step.textRole === 'url') || launchesUrl(read);
-  if (all.some((step) => step.kind === 'launch' && step.mode !== 'foreground'))
-    notes.unshift(platform === 'darwin' && urlLaunch ? MAC_URL_LAUNCH_NOTE : LAUNCH_NOTE);
+  const behind = all.filter((step) => step.kind === 'launch' && step.mode !== 'foreground');
+  // On macOS a URL launch has its own note; a plain launch beside it in a batch keeps its own.
+  const macUrl = platform === 'darwin' && urlLaunch;
+  if (behind.length > 0 && (!macUrl || behind.some((step) => step.textRole !== 'url')))
+    notes.unshift(LAUNCH_NOTE);
+  if (behind.length > 0 && macUrl) notes.unshift(MAC_URL_LAUNCH_NOTE);
   if (urlLaunch) notes.unshift(URL_NOTE);
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
