@@ -46,6 +46,7 @@ const KNOWN_JOBS = new Set([
   'renderer-tests',
   'package-tests',
   'sandbox-rust-windows',
+  'desktop-control-rust-macos',
   'test-macos',
   'platform-tests',
   'electron-bridges',
@@ -116,6 +117,14 @@ function windowsNativePath(path) {
 function desktopControlRustPath(path) {
   return /^(?:build-desktop-control\.mjs|\.github\/actions\/prepare-desktop-control\/|apps\/desktop\/desktop-control\/)/u.test(
     path,
+  );
+}
+
+// The macOS build compiles only the CLI package (build-desktop-control.mjs), whose Windows crate
+// is a Windows-only dependency, so a change confined to that crate cannot break it.
+function desktopControlRustMacosPath(path) {
+  return (
+    desktopControlRustPath(path) && !path.startsWith('apps/desktop/desktop-control/crates/windows/')
   );
 }
 
@@ -193,10 +202,11 @@ function websiteCheckPath(path) {
 
 /**
  * Pull requests and pushes to main run the same static checks, selected from their diff:
- * typecheck, lint, package tests, the website checks and, for Rust changes, a Windows compile
- * (mode `pr`). Every test suite and package smoke runs only before a release: the release
- * workflow calls this workflow with `full: true` (release-beta.yml), and a manual run
- * (workflow_dispatch) runs the same set so it can be tried before tagging.
+ * typecheck, lint, package tests, the website checks and, for Rust changes, a Windows compile and,
+ * when desktop control's macOS build is affected, a macOS compile (mode `pr`). Every test suite
+ * and package smoke runs only before a release: the release workflow calls this workflow with
+ * `full: true` (release-beta.yml), and a manual run (workflow_dispatch) runs the same set so it
+ * can be tried before tagging.
  * `pullRequestTests` restores the earlier PR selection of related tests and package smokes.
  * @param {Change[]} changes The complete PR or push diff.
  * @param {{eventName?: string, fullTests?: boolean, pullRequestTests?: boolean}} [options]
@@ -263,6 +273,8 @@ export function classifyChanges(
     windowsRust: full || rustCompile(sandboxPath),
     // The full run builds desktop control in every Windows test shard; a PR or push only compiles it.
     desktopControlRust: rustCompile(desktopControlRustPath),
+    // The full run builds it in every macOS test shard instead.
+    desktopControlRustMacos: rustCompile(desktopControlRustMacosPath),
     distribution: (full || prTests) && distribution,
     websiteRequired,
     // Boundary and dependency changes reach most of the suite through imports or Vitest's
@@ -285,11 +297,13 @@ function validateScope(scope) {
       'shared',
       'windowsRust',
       'desktopControlRust',
+      'desktopControlRustMacos',
       'distribution',
       'websiteRequired',
       'splitRelated',
     ].every((key) => typeof scope[key] === 'boolean') ||
-    (scope.mode !== 'pr' && (scope.splitRelated || scope.desktopControlRust)) ||
+    (scope.mode !== 'pr' &&
+      (scope.splitRelated || scope.desktopControlRust || scope.desktopControlRustMacos)) ||
     !Array.isArray(scope.specs) ||
     !scope.specs.every((spec) => safePath(spec) && /\.test\.(?:mjs|ts|tsx)$/u.test(spec)) ||
     !Array.isArray(scope.platforms) ||
@@ -342,6 +356,7 @@ export function scopeOutputs(scope) {
     shared_required: String(scope.shared),
     windows_rust_required: String(scope.windowsRust),
     desktop_control_rust_required: String(scope.desktopControlRust),
+    desktop_control_rust_macos_required: String(scope.desktopControlRustMacos),
     full_matrix: String(full),
     platform_required: String(platformRows.length > 0),
     platform_matrix: JSON.stringify({ include: platformRows }),
@@ -364,6 +379,7 @@ export function verifyRequiredJobs(scope, results) {
   if (output.quality_required === 'true') required.add('quality');
   if (scope.shared) required.add('package-tests');
   if (scope.windowsRust || scope.desktopControlRust) required.add('sandbox-rust-windows');
+  if (scope.desktopControlRustMacos) required.add('desktop-control-rust-macos');
   if (output.platform_required === 'true') required.add('platform-tests');
   if (scope.mode === 'full') {
     required.add('renderer-tests');
