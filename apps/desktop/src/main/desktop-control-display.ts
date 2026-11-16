@@ -619,7 +619,7 @@ function describe(
   const macUrl = platform === 'darwin' && urlLaunch;
   if (behind.length > 0 && (!macUrl || behind.some((step) => step.textRole !== 'url')))
     notes.unshift(LAUNCH_NOTE);
-  if (behind.length > 0 && macUrl) notes.unshift(MAC_URL_LAUNCH_NOTE);
+  if (macUrl && behind.some((step) => step.textRole === 'url')) notes.unshift(MAC_URL_LAUNCH_NOTE);
   if (urlLaunch) notes.unshift(URL_NOTE);
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
