@@ -616,6 +616,12 @@ impl FrontGuard {
     fn look(&self) {
         let mut watch = self.watch.borrow_mut();
         let seen = read_front(&watch.candidates, watch.wants_new_window(), self.deadline);
+        tracing::trace!(
+            "launch front: look app={:?} focus={:?} new_window={}",
+            seen.app.as_ref().map(|app| app.pid),
+            seen.focus.as_ref().map(|window| window.id.as_str()),
+            seen.new_window
+        );
         let started = self.started;
         let deadline = self.deadline;
         let candidates = watch.candidates.clone();
@@ -877,12 +883,21 @@ fn restore(target: &Target, deadline: Deadline) -> Restored {
                 Ok(false) => return Restored::Gone,
                 Err(_) => return Restored::Failed,
             }
-            if bring_app_back(app.pid, deadline).is_err() {
+            if let Err(error) = bring_app_back(app.pid, deadline) {
+                tracing::debug!(
+                    "launch front: bringing app {} back failed: {error:?}",
+                    app.pid
+                );
                 return Restored::Failed;
             }
-            if front_pid(deadline) == Some(app.pid) {
+            let front = front_pid(deadline);
+            if front == Some(app.pid) {
                 Restored::Back
             } else {
+                tracing::debug!(
+                    "launch front: app {} is not in front again: {front:?}",
+                    app.pid
+                );
                 Restored::NotBack
             }
         }
@@ -895,9 +910,13 @@ fn restore(target: &Target, deadline: Deadline) -> Restored {
             match super::launch::window_list(pid, budget(deadline)) {
                 Some(windows) if windows.iter().any(|seen| seen.number == number) => {}
                 Some(_) => return Restored::Gone,
-                None => return Restored::Failed,
+                None => {
+                    tracing::debug!("launch front: windows of {pid} could not be read");
+                    return Restored::Failed;
+                }
             }
-            if crate::system::focus::focus_window_impl(window, deadline).is_err() {
+            if let Err(error) = crate::system::focus::focus_window_impl(window, deadline) {
+                tracing::debug!("launch front: bringing window {number} back failed: {error:?}");
                 return Restored::Failed;
             }
             let focused = crate::system::window::window_inventory::focused_window_until(instant(
@@ -907,7 +926,11 @@ fn restore(target: &Target, deadline: Deadline) -> Restored {
                 Ok(Some(focused)) if focused.id == window.id && focused.pid == window.pid => {
                     Restored::Back
                 }
-                _ => Restored::NotBack,
+                other => {
+                    let seen = other.map(|window| window.map(|window| window.id));
+                    tracing::debug!("launch front: window {number} is not focused again: {seen:?}");
+                    Restored::NotBack
+                }
             }
         }
     }
