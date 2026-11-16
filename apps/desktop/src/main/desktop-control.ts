@@ -336,13 +336,17 @@ export const DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE =
 
 /**
  * The variables the shipped executable reads when it starts the cursor overlay's renderer
- * (`crates/windows/src/system/cursor_overlay/renderer_image.rs` and `host_watch.rs`). A run starts
- * from a private copy of the executable that is deleted when it returns, and the owned Job ends
- * every member running that copy (`releaseOwnedJob`), so the renderer is started from the approved
- * executable instead, only when its bytes equal the copy's. It is outside what the release ends,
- * stays drawn between runs, and ends on `session end` and `cursor-overlay disable`, and by itself
- * when the process named by the host variable (Sprint Coder's Main) exits. A Stop of the run that
- * started it ends it with the rest of that run's Job.
+ * (`crates/windows/src/system/cursor_overlay/renderer_image.rs` and `host_watch.rs`; on macOS
+ * `crates/macos/src/system/cursor_overlay/host_watch.rs`). On Windows a run starts from a private
+ * copy of the executable that is deleted when it returns, and the owned Job ends every member
+ * running that copy (`releaseOwnedJob`), so the renderer is started from the approved executable
+ * instead, only when its bytes equal the copy's. It is outside what the release ends, stays drawn
+ * between runs, and ends on `session end` and `cursor-overlay disable`, and by itself when the
+ * process named by the host variable (Sprint Coder's Main) exits. On Windows a Stop of the run that
+ * started it ends it with the rest of that run's Job. On macOS the shipped file runs from its own
+ * path, so only the host variable is read (the image variable is ignored there), and the renderer
+ * runs in a process group of its own, which a Stop of the run does not end: it ends on the session's
+ * end, its agent's `cursor-overlay retire`, or Main's exit.
  */
 export const DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE = 'SPRINT_CODER_DESKTOP_CONTROL_IMAGE';
 export const DESKTOP_CONTROL_HOST_PID_VARIABLE = 'SPRINT_CODER_DESKTOP_HOST_PID';

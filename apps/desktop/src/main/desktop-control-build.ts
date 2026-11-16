@@ -9,9 +9,9 @@
  * Windows x64 and Apple silicon macOS run it, and both ship it in the package (on macOS in
  * `Contents/Resources`, sealed again after code signing like the sandbox runner). Linux has not
  * been verified on a real desktop (the display environment and process-group Stop do not fit
- * yet), so nothing is built there and desktop control stays off. The Team's desktop cursors stay
- * Windows-only. On macOS the clipboard writes go through a helper executable shipped and sealed
- * beside it (`DESKTOP_CONTROL_MAC_HELPER`).
+ * yet), so nothing is built there and desktop control stays off. The Team's desktop cursors run
+ * wherever desktop control does. On macOS the clipboard writes go through a helper executable
+ * shipped and sealed beside it (`DESKTOP_CONTROL_MAC_HELPER`).
  *
  * Kept free of imports so forge.config.ts can use the same facts at package time.
  */
@@ -54,15 +54,15 @@ export const DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE = 'SPRINT_CODER_DESKTOP_TEAM_
 
 /**
  * Whether a process started with this value of `DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE` has the
- * Team's desktop cursors on: on by default, off with `0`, and only on Windows x64 (elsewhere desktop
- * control is not built or the cursors are not built yet, so the Leader there is not offered Workers
- * that could run nothing). Main and the Runtime
- * Host (which inherits Main's environment) both read it here, so they never disagree.
+ * Team's desktop cursors on: on by default, off with `0`, and only where desktop control is built
+ * (Windows x64 and Apple silicon macOS; elsewhere the Leader is not offered Workers that could run
+ * nothing). Main and the Runtime Host (which inherits Main's environment) both read it here, so
+ * they never disagree.
  */
 export function desktopControlTeamCursorsEnabled(
   value: string | undefined,
   platform: string,
   arch: string,
 ): boolean {
-  return value !== '0' && platform === 'win32' && arch === 'x64';
+  return value !== '0' && desktopControlSupported(platform, arch);
 }
