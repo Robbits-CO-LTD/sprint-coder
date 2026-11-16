@@ -8,6 +8,10 @@
 //! form, checked by its shape alone, so every value it accepts is plain printable ASCII that no
 //! browser reads as a switch and the command line passes as one argument. The cases both sides
 //! are tested against live in `launch_url_cases.json`.
+//!
+//! On macOS the browser is named as `launch` names any app there (the bundle's file name without
+//! `.app`, or its bundle id), and the switch and URL reach it as the launch's arguments
+//! (`NSWorkspaceOpenConfiguration.arguments`) of a new instance.
 
 use agent_desktop_core::AppError;
 
@@ -23,6 +27,33 @@ const CHROMIUM_BROWSERS: &[&str] = &[
     "chrome", "msedge", "brave", "vivaldi", "opera", "chromium", "thorium",
 ];
 const FIREFOX_BROWSERS: &[&str] = &["firefox", "librewolf", "waterfox"];
+
+/// The browsers `--url` is for on macOS: the bundle's file name without `.app` and its bundle id
+/// (`CFBundleIdentifier`), as `launch` takes an app there. A browser whose id is not known is left
+/// out. Main judges the bundle the name resolves to by its id against the same table
+/// (`launch_url_mac_apps.json`), so an id listed wrongly refuses that browser rather than passing
+/// another app.
+const MAC_URL_BROWSER_TABLE: &[(&str, &str, BrowserFamily)] = &[
+    (
+        "Google Chrome",
+        "com.google.Chrome",
+        BrowserFamily::Chromium,
+    ),
+    (
+        "Microsoft Edge",
+        "com.microsoft.edgemac",
+        BrowserFamily::Chromium,
+    ),
+    (
+        "Brave Browser",
+        "com.brave.Browser",
+        BrowserFamily::Chromium,
+    ),
+    ("Vivaldi", "com.vivaldi.Vivaldi", BrowserFamily::Chromium),
+    ("Opera", "com.operasoftware.Opera", BrowserFamily::Chromium),
+    ("Chromium", "org.chromium.Chromium", BrowserFamily::Chromium),
+    ("Firefox", "org.mozilla.firefox", BrowserFamily::Firefox),
+];
 
 /// How a browser is told to open a page in a new window of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,19 +87,52 @@ pub(crate) fn browser_family(app: &str) -> Option<BrowserFamily> {
     }
 }
 
+/// The browser a macOS app id names: a bundle's file name (with or without `.app`) or a bundle id
+/// of `MAC_URL_BROWSER_TABLE`, ASCII letters in any case, nothing trimmed.
+pub(crate) fn mac_browser_family(app: &str) -> Option<BrowserFamily> {
+    let lower = app.to_ascii_lowercase();
+    let name = lower.strip_suffix(".app").unwrap_or(&lower);
+    MAC_URL_BROWSER_TABLE
+        .iter()
+        .find(|(file, id, _)| name == file.to_ascii_lowercase() || lower == id.to_ascii_lowercase())
+        .map(|(_, _, family)| *family)
+}
+
 /// The whole command line a `--url` launch passes after the executable: the browser's fixed
-/// switch, then the URL as one argument. Refused unless `app` is a known browser and `url` is in
-/// the canonical shape (`url_shape_refusal`).
+/// switch, then the URL as one argument. Refused unless `app` is a known browser of this OS
+/// (`browser_family`, or `mac_browser_family` on macOS) and `url` is in the canonical shape
+/// (`url_shape_refusal`).
 pub(crate) fn launch_url_args(app: &str, url: &str) -> Result<Vec<String>, AppError> {
-    let family = browser_family(app).ok_or_else(|| {
-        AppError::invalid_input(format!(
-            "--url is only for a known browser ({}); nothing was launched",
+    launch_url_args_on(cfg!(target_os = "macos"), app, url)
+}
+
+/// `launch_url_args` as on macOS (`macos`) or on Windows, whichever OS this runs on.
+pub(crate) fn launch_url_args_on(
+    macos: bool,
+    app: &str,
+    url: &str,
+) -> Result<Vec<String>, AppError> {
+    let family = if macos {
+        mac_browser_family(app)
+    } else {
+        browser_family(app)
+    };
+    let family = family.ok_or_else(|| {
+        let known: Vec<&str> = if macos {
+            MAC_URL_BROWSER_TABLE
+                .iter()
+                .flat_map(|(file, id, _)| [*file, *id])
+                .collect()
+        } else {
             CHROMIUM_BROWSERS
                 .iter()
                 .chain(FIREFOX_BROWSERS)
                 .copied()
-                .collect::<Vec<_>>()
-                .join(", ")
+                .collect()
+        };
+        AppError::invalid_input(format!(
+            "--url is only for a known browser ({}); nothing was launched",
+            known.join(", ")
         ))
     })?;
     if let Some(reason) = url_shape_refusal(url) {

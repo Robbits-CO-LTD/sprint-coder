@@ -135,3 +135,67 @@ fn activation_reports_false_instead_of_failing_after_the_app_opened() {
     let front = window.clone();
     assert!(window_is_in_front(Some(&window), || Ok(Some(front))));
 }
+
+#[test]
+fn only_a_started_process_that_exited_is_read_as_a_possible_hand_off() {
+    let exited = |pid: i64| {
+        AdapterError::new(ErrorCode::AppUnresponsive, "exited").with_details(serde_json::json!({
+            "pid": pid,
+            "complete": false,
+            "kind": LAUNCHED_PROCESS_EXITED,
+        }))
+    };
+    assert_eq!(exited_launch_pid(&exited(42), None), Some(42));
+    assert_eq!(exited_launch_pid(&exited(42), Some(42)), Some(42));
+    assert_eq!(
+        exited_launch_pid(&launch_target_gone(42), Some(42)),
+        Some(42)
+    );
+    // Another process than the one started, no pid, or another failure: not a hand-off.
+    assert_eq!(exited_launch_pid(&exited(42), Some(7)), None);
+    assert_eq!(exited_launch_pid(&exited(0), None), None);
+    for error in [
+        AdapterError::new(ErrorCode::AppUnresponsive, "exited")
+            .with_details(serde_json::json!({ "pid": 42, "complete": false })),
+        AdapterError::timeout("busy"),
+        crate::system::launch_location::refused(),
+    ] {
+        assert_eq!(exited_launch_pid(&error, Some(42)), None);
+    }
+}
+
+#[test]
+fn a_launch_is_handed_off_only_while_an_instance_from_before_it_still_runs() {
+    let before = vec!["macos-proc-v1:1:2".to_owned()];
+    assert!(passed_to_running_instance(
+        &before,
+        &[
+            "macos-proc-v1:9:9".to_owned(),
+            "macos-proc-v1:1:2".to_owned()
+        ]
+    ));
+    // The instance from before is gone, or only a new one runs: not handed off.
+    assert!(!passed_to_running_instance(&before, &[]));
+    assert!(!passed_to_running_instance(
+        &before,
+        &["macos-proc-v1:9:9".to_owned()]
+    ));
+    assert!(!passed_to_running_instance(
+        &[],
+        &["macos-proc-v1:1:2".to_owned()]
+    ));
+}
+
+#[test]
+fn a_handed_off_launch_names_no_window_and_says_how_to_find_it() {
+    let result = handed_off_result(
+        "Google Chrome",
+        agent_desktop_core::ProcessId::new(42),
+        Some("macos-proc-v1:3:4".into()),
+    );
+    assert!(result.handed_off && result.attached);
+    assert!(!result.new_instance && !result.existing_window && !result.running_without_window);
+    assert!(result.window.is_none() && result.activated.is_none());
+    assert_eq!(result.pid, agent_desktop_core::ProcessId::new(42));
+    assert!(result.suggestion.unwrap().contains("list-windows"));
+}

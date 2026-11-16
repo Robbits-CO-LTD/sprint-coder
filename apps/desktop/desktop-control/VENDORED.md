@@ -23,7 +23,7 @@ Windows と macOS arm64 用の CLI の build に要る部分。
 
 `crates/linux`、`crates/ffi`、`apps`（説明のサイト）、`npm`、`benchmarks`、`probes`、`assets`、`docs`、`tests`、`scripts`、`.github`、`.githooks`、`.agents`、`.claude`、`.git`、root の説明の文書（`README.md`、`AGENTS.md`、`CHANGELOG.md`、`CONCEPTS.md`、`CONTRIBUTING.md` など）、`clippy.toml`、`deny.toml`、`.gitleaks.toml` など build に要らない設定。
 
-macOS のソースは取り込み済み。macOS（Apple シリコン）では、アプリ側で有効にしてあり、配布物にも実行ファイルを入れている。macOS でまだ無いのは、clipboard helper、カーソルの表示（Team のカーソルを含む）、`launch --url` で、別の段階で扱う。
+macOS のソースは取り込み済み。macOS（Apple シリコン）では、アプリ側で有効にしてあり、配布物にも実行ファイルを入れている。macOS でまだ無いのは、clipboard helper、カーソルの表示（Team のカーソルを含む）で、別の段階で扱う。`launch --url` は 2026-11-16 に足した（Safari は対象外）。
 
 ## 取り込んだ後に消したもの
 
@@ -273,12 +273,12 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/macos/src/notifications/nc_session.rs` | 通知を開く AppleScript の前に ControlCenter の所有者を確認する。閉じる Escape は前面へ送り、前面が Sprint Coder 自身か読めずに拒否された時は Notification Center の process へ直接送る。前の app への復帰は、それが Sprint Coder 自身なら失敗にせず飛ばす（読めない変数・所有者は今までどおり拒否する）。通知への操作が済んだ後で後始末だけが失敗した時は、何も送っていないとは報告せず、操作が済んだことと結果を載せる |
 | `crates/macos/src/notifications/actions.rs` | 1 行目に変更の注記を足した。dismiss・dismiss all・action の後始末に、操作が済んだことを保つ合わせ方を使う |
 | `crates/macos/src/notifications/nc_session_tests.rs` | 1 行目に変更の注記を足した。操作の後の後始末の失敗・拒否が「何も送っていない」にならないことと、Sprint Coder 自身への復帰を飛ばすことの試験 |
-| `crates/macos/src/system/launch.rs` | core に増えた結果の欄を埋める。既存 instance につないだ時だけ attached、新しく始めた process の窓を得た時だけ new_instance、activate は実際の前面との照合を返す。窓が無い時は前面を読まずに false、前面の読み取りの失敗も false にして、起動後のエラーにしない。attach でも実行中の bundle の場所と拒否の PID を確認する |
-| `crates/macos/src/system/launch_tests.rs` | activate の結果が、窓が無い時・前面を読めない時に false で返ることの試験 |
+| `crates/macos/src/system/launch.rs` | core に増えた結果の欄を埋める。既存 instance につないだ時だけ attached、新しく始めた process の窓を得た時だけ new_instance、activate は実際の前面との照合を返す。窓が無い時は前面を読まずに false、前面の読み取りの失敗も false にして、起動後のエラーにしない。attach でも実行中の bundle の場所と拒否の PID を確認する。2026-11-16（`launch --url` を macOS で使えるようにした時）: 新しく始めた（`--no-attach`・`--url` の）起動の process が窓を出す前に終わり、起動の前から動いていた同じ app の instance（同じ process instance）がまだ動いている時は、起動の失敗ではなく、動いていた instance に引き渡したもの（`handed_off`・`attached` が true、`window` なし、`list-windows` で窓を探す案内の `suggestion`）として返す（`handed_off`。起動の callback の error は `details.kind` で、窓の待ちが窓なしで終わった時〔error・猶予・期限のどれでも〕は、その時に起動した process がまだ同じ instance で動いているかで見分ける。Windows の `handed_off` と同じ意味。URL を受けたブラウザーの 2 つ目の process が、動いているブラウザーに URL を渡して終わる時に、AI が失敗と読んで起動を繰り返さないように）。それ以外の失敗はそのまま返す。判定は `exited_launch_pid`・`passed_to_running_instance` に切り出した。終わったことを示す `details.kind` の `launched_process_exited` を、窓を待つ間に終わった時の error にも付けた。引き渡しの判定は、`--no-attach` の起動すべてに効く（`LaunchResult` の `handed_off` の定義と Windows に合わせた） |
+| `crates/macos/src/system/launch_tests.rs` | activate の結果が、窓が無い時・前面を読めない時に false で返ることの試験。2026-11-16: 上の引き渡しの判定（終わった process の pid の読み方、前から動いていた instance が残っている時だけ引き渡しとすること、結果の欄）の試験を足した |
 | `crates/macos/src/system/launch_location.rs` | 新しいファイル。symlink 解決後の bundle を標準のアプリの場所だけに限る。home は実効 uid の password database から読む。OS 所有の Cryptex の場所も symlink 解決して照合する。場所の判定と symlink の試験を含む |
 | `crates/macos/src/system/launch_workspace.rs` | 起動せずに bundle の場所を解決し、検査した絶対パスを NSWorkspace に渡す。attach では指定 PID の bundle の場所を読む |
 | `crates/macos/src/system/launch_bridge.m` | 検査済みの bundle のパスを開く。開く直前に Rust の判定を呼び、その bundle と同じ ID または場所を持つ実行中の app の PID と場所も確認する。bundle の場所だけを読む関数を足した |
-| `crates/macos/src/system/launch_completion.rs` | 起動直前の判定で、自己ウィンドウと場所の拒否を元のエラーの形で返す。後から来る汎用の完了で上書きしない。callback の拒否の試験を足した |
+| `crates/macos/src/system/launch_completion.rs` | 起動直前の判定で、自己ウィンドウと場所の拒否を元のエラーの形で返す。後から来る汎用の完了で上書きしない。callback の拒否の試験を足した。2026-11-16: 起動した process が確かめる前に終わった時の 2 つの error の details に `kind: launched_process_exited` と pid を入れた（`launch.rs` が引き渡しを見分けるため） |
 | `crates/macos/src/tree/query/node_evidence.rs` | macOS では UIA の runtime_id を読んでいないので None にする |
 | `crates/macos/src/tree/query/node_read.rs` | macOS では UIA の runtime_id を読んでいないので None にする |
 | `crates/macos/src/actions/post_state_tests.rs` | 試験の LocatorRefEvidence に core が足した runtime_id の欄を足した |
@@ -287,14 +287,15 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/macos/src/tree/resolve/resolve_tests.rs` | 試験の ref に core が足した ancestors・in_view・in_menu・settled_thin_nodes の欄を足した |
 | `crates/macos/src/tree/resolve/retained_resolve_tests.rs` | 試験の ref に core が足した ancestors・in_view・in_menu・settled_thin_nodes の欄を足した |
 | `src/main.rs` | macOS の adapter も Windows と同じく環境変数から自己ウィンドウ拒否を組み立てる |
-| `src/dispatch/parse.rs` | macOS の launch --url を OS 未対応として起動前に断る。Windows の引数の組み立ては今までどおり |
-| `src/dispatch/parse_tests.rs` | URL の引数の試験は Windows の動作を保ち、macOS には OS 未対応の拒否の試験を足した |
-| `src/command_policy/mod.rs` | macOS の launch --url は権限の不足を返す前にも OS 未対応として断る。batch にも同じ事前確認が効く |
-| `src/tests/cli_process.rs` | macOS の launch --url が OS 未対応・not_delivered で終わることを実行ファイルから確かめる |
+| `src/dispatch/parse.rs` | macOS の launch --url を OS 未対応として起動前に断る。Windows の引数の組み立ては今までどおり。2026-11-16: その macOS の拒否を外した。`--url` の判定（知っているブラウザーか、URL の形、`--arg` などとの併用の拒否、`attach_if_running: false`）は Windows と同じ道を通り、ブラウザーの判定だけが OS で変わる（`launch_url.rs`） |
+| `src/dispatch/parse_tests.rs` | URL の引数の試験は Windows の動作を保ち、macOS には OS 未対応の拒否の試験を足した。2026-11-16: macOS の拒否の試験を、macOS の名前と bundle ID のブラウザーが Windows と同じ引数になり、Windows の名前・Safari・ほかのアプリは断られる試験に置き換えた |
+| `src/command_policy/mod.rs` | macOS の launch --url は権限の不足を返す前にも OS 未対応として断る。batch にも同じ事前確認が効く。2026-11-16: その macOS の拒否を外した（`--url` の判定は `parse.rs` の Windows と同じ道で行う）。この変更の後は、このファイルの `validate_args` に `--url` の扱いは無い |
+| `src/tests/cli_process.rs` | macOS の launch --url が OS 未対応・not_delivered で終わることを実行ファイルから確かめる。2026-11-16: その試験を外した（macOS でも `--url` を受けるようになったため） |
 | `skills/ffi/references/build-and-link.md` | 「The macOS install name is …」の行の書き方を変え、`@rpath/` という並びが出ないようにした（意味は同じ）。説明書は実行ファイルに埋め込まれ、アプリの起動の規則は相対の読み込みパスの文字列をファイル全体から探すので、この 1 行のために macOS での起動が毎回拒否されていた |
 | `../../../build-desktop-control.mjs` | repo root の build script。darwin-arm64 では CLI の package だけを build し（`-p` で CLI の package を指定する。既定の members にある Windows の crate は macOS で compile できないため）、拡張子なし・実行可の出力と同じ形式の封印を作る。Windows の cargo 引数・出力・封印は今までどおり。macOS では、出来た実行ファイルの中に相対の読み込みパスの文字列（`@rpath/`・`@loader_path/`・`@executable_path/`）があれば build を失敗させる（アプリの起動の規則がその文字列を見て拒否するため） |
 | `VENDORED.md` | macOS の取り込みと、この段階の manifest・lock・ソース・試験の変更を記録した |
 | `crates/macos/src/system/window/window_inventory_global.rs`・`cg_window_exact.rs`・`cg_window_exact_tests.rs`・`window_inventory_global_focus_tests.rs`・`cg_window.rs`（1 行目に変更の注記を足した）、新しい `crates/macos/src/system/window/window_inventory_global_focus_layer.rs` | macOS のシステムのダイアログ（画面収録の確認など。持ち主は最前面の `com.apple.UserNotificationCenter`、CoreGraphics の layer は 8）が最前面にある間、アプリを指定しない `list-windows` と `--window-id` を使うコマンドが、`frontmost_window_join` のやり直しを期限まで繰り返して TIMEOUT になっていた。一覧は layer 0 の窓だけを持つので、AX のフォーカスのある窓（ダイアログ）がどの記録とも合わなかった。最前面のアプリのフォーカスの読み取りの直後に、その窓の番号で CoreGraphics にその 1 つの窓だけを問い合わせ（`exact_window_owner_layer_until`。`CGWindowListCreateDescriptionFromArray` で、layer を問わず持ち主の pid と layer を読む）、窓が実在し、持ち主が最前面のアプリと同じ pid で、layer が 0 でない時だけ、フォーカスを「一覧の中に無い」とする（`read_frontmost_in_inventory`。どの窓も `is_focused: false`、`focused_only` は空）。番号が読めない・CoreGraphics に無い・layer 0・別の pid・問い合わせの失敗の時は、フォーカスをそのままにし、今までどおり `frontmost_window_join` でやり直す。`cg_window.rs` は `int_field` を crate の `system` の中から使えるようにしただけ。試験: 判定の全部の場合、一覧の成功と `focused_only` の空、確かめられない時のやり直し、layer 0 のフォーカスが今までどおり合うこと、1 つの窓の読み取りの欠け・重複・番号の違い |
+| `src/dispatch/launch_url.rs`（2 回目）・`launch_url_tests.rs`（2 回目）、新しい `src/dispatch/launch_url_mac_apps.json` | macOS の `launch <ブラウザー> --url <URL>`。macOS では app を `.app` を除いた名前か bundle ID で指すので、macOS のブラウザーの表 `MAC_URL_BROWSER_TABLE`（Google Chrome〔com.google.Chrome〕・Microsoft Edge〔com.microsoft.edgemac〕・Brave Browser〔com.brave.Browser〕・Vivaldi〔com.vivaldi.Vivaldi〕・Opera〔com.operasoftware.Opera〕・Chromium〔org.chromium.Chromium〕は Chromium 系、Firefox〔org.mozilla.firefox〕は Firefox 系。2026-11-16 に実物の Info.plist で確かめたのは Google Chrome だけ。bundle ID が分からない LibreWolf・Waterfox・Thorium は入れていない。Main は解決した bundle を bundle ID で判定するので、表の ID が違っていれば、そのブラウザーが断られるだけで、ほかのアプリが通ることはない）と、その名前（`.app` 付きも）か bundle ID を ASCII の大文字小文字を区別せず、前後を削らずに読む `mac_browser_family` を足した。`launch_url_args` は macOS ではこの表で、ほかでは従来の `browser_family` で判定する（`launch_url_args_on`。引数・URL の検査は OS で変わらない）。Safari は引数で URL を受けないので表に入れていない。Sprint Coder の Main と同じ判定であることを、共有の表 `launch_url_mac_apps.json` で両方から確かめる試験を足した。既存の試験は Windows の判定を明示して呼ぶようにした |
 
 ## build と試験
 

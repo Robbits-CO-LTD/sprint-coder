@@ -176,11 +176,6 @@ fn url_launch_options(
         ));
     }
     let args = super::launch_url::launch_url_args(&launch.app, url)?;
-    if cfg!(target_os = "macos") {
-        return Err(AppError::invalid_input(
-            "launch --url is not available on this OS (macOS); nothing was launched",
-        ));
-    }
     Ok(LaunchOptions {
         args,
         env: BTreeMap::new(),

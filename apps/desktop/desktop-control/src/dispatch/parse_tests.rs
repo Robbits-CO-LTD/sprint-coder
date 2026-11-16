@@ -174,7 +174,23 @@ fn a_url_launch_refuses_other_arguments_a_non_browser_and_a_non_canonical_url() 
 
 #[cfg(target_os = "macos")]
 #[test]
-fn a_url_launch_is_unavailable_on_macos_before_launching() {
-    let error = build_launch_options(&url_launch("chrome", "https://example.com/")).unwrap_err();
-    assert!(error.to_string().contains("not available on this OS"));
+fn a_url_launch_on_macos_takes_a_browser_by_its_app_name_or_bundle_id() {
+    for app in ["Google Chrome", "com.google.Chrome", "Microsoft Edge"] {
+        let options = build_launch_options(&url_launch(app, "https://example.com/a?q=1")).unwrap();
+        assert_eq!(options.args, ["--new-window", "https://example.com/a?q=1"]);
+        assert!(options.env.is_empty() && options.cwd.is_none() && options.cdp_port.is_none());
+        assert!(!options.attach_if_running);
+    }
+    let options = build_launch_options(&url_launch("Firefox", "https://example.com/")).unwrap();
+    assert_eq!(options.args, ["-new-window", "https://example.com/"]);
+    // The Windows names are not how macOS names an app.
+    for app in ["chrome", "C:\\x\\chrome.exe", "Safari", "TextEdit"] {
+        assert_eq!(
+            build_launch_options(&url_launch(app, "https://example.com/"))
+                .unwrap_err()
+                .code(),
+            "INVALID_ARGS",
+            "{app}"
+        );
+    }
 }

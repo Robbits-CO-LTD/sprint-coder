@@ -10,9 +10,12 @@ import {
 } from './desktop-control';
 import { desktopControlApprovalAction } from './desktop-control-display';
 import {
+  DESKTOP_CONTROL_MAC_URL_BROWSERS,
   DESKTOP_CONTROL_URL_BROWSERS,
   DESKTOP_CONTROL_URL_MAX,
   desktopControlLaunchUrl,
+  desktopControlMacUrlBrowser,
+  desktopControlMacUrlBrowserById,
   desktopControlUrlBrowser,
   launchUrlShapeRefusal,
 } from './desktop-control-launch-url';
@@ -143,6 +146,49 @@ describe('launch --url: the browser', () => {
     expect(refusalOf(['launch', 'C:\\x\\chrome.exe ', '--url', 'https://example.com/'])).toContain(
       '知っているブラウザー',
     );
+  });
+});
+
+describe('launch --url: the browser on macOS', () => {
+  it('knows the same browsers, by name and bundle id, as the executable', () => {
+    const table = /MAC_URL_BROWSER_TABLE: &\[[^\]]*\] = &\[([\s\S]*?)\n\];/u.exec(
+      EXECUTABLE_BROWSERS,
+    );
+    expect(table).not.toBeNull();
+    const listed = [
+      ...table![1]!.matchAll(
+        /\(\s*"([^"]+)",\s*"([^"]+)",\s*BrowserFamily::(Chromium|Firefox),?\s*\)/gu,
+      ),
+    ].map(([, name, bundleId, family]) => ({ name, bundleId, family: family!.toLowerCase() }));
+    expect(listed).toEqual(DESKTOP_CONTROL_MAC_URL_BROWSERS);
+  });
+
+  it('judges every app of the shared macOS table as the executable does, nothing trimmed', () => {
+    const apps = JSON.parse(
+      readFileSync(
+        join(
+          __dirname,
+          '..',
+          '..',
+          'desktop-control',
+          'src',
+          'dispatch',
+          'launch_url_mac_apps.json',
+        ),
+        'utf8',
+      ),
+    ) as { app: string; family: string | null }[];
+    expect(apps.length).toBeGreaterThan(15);
+    for (const { app, family } of apps)
+      expect(desktopControlMacUrlBrowser(app), JSON.stringify(app)).toBe(family);
+  });
+
+  it('reads a bundle id as the browser it belongs to, letter case ignored', () => {
+    expect(desktopControlMacUrlBrowserById('com.google.Chrome')).toBe('chromium');
+    expect(desktopControlMacUrlBrowserById('COM.GOOGLE.CHROME')).toBe('chromium');
+    expect(desktopControlMacUrlBrowserById('org.mozilla.firefox')).toBe('firefox');
+    for (const id of [null, 'com.apple.Safari', 'com.google.Chrome.helper', 'Google Chrome', ''])
+      expect(desktopControlMacUrlBrowserById(id), String(id)).toBeNull();
   });
 });
 

@@ -166,7 +166,7 @@ fn validate_result(
                 ErrorCode::AppUnresponsive,
                 "Launched application terminated before identity verification",
             )
-            .with_details(serde_json::json!({ "pid": result.pid, "complete": false })),
+            .with_details(exited_details(result.pid)),
         ));
     }
     let identity = crate::system::process::process_identity::ProcessIdentity::capture(result.pid)
@@ -177,6 +177,7 @@ fn validate_result(
                     ErrorCode::AppUnresponsive,
                     "Launched application exited before identity verification",
                 )
+                .with_details(exited_details(result.pid))
             })
         })?;
     if identity.conflicts_with_launch_time(result.launch_time) {
@@ -204,6 +205,16 @@ fn validate_result(
         ));
     }
     Ok((result.pid, identity.token()))
+}
+
+/// The details of a launch whose process exited before it could be identified: the kind
+/// `launch` reads to tell a hand-off to a running instance (`launch::LAUNCHED_PROCESS_EXITED`).
+fn exited_details(pid: i32) -> serde_json::Value {
+    serde_json::json!({
+        "pid": pid,
+        "complete": false,
+        "kind": crate::system::launch::LAUNCHED_PROCESS_EXITED,
+    })
 }
 
 fn callback_error(

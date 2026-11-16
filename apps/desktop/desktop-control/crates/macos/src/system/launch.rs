@@ -10,6 +10,17 @@ const MAX_ENVIRONMENT_COUNT: usize = 256;
 const MAX_LAUNCH_TEXT_BYTES: usize = 1024 * 1024;
 const STARTUP_GRACE: Duration = Duration::from_millis(1500);
 
+/// The `details.kind` of a launch whose started process exited before it presented a window.
+pub(crate) const LAUNCHED_PROCESS_EXITED: &str = "launched_process_exited";
+
+/// The guidance of a launch whose process passed it to the instance that was already running.
+pub(crate) const HANDED_OFF: &str = "The launched process exited without a window of its own \
+     while an instance of the same app that ran before the launch still runs: the app most \
+     likely passed the launch to that running instance (a single-instance app, such as a \
+     browser given a URL). Which window that instance opened, if any, was not identified here. \
+     Do not repeat the launch: run `list-windows` for the app and pick the window by its title; \
+     windows that were open before the launch may be ones the user had open.";
+
 enum LaunchTarget {
     Existing { pid: i32, process_instance: String },
     New { baseline_instances: Vec<String> },
@@ -45,11 +56,113 @@ pub(crate) fn launch_app_impl(
     }
     let target = launch_target(options, initial).map_err(before_launch)?;
 
-    let launched = crate::system::launch_workspace::open(id, options, deadline)?;
+    let launched = match crate::system::launch_workspace::open(id, options, deadline) {
+        // Exited before it could be identified: only the error says so.
+        Err(error) => {
+            return match exited_launch_pid(&error, None)
+                .and_then(|pid| handed_off(id, pid, None, &target, deadline))
+            {
+                Some(result) => Ok(result),
+                None => Err(error),
+            };
+        }
+        Ok(launched) => launched,
+    };
     validate_launched_target(&target, &launched).map_err(after_launch)?;
-    let window =
-        settled_window(launched.0, &launched.1, options, deadline).map_err(after_launch)?;
+    let window = settled_window(launched.0, &launched.1, options, deadline);
+    if !matches!(window, Ok(Some(_))) {
+        // The wait ended without a window (an error, the grace or the deadline): judged by what
+        // is observed now, whichever way the wait ended.
+        let gone = !super::process::process_identity::matches_instance(launched.0, &launched.1)
+            .unwrap_or(true);
+        if let Some(result) = gone
+            .then(|| handed_off(id, launched.0, Some(&launched.1), &target, deadline))
+            .flatten()
+        {
+            return Ok(result);
+        }
+    }
+    let window = window.map_err(after_launch)?;
     result_from_launched(&launched, window, id, &target, options, deadline).map_err(after_launch)
+}
+
+/// A fresh launch whose process exited before it presented a window, while an instance of the
+/// app that ran before it still runs, was passed to that instance (a browser given `--url` opens
+/// the page there): reported as handed off, with no window, rather than as a failure the caller
+/// would retry. `None` when it was not (then the launch's own outcome stands).
+#[cfg(target_os = "macos")]
+fn handed_off(
+    id: &str,
+    pid: i32,
+    process_instance: Option<&str>,
+    target: &LaunchTarget,
+    deadline: Deadline,
+) -> Option<LaunchResult> {
+    let LaunchTarget::New { baseline_instances } = target else {
+        return None;
+    };
+    if baseline_instances.is_empty() {
+        return None;
+    }
+    let running: Vec<String> = matching_apps(id, deadline)
+        .map(|apps| {
+            apps.iter()
+                .filter_map(|app| app.process_instance.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !passed_to_running_instance(baseline_instances, &running) {
+        return None;
+    }
+    let pid = agent_desktop_core::ProcessId::try_from(pid).ok()?;
+    Some(handed_off_result(
+        id,
+        pid,
+        process_instance.map(str::to_owned),
+    ))
+}
+
+/// The started process's pid when `error` says it exited before it presented a window.
+#[cfg(target_os = "macos")]
+pub(crate) fn exited_launch_pid(error: &AdapterError, launched: Option<i32>) -> Option<i32> {
+    let details = error.details.as_ref()?;
+    if details.get("kind").and_then(serde_json::Value::as_str) != Some(LAUNCHED_PROCESS_EXITED) {
+        return None;
+    }
+    let pid = details
+        .get("pid")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|pid| i32::try_from(pid).ok())?;
+    (pid > 0 && launched.is_none_or(|launched| launched == pid)).then_some(pid)
+}
+
+/// Whether an instance that ran before the launch (by its exact process instance) still runs.
+#[cfg(target_os = "macos")]
+pub(crate) fn passed_to_running_instance(baseline: &[String], running: &[String]) -> bool {
+    running.iter().any(|instance| baseline.contains(instance))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn handed_off_result(
+    id: &str,
+    pid: agent_desktop_core::ProcessId,
+    process_instance: Option<String>,
+) -> LaunchResult {
+    LaunchResult {
+        app: id.to_owned(),
+        pid,
+        process_instance,
+        window: None,
+        cdp: None,
+        renderer: None,
+        suggestion: Some(HANDED_OFF.to_owned()),
+        attached: true,
+        new_instance: false,
+        handed_off: true,
+        running_without_window: false,
+        existing_window: false,
+        activated: None,
+    }
 }
 
 /// Waits only for the windows the launch itself produces. Starting up is what
@@ -125,7 +238,11 @@ fn launch_target_gone(pid: i32) -> AdapterError {
         ErrorCode::AppUnresponsive,
         "Launched application exited before it presented a window",
     )
-    .with_details(serde_json::json!({ "pid": pid, "complete": false }))
+    .with_details(serde_json::json!({
+        "pid": pid,
+        "complete": false,
+        "kind": LAUNCHED_PROCESS_EXITED,
+    }))
     .with_suggestion("Check the application's own launch requirements, then retry.")
 }
 
