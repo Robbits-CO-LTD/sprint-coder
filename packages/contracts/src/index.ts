@@ -3418,6 +3418,24 @@ export type UpdateHealth = z.infer<typeof updateHealthSchema>;
  */
 export const desktopControlActivitySchema = z.object({ active: z.boolean() }).strict();
 export type DesktopControlActivity = z.infer<typeof desktopControlActivitySchema>;
+/**
+ * Whether macOS lets this app use what desktop control needs. `applicable` is true only on macOS
+ * builds that run desktop control; otherwise the two states are `unknown` and nothing is shown.
+ * `denied` covers every state that is not yet a grant (denied, restricted, never asked).
+ */
+export const desktopControlPermissionStateSchema = z.enum(['granted', 'denied', 'unknown']);
+export type DesktopControlPermissionState = z.infer<typeof desktopControlPermissionStateSchema>;
+export const desktopControlPermissionsSchema = z
+  .object({
+    applicable: z.boolean(),
+    accessibility: desktopControlPermissionStateSchema,
+    screenRecording: desktopControlPermissionStateSchema,
+  })
+  .strict();
+export type DesktopControlPermissions = z.infer<typeof desktopControlPermissionsSchema>;
+/** Which System Settings pane to open. Main maps it to a URL it holds; no URL crosses IPC. */
+export const desktopControlPermissionPaneSchema = z.enum(['accessibility', 'screen-recording']);
+export type DesktopControlPermissionPane = z.infer<typeof desktopControlPermissionPaneSchema>;
 export const updateCheckResultSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('up_to_date') }).strict(),
   z
@@ -4905,6 +4923,10 @@ export interface SprintCoderApi {
   desktopControl: {
     /** Receives each change of `DesktopControlActivity`. Returns an unsubscribe function. */
     subscribeActivity(listener: (activity: DesktopControlActivity) => void): () => void;
+    /** Reads the macOS permissions desktop control needs, without asking the user for them. */
+    getPermissions(): Promise<DesktopControlPermissions>;
+    /** Opens the System Settings pane where the user grants the named permission. */
+    openPermissionSettings(pane: DesktopControlPermissionPane): void;
   };
   files: {
     /** Every edit recorded for this Task, oldest first. Read on select rather than replayed through
@@ -5169,6 +5191,8 @@ export const IPC_CHANNELS = {
   updateOpenLog: 'sprint-coder:update:open-log',
   /** Push-only (webContents.send) `DesktopControlActivity`, never bound to an input schema. */
   desktopControlActivityEvent: 'sprint-coder:desktop-control:activity',
+  desktopControlGetPermissions: 'sprint-coder:desktop-control:get-permissions',
+  desktopControlOpenPermissionSettings: 'sprint-coder:desktop-control:open-permission-settings',
   runtimeFailureDiagnosticGet: 'sprint-coder:runtime:failure-diagnostic:get',
   imagesList: 'sprint-coder:images:list',
   filesList: 'sprint-coder:files:list',

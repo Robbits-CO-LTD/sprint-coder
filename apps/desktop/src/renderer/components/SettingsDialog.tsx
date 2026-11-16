@@ -16,6 +16,7 @@ import { SkillSettingsSection } from './SkillSettingsSection';
 import { AssistantPreferencesSettings } from './AssistantPreferencesSettings';
 import { TeamUsageModeSetting } from './TeamUsageModeSetting';
 import { SetupReplayGroup } from './SetupReplayGroup';
+import { DesktopControlPermissionsGroup } from './DesktopControlPermissionsGroup';
 import { ThemeSetting } from './ThemeSetting';
 import { useTheme } from '../lib/theme';
 import { THEME_ATTRIBUTE } from '../../window-theme';
@@ -266,6 +267,7 @@ export function LegacyBody({
           {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item, which
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
+          <DesktopControlPermissionsGroup active={open} />
           <UpdateHealthGroup />
           <SprintCoderPrePromptSetting active={open} />
           <AssistantPreferencesSettings active={open} />
@@ -397,6 +399,7 @@ export function WorkspaceBody({
               {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item,
                   which is exactly where a user who cannot select a Runtime will not look. */}
               <CliDetectionGroup />
+              <DesktopControlPermissionsGroup active={open && current === 'advanced'} />
               <UpdateHealthGroup />
               <DiagnosticsGroup />
               <SoundEffectsGroup />
