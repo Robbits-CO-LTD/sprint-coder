@@ -276,7 +276,7 @@ fn a_hand_off_is_taken_only_when_the_instance_shows_a_window_it_did_not_have() {
     let seen = watch_handoff(
         &candidates,
         30,
-        |_| true,
+        |_| Some(true),
         |_| {
             looks += 1;
             Some(if looks >= 3 {
@@ -299,7 +299,7 @@ fn a_hand_off_is_taken_only_when_the_instance_shows_a_window_it_did_not_have() {
         watch_handoff(
             &[candidate(), other],
             5,
-            |_| true,
+            |_| Some(true),
             |pid| Some(if pid == 20 {
                 vec![shown(300), shown(301)]
             } else {
@@ -323,23 +323,29 @@ fn a_hand_off_is_taken_only_when_the_instance_shows_a_window_it_did_not_have() {
     ] {
         let now = now.clone();
         assert_eq!(
-            watch_handoff(&candidates, 5, |_| true, |_| Some(now.clone()), || {}),
+            watch_handoff(&candidates, 5, |_| Some(true), |_| Some(now.clone()), || {}),
             HandoffWatch::NoNewWindow,
             "{now:?}"
         );
     }
     // Windows that cannot be read do not confirm it.
     assert_eq!(
-        watch_handoff(&candidates, 5, |_| true, |_| None, || {}),
+        watch_handoff(&candidates, 5, |_| Some(true), |_| None, || {}),
         HandoffWatch::NoNewWindow
     );
     // The instance is gone, or there is none.
     assert_eq!(
-        watch_handoff(&candidates, 5, |_| false, |_| Some(vec![shown(200)]), || {}),
+        watch_handoff(
+            &candidates,
+            5,
+            |_| Some(false),
+            |_| Some(vec![shown(200)]),
+            || {}
+        ),
         HandoffWatch::NoInstance
     );
     assert_eq!(
-        watch_handoff(&[], 5, |_| true, |_| Some(vec![shown(1)]), || {}),
+        watch_handoff(&[], 5, |_| Some(true), |_| Some(vec![shown(1)]), || {}),
         HandoffWatch::NoInstance
     );
 }
@@ -349,10 +355,12 @@ fn an_exit_while_the_same_app_runs_is_handed_off_or_unconfirmed_never_a_failure_
     let watched = Handoff {
         candidates: vec![candidate()],
         same_app_ran: true,
+        ..Default::default()
     };
     let unwatched = Handoff {
         candidates: vec![],
         same_app_ran: true,
+        ..Default::default()
     };
     let unrelated = Handoff::default();
     let never = |_: &Handoff| -> HandoffWatch { panic!("nothing to watch") };
@@ -397,6 +405,7 @@ fn an_open_error_is_judged_as_a_hand_off_only_on_a_fresh_launch_whose_process_ex
     let watched = Handoff {
         candidates: vec![candidate()],
         same_app_ran: true,
+        ..Default::default()
     };
     let result = after_open_error(
         exited(42),
@@ -442,6 +451,7 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
     let watched = Handoff {
         candidates: vec![candidate()],
         same_app_ran: true,
+        ..Default::default()
     };
     let launched = (42, "macos-proc-v1:42:1".to_owned());
     let goes_on = |outcome: AfterWait| matches!(outcome, AfterWait::Window(_));
@@ -449,7 +459,7 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
     assert!(goes_on(after_wait(
         Ok(None),
         None,
-        || panic!("not read"),
+        |_| panic!("not read"),
         |_| panic!("not watched"),
         "Firefox",
         &launched,
@@ -459,7 +469,7 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
     assert!(goes_on(after_wait(
         Ok(None),
         Some(&watched),
-        || false,
+        |_| false,
         |_| panic!("not watched"),
         "Firefox",
         &launched,
@@ -469,7 +479,7 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
     assert!(goes_on(after_wait(
         Ok(Some(window)),
         Some(&watched),
-        || panic!("not read"),
+        |_| panic!("not read"),
         |_| panic!("not watched"),
         "Firefox",
         &launched,
@@ -480,7 +490,7 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
         match after_wait(
             wait,
             Some(&watched),
-            || true,
+            |_| true,
             |_| new_window(),
             "Firefox",
             &launched,
@@ -501,7 +511,7 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
     assert!(goes_on(after_wait(
         Err(launch_target_gone(42)),
         Some(&watched),
-        || true,
+        |_| true,
         |_| HandoffWatch::NoInstance,
         "Firefox",
         &launched,
@@ -549,4 +559,280 @@ fn only_an_on_screen_window_of_some_size_counts_as_shown() {
     assert!(!counts_as_shown(false, 800.0, 600.0));
     assert!(!counts_as_shown(true, 99.0, 600.0));
     assert!(!counts_as_shown(true, 800.0, 20.0));
+}
+
+#[test]
+fn a_candidate_whose_process_cannot_be_read_may_still_run_but_never_names_a_hand_off() {
+    let candidates = [candidate()];
+    // Unreadable on every look: not gone, and its windows are never read.
+    assert_eq!(
+        watch_handoff(
+            &candidates,
+            5,
+            |_| None,
+            |_| panic!("windows of an unproven instance must not be read"),
+            || {},
+        ),
+        HandoffWatch::NoNewWindow
+    );
+    // Unreadable first, then gone: it may have run, so not `NoInstance`.
+    let mut looks = 0;
+    assert_eq!(
+        watch_handoff(
+            &candidates,
+            5,
+            |_| {
+                looks += 1;
+                (looks > 1).then_some(false)
+            },
+            |_| panic!("not read"),
+            || {},
+        ),
+        HandoffWatch::NoNewWindow
+    );
+    // One unreadable, the other gone.
+    let other = HandoffCandidate {
+        pid: 20,
+        process_instance: "macos-proc-v1:20:1".into(),
+        windows_before: vec![],
+    };
+    assert_eq!(
+        watch_handoff(
+            &[candidate(), other],
+            5,
+            |candidate| (candidate.pid == 20).then_some(false),
+            |_| panic!("not read"),
+            || {},
+        ),
+        HandoffWatch::NoNewWindow
+    );
+}
+
+#[test]
+fn candidates_gone_while_another_instance_of_the_same_app_may_run_is_not_a_failure() {
+    let copy = SameAppInstance {
+        pid: 30,
+        process_instance: Some("macos-proc-v1:30:1".into()),
+    };
+    let untokened = SameAppInstance {
+        pid: 31,
+        process_instance: None,
+    };
+    // Another copy runs, or cannot be read: unconfirmed.
+    for runs in [Some(true), None] {
+        assert_eq!(
+            unless_another_runs(
+                HandoffWatch::NoInstance,
+                std::slice::from_ref(&copy),
+                |_| { runs }
+            ),
+            HandoffWatch::NoNewWindow
+        );
+    }
+    assert_eq!(
+        unless_another_runs(
+            HandoffWatch::NoInstance,
+            &[copy.clone(), untokened],
+            |other| (other.pid == 30).then_some(false),
+        ),
+        HandoffWatch::NoNewWindow
+    );
+    // Every other instance is gone too, or there is none: still the launch's own outcome.
+    assert_eq!(
+        unless_another_runs(
+            HandoffWatch::NoInstance,
+            std::slice::from_ref(&copy),
+            |_| { Some(false) }
+        ),
+        HandoffWatch::NoInstance
+    );
+    assert_eq!(
+        unless_another_runs(HandoffWatch::NoInstance, &[], |_| panic!("none")),
+        HandoffWatch::NoInstance
+    );
+    // What the watch saw otherwise is kept, without reading the others.
+    for seen in [new_window(), HandoffWatch::NoNewWindow] {
+        assert_eq!(
+            unless_another_runs(seen.clone(), std::slice::from_ref(&copy), |_| {
+                panic!("not read")
+            }),
+            seen
+        );
+    }
+    // Through `after_exit`: the candidate is gone, the other copy runs: unconfirmed, not `None`.
+    let watched = Handoff {
+        candidates: vec![candidate()],
+        same_app_ran: true,
+        others: vec![copy],
+    };
+    let error = after_exit(
+        &watched,
+        |handoff| unless_another_runs(HandoffWatch::NoInstance, &handoff.others, |_| Some(true)),
+        "Google Chrome",
+        42,
+        false,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(kind(&error), "launch_handoff_unconfirmed");
+    assert_eq!(
+        delivery(&error),
+        serde_json::to_value(DeliverySemantics::uncertain()).unwrap()
+    );
+}
+
+#[test]
+fn every_instance_of_the_same_app_that_is_not_a_candidate_is_an_other_instance() {
+    let apps = [
+        // The candidate itself.
+        running(10, "macos-proc-v1:10:1", "org.mozilla.firefox"),
+        // Another copy of the bundle, or one that could not be made a candidate.
+        running(11, "macos-proc-v1:11:1", "org.mozilla.firefox"),
+        // Another app.
+        running(12, "macos-proc-v1:12:1", "org.mozilla.nightly"),
+        // No instance token.
+        AppInfo {
+            process_instance: None,
+            ..running(13, "", "ORG.MOZILLA.FIREFOX")
+        },
+    ];
+    let others = other_instances(&apps, Some("org.mozilla.firefox"), &[candidate()]);
+    assert_eq!(
+        others,
+        [
+            SameAppInstance {
+                pid: 11,
+                process_instance: Some("macos-proc-v1:11:1".into()),
+            },
+            SameAppInstance {
+                pid: 13,
+                process_instance: None,
+            },
+        ]
+    );
+    // The bundle's id cannot be read: every app the launch named that is not a candidate.
+    assert_eq!(
+        other_instances(&apps, None, &[candidate()])
+            .iter()
+            .map(|other| other.pid)
+            .collect::<Vec<_>>(),
+        [11, 12, 13]
+    );
+}
+
+#[test]
+fn an_instance_of_the_same_bundle_id_under_another_name_is_known_to_have_run() {
+    let named = vec![running(10, "macos-proc-v1:10:1", "com.google.Chrome")];
+    let renamed = AppInfo {
+        name: "Chrome Work".into(),
+        ..running(20, "macos-proc-v1:20:1", "COM.GOOGLE.CHROME")
+    };
+    let running_now = vec![
+        // Already found by name.
+        running(10, "macos-proc-v1:10:1", "com.google.Chrome"),
+        renamed.clone(),
+        running(30, "macos-proc-v1:30:1", "com.google.Chrome.beta"),
+        AppInfo {
+            bundle_id: None,
+            ..running(40, "macos-proc-v1:40:1", "")
+        },
+    ];
+    let pids = |apps: &[AppInfo]| apps.iter().map(|app| app.pid.get()).collect::<Vec<_>>();
+    let apps = with_same_bundle_id(named.clone(), running_now, "com.google.Chrome");
+    assert_eq!(pids(&apps), [10, 20]);
+    assert_eq!(apps[1].name, "Chrome Work");
+    // Nothing was found by name: the renamed copy alone tells that the same app ran.
+    let apps = with_same_bundle_id(vec![], vec![renamed], "com.google.Chrome");
+    assert!(same_app_ran(&apps, Some("com.google.Chrome")));
+    // The listing could not be read: the apps found by name, as before.
+    assert_eq!(
+        pids(&with_same_bundle_id(named, vec![], "com.google.Chrome")),
+        [10]
+    );
+}
+
+#[test]
+fn a_process_that_exits_within_the_grace_is_gone() {
+    let mut looks = 0;
+    let mut waits = 0;
+    assert!(exits_within(
+        16,
+        || {
+            looks += 1;
+            looks >= 3
+        },
+        || waits += 1,
+    ));
+    assert_eq!((looks, waits), (3, 2));
+    let (mut looks, mut waits) = (0, 0);
+    assert!(!exits_within(
+        16,
+        || {
+            looks += 1;
+            false
+        },
+        || waits += 1,
+    ));
+    assert_eq!((looks, waits), (16, 15));
+    // No time left: one look, no wait.
+    assert!(!exits_within(0, || false, || panic!("no wait")));
+}
+
+#[test]
+fn only_a_launch_with_candidates_waits_for_its_process_to_exit_after_the_wait() {
+    let watched = Handoff {
+        candidates: vec![candidate()],
+        same_app_ran: true,
+        ..Default::default()
+    };
+    let unwatched = Handoff {
+        same_app_ran: true,
+        ..Default::default()
+    };
+    let launched = (42, "macos-proc-v1:42:1".to_owned());
+    // Still running at the end of the wait, gone within the grace: judged, and handed off.
+    match after_wait(
+        Ok(None),
+        Some(&watched),
+        |wait_for_exit| wait_for_exit,
+        |_| new_window(),
+        "Google Chrome",
+        &launched,
+        false,
+    ) {
+        AfterWait::Outcome(Ok(result)) => {
+            assert!(result.handed_off && result.window.is_none());
+            assert_eq!(result.pid, agent_desktop_core::ProcessId::new(10));
+        }
+        _ => panic!("expected a hand-off"),
+    }
+    // Without candidates the process is only looked at once, as before.
+    assert!(matches!(
+        after_wait(
+            Ok(None),
+            Some(&unwatched),
+            |wait_for_exit| {
+                assert!(!wait_for_exit, "a launch without candidates is not slowed");
+                false
+            },
+            |_| panic!("not watched"),
+            "Firefox",
+            &launched,
+            false,
+        ),
+        AfterWait::Window(Ok(None))
+    ));
+    // Still running after the grace: as before.
+    assert!(matches!(
+        after_wait(
+            Ok(None),
+            Some(&watched),
+            |_| false,
+            |_| panic!("not watched"),
+            "Firefox",
+            &launched,
+            false,
+        ),
+        AfterWait::Window(Ok(None))
+    ));
 }
