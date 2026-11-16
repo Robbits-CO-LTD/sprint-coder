@@ -16,6 +16,7 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { ForgeConfig, ResolvedForgeConfig } from '@electron-forge/shared-types';
 import config, {
+  desktopControlHelperSource,
   desktopControlResources,
   desktopControlSource,
   assertNativePackagingHost,
@@ -28,6 +29,7 @@ import config, {
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
   refreshPackagedDesktopControlDigest,
+  refreshPackagedDesktopControlHelperDigest,
   refreshPackagedSandboxRunnerDigest,
   shouldIgnoreFromPackage,
   verifyDesktopControlBinary,
@@ -73,6 +75,13 @@ const MAC_DESKTOP_CONTROL_SOURCE = resolve(
   'build',
   'Release',
   'sprint-coder-desktop-control',
+);
+const MAC_DESKTOP_CONTROL_HELPER_SOURCE = resolve(
+  __dirname,
+  'desktop-control',
+  'build',
+  'Release',
+  'sprint-coder-desktop-control-helper',
 );
 const sha256 = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 
@@ -325,10 +334,15 @@ describe('desktop-control resources', () => {
       `${DESKTOP_CONTROL_SOURCE}.sha256`,
       LICENSE,
     ]);
+    // Windows ships no clipboard helper.
+    expect(desktopControlHelperSource('win32', 'x64')).toBeNull();
     expect(desktopControlSource('darwin', 'arm64')).toBe(MAC_DESKTOP_CONTROL_SOURCE);
+    expect(desktopControlHelperSource('darwin', 'arm64')).toBe(MAC_DESKTOP_CONTROL_HELPER_SOURCE);
     expect(desktopControlResources('darwin', 'arm64')).toEqual([
       MAC_DESKTOP_CONTROL_SOURCE,
       `${MAC_DESKTOP_CONTROL_SOURCE}.sha256`,
+      MAC_DESKTOP_CONTROL_HELPER_SOURCE,
+      `${MAC_DESKTOP_CONTROL_HELPER_SOURCE}.sha256`,
       LICENSE,
     ]);
     for (const [platform, arch] of [
@@ -337,6 +351,7 @@ describe('desktop-control resources', () => {
       ['linux', 'x64'],
     ] as const) {
       expect(desktopControlSource(platform, arch)).toBeNull();
+      expect(desktopControlHelperSource(platform, arch)).toBeNull();
       expect(desktopControlResources(platform, arch)).toEqual([]);
     }
     const extra = (config.packagerConfig?.extraResource ?? []) as string[];
@@ -344,6 +359,8 @@ describe('desktop-control resources', () => {
     const macShipped = [
       MAC_DESKTOP_CONTROL_SOURCE,
       `${MAC_DESKTOP_CONTROL_SOURCE}.sha256`,
+      MAC_DESKTOP_CONTROL_HELPER_SOURCE,
+      `${MAC_DESKTOP_CONTROL_HELPER_SOURCE}.sha256`,
       LICENSE,
     ];
     expect(extra.filter((path) => shipped.includes(path) || macShipped.includes(path))).toEqual(
@@ -363,6 +380,10 @@ describe('desktop-control resources', () => {
     expect(license).toContain('https://github.com/vercel-labs/agent-desktop');
     expect(license).toContain('2b0a7334fc111730454b726e6800aa41cdafc093');
     expect(license).toContain('apps/desktop/desktop-control/VENDORED.md');
+    // Every executable built from that source is named, the macOS clipboard helper included.
+    expect(license).toContain('sprint-coder-desktop-control.exe on Windows');
+    expect(license).toContain('sprint-coder-desktop-control on macOS');
+    expect(license).toContain('sprint-coder-desktop-control-helper');
     expect(license).toContain('Apache License');
     expect(license).toContain('END OF TERMS AND CONDITIONS');
   });
@@ -408,6 +429,17 @@ describe('desktop-control resources', () => {
       const shipped = join(resources, 'sprint-coder-desktop-control');
       writeFileSync(shipped, 'built-desktop-control');
       writeFileSync(`${shipped}.sha256`, `${sha256('built-desktop-control')}\n`);
+      // The clipboard helper beside it is required and checked too.
+      await expect(runHook('darwin', 'arm64')).rejects.toThrow('executable was not found');
+      const helper = join(resources, 'sprint-coder-desktop-control-helper');
+      writeFileSync(helper, 'built-clipboard-helper');
+      writeFileSync(`${helper}.sha256`, `${sha256('built-clipboard-helper')}\n`);
+      await expect(runHook('darwin', 'arm64')).resolves.toBeUndefined();
+      appendFileSync(helper, 'x');
+      await expect(runHook('darwin', 'arm64')).rejects.toThrow(
+        'sprint-coder-desktop-control-helper SHA-256',
+      );
+      writeFileSync(helper, 'built-clipboard-helper');
       await expect(runHook('darwin', 'arm64')).resolves.toBeUndefined();
       appendFileSync(shipped, 'x');
       await expect(runHook('darwin', 'arm64')).rejects.toThrow('does not match its sealed digest');
@@ -420,11 +452,17 @@ describe('desktop-control resources', () => {
     }
   });
 
-  it('signs the macOS executable with hardened runtime and an empty entitlement set', () => {
+  it('signs the macOS executable and its clipboard helper with hardened runtime and an empty entitlement set', () => {
     const app = '/out/Sprint Coder-darwin-arm64/Sprint Coder.app';
     expect(macSignOptionsForFile(`${app}/Contents/Resources/sprint-coder-desktop-control`)).toEqual(
       { entitlements: [], hardenedRuntime: true },
     );
+    expect(
+      macSignOptionsForFile(`${app}/Contents/Resources/sprint-coder-desktop-control-helper`),
+    ).toEqual({ entitlements: [], hardenedRuntime: true });
+    expect(
+      macSignOptionsForFile(`${app}/Contents/Resources/sprint-coder-desktop-control-helper.sha256`),
+    ).toEqual({});
     // The bundled Node keeps its own entitlements; other files keep osx-sign's defaults.
     expect(macSignOptionsForFile(`${app}/Contents/Resources/node`)).toEqual({
       entitlements: resolve(__dirname, 'entitlements.node.plist'),
@@ -473,6 +511,7 @@ describe('desktop-control resources', () => {
       existsSync(MAC_DESKTOP_CONTROL_SOURCE),
   )('has a real macOS build output that agrees with its seal', () => {
     expect(() => verifyDesktopControlBinary(MAC_DESKTOP_CONTROL_SOURCE)).not.toThrow();
+    expect(() => verifyDesktopControlBinary(MAC_DESKTOP_CONTROL_HELPER_SOURCE)).not.toThrow();
   });
 
   it('reseals the packaged executable from its post-signing bytes', () => {
@@ -511,6 +550,17 @@ describe('desktop-control resources', () => {
       );
       // The Windows layout is not looked for inside a macOS bundle.
       expect(() => refreshPackagedDesktopControlDigest(appPath)).toThrow();
+      // The clipboard helper beside it, the same way.
+      const helper = join(resources, 'sprint-coder-desktop-control-helper');
+      expect(() => refreshPackagedDesktopControlHelperDigest(appPath)).toThrow();
+      writeFileSync(helper, 'signed-clipboard-helper');
+      writeFileSync(`${helper}.sha256`, `${'0'.repeat(64)}\n`);
+      expect(refreshPackagedDesktopControlHelperDigest(appPath)).toBe(
+        sha256('signed-clipboard-helper'),
+      );
+      expect(readFileSync(`${helper}.sha256`, 'utf8')).toBe(
+        `${sha256('signed-clipboard-helper')}\n`,
+      );
       rmSync(shipped);
       expect(() => refreshPackagedDesktopControlDigest(appPath, 'darwin')).toThrow();
     } finally {
@@ -550,22 +600,32 @@ describe('macOS postPackage desktop-control sealing', () => {
     const resources = join(appPath, 'Contents', 'Resources');
     const runner = join(resources, 'sprint-coder-sandbox-runner');
     const desktop = join(resources, 'sprint-coder-desktop-control');
+    const clipboard = join(resources, 'sprint-coder-desktop-control-helper');
     const node = join(resources, 'node');
     mkdirSync(resources, { recursive: true });
     writeFileSync(runner, 'signed-runner', { mode: 0o755 });
     writeFileSync(`${runner}.sha256`, STALE_SEAL);
     writeFileSync(desktop, 'signed-desktop-control', { mode: 0o755 });
     writeFileSync(`${desktop}.sha256`, STALE_SEAL);
+    writeFileSync(clipboard, 'signed-clipboard-helper', { mode: 0o755 });
+    writeFileSync(`${clipboard}.sha256`, STALE_SEAL);
     writeFileSync(node, 'fake-node', { mode: 0o755 });
-    const codesign: { args: string[]; desktopSeal: string; runnerSeal: string }[] = [];
+    const codesign: {
+      args: string[];
+      desktopSeal: string;
+      clipboardSeal: string;
+      runnerSeal: string;
+    }[] = [];
     childProcessMock.answer = (file, args) => {
       if (file === '/usr/bin/codesign') {
         // Ad-hoc signing rewrites a nested executable's bytes, as the real codesign does.
-        if (args.at(-1) === desktop && !args.includes(RESEAL) && !args.includes('--verify'))
-          appendFileSync(desktop, '+ad-hoc-signature');
+        for (const nested of [desktop, clipboard])
+          if (args.at(-1) === nested && !args.includes(RESEAL) && !args.includes('--verify'))
+            appendFileSync(nested, '+ad-hoc-signature');
         codesign.push({
           args: [...args],
           desktopSeal: readFileSync(`${desktop}.sha256`, 'utf8'),
+          clipboardSeal: readFileSync(`${clipboard}.sha256`, 'utf8'),
           runnerSeal: readFileSync(`${runner}.sha256`, 'utf8'),
         });
         return { result: Buffer.alloc(0) };
@@ -603,6 +663,9 @@ describe('macOS postPackage desktop-control sealing', () => {
         desktop,
         desktopBytes: readFileSync(desktop),
         desktopSeal: readFileSync(`${desktop}.sha256`, 'utf8'),
+        clipboard,
+        clipboardBytes: readFileSync(clipboard),
+        clipboardSeal: readFileSync(`${clipboard}.sha256`, 'utf8'),
         reseal,
         resealIndex,
       };
@@ -628,14 +691,20 @@ describe('macOS postPackage desktop-control sealing', () => {
     expect(run.codesign.findIndex((call) => call.args.at(-1) === run.appPath)).toBeLessThan(
       run.resealIndex,
     );
+    // The clipboard helper beside it is sealed the same way, before the outer re-seal.
+    const clipboardDigest = `${sha256(run.clipboardBytes)}\n`;
+    expect(run.clipboardSeal).toBe(clipboardDigest);
+    expect(run.reseal.clipboardSeal).toBe(clipboardDigest);
     // Execute bits exist only off Windows, so only there does the ad-hoc signing reach the helper.
     if (process.platform !== 'win32') {
       expect(run.desktopBytes.toString()).toBe('signed-desktop-control+ad-hoc-signature');
-      expect(
-        run.codesign.findIndex(
-          (call) => call.args.at(-1) === run.desktop && !call.args.includes('--verify'),
-        ),
-      ).toBeLessThan(run.resealIndex);
+      expect(run.clipboardBytes.toString()).toBe('signed-clipboard-helper+ad-hoc-signature');
+      for (const nested of [run.desktop, run.clipboard])
+        expect(
+          run.codesign.findIndex(
+            (call) => call.args.at(-1) === nested && !call.args.includes('--verify'),
+          ),
+        ).toBeLessThan(run.resealIndex);
     }
   });
 
@@ -645,6 +714,7 @@ describe('macOS postPackage desktop-control sealing', () => {
     const digest = `${sha256('signed-desktop-control')}\n`;
     expect(run.desktopSeal).toBe(digest);
     expect(run.reseal.desktopSeal).toBe(digest);
+    expect(run.reseal.clipboardSeal).toBe(`${sha256('signed-clipboard-helper')}\n`);
     const sign = run.reseal.args.indexOf('--sign');
     expect(run.reseal.args[sign + 1]).toBe(identity);
     expect(run.reseal.args).toContain('--timestamp');
@@ -657,6 +727,7 @@ describe('macOS postPackage desktop-control sealing', () => {
     const run = await runMacPostPackage('x64', undefined);
     expect(run.desktopSeal).toBe(STALE_SEAL);
     expect(run.reseal.desktopSeal).toBe(STALE_SEAL);
+    expect(run.clipboardSeal).toBe(STALE_SEAL);
   });
 });
 

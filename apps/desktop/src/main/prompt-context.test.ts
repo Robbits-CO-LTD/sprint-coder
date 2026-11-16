@@ -488,7 +488,9 @@ describe('prompt context compiler', () => {
       '開発版では、一覧に出る Electron か、起動に使ったアプリ（npm start を実行した端末や IDE）を許可してください',
     );
     expect(text).toContain('PERM_DENIED');
-    expect(text).toContain('clipboard-set・clipboard-clear');
+    // The clipboard writes work on macOS too now; only launch --url is still refused.
+    expect(text).not.toContain('clipboard-set・clipboard-clear');
+    expect(text).not.toContain('クリップボードへの書き込み');
     expect(text).toContain('launch の --url はまだ使えない');
     expect(text).toContain('Terminal・iTerm・Ghostty・Warp など');
     // Nothing of Windows.

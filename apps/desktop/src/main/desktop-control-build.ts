@@ -9,8 +9,9 @@
  * Windows x64 and Apple silicon macOS run it, and both ship it in the package (on macOS in
  * `Contents/Resources`, sealed again after code signing like the sandbox runner). Linux has not
  * been verified on a real desktop (the display environment and process-group Stop do not fit
- * yet), so nothing is built there and desktop control stays off. The Team's desktop cursors and
- * the clipboard writes stay Windows-only.
+ * yet), so nothing is built there and desktop control stays off. The Team's desktop cursors stay
+ * Windows-only. On macOS the clipboard writes go through a helper executable shipped and sealed
+ * beside it (`DESKTOP_CONTROL_MAC_HELPER`).
  *
  * Kept free of imports so forge.config.ts can use the same facts at package time.
  */
@@ -25,6 +26,14 @@ export const DESKTOP_CONTROL_EXECUTABLE = 'sprint-coder-desktop-control.exe';
 export function desktopControlExecutableName(platform: string): string {
   return platform === 'win32' ? DESKTOP_CONTROL_EXECUTABLE : 'sprint-coder-desktop-control';
 }
+
+/**
+ * macOS: the helper executable the desktop-control executable writes and clears the clipboard
+ * through, beside it in the build output and in `Contents/Resources` alike, with its own `.sha256`
+ * manifest. Under its Sprint Coder name the executable looks for the helper only there, by this
+ * name, and ignores any variable that names another one.
+ */
+export const DESKTOP_CONTROL_MAC_HELPER = 'sprint-coder-desktop-control-helper';
 
 /** Whether desktop control is built and runs on this platform and architecture. */
 export function desktopControlSupported(platform: string, arch: string): boolean {

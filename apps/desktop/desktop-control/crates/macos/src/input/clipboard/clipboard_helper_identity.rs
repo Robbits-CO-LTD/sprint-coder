@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ErrorCode};
 use std::ffi::{CString, c_int, c_void};
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
@@ -5,9 +6,49 @@ use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use super::clipboard_helper_protocol as protocol;
 use super::directory_identity::DirectoryIdentity;
 
+/// The name Sprint Coder ships the CLI under.
+const SPRINT_CODER_EXECUTABLE: &str = "sprint-coder-desktop-control";
+/// The name Sprint Coder ships the helper under, beside its CLI.
+pub(crate) const SPRINT_CODER_HELPER_BASENAME: &str = "sprint-coder-desktop-control-helper";
+/// The gid macOS gives the `admin` group.
+const ADMIN_GID: u32 = 80;
+
+/// Where the helper is looked for, by the name the CLI runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    basename: &'static str,
+    /// Whether `AGENT_DESKTOP_MACOS_HELPER_PATH` may name the helper.
+    path_override: bool,
+    /// Whether the folder of the image holding this code is a candidate too.
+    beside_image: bool,
+}
+
+/// Under Sprint Coder's name the helper is only the file of Sprint Coder's name beside the running
+/// executable: no variable can point elsewhere. Any other name keeps the upstream lookup.
+fn layout_for(executable: Option<&std::path::Path>) -> Layout {
+    if executable
+        .and_then(std::path::Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some(SPRINT_CODER_EXECUTABLE)
+    {
+        Layout {
+            basename: SPRINT_CODER_HELPER_BASENAME,
+            path_override: false,
+            beside_image: false,
+        }
+    } else {
+        Layout {
+            basename: protocol::HELPER_BASENAME,
+            path_override: true,
+            beside_image: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HelperIdentity {
     pub(crate) path: std::path::PathBuf,
+    basename: &'static str,
     device: u64,
     inode: u64,
     owner: u32,
@@ -18,52 +59,63 @@ pub(crate) struct HelperIdentity {
 
 impl HelperIdentity {
     pub(crate) fn discover() -> Result<Self, AdapterError> {
-        if let Some(path) = std::env::var_os("AGENT_DESKTOP_MACOS_HELPER_PATH") {
+        let executable = std::env::current_exe().ok();
+        let layout = layout_for(executable.as_deref());
+        let basename = layout.basename;
+        if layout.path_override
+            && let Some(path) = std::env::var_os("AGENT_DESKTOP_MACOS_HELPER_PATH")
+        {
             let path = std::path::PathBuf::from(path);
             if !path.is_absolute() {
-                return Err(invalid("Explicit helper path must be absolute"));
+                return Err(invalid(basename, "Explicit helper path must be absolute"));
             }
-            return Self::read(path);
+            return Self::read(path, basename);
         }
         let mut candidates = Vec::new();
-        if let Ok(executable) = std::env::current_exe()
-            && let Some(parent) = executable.parent()
-        {
-            candidates.push(parent.join(protocol::HELPER_BASENAME));
+        if let Some(parent) = executable.as_deref().and_then(std::path::Path::parent) {
+            candidates.push(parent.join(basename));
         }
-        if let Some(image) = super::clipboard_helper_dl::containing_image()
+        if layout.beside_image
+            && let Some(image) = super::clipboard_helper_dl::containing_image()
             && let Some(parent) = image.parent()
         {
-            let candidate = parent.join(protocol::HELPER_BASENAME);
+            let candidate = parent.join(basename);
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);
             }
         }
         for candidate in candidates {
-            match Self::read(candidate) {
+            match Self::read(candidate, basename) {
                 Ok(identity) => return Ok(identity),
                 Err(error) if missing(&error) => {}
                 Err(error) => return Err(error),
             }
         }
-        Err(invalid("No colocated packaged helper was found"))
+        Err(invalid(basename, "No colocated packaged helper was found"))
     }
 
     pub(crate) fn revalidate(&self) -> Result<(), AdapterError> {
-        let current = Self::read(self.path.clone())?;
+        let current = Self::read(self.path.clone(), self.basename)?;
         if current == *self {
             Ok(())
         } else {
-            Err(invalid("Helper filesystem identity changed during launch"))
+            Err(invalid(
+                self.basename,
+                "Helper filesystem identity changed during launch",
+            ))
         }
     }
 
-    fn read(path: std::path::PathBuf) -> Result<Self, AdapterError> {
-        if path.file_name().and_then(|name| name.to_str()) != Some(protocol::HELPER_BASENAME) {
-            return Err(invalid("Helper path has the wrong packaged basename"));
+    fn read(path: std::path::PathBuf, basename: &'static str) -> Result<Self, AdapterError> {
+        let invalid = |detail: String| invalid(basename, detail);
+        if path.file_name().and_then(|name| name.to_str()) != Some(basename) {
+            return Err(invalid(
+                "Helper path has the wrong packaged basename".into(),
+            ));
         }
         let original = std::fs::symlink_metadata(&path).map_err(|error| {
             invalid_with_kind(
+                basename,
                 format!("{}: {error}", path.display()),
                 if error.kind() == std::io::ErrorKind::NotFound {
                     "clipboard_helper_not_found"
@@ -73,20 +125,15 @@ impl HelperIdentity {
             )
         })?;
         if !original.file_type().is_file() {
-            return Err(invalid("Helper must be a regular file, not a symlink"));
+            return Err(invalid(
+                "Helper must be a regular file, not a symlink".into(),
+            ));
         }
-        let path = path.canonicalize().map_err(|error| {
-            invalid_with_kind(
-                format!("{}: {error}", path.display()),
-                "clipboard_helper_invalid",
-            )
-        })?;
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            invalid_with_kind(
-                format!("{}: {error}", path.display()),
-                "clipboard_helper_invalid",
-            )
-        })?;
+        let path = path
+            .canonicalize()
+            .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
         let mode = metadata.mode();
         if !metadata.file_type().is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
@@ -95,18 +142,20 @@ impl HelperIdentity {
             || metadata.nlink() != 1
         {
             return Err(invalid(
-                "Helper must be an owner-matched, executable, single-link regular file with no group/world writes",
+                "Helper must be an owner-matched, executable, single-link regular file with no group/world writes".into(),
             ));
         }
         if acl_has_mutating_allow(&path)
             .map_err(|error| invalid(format!("Could not verify helper ACL: {error}")))?
         {
-            return Err(invalid("Helper ACL permits another principal to modify it"));
+            return Err(invalid(
+                "Helper ACL permits another principal to modify it".into(),
+            ));
         }
         let mut ancestors = Vec::new();
         let parent = path
             .parent()
-            .ok_or_else(|| invalid("Helper has no parent directory"))?;
+            .ok_or_else(|| invalid("Helper has no parent directory".into()))?;
         for directory in parent.ancestors() {
             let metadata = std::fs::symlink_metadata(directory).map_err(|error| {
                 invalid(format!(
@@ -116,10 +165,8 @@ impl HelperIdentity {
             })?;
             let owner = metadata.uid();
             let mode = metadata.mode();
-            let sticky = mode & 0o1000 != 0;
             if !metadata.file_type().is_dir()
-                || (owner != 0 && owner != unsafe { libc::geteuid() })
-                || (mode & 0o022 != 0 && !sticky)
+                || !ancestor_permits(owner, metadata.gid(), mode, unsafe { libc::geteuid() })
                 || acl_has_mutating_allow(directory).map_err(|error| {
                     invalid(format!("Could not verify helper directory ACL: {error}"))
                 })?
@@ -139,6 +186,7 @@ impl HelperIdentity {
         }
         Ok(Self {
             path,
+            basename,
             device: metadata.dev(),
             inode: metadata.ino(),
             owner: metadata.uid(),
@@ -147,6 +195,20 @@ impl HelperIdentity {
             ancestors,
         })
     }
+}
+
+/// Whether a folder above the helper may hold it: owned by root or by this user, and writable by
+/// no one else, or sticky. One more case is accepted: owned by root, of the `admin` group, and
+/// writable by that group but not by everyone. That is how macOS keeps `/Applications`, where
+/// Sprint Coder is installed; Main starts the CLI beside the helper by path from there anyway, and
+/// a member of `admin` could replace the whole app, so refusing it only for the helper adds no
+/// protection.
+fn ancestor_permits(owner: u32, group: u32, mode: u32, euid: u32) -> bool {
+    let trusted_owner = owner == 0 || owner == euid;
+    let shared_write = mode & 0o022 != 0;
+    let sticky = mode & 0o1000 != 0;
+    let admin_group_write = owner == 0 && group == ADMIN_GID && mode & 0o002 == 0;
+    trusted_owner && (!shared_write || sticky || admin_group_write)
 }
 
 type Acl = *mut c_void;
@@ -256,11 +318,11 @@ fn acl_has_mutating_allow(path: &std::path::Path) -> std::io::Result<bool> {
     result
 }
 
-fn invalid(detail: impl Into<String>) -> AdapterError {
-    invalid_with_kind(detail, "clipboard_helper_invalid")
+fn invalid(basename: &str, detail: impl Into<String>) -> AdapterError {
+    invalid_with_kind(basename, detail, "clipboard_helper_invalid")
 }
 
-fn invalid_with_kind(detail: impl Into<String>, kind: &str) -> AdapterError {
+fn invalid_with_kind(basename: &str, detail: impl Into<String>, kind: &str) -> AdapterError {
     AdapterError::new(
         ErrorCode::ActionNotSupported,
         "The packaged macOS clipboard helper is missing or invalid",
@@ -268,7 +330,7 @@ fn invalid_with_kind(detail: impl Into<String>, kind: &str) -> AdapterError {
     .with_platform_detail(detail)
     .with_details(serde_json::json!({
         "kind": kind,
-        "helper": protocol::HELPER_BASENAME,
+        "helper": basename,
     }))
     .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
 }
