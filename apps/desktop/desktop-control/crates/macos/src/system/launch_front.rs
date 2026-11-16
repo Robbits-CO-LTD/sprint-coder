@@ -48,9 +48,10 @@ pub(crate) const FRONT_SETTLE: Duration = FRONT_APP_GRACE;
 /// may take, so a look stays short beside the watch's own reads.
 pub(crate) const FRONT_READ_BUDGET: Duration = Duration::from_millis(150);
 
-/// The least time left before the deadline that a giving back is tried with: it waits up to
-/// 500 ms for the app to report frontmost (`focus::VERIFY_LIMIT`), and the window way also for the
-/// window to become main (about 0.45 s measured), then reads the front again.
+/// The least time left before the deadline that a giving back is tried with, and the most it
+/// may take: it waits up to 500 ms for the app to report frontmost (`focus::VERIFY_LIMIT`), and
+/// the window way also for the window to become main (about 0.45 s measured), then reads the
+/// front again.
 pub(crate) const RESTORE_MIN_REMAINING: Duration = Duration::from_millis(1_200);
 
 /// Input this close before the launch began still counts as after it: doubt falls on input.
@@ -555,9 +556,11 @@ fn with_note(suggestion: Option<String>, note: &str) -> String {
     }
 }
 
-/// `result` with what happened to the front (`outcome`), when a take was seen: a result adds it
-/// to its suggestion, a launch not confirmed to its suggestion and `details.front`. Everything
-/// else of the result stays as it was.
+/// `result` with what happened to the front (`outcome`), when a take was seen: a launch handed
+/// off adds it to its suggestion, a launch not confirmed to its suggestion and `details.front`.
+/// Everything else of the result stays as it was, and any other result (a launch that was not
+/// passed on, another error) is returned as it is: the sentences speak of the instance the
+/// launch was passed to.
 pub(crate) fn annotate(
     result: Result<LaunchResult, AdapterError>,
     outcome: Option<FrontOutcome>,
@@ -567,10 +570,11 @@ pub(crate) fn annotate(
     };
     let note = front_note(outcome);
     match result {
-        Ok(mut result) => {
+        Ok(mut result) if result.handed_off => {
             result.suggestion = Some(with_note(result.suggestion.take(), note));
             Ok(result)
         }
+        Ok(result) => Ok(result),
         Err(mut error) if is_unconfirmed(&error) => {
             error.suggestion = Some(with_note(error.suggestion.take(), note));
             if let Some(details) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
@@ -833,6 +837,9 @@ unsafe extern "C" {
 
 /// Input since the launch began, read without any permission: the combined session state, so
 /// input another program posted counts too; any input event type (`kCGAnyInputEventType`).
+/// Pointer movement and a finger on the trackpad count as well (a trackpad's touches are events
+/// of their own, and a swipe between Spaces moves the front without a key or a button): a
+/// narrower list would give the front back more often, but could miss a way the user moved it.
 #[cfg(target_os = "macos")]
 fn read_input(started: Instant) -> Input {
     const COMBINED_SESSION_STATE: i32 = 0;
@@ -857,6 +864,9 @@ fn restore(target: &Target, deadline: Deadline) -> Restored {
     if !restore_has_time(deadline.remaining()) {
         return Restored::NoTime;
     }
+    // An app that does not answer must not use up the rest of the launch's time: the hand-off is
+    // still being judged after this.
+    let deadline = deadline.capped(RESTORE_MIN_REMAINING);
     match target {
         Target::App(app) => {
             let Some(instance) = app.instance.as_deref() else {

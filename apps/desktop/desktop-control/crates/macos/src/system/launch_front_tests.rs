@@ -646,6 +646,15 @@ fn the_result_says_what_happened_to_the_front_and_nothing_else_changes() {
     let other = AdapterError::new(ErrorCode::Timeout, "slow");
     let other = annotate(Err(other), Some(FrontOutcome::Restored(TakeKind::App))).unwrap_err();
     assert!(other.suggestion.is_none() && other.details.is_none());
+    // A launch that was not passed on (a new instance of its own) says nothing of the front:
+    // the sentences speak of the instance a launch was passed to.
+    let own = LaunchResult {
+        handed_off: false,
+        suggestion: Some("as it was".into()),
+        ..handed_off()
+    };
+    let own = annotate(Ok(own), Some(FrontOutcome::Restored(TakeKind::App))).unwrap();
+    assert_eq!(own.suggestion.as_deref(), Some("as it was"));
 }
 
 #[test]
