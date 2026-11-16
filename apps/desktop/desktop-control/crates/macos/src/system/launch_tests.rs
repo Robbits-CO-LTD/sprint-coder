@@ -192,6 +192,14 @@ fn candidate() -> HandoffCandidate {
     }
 }
 
+/// The watch's answer when `candidate()` showed a new window.
+fn new_window() -> HandoffWatch {
+    HandoffWatch::NewWindow {
+        pid: 10,
+        process_instance: "macos-proc-v1:10:1".into(),
+    }
+}
+
 fn exited(pid: i64) -> AdapterError {
     AdapterError::new(ErrorCode::AppUnresponsive, "exited")
         .with_details(serde_json::json!({
@@ -279,8 +287,31 @@ fn a_hand_off_is_taken_only_when_the_instance_shows_a_window_it_did_not_have() {
         },
         || waits += 1,
     );
-    assert_eq!(seen, HandoffWatch::NewWindow);
+    assert_eq!(seen, new_window());
     assert_eq!((looks, waits), (3, 2));
+    // Of two instances, the one that showed the window is the one named.
+    let other = HandoffCandidate {
+        pid: 20,
+        process_instance: "macos-proc-v1:20:1".into(),
+        windows_before: vec![300],
+    };
+    assert_eq!(
+        watch_handoff(
+            &[candidate(), other],
+            5,
+            |_| true,
+            |pid| Some(if pid == 20 {
+                vec![shown(300), shown(301)]
+            } else {
+                vec![shown(100)]
+            }),
+            || {},
+        ),
+        HandoffWatch::NewWindow {
+            pid: 20,
+            process_instance: "macos-proc-v1:20:1".into(),
+        }
+    );
     for now in [
         // The same windows, or one closed.
         vec![shown(100), hidden(101)],
@@ -326,31 +357,29 @@ fn an_exit_while_the_same_app_runs_is_handed_off_or_unconfirmed_never_a_failure_
     let unrelated = Handoff::default();
     let never = |_: &Handoff| -> HandoffWatch { panic!("nothing to watch") };
     // New window: handed off.
-    let result = after_exit(
-        &watched,
-        |_| HandoffWatch::NewWindow,
-        "Firefox",
-        42,
-        None,
-        false,
-    )
-    .unwrap()
-    .unwrap();
+    let result = after_exit(&watched, |_| new_window(), "Firefox", 42, false)
+        .unwrap()
+        .unwrap();
     assert!(result.handed_off);
+    // The result names the running instance that showed the window, not the process that exited.
+    assert_eq!(result.pid, agent_desktop_core::ProcessId::new(10));
+    assert_eq!(
+        result.process_instance.as_deref(),
+        Some("macos-proc-v1:10:1")
+    );
     // Watched, no new window: unconfirmed.
     let error = after_exit(
         &watched,
         |_| HandoffWatch::NoNewWindow,
         "Firefox",
         42,
-        None,
         false,
     )
     .unwrap()
     .unwrap_err();
     assert_eq!(kind(&error), "launch_handoff_unconfirmed");
     // The same app ran but could not be watched: unconfirmed too, without watching.
-    let error = after_exit(&unwatched, never, "Firefox", 42, None, false)
+    let error = after_exit(&unwatched, never, "Firefox", 42, false)
         .unwrap()
         .unwrap_err();
     assert_eq!(kind(&error), "launch_handoff_unconfirmed");
@@ -359,18 +388,8 @@ fn an_exit_while_the_same_app_runs_is_handed_off_or_unconfirmed_never_a_failure_
         serde_json::to_value(DeliverySemantics::uncertain()).unwrap()
     );
     // Nothing of the same app ran, or its instances are gone: the launch's own outcome.
-    assert!(after_exit(&unrelated, never, "Firefox", 42, None, false).is_none());
-    assert!(
-        after_exit(
-            &watched,
-            |_| HandoffWatch::NoInstance,
-            "Firefox",
-            42,
-            None,
-            false
-        )
-        .is_none()
-    );
+    assert!(after_exit(&unrelated, never, "Firefox", 42, false).is_none());
+    assert!(after_exit(&watched, |_| HandoffWatch::NoInstance, "Firefox", 42, false).is_none());
 }
 
 #[test]
@@ -382,23 +401,20 @@ fn an_open_error_is_judged_as_a_hand_off_only_on_a_fresh_launch_whose_process_ex
     let result = after_open_error(
         exited(42),
         Some(&watched),
-        |_| HandoffWatch::NewWindow,
+        |_| new_window(),
         "Google Chrome",
         true,
     )
     .unwrap();
     assert!(result.handed_off && result.window.is_none());
-    assert_eq!(result.pid, agent_desktop_core::ProcessId::new(42));
+    assert_eq!(result.pid, agent_desktop_core::ProcessId::new(10));
+    assert_eq!(
+        result.process_instance.as_deref(),
+        Some("macos-proc-v1:10:1")
+    );
     assert_eq!(result.activated, Some(false));
     // An attach (no hand-off read) or another error: returned as it is.
-    let error = after_open_error(
-        exited(42),
-        None,
-        |_| HandoffWatch::NewWindow,
-        "Firefox",
-        false,
-    )
-    .unwrap_err();
+    let error = after_open_error(exited(42), None, |_| new_window(), "Firefox", false).unwrap_err();
     assert_eq!(kind(&error), LAUNCHED_PROCESS_EXITED);
     let error = after_open_error(
         crate::system::launch_completion::bundle_id_refused(),
@@ -465,16 +481,17 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
             wait,
             Some(&watched),
             || true,
-            |_| HandoffWatch::NewWindow,
+            |_| new_window(),
             "Firefox",
             &launched,
             false,
         ) {
             AfterWait::Outcome(Ok(result)) => {
                 assert!(result.handed_off);
+                assert_eq!(result.pid, agent_desktop_core::ProcessId::new(10));
                 assert_eq!(
                     result.process_instance.as_deref(),
-                    Some("macos-proc-v1:42:1")
+                    Some("macos-proc-v1:10:1")
                 );
             }
             _ => panic!("expected a hand-off"),
@@ -494,21 +511,20 @@ fn the_wait_goes_on_as_before_unless_a_fresh_launch_exited_without_a_window() {
 
 #[test]
 fn each_watch_outcome_returns_what_can_be_said() {
-    assert!(handoff_outcome(HandoffWatch::NoInstance, "Firefox", 42, None, false).is_none());
-    let result = handoff_outcome(
-        HandoffWatch::NewWindow,
-        "Google Chrome",
-        42,
-        Some("macos-proc-v1:3:4"),
-        false,
-    )
-    .unwrap()
-    .unwrap();
+    assert!(handoff_outcome(HandoffWatch::NoInstance, "Firefox", 42, false).is_none());
+    let result = handoff_outcome(new_window(), "Google Chrome", 42, false)
+        .unwrap()
+        .unwrap();
     assert!(result.handed_off && result.attached);
+    assert_eq!(result.pid, agent_desktop_core::ProcessId::new(10));
+    assert_eq!(
+        result.process_instance.as_deref(),
+        Some("macos-proc-v1:10:1")
+    );
     assert!(!result.new_instance && !result.existing_window && !result.running_without_window);
     assert!(result.window.is_none() && result.activated.is_none());
     assert!(result.suggestion.unwrap().contains("list-windows"));
-    let error = handoff_outcome(HandoffWatch::NoNewWindow, "Firefox", 42, None, false)
+    let error = handoff_outcome(HandoffWatch::NoNewWindow, "Firefox", 42, false)
         .unwrap()
         .unwrap_err();
     assert_eq!(kind(&error), "launch_handoff_unconfirmed");

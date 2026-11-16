@@ -141,10 +141,10 @@ pub(crate) struct Handoff {
 }
 
 /// What watching the candidates after the launched process exited showed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HandoffWatch {
-    /// A candidate showed a window it did not have before.
-    NewWindow,
+    /// A candidate showed a window it did not have before: that instance, which still runs.
+    NewWindow { pid: i32, process_instance: String },
     /// A candidate still runs, but showed no new window in the time watched.
     NoNewWindow,
     /// No candidate still runs.
@@ -267,8 +267,9 @@ pub(crate) fn handoff_candidates(
         .collect()
 }
 
-/// Watches the candidates for up to `rounds` looks, `wait` between them: `NewWindow` as soon as
-/// one that still runs (`alive`) shows (`WindowSeen::shown`) a window it did not have before.
+/// Watches the candidates for up to `rounds` looks, `wait` between them: `NewWindow`, naming the
+/// candidate, as soon as one that still runs (`alive`) shows (`WindowSeen::shown`) a window it did
+/// not have before.
 pub(crate) fn watch_handoff(
     candidates: &[HandoffCandidate],
     rounds: usize,
@@ -288,7 +289,10 @@ pub(crate) fn watch_handoff(
                     window.shown && !candidate.windows_before.contains(&window.number)
                 })
             }) {
-                return HandoffWatch::NewWindow;
+                return HandoffWatch::NewWindow {
+                    pid: candidate.pid,
+                    process_instance: candidate.process_instance.clone(),
+                };
             }
         }
         if !seen_alive {
@@ -329,7 +333,7 @@ pub(crate) fn after_open_error(
     let (Some(handoff), Some(pid)) = (handoff, exited_launch_pid(&error)) else {
         return Err(error);
     };
-    after_exit(handoff, watch, id, pid, None, activate).unwrap_or(Err(error))
+    after_exit(handoff, watch, id, pid, activate).unwrap_or(Err(error))
 }
 
 /// After the wait for the window: on a fresh launch whose wait ended without a window (an error,
@@ -351,7 +355,7 @@ pub(crate) fn after_wait(
     if matches!(window, Ok(Some(_))) || !gone() {
         return AfterWait::Window(window);
     }
-    match after_exit(handoff, watch, id, launched.0, Some(&launched.1), activate) {
+    match after_exit(handoff, watch, id, launched.0, activate) {
         Some(outcome) => AfterWait::Outcome(outcome),
         None => AfterWait::Window(window),
     }
@@ -366,7 +370,6 @@ pub(crate) fn after_exit(
     watch: impl FnOnce(&Handoff) -> HandoffWatch,
     id: &str,
     pid: i32,
-    process_instance: Option<&str>,
     activate: bool,
 ) -> Option<Result<LaunchResult, AdapterError>> {
     let seen = if handoff.candidates.is_empty() {
@@ -377,26 +380,30 @@ pub(crate) fn after_exit(
     } else {
         watch(handoff)
     };
-    handoff_outcome(seen, id, pid, process_instance, activate)
+    handoff_outcome(seen, id, pid, activate)
 }
 
 /// The result for what the watch showed: handed off, not confirmed (delivery uncertain, with
-/// guidance not to repeat the launch), or `None` for the launch's own outcome.
+/// guidance not to repeat the launch), or `None` for the launch's own outcome. A hand-off names
+/// the running instance that showed the window; `pid` is the launched process's, which has
+/// exited, and is only reported with the unconfirmed outcome.
 pub(crate) fn handoff_outcome(
     seen: HandoffWatch,
     id: &str,
     pid: i32,
-    process_instance: Option<&str>,
     activate: bool,
 ) -> Option<Result<LaunchResult, AdapterError>> {
     match seen {
         HandoffWatch::NoInstance => None,
-        HandoffWatch::NewWindow => {
-            let pid = agent_desktop_core::ProcessId::try_from(pid).ok()?;
+        HandoffWatch::NewWindow {
+            pid: instance,
+            process_instance,
+        } => {
+            let instance = agent_desktop_core::ProcessId::try_from(instance).ok()?;
             Some(Ok(handed_off_result(
                 id,
-                pid,
-                process_instance.map(str::to_owned),
+                instance,
+                Some(process_instance),
                 activate,
             )))
         }
@@ -428,8 +435,10 @@ pub(crate) fn exited_launch_pid(error: &AdapterError) -> Option<i32> {
 }
 
 /// A launch passed to the instance that was already running, which showed a new window: that
-/// window is not named (which one is the launch's is not proven). With `--activate`, it is not
-/// confirmed in front either (`activated: false`, as the field defines it without a window).
+/// window is not named (which one is the launch's is not proven). `pid` and `process_instance`
+/// are that running instance's, never the launched process's (it has exited). With `--activate`,
+/// it is not confirmed in front either (`activated: false`, as the field defines it without a
+/// window).
 pub(crate) fn handed_off_result(
     id: &str,
     pid: agent_desktop_core::ProcessId,
