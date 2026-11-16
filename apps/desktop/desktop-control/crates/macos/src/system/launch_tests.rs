@@ -528,6 +528,8 @@ fn each_watch_outcome_returns_what_can_be_said() {
         .unwrap()
         .unwrap_err();
     assert_eq!(kind(&error), "launch_handoff_unconfirmed");
+    // The unconfirmed outcome still reports the launched process, which has exited.
+    assert_eq!(error.details.as_ref().unwrap()["pid"], 42);
     assert_eq!(
         delivery(&error),
         serde_json::to_value(DeliverySemantics::uncertain()).unwrap()

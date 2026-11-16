@@ -37,8 +37,9 @@ pub struct LaunchResult {
     /// already running instead of one it started: it attached to that
     /// instance (`pid` names it), or the process it started passed the
     /// launch to it and exited (a single-instance app; `pid` names the
-    /// exited process). Windows of that instance may be ones the user
-    /// already had open, not ones this launch opened.
+    /// exited process on Windows, and on macOS the running instance that
+    /// showed the new window). Windows of that instance may be ones the
+    /// user already had open, not ones this launch opened.
     #[serde(default)]
     pub attached: bool,
     /// `true` only when `window` is proven to belong to a process this
