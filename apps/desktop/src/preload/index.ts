@@ -108,6 +108,8 @@ import {
   updateCheckResultSchema,
   updateHealthSchema,
   desktopControlActivitySchema,
+  desktopControlPermissionPaneSchema,
+  desktopControlPermissionsSchema,
   runtimeFailureDiagnosticQuerySchema,
   runtimeFailureDiagnosticExportSchema,
   fileChangeRecordSchema,
@@ -830,6 +832,16 @@ const api: SprintCoderApi = {
       ipcRenderer.on(IPC_CHANNELS.desktopControlActivityEvent, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.desktopControlActivityEvent, handler);
     },
+    getPermissions: async () =>
+      desktopControlPermissionsSchema.parse(
+        await ipcRenderer.invoke(IPC_CHANNELS.desktopControlGetPermissions),
+      ),
+    // Only the pane's name crosses IPC; Main holds the System Settings URLs.
+    openPermissionSettings: (pane) =>
+      ipcRenderer.send(
+        IPC_CHANNELS.desktopControlOpenPermissionSettings,
+        desktopControlPermissionPaneSchema.parse(pane),
+      ),
   },
   fileEdits: {
     // Push-only, mirroring `reasoning` above: the frame carries its own taskId/turnId and the store

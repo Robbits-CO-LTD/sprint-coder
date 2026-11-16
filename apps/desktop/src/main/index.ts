@@ -10,6 +10,7 @@ import {
   protocol,
   session,
   shell,
+  systemPreferences,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
 } from 'electron';
@@ -25,6 +26,11 @@ import { GraphRenderService } from './graph-render';
 import { reportDesktopControlAvailability } from './desktop-control';
 import { endDesktopControlSessions } from './desktop-control-session';
 import { desktopControlActivity, sendDesktopControlActivity } from './desktop-control-activity';
+import {
+  DESKTOP_CONTROL_PERMISSIONS_NOT_APPLICABLE,
+  desktopControlPermissionSettingsUrl,
+  readDesktopControlPermissions,
+} from './desktop-control-permissions';
 import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
@@ -61,6 +67,7 @@ import {
 } from './auto-update';
 import {
   IPC_CHANNELS,
+  desktopControlPermissionsSchema,
   updateCheckResultSchema,
   updateHealthSchema,
   type UpdateHealth,
@@ -152,6 +159,21 @@ ipcMain.on(IPC_CHANNELS.updateOpenManual, (event) => {
   void shell
     .openExternal('https://github.com/Robbits-CO-LTD/sprint-coder/releases/latest')
     .catch((error) => secureLogger.warn('Manual update page could not be opened', error));
+});
+ipcMain.handle(IPC_CHANNELS.desktopControlGetPermissions, (event) => {
+  if (trustedMainWindowTarget(event) === null)
+    return desktopControlPermissionsSchema.parse(DESKTOP_CONTROL_PERMISSIONS_NOT_APPLICABLE);
+  return desktopControlPermissionsSchema.parse(
+    readDesktopControlPermissions(process.platform, process.arch, systemPreferences),
+  );
+});
+ipcMain.on(IPC_CHANNELS.desktopControlOpenPermissionSettings, (event, pane: unknown) => {
+  if (trustedMainWindowTarget(event) === null) return;
+  const url = desktopControlPermissionSettingsUrl(process.platform, pane);
+  if (url === null) return;
+  void shell
+    .openExternal(url)
+    .catch((error) => secureLogger.warn('System Settings could not be opened', error));
 });
 ipcMain.on(IPC_CHANNELS.updateOpenLog, (event) => {
   if (trustedMainWindowTarget(event) === null) return;

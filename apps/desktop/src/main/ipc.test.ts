@@ -8389,6 +8389,8 @@ const NON_ROUTER_CHANNELS = new Set<string>([
   IPC_CHANNELS.updateOpenManual,
   IPC_CHANNELS.updateOpenLog,
   IPC_CHANNELS.desktopControlActivityEvent,
+  IPC_CHANNELS.desktopControlGetPermissions,
+  IPC_CHANNELS.desktopControlOpenPermissionSettings,
 ]);
 
 describe('IPC channel registry stays in sync with the adversarial fuzz table', () => {
