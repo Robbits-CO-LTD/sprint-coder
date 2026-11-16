@@ -8,6 +8,7 @@ import {
   type PermissionSettings,
   type TaskSummary,
 } from '@sprint-coder/contracts';
+import { fullAccessConfirmationDetail } from './full-access-confirmation';
 import { IpcRouter, TaskMailbox } from './ipc';
 import {
   FullAccessConfirmation,
@@ -317,6 +318,7 @@ describe('permission confirmation admission through the real IPC handlers and Ta
       expect(electron.showMessageBox.mock.calls[0]![1]).toMatchObject({
         defaultId: 0,
         cancelId: 0,
+        detail: fullAccessConfirmationDetail(process.platform),
       });
       f.confirmations[0]!.respond(response);
       const result = await changing;
