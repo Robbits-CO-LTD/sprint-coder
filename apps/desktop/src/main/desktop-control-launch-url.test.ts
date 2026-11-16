@@ -360,6 +360,41 @@ describe('launch --url: the approval card', () => {
     expect(mixed.notes).toContain(
       'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
     );
+    // A URL launch a long batch does not list still gets the note; one only in front does not.
+    const plain = Array.from({ length: 20 }, () => ({
+      command: 'launch',
+      args: { app: 'TextEdit' },
+    }));
+    const url = { app: 'Firefox', url: 'https://example.com/' };
+    const hidden = card(
+      ['batch', JSON.stringify([...plain, { command: 'launch', args: url }])],
+      'darwin',
+    );
+    expect(hidden.steps).toHaveLength(20);
+    expect(hidden.stepsOmitted).toBe(1);
+    expect(hidden.notes).toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
+    );
+    expect(hidden.notes).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
+    const hiddenFront = card(
+      [
+        'batch',
+        JSON.stringify([...plain, { command: 'launch', args: { ...url, activate: true } }]),
+      ],
+      'darwin',
+    );
+    expect(hiddenFront.stepsOmitted).toBe(1);
+    expect(hiddenFront.notes).not.toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
+    );
+    // On Windows the same long batch reads as before: no macOS note.
+    expect(
+      card(['batch', JSON.stringify([...plain, { command: 'launch', args: url }])]).notes,
+    ).not.toContain(
+      'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。ブラウザーが自分で前に出ることがあります。',
+    );
     // A plain launch on macOS keeps its note.
     expect(card(['launch', 'TextEdit'], 'darwin').notes).toContain(
       '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',

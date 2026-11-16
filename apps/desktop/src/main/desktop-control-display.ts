@@ -613,13 +613,16 @@ function describe(
   if (mode === 'background' && commands.some((command) => PART_OPERATIONS.has(command)))
     notes.unshift(BEHIND_NOTE);
   // A launch that opens a URL is decided on its own card every time, never by a Task grant.
-  const urlLaunch = all.some((step) => step.textRole === 'url') || launchesUrl(read);
+  const urls = urlLaunches(read, mode);
+  const urlLaunch = all.some((step) => step.textRole === 'url') || urls.any;
   const behind = all.filter((step) => step.kind === 'launch' && step.mode !== 'foreground');
   // On macOS a URL launch has its own note; a plain launch beside it in a batch keeps its own.
   const macUrl = platform === 'darwin' && urlLaunch;
   if (behind.length > 0 && (!macUrl || behind.some((step) => step.textRole !== 'url')))
     notes.unshift(LAUNCH_NOTE);
-  if (macUrl && behind.some((step) => step.textRole === 'url')) notes.unshift(MAC_URL_LAUNCH_NOTE);
+  // Also for one a long batch does not list: the note is about the run, not the steps shown.
+  if (macUrl && (urls.behind || behind.some((step) => step.textRole === 'url')))
+    notes.unshift(MAC_URL_LAUNCH_NOTE);
   if (urlLaunch) notes.unshift(URL_NOTE);
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
@@ -805,14 +808,32 @@ function cutNote({ step }: { step: DesktopActionStep }): string {
   return step.textRole === 'url' ? URL_CUT_NOTE : TEXT_CUT_NOTE;
 }
 
-/** Whether the run has a `launch` with a URL anywhere, shown or not. */
-function launchesUrl(read: ReturnType<typeof readDesktopControlCommand>): boolean {
-  if (read === null || read.help) return false;
-  if (read.command === 'launch') return read.options.has('--url');
-  if (read.command !== 'batch') return false;
-  return (readBatchEntries(read.positionals) ?? []).some(
+/**
+ * Whether the run has a `launch` with a URL anywhere, shown or not, and whether one of them is not
+ * brought to the front (as the steps of a batch are judged: all of a `--headed` batch are).
+ */
+function urlLaunches(
+  read: ReturnType<typeof readDesktopControlCommand>,
+  mode: Mode,
+): { any: boolean; behind: boolean } {
+  if (read === null || read.help) return { any: false, behind: false };
+  if (read.command === 'launch') {
+    const any = read.options.has('--url');
+    return { any, behind: any && mode !== 'foreground' };
+  }
+  if (read.command !== 'batch') return { any: false, behind: false };
+  const urls = (readBatchEntries(read.positionals) ?? []).filter(
     ({ command, args }) => command === 'launch' && args['url'] !== undefined,
   );
+  const headed = mode === 'foreground' && read.options.has('--headed');
+  return {
+    any: urls.length > 0,
+    behind:
+      !headed &&
+      urls.some(
+        ({ command, args }) => desktopControlBatchEntryMode(command, args) !== 'foreground',
+      ),
+  };
 }
 
 /**
