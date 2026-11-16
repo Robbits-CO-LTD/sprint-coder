@@ -478,6 +478,7 @@ describe('CI scope wiring', () => {
       '${{ fromJSON(needs.classify.outputs.rust_runner) }}',
     );
     expect(workflow.jobs['test-macos']['runs-on']).toBe('macos-latest');
+    expect(workflow.jobs['desktop-control-rust-macos']['runs-on']).toBe('macos-latest');
     // Linux is no longer distributed, so it has no package smoke (owner decision, 2026-11-16).
     expect(workflow.jobs['package-linux']).toBeUndefined();
     expect(workflow.jobs['renderer-tests']['runs-on']).toBe('ubuntu-latest');
@@ -528,6 +529,15 @@ describe('CI scope wiring', () => {
     [
       'apps/desktop/desktop-control/crates/windows/src/lib.rs',
       ['classify', 'quality', 'sandbox-rust-windows', 'required'],
+    ],
+    // A change that reaches the macOS build also builds desktop control on macOS.
+    [
+      'apps/desktop/desktop-control/crates/macos/src/lib.rs',
+      ['classify', 'quality', 'sandbox-rust-windows', 'desktop-control-rust-macos', 'required'],
+    ],
+    [
+      'apps/desktop/desktop-control/crates/core/src/lib.rs',
+      ['classify', 'quality', 'sandbox-rust-windows', 'desktop-control-rust-macos', 'required'],
     ],
     // A push to main runs the same static checks as a PR.
     ['apps/desktop/forge.config.ts', ['classify', 'quality', 'package-tests', 'required'], 'push'],
@@ -859,6 +869,21 @@ describe('full CI partition contract', () => {
     );
     expect(build.run).toContain('cargo test --no-run --locked');
     expect(build.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
+    // macOS builds desktop control in a PR the same way: the shared cached action, on Apple silicon.
+    const macRust = workflow.jobs['desktop-control-rust-macos'];
+    expect(macRust.if).toBe("needs.classify.outputs.desktop_control_rust_macos_required == 'true'");
+    expect(workflow.jobs.classify.outputs.desktop_control_rust_macos_required).toBe(
+      '${{ steps.scope.outputs.desktop_control_rust_macos_required }}',
+    );
+    expect(
+      macRust.steps.some((step) => step.uses === './.github/actions/prepare-desktop-control'),
+    ).toBe(true);
+    expect(macRust.steps.find((step) => step.run?.includes('RUNNER_ARCH')).run).toBe(
+      'test "$RUNNER_ARCH" = ARM64',
+    );
+    // Every scope output the jobs read reaches them through the classify job's outputs.
+    for (const key of Object.keys(scopeOutputs(classifyChanges([]))))
+      expect(workflow.jobs.classify.outputs[key], key).toBe(`\${{ steps.scope.outputs.${key} }}`);
     const bridges = workflow.jobs['electron-bridges'];
     const matrix = bridges.strategy.matrix;
     const macRows = workflow.jobs['test-macos'].strategy.matrix.include;

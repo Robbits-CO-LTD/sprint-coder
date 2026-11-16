@@ -38,6 +38,7 @@ jobs:
       shared_required: ${{ steps.scope.outputs.shared_required }}
       windows_rust_required: ${{ steps.scope.outputs.windows_rust_required }}
       desktop_control_rust_required: ${{ steps.scope.outputs.desktop_control_rust_required }}
+      desktop_control_rust_macos_required: ${{ steps.scope.outputs.desktop_control_rust_macos_required }}
       platform_required: ${{ steps.scope.outputs.platform_required }}
       platform_matrix: ${{ steps.scope.outputs.platform_matrix }}
       distribution_required: ${{ steps.scope.outputs.distribution_required }}
@@ -155,7 +156,7 @@ jobs:
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
 
   sandbox-rust-windows:
-    # PRs run no tests, so this job is where a PR proves its Rust still compiles.
+    # PRs run no tests, so this job is where a PR proves its Rust still compiles on Windows.
     name: Rust Windows build
     needs: classify
     if: needs.classify.outputs.windows_rust_required == 'true' || needs.classify.outputs.desktop_control_rust_required == 'true'
@@ -190,6 +191,33 @@ jobs:
       # The same cached release build that the Windows test shards use in the full run.
       - name: Build Windows desktop control
         if: needs.classify.outputs.desktop_control_rust_required == 'true'
+        uses: ./.github/actions/prepare-desktop-control
+
+  desktop-control-rust-macos:
+    # PRs run no tests, so this job is where a PR proves desktop control still builds on macOS.
+    # A full run never sets this flag (the macOS test shards build it instead).
+    name: Rust macOS build
+    needs: classify
+    if: needs.classify.outputs.desktop_control_rust_macos_required == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # The action builds nothing on Intel macOS, which would let this job pass without a build.
+      - name: Require an Apple silicon runner
+        shell: bash
+        run: test "$RUNNER_ARCH" = ARM64
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # The same cached release build that the macOS test shards use in the full run.
+      - name: Build macOS desktop control
         uses: ./.github/actions/prepare-desktop-control
 
   test-macos:
@@ -739,6 +767,7 @@ jobs:
         renderer-tests,
         package-tests,
         sandbox-rust-windows,
+        desktop-control-rust-macos,
         test-macos,
         package-macos,
         platform-tests,

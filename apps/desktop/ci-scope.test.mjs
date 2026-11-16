@@ -207,27 +207,58 @@ describe('CI change boundaries', () => {
   });
 
   it.each([
-    ['apps/desktop/desktop-control/crates/windows/src/lib.rs', false, true],
-    // A PR compiles only on Windows; the macOS crate is built by the full run's macOS jobs.
-    ['apps/desktop/desktop-control/crates/macos/src/lib.rs', false, true],
-    ['apps/desktop/desktop-control/Cargo.lock', false, true],
-    ['build-desktop-control.mjs', false, true],
-    ['.github/actions/prepare-desktop-control/action.yml', false, true],
-    ['apps/desktop/sandbox-runner/src/main.rs', true, false],
-    ['.github/workflows/ci.yml', true, true],
-    ['apps/desktop/src/main/desktop-control.ts', false, false],
-    [`${renderer}components/RunCard.tsx`, false, false],
-  ])('compiles Rust on a PR changing %s (sandbox %s, desktop control %s)', (path, sandbox, dc) => {
-    const scope = classifyChanges(changes(path));
-    expect(scope).toMatchObject({ windowsRust: sandbox, desktopControlRust: dc, platforms: [] });
-    const required = verifyRequiredJobs(scope, {
-      classify: 'success',
-      quality: 'success',
-      'package-tests': 'success',
-      'sandbox-rust-windows': 'success',
-      website: 'success',
-    }).required;
-    expect(required.includes('sandbox-rust-windows')).toBe(sandbox || dc);
+    // The macOS build compiles only the CLI package, which uses the Windows crate on Windows only.
+    ['apps/desktop/desktop-control/crates/windows/src/lib.rs', false, true, false],
+    ['apps/desktop/desktop-control/crates/macos/src/lib.rs', false, true, true],
+    ['apps/desktop/desktop-control/crates/core/src/lib.rs', false, true, true],
+    ['apps/desktop/desktop-control/src/main.rs', false, true, true],
+    ['apps/desktop/desktop-control/Cargo.toml', false, true, true],
+    ['apps/desktop/desktop-control/Cargo.lock', false, true, true],
+    ['build-desktop-control.mjs', false, true, true],
+    ['.github/actions/prepare-desktop-control/action.yml', false, true, true],
+    ['apps/desktop/sandbox-runner/src/main.rs', true, false, false],
+    ['.github/workflows/ci.yml', true, true, true],
+    ['apps/desktop/src/main/desktop-control.ts', false, false, false],
+    [`${renderer}components/RunCard.tsx`, false, false, false],
+  ])(
+    'compiles Rust on a PR changing %s (sandbox %s, desktop control %s, macOS %s)',
+    (path, sandbox, dc, macos) => {
+      const scope = classifyChanges(changes(path));
+      expect(scope).toMatchObject({
+        windowsRust: sandbox,
+        desktopControlRust: dc,
+        desktopControlRustMacos: macos,
+        platforms: [],
+      });
+      expect(scopeOutputs(scope).desktop_control_rust_macos_required).toBe(String(macos));
+      const required = verifyRequiredJobs(scope, {
+        classify: 'success',
+        quality: 'success',
+        'package-tests': 'success',
+        'sandbox-rust-windows': 'success',
+        'desktop-control-rust-macos': 'success',
+        website: 'success',
+      }).required;
+      expect(required.includes('sandbox-rust-windows')).toBe(sandbox || dc);
+      expect(required.includes('desktop-control-rust-macos')).toBe(macos);
+    },
+  );
+
+  it('requires the macOS build only alongside a macOS-affecting change', () => {
+    const scope = classifyChanges(
+      changes(
+        'apps/desktop/desktop-control/crates/windows/src/lib.rs',
+        'apps/desktop/desktop-control/crates/macos/src/lib.rs',
+      ),
+    );
+    expect(scope).toMatchObject({ desktopControlRust: true, desktopControlRustMacos: true });
+    expect(() =>
+      verifyRequiredJobs(scope, {
+        classify: 'success',
+        quality: 'success',
+        'sandbox-rust-windows': 'success',
+      }),
+    ).toThrow('desktop-control-rust-macos: missing');
   });
 
   it('leaves the desktop-control build to the full Windows shards in the full run', () => {
@@ -239,7 +270,12 @@ describe('CI change boundaries', () => {
         changes('apps/desktop/desktop-control/crates/windows/src/lib.rs'),
         options,
       );
-      expect(scope).toMatchObject({ mode: 'full', windowsRust: true, desktopControlRust: false });
+      expect(scope).toMatchObject({
+        mode: 'full',
+        windowsRust: true,
+        desktopControlRust: false,
+        desktopControlRustMacos: false,
+      });
       expect(scopeOutputs(scope)).toMatchObject({
         platform_required: 'true',
         native_required: 'true',
@@ -249,7 +285,12 @@ describe('CI change boundaries', () => {
     const macos = classifyChanges(changes('apps/desktop/desktop-control/crates/macos/src/lib.rs'), {
       eventName: 'workflow_dispatch',
     });
-    expect(macos).toMatchObject({ mode: 'full', distribution: true });
+    // The PR-only macOS build job is not selected, so the full run builds it once per shard.
+    expect(macos).toMatchObject({
+      mode: 'full',
+      distribution: true,
+      desktopControlRustMacos: false,
+    });
     expect(scopeOutputs(macos)).toMatchObject({
       full_matrix: 'true',
       distribution_required: 'true',
@@ -258,6 +299,12 @@ describe('CI change boundaries', () => {
       expect(() => verifyRequiredJobs(macos, { classify: 'success' })).toThrow(`${job}: missing`);
     const docs = classifyChanges(changes('README.md'));
     expect(() => scopeOutputs({ ...docs, desktopControlRust: true })).toThrow('Invalid CI scope');
+    expect(() => scopeOutputs({ ...docs, desktopControlRustMacos: true })).toThrow(
+      'Invalid CI scope',
+    );
+    expect(() => scopeOutputs({ ...macos, desktopControlRustMacos: undefined })).toThrow(
+      'Invalid CI scope',
+    );
     const pr = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
     expect(() => scopeOutputs({ ...pr, native: true })).toThrow('Invalid CI scope');
   });
@@ -268,6 +315,7 @@ describe('CI change boundaries', () => {
       shared: false,
       windowsRust: false,
       desktopControlRust: false,
+      desktopControlRustMacos: false,
       websiteRequired: false,
     });
     expect(scopeOutputs(classifyChanges(changes('README.md'))).quality_required).toBe('false');
@@ -362,6 +410,7 @@ describe('required CI result aggregation', () => {
         [['packages/contracts/src/index.ts'], 'package-tests'],
         [['apps/desktop/forge.config.ts'], 'package-windows', { eventName: 'workflow_dispatch' }],
         [['apps/desktop/desktop-control/src/main.rs'], 'sandbox-rust-windows'],
+        [['apps/desktop/desktop-control/crates/macos/src/lib.rs'], 'desktop-control-rust-macos'],
       ]) {
         const scope = classifyChanges(changes(...paths), options);
         expect(() => verifyRequiredJobs(scope, { classify: 'success', [job]: result })).toThrow(
