@@ -489,9 +489,14 @@ describe('prompt context compiler', () => {
     );
     expect(text).toContain('PERM_DENIED');
     // The clipboard writes work on macOS too now; only launch --url is still refused.
-    expect(text).not.toContain('clipboard-set・clipboard-clear');
-    expect(text).not.toContain('クリップボードへの書き込み');
+    expect(text).not.toContain('クリップボードへの書き込み（clipboard-set・clipboard-clear）と');
     expect(text).toContain('launch の --url はまだ使えない');
+    // A batch that writes the clipboard stops on an error, and a failed write is never pasted.
+    expect(text).toContain(
+      'clipboard-set・clipboard-clear を batch に入れる時は、batch に --stop-on-error を付ける',
+    );
+    expect(text).toContain('書き込みが失敗したら、その後の貼り付け（cmd+v など）はしない');
+    expect(windows.content).not.toContain('--stop-on-error を付ける');
     expect(text).toContain('Terminal・iTerm・Ghostty・Warp など');
     // Nothing of Windows.
     for (const windowsOnly of [

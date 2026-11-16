@@ -21,34 +21,45 @@ struct Layout {
     path_override: bool,
     /// Whether the folder of the image holding this code is a candidate too.
     beside_image: bool,
+    /// Whether a folder above the helper may be root's `admin`-group folder (`ancestor_permits`).
+    admin_group_folders: bool,
 }
 
-/// Under Sprint Coder's name the helper is only the file of Sprint Coder's name beside the running
-/// executable: no variable can point elsewhere. Any other name keeps the upstream lookup.
+/// Sprint Coder's: only the file of Sprint Coder's name beside the running executable, no variable
+/// can point elsewhere, and `/Applications` may hold it.
+const SPRINT_CODER_LAYOUT: Layout = Layout {
+    basename: SPRINT_CODER_HELPER_BASENAME,
+    path_override: false,
+    beside_image: false,
+    admin_group_folders: true,
+};
+
+/// The upstream lookup and checks, unchanged.
+const UPSTREAM_LAYOUT: Layout = Layout {
+    basename: protocol::HELPER_BASENAME,
+    path_override: true,
+    beside_image: true,
+    admin_group_folders: false,
+};
+
+/// Under Sprint Coder's name the helper is looked for as `SPRINT_CODER_LAYOUT` says. Any other name
+/// keeps the upstream lookup and checks.
 fn layout_for(executable: Option<&std::path::Path>) -> Layout {
     if executable
         .and_then(std::path::Path::file_name)
         .and_then(|name| name.to_str())
         == Some(SPRINT_CODER_EXECUTABLE)
     {
-        Layout {
-            basename: SPRINT_CODER_HELPER_BASENAME,
-            path_override: false,
-            beside_image: false,
-        }
+        SPRINT_CODER_LAYOUT
     } else {
-        Layout {
-            basename: protocol::HELPER_BASENAME,
-            path_override: true,
-            beside_image: true,
-        }
+        UPSTREAM_LAYOUT
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HelperIdentity {
     pub(crate) path: std::path::PathBuf,
-    basename: &'static str,
+    layout: Layout,
     device: u64,
     inode: u64,
     owner: u32,
@@ -69,7 +80,7 @@ impl HelperIdentity {
             if !path.is_absolute() {
                 return Err(invalid(basename, "Explicit helper path must be absolute"));
             }
-            return Self::read(path, basename);
+            return Self::read(path, layout);
         }
         let mut candidates = Vec::new();
         if let Some(parent) = executable.as_deref().and_then(std::path::Path::parent) {
@@ -85,7 +96,7 @@ impl HelperIdentity {
             }
         }
         for candidate in candidates {
-            match Self::read(candidate, basename) {
+            match Self::read(candidate, layout) {
                 Ok(identity) => return Ok(identity),
                 Err(error) if missing(&error) => {}
                 Err(error) => return Err(error),
@@ -95,18 +106,19 @@ impl HelperIdentity {
     }
 
     pub(crate) fn revalidate(&self) -> Result<(), AdapterError> {
-        let current = Self::read(self.path.clone(), self.basename)?;
+        let current = Self::read(self.path.clone(), self.layout)?;
         if current == *self {
             Ok(())
         } else {
             Err(invalid(
-                self.basename,
+                self.layout.basename,
                 "Helper filesystem identity changed during launch",
             ))
         }
     }
 
-    fn read(path: std::path::PathBuf, basename: &'static str) -> Result<Self, AdapterError> {
+    fn read(path: std::path::PathBuf, layout: Layout) -> Result<Self, AdapterError> {
+        let basename = layout.basename;
         let invalid = |detail: String| invalid(basename, detail);
         if path.file_name().and_then(|name| name.to_str()) != Some(basename) {
             return Err(invalid(
@@ -166,7 +178,13 @@ impl HelperIdentity {
             let owner = metadata.uid();
             let mode = metadata.mode();
             if !metadata.file_type().is_dir()
-                || !ancestor_permits(owner, metadata.gid(), mode, unsafe { libc::geteuid() })
+                || !ancestor_permits(
+                    owner,
+                    metadata.gid(),
+                    mode,
+                    unsafe { libc::geteuid() },
+                    layout.admin_group_folders,
+                )
                 || acl_has_mutating_allow(directory).map_err(|error| {
                     invalid(format!("Could not verify helper directory ACL: {error}"))
                 })?
@@ -186,7 +204,7 @@ impl HelperIdentity {
         }
         Ok(Self {
             path,
-            basename,
+            layout,
             device: metadata.dev(),
             inode: metadata.ino(),
             owner: metadata.uid(),
@@ -198,16 +216,23 @@ impl HelperIdentity {
 }
 
 /// Whether a folder above the helper may hold it: owned by root or by this user, and writable by
-/// no one else, or sticky. One more case is accepted: owned by root, of the `admin` group, and
-/// writable by that group but not by everyone. That is how macOS keeps `/Applications`, where
-/// Sprint Coder is installed; Main starts the CLI beside the helper by path from there anyway, and
-/// a member of `admin` could replace the whole app, so refusing it only for the helper adds no
-/// protection.
-fn ancestor_permits(owner: u32, group: u32, mode: u32, euid: u32) -> bool {
+/// no one else, or sticky. Only under Sprint Coder's name (`admin_group_folders`), one more case is
+/// accepted: owned by root, of the `admin` group, and writable by that group but not by everyone.
+/// That is how macOS keeps `/Applications`, where Sprint Coder is installed; Main starts the CLI
+/// beside the helper by path from there anyway, and a member of `admin` could replace the whole
+/// app, so refusing it only for the helper adds no protection.
+fn ancestor_permits(
+    owner: u32,
+    group: u32,
+    mode: u32,
+    euid: u32,
+    admin_group_folders: bool,
+) -> bool {
     let trusted_owner = owner == 0 || owner == euid;
     let shared_write = mode & 0o022 != 0;
     let sticky = mode & 0o1000 != 0;
-    let admin_group_write = owner == 0 && group == ADMIN_GID && mode & 0o002 == 0;
+    let admin_group_write =
+        admin_group_folders && owner == 0 && group == ADMIN_GID && mode & 0o002 == 0;
     trusted_owner && (!shared_write || sticky || admin_group_write)
 }
 

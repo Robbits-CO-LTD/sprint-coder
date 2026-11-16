@@ -1212,7 +1212,7 @@ export function desktopControlArgvRefusal(
   }
   if (key === 'batch')
     return positionals.length === 1
-      ? batchRefusal(positionals[0]!, workspaceRoots, lookup)
+      ? batchRefusal(positionals[0]!, workspaceRoots, lookup, read.options.has('--stop-on-error'))
       : refusal('batch には JSON の配列を 1 つだけ渡す');
   const keyTarget = keyTargetRefusal(key, (name) =>
     name === ''
@@ -1382,8 +1382,10 @@ const MAC_HELPER_COMMANDS = new Set(['clipboard-set', 'clipboard-clear']);
  * Why a macOS clipboard write may not run, or `null` when the helper lies beside the shipped
  * executable (the folder the executable, started from its own path, looks in under its Sprint Coder
  * name) and its bytes match its `.sha256` manifest. Judged on the cached digest like the executable
- * itself (`shippedDesktopControl`); the executable checks the helper's file again before starting
- * it. Only these two commands are refused: everything else stays as it was.
+ * itself (`shippedDesktopControl`). Before starting the helper the executable checks only how the
+ * file is held (a regular single-link file of this user, its permissions, ACLs and folders), never
+ * its bytes again, so a same-user swap of both the helper and its seal between the card and the run
+ * is not caught. Only these two commands are refused: everything else stays as it was.
  */
 function macClipboardHelperRefusal(what: string, lookup: DesktopControlLookup): string | null {
   const shipped = shippedDesktopControl(lookup);
@@ -1486,6 +1488,7 @@ function batchRefusal(
   json: string,
   workspaceRoots: readonly string[],
   lookup: DesktopControlLookup,
+  stopOnError: boolean,
 ): string | null {
   let entries: unknown;
   try {
@@ -1511,6 +1514,13 @@ function batchRefusal(
       if (MAC_HELPER_COMMANDS.has(command)) {
         const helper = macClipboardHelperRefusal(`batch の中の ${command}`, lookup);
         if (helper !== null) return helper;
+        // The executable may still refuse the helper after the card (its owner, mode or folders,
+        // which Main does not check), and a batch goes on to the next entry by default: a paste
+        // after a refused write would then paste what the user had on the clipboard before.
+        if (!stopOnError)
+          return refusal(
+            `batch の中の ${command} は、--stop-on-error を付けた batch でだけ使える（macOS では、書き込みが失敗しても batch が次の操作へ進み、貼り付けが前のクリップボードの中身を貼り得るため）。batch に --stop-on-error を付けて出し直す`,
+          );
       }
       if (command === 'launch' && fields['url'] !== undefined)
         return macUnavailable('batch の中の launch の url');

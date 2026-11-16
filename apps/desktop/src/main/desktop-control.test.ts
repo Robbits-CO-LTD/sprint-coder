@@ -1296,8 +1296,12 @@ describe('desktop control on Apple silicon macOS', () => {
     const writes: string[][] = [
       ['clipboard-set', 'text'],
       ['clipboard-clear'],
-      ['batch', JSON.stringify([{ command: 'clipboard-set', args: { text: 'x' } }])],
-      ['batch', JSON.stringify([{ command: 'clipboard-clear', args: {} }])],
+      [
+        'batch',
+        JSON.stringify([{ command: 'clipboard-set', args: { text: 'x' } }]),
+        '--stop-on-error',
+      ],
+      ['batch', '--stop-on-error', JSON.stringify([{ command: 'clipboard-clear', args: {} }])],
     ];
     const where = 'apps/desktop/desktop-control/build/Release/sprint-coder-desktop-control-helper';
     // Missing, unsealed or not matching its seal: only the two writes are refused, before any card.
@@ -1325,6 +1329,80 @@ describe('desktop control on Apple silicon macOS', () => {
     expect(
       refusedWith(sealed, ['batch', JSON.stringify([{ command: 'clipboard-get', args: {} }])]),
     ).toContain('clipboard-get は使えない');
+    // In a batch too, an image or a file URL stays refused with --stop-on-error (and the batch
+    // without it is refused anyway).
+    for (const [args, key] of [
+      [{ image: '/tmp/picture.png' }, 'image'],
+      [{ file_url: ['/tmp/secret.txt'] }, 'file_url'],
+    ] as const) {
+      const entries = JSON.stringify([{ command: 'clipboard-set', args }]);
+      expect(refusedWith(sealed, ['batch', '--stop-on-error', entries]), key).toContain(
+        `batch の中の ${key} は使えない`,
+      );
+      expect(refusedWith(sealed, ['batch', entries]), key).not.toBeNull();
+    }
+  });
+
+  it('on macOS lets a batch write the clipboard only when it stops on an error', () => {
+    const HELPER = posix.join(posix.dirname(BUILD), 'sprint-coder-desktop-control-helper');
+    const sealed = {
+      ...mac,
+      contentDigest: digests({ [BUILD]: SEALED, [HELPER]: SEALED }),
+      sealedDigest: digests({ [BUILD]: SEALED, [HELPER]: SEALED }),
+    };
+    const batch = (entries: unknown[], ...flags: string[]) => [
+      'batch',
+      ...flags,
+      JSON.stringify(entries),
+    ];
+    const pasteAfter = (command: string, args: Record<string, unknown>) => [
+      { command, args },
+      { command: 'press', args: { combo: 'cmd+v', app: 'TextEdit' } },
+    ];
+    for (const [command, args] of [
+      ['clipboard-set', { text: 'x' }],
+      ['clipboard-clear', {}],
+    ] as const) {
+      const refusalText = desktopControlArgvRefusal(
+        batch(pasteAfter(command, args)),
+        ['/Users/me/work'],
+        sealed,
+      );
+      expect(refusalText, command).toContain(
+        `batch の中の ${command} は、--stop-on-error を付けた batch でだけ使える`,
+      );
+      expect(refusalText, command).toContain('batch に --stop-on-error を付けて出し直す');
+      expect(
+        desktopControlArgvRefusal(
+          batch(pasteAfter(command, args), '--stop-on-error'),
+          ['/Users/me/work'],
+          sealed,
+        ),
+        command,
+      ).toBeNull();
+    }
+    // A batch without a clipboard write is as it was.
+    expect(
+      desktopControlArgvRefusal(
+        batch([{ command: 'press', args: { combo: 'cmd+v', app: 'TextEdit' } }]),
+        ['/Users/me/work'],
+        sealed,
+      ),
+    ).toBeNull();
+    // Windows is unchanged: no --stop-on-error is required there.
+    const windows = { ...mac, platform: 'win32' as const };
+    expect(
+      desktopControlArgvRefusal(
+        batch(pasteAfter('clipboard-set', { text: 'x' })),
+        ['C:\\work'],
+        windows,
+      ),
+    ).toBeNull();
+  });
+
+  it('names the packaged helper by where it lives in the bundle', () => {
+    const refusedWith = (lookup: typeof mac, argv: string[]) =>
+      desktopControlArgvRefusal(argv, ['/Users/me/work'], lookup);
     // A packaged app names the helper by where it lives in the bundle, without the build hint.
     const resources = '/Applications/Sprint Coder.app/Contents/Resources';
     const shipped = posix.join(resources, 'sprint-coder-desktop-control');
