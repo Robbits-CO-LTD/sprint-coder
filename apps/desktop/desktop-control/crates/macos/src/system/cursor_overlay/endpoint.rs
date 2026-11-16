@@ -1,9 +1,42 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ErrorCode, session};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 pub(super) const PROTOCOL_VERSION: &str = "v2";
+
+/// The mark a retire leaves beside an agent's socket when no renderer was
+/// listening on it: a renderer for that agent that is still starting (its
+/// command was stopped before it bound) ends instead of drawing. The name does
+/// not end in `.sock`, so `discover` never takes it for a socket.
+fn retired_mark(socket: &Path) -> PathBuf {
+    socket.with_extension("retired")
+}
+
+/// Leaves the retired mark for `socket`. Private to the user, never through a
+/// link; one already there is kept.
+pub(super) fn leave_retired_mark(socket: &Path) -> Result<(), AdapterError> {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(retired_mark(socket))
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(
+            AdapterError::internal("Could not mark the cursor overlay as retired")
+                .with_platform_detail(error.to_string()),
+        ),
+    }
+}
+
+/// Removes the retired mark for `socket` and reports whether it was there.
+pub(super) fn take_retired_mark(socket: &Path) -> bool {
+    std::fs::remove_file(retired_mark(socket)).is_ok()
+}
 
 pub(super) fn path(session_id: &str, agent_id: Option<&str>) -> Result<PathBuf, AdapterError> {
     let root = session::agent_desktop_dir()

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, CURSOR_HIGHLIGHT_HOLD_MS, CursorImage, CursorOverlayInstruction,
     CursorOverlayStyle, CursorPhase, CursorPose, ErrorCode, LabelPill, Point, Rect, place_label,
@@ -70,6 +71,8 @@ unsafe extern "C" {
     fn agent_desktop_cursor_overlay_rest();
     fn agent_desktop_cursor_overlay_show();
     fn agent_desktop_cursor_overlay_stop();
+    fn sc_cursor_overlay_anchor(named: bool, number: u32);
+    fn sc_cursor_overlay_restack();
 }
 
 pub(super) fn is_caret(instruction: &CursorOverlayInstruction) -> bool {
@@ -269,6 +272,30 @@ pub(super) fn hide() {
 
 pub(super) fn show() {
     unsafe { agent_desktop_cursor_overlay_show() }
+}
+
+/// Names the window the cursor is drawn at the height of. With none it is
+/// drawn above every window; with one it is shown only while that window is on
+/// the screen now, and an unreadable one hides it.
+pub(super) fn set_anchor(anchor: super::child::Anchor) {
+    let (named, number) = anchor_arguments(anchor);
+    unsafe { sc_cursor_overlay_anchor(named, number) }
+}
+
+/// What the native side is given: whether a window is named, and its number
+/// (0, which is no window, for one that could not be read).
+pub(super) fn anchor_arguments(anchor: super::child::Anchor) -> (bool, u32) {
+    match anchor {
+        super::child::Anchor::Free => (false, 0),
+        super::child::Anchor::Window(number) => (true, number),
+        super::child::Anchor::Unreadable => (true, 0),
+    }
+}
+
+/// Puts the shown cursor back at the named window's height when the windows
+/// have moved in the stacking order since it was drawn.
+pub(super) fn restack() {
+    unsafe { sc_cursor_overlay_restack() }
 }
 
 #[cfg(test)]

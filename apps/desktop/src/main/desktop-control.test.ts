@@ -358,12 +358,20 @@ describe('desktop-control build', () => {
 
   it('has the Team’s desktop cursors on by default, off only with 0, and never where it is not built', () => {
     expect(DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE).toBe('SPRINT_CODER_DESKTOP_TEAM_CURSORS');
-    for (const value of [undefined, '1', '', 'true', 'false', 'off', ' 0', '00'])
-      expect(desktopControlTeamCursorsEnabled(value, 'win32', 'x64'), String(value)).toBe(true);
-    expect(desktopControlTeamCursorsEnabled('0', 'win32', 'x64')).toBe(false);
+    for (const [platform, arch] of [
+      ['win32', 'x64'],
+      ['darwin', 'arm64'],
+    ] as const) {
+      for (const value of [undefined, '1', '', 'true', 'false', 'off', ' 0', '00'])
+        expect(
+          desktopControlTeamCursorsEnabled(value, platform, arch),
+          `${platform} ${String(value)}`,
+        ).toBe(true);
+      expect(desktopControlTeamCursorsEnabled('0', platform, arch)).toBe(false);
+    }
     for (const [platform, arch] of [
       ['win32', 'arm64'],
-      ['darwin', 'arm64'],
+      ['darwin', 'x64'],
       ['linux', 'x64'],
     ] as const)
       for (const value of [undefined, '1'])
