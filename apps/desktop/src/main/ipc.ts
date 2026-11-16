@@ -5862,6 +5862,7 @@ export class IpcRouter {
           ...promptWriteAccess(accessPreset, workspacePath),
           skills: runtimeSkills,
           teamMcpEnabled: teamMcp !== undefined,
+          desktopControlProjectGuidance: true,
         }),
       ),
       new Set(
