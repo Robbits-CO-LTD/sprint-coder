@@ -23,15 +23,19 @@ struct Layout {
     beside_image: bool,
     /// Whether a folder above the helper may be root's `admin`-group folder (`ancestor_permits`).
     admin_group_folders: bool,
+    /// How the helper is started and ended (`clipboard_helper_process::Termination`).
+    termination: super::clipboard_helper_process::Termination,
 }
 
 /// Sprint Coder's: only the file of Sprint Coder's name beside the running executable, no variable
-/// can point elsewhere, and `/Applications` may hold it.
+/// can point elsewhere, and `/Applications` may hold it. The helper stays in the CLI's process
+/// group, so the Stop that Sprint Coder sends to that group ends the helper too.
 const SPRINT_CODER_LAYOUT: Layout = Layout {
     basename: SPRINT_CODER_HELPER_BASENAME,
     path_override: false,
     beside_image: false,
     admin_group_folders: true,
+    termination: super::clipboard_helper_process::Termination::CallerGroup,
 };
 
 /// The upstream lookup and checks, unchanged.
@@ -40,6 +44,7 @@ const UPSTREAM_LAYOUT: Layout = Layout {
     path_override: true,
     beside_image: true,
     admin_group_folders: false,
+    termination: super::clipboard_helper_process::Termination::OwnGroup,
 };
 
 /// Under Sprint Coder's name the helper is looked for as `SPRINT_CODER_LAYOUT` says. Any other name
@@ -69,6 +74,11 @@ pub(crate) struct HelperIdentity {
 }
 
 impl HelperIdentity {
+    /// How this helper is started and ended, by the name the CLI runs under.
+    pub(crate) fn termination(&self) -> super::clipboard_helper_process::Termination {
+        self.layout.termination
+    }
+
     pub(crate) fn discover() -> Result<Self, AdapterError> {
         let executable = std::env::current_exe().ok();
         let layout = layout_for(executable.as_deref());

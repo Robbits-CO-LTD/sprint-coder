@@ -14,6 +14,7 @@ fn sprint_coders_executable_looks_only_beside_itself_for_its_own_helper_name() {
             path_override: false,
             beside_image: false,
             admin_group_folders: true,
+            termination: super::super::clipboard_helper_process::Termination::CallerGroup,
         }
     );
     // Any other name keeps the upstream lookup and checks.
@@ -31,6 +32,7 @@ fn sprint_coders_executable_looks_only_beside_itself_for_its_own_helper_name() {
                 path_override: true,
                 beside_image: true,
                 admin_group_folders: false,
+                termination: super::super::clipboard_helper_process::Termination::OwnGroup,
             }
         );
     }
