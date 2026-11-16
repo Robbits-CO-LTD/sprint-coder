@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::cli::Commands;
 use crate::cli_args::{
@@ -217,4 +218,53 @@ fn a_multi_agent_desktop_action_needs_an_agent_id_on_every_platform() {
     assert!(!agent_id_missing(&click, true, Some("agent-a")));
     assert!(!agent_id_missing(&click, false, None));
     assert!(!agent_id_missing(&Commands::Status, true, None));
+}
+
+fn url_launch(app: &str, url: &str, args: &[&str]) -> Commands {
+    Commands::Launch(crate::cli_args::system::LaunchArgs {
+        app: app.into(),
+        timeout: 100,
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        env: Vec::new(),
+        cwd: None,
+        no_attach: false,
+        activate: false,
+        cdp: None,
+        url: Some(url.into()),
+    })
+}
+
+/// On Windows a `launch --url` is judged only when it runs, as it always was, so a denied
+/// permission still comes first; on macOS it is judged as its run would judge it, before that.
+#[test]
+fn launch_url_is_judged_before_the_permission_refusal_only_on_macos() {
+    let report = PermissionReport {
+        accessibility: PermissionState::Denied {
+            suggestion: "grant accessibility".into(),
+        },
+        screen_recording: PermissionState::Granted,
+        automation: PermissionState::NotRequired,
+    };
+    for (command, macos_message) in [
+        (
+            url_launch("notepad", "https://example.com/", &[]),
+            "only for a known browser",
+        ),
+        (
+            url_launch("Google Chrome", "https://example.com/", &["--x"]),
+            "cannot be combined",
+        ),
+        (
+            url_launch("Google Chrome", "javascript:alert(1)", &[]),
+            "--url refused",
+        ),
+    ] {
+        let err = preflight(&command, &report).unwrap_err();
+        if cfg!(target_os = "macos") {
+            assert_eq!(err.code(), "INVALID_ARGS");
+            assert!(err.to_string().contains(macos_message), "{err}");
+        } else {
+            assert_eq!(err.code(), "PERM_DENIED");
+        }
+    }
 }

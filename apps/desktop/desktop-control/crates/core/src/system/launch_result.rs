@@ -37,8 +37,9 @@ pub struct LaunchResult {
     /// already running instead of one it started: it attached to that
     /// instance (`pid` names it), or the process it started passed the
     /// launch to it and exited (a single-instance app; `pid` names the
-    /// exited process). Windows of that instance may be ones the user
-    /// already had open, not ones this launch opened.
+    /// exited process on Windows, and on macOS the running instance that
+    /// showed the new window). Windows of that instance may be ones the
+    /// user already had open, not ones this launch opened.
     #[serde(default)]
     pub attached: bool,
     /// `true` only when `window` is proven to belong to a process this
@@ -53,7 +54,9 @@ pub struct LaunchResult {
     /// then `true` too). A `window` beside it is one that instance showed
     /// after the launch started, owned by `window.pid` (with `existing_window`
     /// when it already had it); without a `window`, no such window was seen. Left out
-    /// when `false`.
+    /// when `false`. On macOS `window` is never given with it: there `handed_off` means a
+    /// window that instance did not have before was seen after the launch, without naming
+    /// which (one the user opened at the same time is not told apart).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
     /// `true` when a bare launch found the app already running with no

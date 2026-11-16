@@ -1,11 +1,10 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, system::launch_options::LaunchOptions};
 
-pub(crate) fn open(
-    id: &str,
-    options: &LaunchOptions,
-    deadline: Deadline,
-) -> Result<(i32, String), AdapterError> {
+/// The bundle a launch of `id` opens, checked as `open` always checked it before opening, in the
+/// same order: the deadline, the Cocoa runtime, the resolution without launching, and the
+/// standard places.
+pub(crate) fn prepare(id: &str, deadline: Deadline) -> Result<std::path::PathBuf, AdapterError> {
     if deadline.is_expired() {
         return Err(deadline
             .timeout_error()
@@ -15,7 +14,16 @@ pub(crate) fn open(
         error.with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
     })?;
     let path = resolved_path(id, None)?;
-    let path = super::launch_location::require(&path)?;
+    super::launch_location::require(&path)
+}
+
+/// Opens the bundle at `path` (from `prepare`).
+pub(crate) fn open(
+    id: &str,
+    path: &std::path::Path,
+    options: &LaunchOptions,
+    deadline: Deadline,
+) -> Result<(i32, String), AdapterError> {
     let request = serde_json::to_vec(&serde_json::json!({
         "identifier": id,
         "resolved_path": path,
@@ -26,6 +34,7 @@ pub(crate) fn open(
         "prompts": false,
         "substitution": false,
         "new_instance": creates_new_instance(options),
+        "bundle_ids": options.bundle_ids,
     }))
     .map_err(|error| {
         AdapterError::internal(format!("Encode launch request: {error}"))
@@ -62,8 +71,26 @@ pub(crate) fn resolved_path(
     Ok(path)
 }
 
+/// The `CFBundleIdentifier` of the bundle at `path`, read from the bundle itself, or `None`.
+#[cfg(target_os = "macos")]
+pub(crate) fn bundle_identifier(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let raw = unsafe { agent_desktop_copy_bundle_identifier(bytes.as_ptr(), bytes.len()) };
+    if raw.is_null() {
+        return None;
+    }
+    let id = unsafe { std::ffi::CStr::from_ptr(raw) }
+        .to_str()
+        .ok()
+        .map(str::to_owned);
+    unsafe { libc::free(raw.cast()) };
+    id
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
+    fn agent_desktop_copy_bundle_identifier(path: *const u8, len: usize) -> *mut std::ffi::c_char;
     fn agent_desktop_copy_application_path(
         id: *const u8,
         len: usize,

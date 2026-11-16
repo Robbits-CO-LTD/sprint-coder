@@ -401,22 +401,26 @@ fn batch_session_ended_skip_covers_a_following_entry_of_the_same_session() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn launch_url_is_refused_as_unavailable_before_launching_on_macos() {
-    let output = binary()
-        .args(["launch", "chrome", "--url", "https://example.com/"])
-        .output()
-        .expect("binary starts");
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(!output.status.success());
-    assert_eq!(envelope["error"]["code"], "INVALID_ARGS");
-    assert!(
-        envelope["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not available on this OS")
-    );
-    assert_eq!(
-        envelope["error"]["disposition"]["delivery"],
-        "not_delivered"
-    );
+fn launch_url_refuses_an_app_that_is_not_a_known_browser_before_launching_on_macos() {
+    // Neither name starts anything: both are refused before the permission refusal.
+    for app in ["TextEdit", "Safari"] {
+        let output = binary()
+            .args(["launch", app, "--url", "https://example.com/"])
+            .output()
+            .expect("binary starts");
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{app}");
+        assert_eq!(envelope["error"]["code"], "INVALID_ARGS", "{app}");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("only for a known browser"),
+            "{app}"
+        );
+        assert_eq!(
+            envelope["error"]["disposition"]["delivery"], "not_delivered",
+            "{app}"
+        );
+    }
 }

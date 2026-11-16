@@ -1438,20 +1438,33 @@ describe('desktop control on Apple silicon macOS', () => {
     ).toBeNull();
   });
 
-  it('refuses what macOS cannot do yet before any card, alone or in a batch', () => {
+  it('judges launch --url by the known browsers on macOS, alone or in a batch', () => {
     const refused = (argv: string[]) => desktopControlArgvRefusal(argv, ['/Users/me/work'], mac);
-    const later = 'は macOS ではまだ使えない';
-    expect(refused(['launch', 'Safari', '--url', 'https://example.com/'])).toContain(
-      `launch --url ${later}`,
-    );
-    expect(
+    // launch --url is for the known browsers by their macOS names; Safari takes no URL.
+    expect(refused(['launch', 'Google Chrome', '--url', 'https://example.com/'])).toBeNull();
+    expect(refused(['launch', 'com.google.Chrome', '--url', 'https://example.com/'])).toBeNull();
+    for (const app of ['Safari', 'chrome', 'TextEdit', ' Google Chrome'])
+      expect(refused(['launch', app, '--url', 'https://example.com/']), app).toContain(
+        '知っているブラウザー',
+      );
+    const batch = (app: string) =>
       refused([
         'batch',
-        JSON.stringify([
-          { command: 'launch', args: { app: 'Safari', url: 'https://example.com/' } },
-        ]),
-      ]),
-    ).toContain(`batch の中の launch の url ${later}`);
+        JSON.stringify([{ command: 'launch', args: { app, url: 'https://example.com/' } }]),
+      ]);
+    expect(batch('Firefox')).toBeNull();
+    expect(batch('Safari')).toContain('知っているブラウザー');
+    // The same URL checks and option refusals as on Windows.
+    expect(refused(['launch', 'Google Chrome', '--url', 'file:///etc/passwd'])).toContain(
+      'http:// か https://',
+    );
+    expect(
+      refused(['launch', 'Google Chrome', '--url', 'https://example.com/', '--arg=--x']),
+    ).toContain('は使えない');
+    // A tool or Sprint Coder itself is refused before the browser check.
+    expect(refused(['launch', 'Terminal', '--url', 'https://example.com/'])).toContain(
+      'は起動できない',
+    );
     // Windows keeps them.
     const windows = { ...mac, platform: 'win32' as const };
     expect(desktopControlArgvRefusal(['clipboard-clear'], ['C:\\work'], windows)).toBeNull();
@@ -1656,6 +1669,89 @@ describe('desktop control on Apple silicon macOS', () => {
         ).toMatchObject({ refusal: expect.stringContaining('Sprint Coder 自身は起動できない') });
       } finally {
         place.remove();
+      }
+    });
+
+    it('lets --url through only to bundles whose bundle id is the named browser, and seals the URL', () => {
+      const base = mkdtempSync(join(tmpdir(), 'sc-dc-browsers-'));
+      try {
+        const applications = join(base, 'Applications');
+        const home = join(base, 'Home', 'Applications');
+        const browserIds: Record<string, string> = {
+          'Google Chrome.app': 'com.google.Chrome',
+          'Firefox.app': 'org.mozilla.firefox',
+          // A renamed app does not pass for the browser of its name.
+          'Microsoft Edge.app': 'com.example.not-edge',
+          // Nor a browser of the other kind, which takes another switch.
+          'Chromium.app': 'org.mozilla.firefox',
+          'TextEdit.app': 'com.apple.TextEdit',
+        };
+        for (const bundle of Object.keys(browserIds))
+          mkdirSync(join(applications, bundle), { recursive: true });
+        // A second Firefox in ~/Applications whose bundle id cannot be read.
+        mkdirSync(join(home, 'Firefox.app'), { recursive: true });
+        const lookup = {
+          ...mac,
+          macApplicationFolders: [applications],
+          bundleIdentifier: (bundle: string) =>
+            bundle.startsWith(home) ? null : (browserIds[bundle.split('/').pop()!] ?? null),
+          bundlesWithIdentifier: (id: string) =>
+            readdirSync(applications)
+              .filter((file) => browserIds[file]?.toLowerCase() === id.toLowerCase())
+              .map((file) => posix.join(applications, file)),
+        };
+        const launch = (argv: string[], over: object = {}) =>
+          desktopControlLaunchByName(argv, [], { ...lookup, ...over });
+        // By name or bundle id; an already canonical URL is left as it is.
+        expect(launch(['launch', 'Google Chrome', '--url', 'https://example.com/'])).toBeNull();
+        expect(launch(['launch', 'com.google.Chrome', '--url', 'https://example.com/'])).toBeNull();
+        expect(launch(['launch', 'Firefox', '--url=https://example.com/'])).toBeNull();
+        // Sealed in its canonical form before the card, as on Windows.
+        expect(launch(['launch', 'Google Chrome', '--url', 'HTTPS://Example.COM/検索'])).toEqual({
+          argv: ['launch', 'Google Chrome', '--url', 'https://example.com/%E6%A4%9C%E7%B4%A2'],
+        });
+        const sealed = launch([
+          'batch',
+          JSON.stringify([
+            { command: 'launch', args: { app: 'Firefox', url: 'https://example.com' } },
+          ]),
+        ]);
+        expect(JSON.parse((sealed as { argv: string[] }).argv[1]!)).toEqual([
+          { command: 'launch', args: { app: 'Firefox', url: 'https://example.com/' } },
+        ]);
+        // A bundle whose id is not the named browser's: refused, also in a batch.
+        const notBrowser = { refusal: expect.stringContaining('知っているブラウザーのものでない') };
+        expect(launch(['launch', 'Microsoft Edge', '--url', 'https://example.com/'])).toEqual(
+          notBrowser,
+        );
+        expect(launch(['launch', 'Chromium', '--url', 'https://example.com/'])).toEqual(notBrowser);
+        expect(
+          launch([
+            'batch',
+            JSON.stringify([
+              { command: 'launch', args: { app: 'Google Chrome', url: 'https://example.com/' } },
+              { command: 'launch', args: { app: 'Microsoft Edge', url: 'https://example.com/' } },
+            ]),
+          ]),
+        ).toEqual(notBrowser);
+        // Without --url, the same apps launch as before.
+        expect(launch(['launch', 'Microsoft Edge'])).toBeNull();
+        // Every bundle the name may start is judged: one without a readable id refuses the run.
+        expect(
+          launch(['launch', 'Firefox', '--url', 'https://example.com/'], {
+            macApplicationFolders: [applications, home],
+          }),
+        ).toEqual(notBrowser);
+        // Not found: refused as any launch is.
+        expect(launch(['launch', 'Vivaldi', '--url', 'https://example.com/'])).toMatchObject({
+          refusal: expect.stringContaining('見つからない'),
+        });
+        // A refused URL is refused here too.
+        expect(launch(['launch', 'Google Chrome', '--url', 'javascript:alert(1)'])).toMatchObject({
+          refusal: expect.stringContaining('http:// か https://'),
+        });
+      } finally {
+        rmSync(base, { recursive: true, force: true });
       }
     });
   });

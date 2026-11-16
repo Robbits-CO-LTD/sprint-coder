@@ -140,9 +140,30 @@ unsafe extern "C" fn release_context(context: *mut c_void) {
     });
 }
 
+/// The bridge's `errorKind` when the bundle about to open does not carry a bundle id the launch
+/// allows (`LaunchOptions::bundle_ids`).
+const BUNDLE_ID_REFUSED: u8 = 5;
+
+pub(crate) fn bundle_id_refused() -> AdapterError {
+    AdapterError::new(
+        ErrorCode::PolicyDenied,
+        "The application's bundle id is not one of the browsers this launch is for; nothing was launched",
+    )
+    .with_details(serde_json::json!({
+        "kind": "launch_bundle_id_refused",
+        "physical_delivery_started": false,
+        "retryable": false,
+    }))
+    .with_suggestion("Name a known browser installed in a standard application folder.")
+    .with_disposition(DeliverySemantics::not_delivered())
+}
+
 fn validate_result(
     result: &crate::system::launch_callback_result::LaunchCallbackResult,
 ) -> LaunchResult {
+    if result.pid <= 0 && result.error_kind == BUNDLE_ID_REFUSED && result.delivery_started == 0 {
+        return Err(bundle_id_refused());
+    }
     if result.pid <= 0 {
         let code = if result.error_kind == 1 {
             ErrorCode::AppNotFound
@@ -166,7 +187,7 @@ fn validate_result(
                 ErrorCode::AppUnresponsive,
                 "Launched application terminated before identity verification",
             )
-            .with_details(serde_json::json!({ "pid": result.pid, "complete": false })),
+            .with_details(exited_details(result.pid)),
         ));
     }
     let identity = crate::system::process::process_identity::ProcessIdentity::capture(result.pid)
@@ -177,6 +198,7 @@ fn validate_result(
                     ErrorCode::AppUnresponsive,
                     "Launched application exited before identity verification",
                 )
+                .with_details(exited_details(result.pid))
             })
         })?;
     if identity.conflicts_with_launch_time(result.launch_time) {
@@ -194,16 +216,43 @@ fn validate_result(
         ));
     }
     if unsafe { agent_desktop_running_application_is_live(result.application, result.pid) } == 0 {
-        return Err(callback_error(
-            result,
-            AdapterError::new(
-                ErrorCode::AppUnresponsive,
-                "Launched application changed after libproc identity verification",
-            )
-            .with_details(serde_json::json!({ "pid": result.pid, "complete": false })),
-        ));
+        // Not live for NSWorkspace after its identity was verified. Only when libproc confirms
+        // that the identified process is gone did it exit (a process passing the launch to a
+        // running instance exits within milliseconds, and may do so right here); one that still
+        // runs or cannot be read is the mismatch it was before.
+        let exited = matches!(identity.still_matches(), Ok(false));
+        return Err(callback_error(result, no_longer_live(result.pid, exited)));
     }
     Ok((result.pid, identity.token()))
+}
+
+/// The error for a launched application NSWorkspace no longer reports live after its identity
+/// was verified: an exit `launch` may judge as a hand-off when the process is confirmed gone
+/// (`exited`), otherwise the identity mismatch it always was.
+fn no_longer_live(pid: i32, exited: bool) -> AdapterError {
+    if exited {
+        AdapterError::new(
+            ErrorCode::AppUnresponsive,
+            "Launched application exited after identity verification",
+        )
+        .with_details(exited_details(pid))
+    } else {
+        AdapterError::new(
+            ErrorCode::AppUnresponsive,
+            "Launched application changed after libproc identity verification",
+        )
+        .with_details(serde_json::json!({ "pid": pid, "complete": false }))
+    }
+}
+
+/// The details of a launch whose process exited before it could be identified: the kind
+/// `launch` reads to tell a hand-off to a running instance (`launch::LAUNCHED_PROCESS_EXITED`).
+fn exited_details(pid: i32) -> serde_json::Value {
+    serde_json::json!({
+        "pid": pid,
+        "complete": false,
+        "kind": crate::system::launch::LAUNCHED_PROCESS_EXITED,
+    })
 }
 
 fn callback_error(
@@ -275,6 +324,43 @@ unsafe extern "C" {
 mod tests {
     use super::*;
 
+    /// A launched process confirmed gone at the last liveness check is an exit `launch` judges
+    /// as a possible hand-off, like the earlier exits; one not confirmed gone is not.
+    #[test]
+    fn a_process_confirmed_gone_at_the_last_check_is_an_exit_the_launch_can_judge() {
+        let exited = no_longer_live(42, true);
+        assert_eq!(exited.code, ErrorCode::AppUnresponsive);
+        assert_eq!(
+            crate::system::launch::exited_launch_pid(&exited),
+            Some(42),
+            "judged as a possible hand-off"
+        );
+        let changed = no_longer_live(42, false);
+        assert_eq!(changed.code, ErrorCode::AppUnresponsive);
+        assert_eq!(crate::system::launch::exited_launch_pid(&changed), None);
+        assert_eq!(changed.details.as_ref().unwrap()["pid"], 42);
+    }
+
+    /// The re-read that confirms the exit: the identity of a process that has exited no longer
+    /// matches, and that of one that runs still does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_identity_of_an_exited_process_no_longer_matches() {
+        use crate::system::process::process_identity::ProcessIdentity;
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep starts");
+        let pid = i32::try_from(child.id()).expect("pid fits");
+        let identity = ProcessIdentity::capture(pid)
+            .expect("child is readable")
+            .expect("child runs");
+        assert!(matches!(identity.still_matches(), Ok(true)));
+        child.kill().expect("child is killed");
+        child.wait().expect("child is reaped");
+        assert!(matches!(identity.still_matches(), Ok(false)));
+    }
+
     #[test]
     fn launch_policy_callback_preserves_the_own_window_refusal_before_opening() {
         let _scope = crate::system::own_window::enter(
@@ -304,6 +390,36 @@ mod tests {
         let error = state.wait(Deadline::after(100).unwrap()).unwrap_err();
         assert_eq!(error.code, ErrorCode::PolicyDenied);
         assert_eq!(error.details.unwrap()["kind"], "launch_location_refused");
+    }
+
+    #[test]
+    fn a_bundle_whose_id_the_launch_does_not_allow_is_refused_before_opening() {
+        let refused = crate::system::launch_callback_result::LaunchCallbackResult {
+            application: std::ptr::null_mut(),
+            pid: 0,
+            launch_time: 0.0,
+            terminated: 1,
+            delivery_started: 0,
+            error_kind: BUNDLE_ID_REFUSED,
+            error: std::ptr::null(),
+            error_len: 0,
+        };
+        let error = validate_result(&refused).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyDenied);
+        assert_eq!(error.details.unwrap()["kind"], "launch_bundle_id_refused");
+        assert_eq!(
+            serde_json::to_value(error.disposition).unwrap(),
+            serde_json::to_value(DeliverySemantics::not_delivered()).unwrap()
+        );
+        // The same kind after delivery started is not read as a refusal before opening.
+        let started = crate::system::launch_callback_result::LaunchCallbackResult {
+            delivery_started: 1,
+            ..refused
+        };
+        assert_ne!(
+            validate_result(&started).unwrap_err().code,
+            ErrorCode::PolicyDenied
+        );
     }
 
     #[test]

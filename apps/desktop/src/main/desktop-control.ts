@@ -18,8 +18,11 @@ import {
   desktopControlSupported,
 } from './desktop-control-build';
 import {
+  DESKTOP_CONTROL_MAC_URL_BROWSERS,
   DESKTOP_CONTROL_URL_BROWSERS,
   desktopControlLaunchUrl,
+  desktopControlMacUrlBrowser,
+  desktopControlMacUrlBrowserById,
   desktopControlUrlBrowser,
 } from './desktop-control-launch-url';
 import { startMenuShortcuts, type StartMenuShortcut } from './desktop-control-start-menu';
@@ -1208,10 +1211,9 @@ export function desktopControlArgvRefusal(
     if (positionals.length !== 1)
       return refusal('launch に渡せるのはアプリ名か Workspace の外の絶対パス 1 つだけ');
     if ((read.counts.get('--url') ?? 0) > 1) return refusal('launch の --url は 1 つだけ');
-    if (platform === 'darwin' && read.options.has('--url')) return macUnavailable('launch --url');
     return (
       launchTargetRefusal(positionals[0]!, workspaceRoots, lookup) ??
-      launchUrlRefusal(positionals[0]!, read.options.get('--url'))
+      launchUrlRefusal(positionals[0]!, read.options.get('--url'), platform)
     );
   }
   if (key === 'batch')
@@ -1411,11 +1413,6 @@ function macClipboardHelperRefusal(what: string, lookup: DesktopControlLookup): 
   return null;
 }
 
-// Not on macOS yet: `--url` is sealed for the Windows browsers only.
-function macUnavailable(what: string): string {
-  return refusal(`${what} は macOS ではまだ使えない`);
-}
-
 function optionName(token: string): string {
   const equals = token.indexOf('=');
   return equals < 0 ? token : token.slice(0, equals);
@@ -1459,12 +1456,22 @@ function launchTargetRefusal(
 
 /**
  * Why `launch <app> --url <url>` may not run, or `null` (also `null` without `--url`): only a known
- * browser (`desktopControlUrlBrowser`) and an http or https URL Main can seal in its canonical form
- * (`desktopControlLaunchUrl`). The executable takes nothing else with it, and checks both again.
+ * browser (`desktopControlUrlBrowser`, on macOS `desktopControlMacUrlBrowser`) and an http or https
+ * URL Main can seal in its canonical form (`desktopControlLaunchUrl`). The executable takes nothing
+ * else with it, and checks both again. On macOS the bundles the name resolves to are judged by
+ * their bundle id too, where they are looked up (`macLaunchBundleRefusal`).
  */
-function launchUrlRefusal(app: string, url: string | undefined): string | null {
+function launchUrlRefusal(
+  app: string,
+  url: string | undefined,
+  platform: NodeJS.Platform,
+): string | null {
   if (url === undefined) return null;
-  if (!desktopControlUrlBrowser(app))
+  if (platform === 'darwin' && desktopControlMacUrlBrowser(app) === null)
+    return refusal(
+      `launch の --url は、知っているブラウザー（${DESKTOP_CONTROL_MAC_URL_BROWSERS.map((browser) => `${browser.name}〔${browser.bundleId}〕`).join('・')}）にだけ、その名前か bundle ID で付けられる（Safari には付けられない）`,
+    );
+  if (platform !== 'darwin' && !desktopControlUrlBrowser(app))
     return refusal(
       `launch の --url は、知っているブラウザー（${DESKTOP_CONTROL_URL_BROWSERS.join('・')}）にだけ付けられる`,
     );
@@ -1514,20 +1521,17 @@ function batchRefusal(
     if (COMMAND_OPTIONS[command] === undefined || WITH_SUBCOMMANDS.has(command))
       return refusal(`batch の中の ${command} を判定できない`);
     const fields = (args ?? {}) as Record<string, unknown>;
-    if ((lookup.platform ?? process.platform) === 'darwin') {
-      if (MAC_HELPER_COMMANDS.has(command)) {
-        const helper = macClipboardHelperRefusal(`batch の中の ${command}`, lookup);
-        if (helper !== null) return helper;
-        // The executable may still refuse the helper after the card (its owner, mode or folders,
-        // which Main does not check), and a batch goes on to the next entry by default: a paste
-        // after a refused write would then paste what the user had on the clipboard before.
-        if (!stopOnError)
-          return refusal(
-            `batch の中の ${command} は、--stop-on-error を付けた batch でだけ使える（macOS では、書き込みが失敗しても batch が次の操作へ進み、貼り付けが前のクリップボードの中身を貼り得るため）。batch に --stop-on-error を付けて出し直す`,
-          );
-      }
-      if (command === 'launch' && fields['url'] !== undefined)
-        return macUnavailable('batch の中の launch の url');
+    const platform = lookup.platform ?? process.platform;
+    if (platform === 'darwin' && MAC_HELPER_COMMANDS.has(command)) {
+      const helper = macClipboardHelperRefusal(`batch の中の ${command}`, lookup);
+      if (helper !== null) return helper;
+      // The executable may still refuse the helper after the card (its owner, mode or folders,
+      // which Main does not check), and a batch goes on to the next entry by default: a paste
+      // after a refused write would then paste what the user had on the clipboard before.
+      if (!stopOnError)
+        return refusal(
+          `batch の中の ${command} は、--stop-on-error を付けた batch でだけ使える（macOS では、書き込みが失敗しても batch が次の操作へ進み、貼り付けが前のクリップボードの中身を貼り得るため）。batch に --stop-on-error を付けて出し直す`,
+        );
     }
     if (command === 'launch') {
       const unknown = Object.keys(fields).find((name) => !BATCH_LAUNCH_KEYS.has(name));
@@ -1538,7 +1542,7 @@ function batchRefusal(
         return refusal('batch の launch の url を判定できない');
       const reason =
         launchTargetRefusal(fields['app'], workspaceRoots, lookup) ??
-        launchUrlRefusal(fields['app'], fields['url']);
+        launchUrlRefusal(fields['app'], fields['url'], platform);
       if (reason !== null) return reason;
     }
     const keyRefusal = refusedBatchKey(fields);
@@ -1578,8 +1582,9 @@ function batchRefusal(
  * A `--url` (`url` in a batch) is replaced by its canonical form the same way, on any platform
  * (`desktopControlLaunchUrl`), so the card shows and the browser gets that exact string.
  *
- * On macOS nothing is replaced: the name is only looked up and judged (`macLaunchBundlesRefusal`),
- * and the result is the refusal or `null`.
+ * On macOS the name is not replaced: it is only looked up and judged (`macLaunchBundlesRefusal`,
+ * with `--url` only when every bundle it may name is a known browser's by its bundle id), and only a
+ * `--url` is replaced by its canonical form.
  */
 export function desktopControlLaunchByName(
   argv: readonly string[],
@@ -1587,7 +1592,10 @@ export function desktopControlLaunchByName(
   lookup: DesktopControlLookup = {},
 ): { argv: readonly string[] } | { refusal: string } | null {
   const platform = lookup.platform ?? process.platform;
-  if (platform === 'darwin') return macLaunchBundlesRefusal(argv, lookup);
+  if (platform === 'darwin') {
+    const bundles = macLaunchBundlesRefusal(argv, lookup);
+    if (bundles !== null) return bundles;
+  }
   const byName = platform === 'win32';
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string' || read.help.length > 0 || read.positionals.length !== 1)
@@ -1759,22 +1767,32 @@ function macLaunchBundlesRefusal(
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string' || read.help.length > 0 || read.positionals.length !== 1)
     return null;
-  const apps =
+  const launches =
     read.key === 'launch'
-      ? [read.positionals[0]!]
+      ? [{ app: read.positionals[0]!, url: read.options.has('--url') }]
       : read.key === 'batch'
         ? (readBatchEntries(read.positionals) ?? []).flatMap(({ command, args }) =>
-            command === 'launch' && typeof args['app'] === 'string' ? [args['app']] : [],
+            command === 'launch' && typeof args['app'] === 'string'
+              ? [{ app: args['app'], url: args['url'] !== undefined }]
+              : [],
           )
         : [];
-  for (const app of apps) {
-    const reason = macLaunchBundleRefusal(app.trim(), lookup);
+  for (const { app, url } of launches) {
+    const reason = macLaunchBundleRefusal(app.trim(), lookup, url ? app : undefined);
     if (reason !== null) return { refusal: reason };
   }
   return null;
 }
 
-function macLaunchBundleRefusal(app: string, lookup: DesktopControlLookup): string | null {
+/**
+ * `urlApp`: the name as given for a launch with `--url`, whose browser (`desktopControlMacUrlBrowser`)
+ * every bundle found must be by its bundle id, so the switch passed fits the app that starts.
+ */
+function macLaunchBundleRefusal(
+  app: string,
+  lookup: DesktopControlLookup,
+  urlApp?: string,
+): string | null {
   const byName = macLaunchNameRefusal(app, lookup);
   if (byName !== null || app === '') return byName;
   const folders = lookup.macApplicationFolders ?? [
@@ -1819,6 +1837,14 @@ function macLaunchBundleRefusal(app: string, lookup: DesktopControlLookup): stri
     const id = identifier(bundle);
     if (desktopControlMacNamesTool(file) || (id !== null && desktopControlMacNamesTool(id)))
       return refusal(`${app} は起動できない（端末・shell・設定・パスワードの道具）`);
+    if (
+      urlApp !== undefined &&
+      (desktopControlMacUrlBrowser(urlApp) === null ||
+        desktopControlMacUrlBrowserById(id) !== desktopControlMacUrlBrowser(urlApp))
+    )
+      return refusal(
+        `launch の --url: 「${app}」で見つかった ${file} は、bundle ID（${id ?? '読めない'}）が知っているブラウザーのものでないため、URL を付けて起動できない`,
+      );
   }
   return null;
 }

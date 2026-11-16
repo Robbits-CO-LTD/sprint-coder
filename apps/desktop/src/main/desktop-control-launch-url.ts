@@ -156,6 +156,60 @@ export function desktopControlUrlBrowser(app: string): boolean {
   return !/[\\/]/u.test(app) && BROWSER_MENU_NAMES.has(stem.replace(/[^a-z0-9]/gu, ''));
 }
 
+/** How a browser is told to open a page in a new window (`BrowserFamily` of the executable). */
+export type DesktopControlUrlBrowserFamily = 'chromium' | 'firefox';
+
+/**
+ * The browsers `--url` is for on macOS: the bundle's file name without `.app` and its bundle id
+ * (`CFBundleIdentifier`), the same table as `MAC_URL_BROWSER_TABLE` in
+ * `src/dispatch/launch_url.rs`; a browser whose id is not known is left out. Main judges the name
+ * the agent gave by this table (as the executable does) and every bundle the name resolves to by
+ * its bundle id, so a renamed app does not pass for a browser (and an id listed wrongly refuses
+ * that browser rather than passing another app).
+ */
+export const DESKTOP_CONTROL_MAC_URL_BROWSERS: readonly {
+  name: string;
+  bundleId: string;
+  family: DesktopControlUrlBrowserFamily;
+}[] = [
+  { name: 'Google Chrome', bundleId: 'com.google.Chrome', family: 'chromium' },
+  { name: 'Microsoft Edge', bundleId: 'com.microsoft.edgemac', family: 'chromium' },
+  { name: 'Brave Browser', bundleId: 'com.brave.Browser', family: 'chromium' },
+  { name: 'Vivaldi', bundleId: 'com.vivaldi.Vivaldi', family: 'chromium' },
+  { name: 'Opera', bundleId: 'com.operasoftware.Opera', family: 'chromium' },
+  { name: 'Chromium', bundleId: 'org.chromium.Chromium', family: 'chromium' },
+  { name: 'Firefox', bundleId: 'org.mozilla.firefox', family: 'firefox' },
+];
+
+/**
+ * The browser a macOS `launch` names, by a bundle's file name (with or without a lower-case `.app`,
+ * the only suffix the executable reads as a file name) or a bundle id of
+ * `DESKTOP_CONTROL_MAC_URL_BROWSERS`, or `null`. Read as the executable reads it
+ * (`mac_browser_family`): ASCII letters in any case otherwise, nothing trimmed
+ * (`launch_url_mac_apps.json`).
+ */
+export function desktopControlMacUrlBrowser(app: string): DesktopControlUrlBrowserFamily | null {
+  const lower = asciiLower(app);
+  const name = asciiLower(app.endsWith('.app') ? app.slice(0, -'.app'.length) : app);
+  return (
+    DESKTOP_CONTROL_MAC_URL_BROWSERS.find(
+      (browser) => name === asciiLower(browser.name) || lower === asciiLower(browser.bundleId),
+    )?.family ?? null
+  );
+}
+
+/** The browser a macOS bundle id (`CFBundleIdentifier`, letter case ignored) is, or `null`. */
+export function desktopControlMacUrlBrowserById(
+  id: string | null,
+): DesktopControlUrlBrowserFamily | null {
+  if (id === null) return null;
+  return (
+    DESKTOP_CONTROL_MAC_URL_BROWSERS.find(
+      (browser) => asciiLower(id) === asciiLower(browser.bundleId),
+    )?.family ?? null
+  );
+}
+
 function asciiLower(text: string): string {
   return text.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
 }
