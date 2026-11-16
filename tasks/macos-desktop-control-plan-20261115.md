@@ -67,9 +67,9 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 | 1 | 完了 | #1316（upstream の `crates/macos` の取り込み）、#1317 |
 | 2 | 完了 | #1318 |
 | 3 | 完了。公証を通した配布物での確認は未実施 | #1319、[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315) |
-| 4 | 未着手 | [Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) |
+| 4 | 一部完了。権限の案内・Finder の文言・Project の案内・PR の CI は main に入った。Team のカーソル・`launch --url`・クリップボードの書き込みは PR を出して未 merge | #1330、#1331、#1332、#1334（main）。#1335、#1337、#1338（未 merge）。[Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) |
 
-実装の担当は、段階 1 の最初の実装が Codex、それ以後（段階 1 のレビュー指摘の修正、段階 2、段階 3）は Opus 5.5。オーナーの指示（2026-11-15）による。
+実装の担当は、段階 1 の最初の実装が Codex、それ以後（段階 1 のレビュー指摘の修正、段階 2、段階 3、段階 4）は Opus 5.5。オーナーの指示（2026-11-15）による。
 
 ### 段階 1: macOS 用の実行ファイルを build できるようにする（機能は無効のまま）
 
@@ -125,11 +125,11 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 ### 段階 4: 残りを足す（影響の大きい順）
 
-- 権限の案内を画面に出す（設定の中に状態と「システム設定を開く」）。
-- Team のカーソルを macOS でも出す。
-- クリップボードの書き込み（別の実行ファイルの同梱）。
-- `launch --url`（ブラウザーの一覧の Mac 版）。
-- フルアクセスの説明文の「エクスプローラー」を macOS では Finder にする。
+- 権限の案内を画面に出す（設定の中に状態と「システム設定を開く」）。**完了**（#1334）。
+- Team のカーソルを macOS でも出す。PR #1335（未 merge）。
+- クリップボードの書き込み（別の実行ファイルの同梱）。PR #1338（未 merge）。
+- `launch --url`（ブラウザーの一覧の Mac 版）。PR #1337（未 merge）。
+- フルアクセスの説明文の「エクスプローラー」を macOS では Finder にする。**完了**（#1330）。
 - Website と release の本文の「Windows だけ」の記載。配布する時に直す。
 
 上の 5 つ（Website と release の本文を除く）は [Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) で追う。
@@ -186,7 +186,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 試験と CI:
 
-- PR の CI では macOS の Rust を compile しない。release の前の全試験と release の workflow で build する。
+- PR の CI では macOS の Rust を compile しなかった。**直した**（#1331）。macOS の build に関わる Rust の変更（Windows 用の crate だけの変更を除く）で、macOS の runner での build（「Rust macOS build」）が走る。試験は今も走らない。
 - CLI の package の試験は、取り込んでいない upstream のファイルを読むので compile できない。Windows と同じ。
 
 ### 段階 2 の独立レビューと実機の試験で出て、残したもの
@@ -199,7 +199,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 使い勝手に関わるもの:
 
-- Project を選んでいない Task で頼むと、AI は「デスクトップ操作の道具が渡されていない」と答える。Project を選ぶよう案内していない。
+- Project を選んでいない Task で頼むと、AI は「デスクトップ操作の道具が渡されていない」と答え、Project を選ぶよう案内しなかった。**直した**（#1332）。
 - アプリの名前で指す読み取り（`snapshot --app …`）は、「このアプリは Task 中許可」の後も毎回カードが出る。アプリ単位の許可は、ref と窓の id で指した操作だけが対象。
 - `launch` を bundle ID で指した時は、Spotlight（`mdfind`）で bundle を探す。Spotlight の索引が無い Mac や、索引から外した場所のアプリは「見つからない」と断る（名前で指せば起動できる）。検索は同期で、最長 2 秒 Main の thread を止める。
 - 標準のアプリの場所のサブフォルダーにあるアプリは、「見つからない」と断る。
@@ -207,7 +207,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 試験:
 
-- Claude CLI での実 AI の試験は未実施。`open` で起動した開発版が、Claude Code を「ログインが必要」と表示した。原因は調べていない。
+- Claude CLI での実 AI の試験は未実施。`open` で起動した開発版が、Claude Code を「ログインが必要」と表示した。shell から起動した開発版でも同じ表示だった（2026-11-16）。原因は調べていない。
 - 物理の pointer とキーボード（`--headed`）、drag の実機の確認は未実施。
 - 実 AI の試験の記録: `tasks/evidence/macos-desktop-control-real-ai-20261116.md`
 
@@ -223,7 +223,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 試験と CI:
 
-- `crates/macos` だけを変えた PR では、macOS の compile が走らない（PR の CI は Windows の compile だけ）。全試験（`gh workflow run ci.yml --ref main`）と release の workflow では build する。デスクトップ操作の OS ごとの挙動を変えた PR は、merge の後に全試験を流して確かめる。
+- `crates/macos` だけを変えた PR では、macOS の compile が走らなかった。**直した**（#1331）。PR の CI は今も build までで、Rust の試験と OS ごとの試験は走らない。デスクトップ操作の OS ごとの挙動を変えた PR は、merge の後に全試験（`gh workflow run ci.yml --ref main`）を流して確かめる。
 
 ### 段階 3 の後の確認（2026-11-16）で出たもの
 
@@ -241,3 +241,21 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 - 通知の command（`osascript` を使う）が、hardened runtime の配布物で動くかは未確認。
 - `cargo clippy -- -D warnings` は、`crates/core` の既存の警告 2 件（`snapshot/window_capture.rs`）で止まる。CI では clippy を流していない。
 - upstream にも同じ不具合がある（v1.3.1 の後でも同じ作り）。upstream への報告はしていない。
+
+### 段階 4 の作業（2026-11-16）で出たもの
+
+直したもの・分かったこと:
+
+- 製品（Main）は、コマンドを追加の管（pipe）つきで起動する。CLI が起動する、長く生きる子プロセス（カーソルの描画）がそれを引き継いで握ると、Main がコマンドの終わりを 5 秒待ち、実行が「失敗」と記録される。CLI を直接実行する確認では起きない。子プロセスを起動する変更は、製品の経路で確かめる。#1335 で、描画の子が引き継いだ descriptor を握らないようにした。
+- 取り込んだままの macOS のカーソルの描画は、全部の窓の上に描く。オーナーの指示（カーソルを前面に出さない）で、操作先の窓のすぐ上の高さに置き、操作先の窓が今の画面に無い時は隠す形にした（#1335）。
+- 取り込んだ helper の検査は、helper から `/` までの全部のフォルダーを調べる。macOS の標準の導入先 `/Applications`（root の持ち物・admin group が書ける）は通らないので、配布版ではクリップボードの helper が必ず断られる。#1338 で、その形のフォルダーだけを認めた（検査を 1 か所緩めた。オーナーの了承待ち）。
+
+残したもの:
+
+- 利用者が全画面のアプリ（別の Space）を使っている間は、デスクトップ操作が別の Space の窓を読めない（[Issue #1336](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1336)）。以前からの制限で、この日の確認で分かった。
+- 窓を名指さない操作（座標だけの操作など）のカーソルは、今も全部の窓の上に描く（Windows と同じ）。
+- macOS では、動いているブラウザーに URL を渡した時に、ブラウザーが自分から前に出るのを止められない（`launch --url`。#1337）。Windows にある「前面を取られたら戻す」処理が、macOS には無い。
+- 別の利用者が入れたアプリと、root の持ち物として入ったアプリでは、クリップボードの書き込みが承認カードの後で断られる（#1338）。
+- Windows の batch にも、失敗した書き込みの後に貼り付けへ進む余地がある（macOS は #1338 で、書き込みを含む batch に `--stop-on-error` を求めるようにした）。
+- 開発版の確認で、計算機が 1 回前面になった記録がある。同じ順番のコマンドを 2 回再現したが起きず、原因は特定できていない（#1335 に記録）。
+- 設定の「システム設定を開く」（アクセシビリティ）は、macOS 27.0.1 では「デバイスの制御とデータへのアクセス」という画面を開く。macOS 26 以前でどの画面が開くかは確かめていない。
