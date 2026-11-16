@@ -734,13 +734,14 @@ fn right_behind_the_taker_is_read_from_the_window_order() {
     let at = |pid: i32, number: i64| OrderedWindow { pid, number };
     let candidates = [candidate()];
     let sprint_coder = Target::App(app(SPRINT_CODER));
+    // The taker's new windows are passed over; the first window after them decides.
     let order = [
         at(CHROME, 102),
-        at(CHROME, 100),
+        at(CHROME, 103),
         at(SPRINT_CODER, 5),
+        at(CHROME, 100),
         at(DISCORD, 6),
     ];
-    // Every window of the taker is passed over; the first other one decides.
     assert!(just_behind(&sprint_coder, &order, &candidates));
     assert!(!just_behind(
         &Target::App(app(DISCORD)),
@@ -750,15 +751,18 @@ fn right_behind_the_taker_is_read_from_the_window_order() {
     // The user went on to Discord before the take: Discord's window is behind Chrome's.
     let switched = [at(CHROME, 102), at(DISCORD, 6), at(SPRINT_CODER, 5)];
     assert!(!just_behind(&sprint_coder, &switched, &candidates));
+    // A window Chrome already had is right behind its new one: the user may have gone to it
+    // just before, so the app read at the last look is not proven to be what was in front.
+    let to_chrome = [at(CHROME, 102), at(CHROME, 100), at(SPRINT_CODER, 5)];
+    assert!(!just_behind(&sprint_coder, &to_chrome, &candidates));
     // No other window at all: not confirmed.
     assert!(!just_behind(&sprint_coder, &[at(CHROME, 102)], &candidates));
 
-    // The window way: the first window Chrome had before the launch decides; new ones and other
-    // apps' windows are passed over.
+    // The window way: the window right behind the new ones must be the one to give back.
     let order = [
         at(CHROME, 102),
-        at(DISCORD, 6),
         at(CHROME, 101),
+        at(DISCORD, 6),
         at(CHROME, 100),
     ];
     assert!(just_behind(
@@ -769,6 +773,19 @@ fn right_behind_the_taker_is_read_from_the_window_order() {
     assert!(!just_behind(
         &Target::Window(window(100)),
         &order,
+        &candidates
+    ));
+    // The user left Chrome's window for Discord just before the new window came: Discord is
+    // between, and Chrome's window is not given the focus back over it.
+    let left_for_discord = [
+        at(CHROME, 102),
+        at(DISCORD, 6),
+        at(CHROME, 101),
+        at(CHROME, 100),
+    ];
+    assert!(!just_behind(
+        &Target::Window(window(101)),
+        &left_for_discord,
         &candidates
     ));
     assert!(!just_behind(

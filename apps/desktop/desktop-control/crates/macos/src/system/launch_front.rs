@@ -19,9 +19,10 @@
 //! the launch began, a take is given back whenever it is seen; with input (unreadable input counts
 //! as input), only a take within `FRONT_APP_GRACE` of the new window being first seen (an app
 //! taking the front as it shows its window, too soon for a person to have picked it), and only
-//! when what is given back is still right behind the taker in the window order (`behind`): the
-//! front is read at looks some tens of milliseconds apart, and the user may have moved it between
-//! the last look and the take. The result says what was done.
+//! when what is given back is still right behind the taker's new windows in the window order
+//! (`behind`, with nothing else between): the front is read at looks some tens of milliseconds
+//! apart, and the user may have moved it between the last look and the take. The result says
+//! what was done.
 
 use agent_desktop_core::{AdapterError, Deadline, WindowInfo, system::launch_result::LaunchResult};
 use std::time::{Duration, Instant};
@@ -433,38 +434,31 @@ pub(crate) struct OrderedWindow {
 }
 
 /// Whether `target` is right behind the candidate that took the front, in `order` (the shown
-/// windows, front to back): for an app, the first window that is not a candidate's is that
-/// app's; for a window, the first window the candidate had before the launch is that window.
+/// windows, front to back). The windows a candidate did not have before the launch are the
+/// taker's and are passed over; the first window after them must be the target's: for an app, a
+/// window of that app; for a window, that window. Any other window there (another app's, or
+/// another window the candidate already had) may be what the user was using just before, so the
+/// target is not proven to be it.
 pub(crate) fn just_behind(
     target: &Target,
     order: &[OrderedWindow],
     candidates: &[HandoffCandidate],
 ) -> bool {
+    let takers = |window: &OrderedWindow| {
+        candidates.iter().any(|candidate| {
+            candidate.pid == window.pid && !candidate.windows_before.contains(&window.number)
+        })
+    };
+    let Some(behind) = order.iter().find(|window| !takers(window)) else {
+        return false;
+    };
     match target {
-        Target::App(app) => order
-            .iter()
-            .find(|window| {
-                !candidates
-                    .iter()
-                    .any(|candidate| candidate.pid == window.pid)
-            })
-            .is_some_and(|window| window.pid == app.pid),
+        Target::App(app) => behind.pid == app.pid,
         Target::Window(target) => {
-            let (Ok(pid), Some(number)) =
-                (i32::try_from(target.pid.get()), window_number(&target.id))
-            else {
-                return false;
-            };
-            order
-                .iter()
-                .find(|window| {
-                    window.pid == pid
-                        && candidates.iter().any(|candidate| {
-                            candidate.pid == pid
-                                && candidate.windows_before.contains(&window.number)
-                        })
-                })
-                .is_some_and(|window| window.number == number)
+            matches!(
+                (i32::try_from(target.pid.get()), window_number(&target.id)),
+                (Ok(pid), Some(number)) if behind.pid == pid && behind.number == number
+            )
         }
     }
 }
@@ -650,6 +644,10 @@ impl FrontGuard {
         result: Result<LaunchResult, AdapterError>,
     ) -> Result<LaunchResult, AdapterError> {
         if is_handoff(&result) {
+            // The hand-off may have been judged without one pause (its window was already
+            // there at the first look): the front is read at least once here, so a take that
+            // came with that window is seen and the time to settle starts from it.
+            self.look();
             let end = self.watch.borrow().settle_end();
             if let Some(wait) = end.map(|end| end.saturating_duration_since(Instant::now())) {
                 if !wait.is_zero() {
