@@ -800,7 +800,10 @@ describe('desktop-control arguments outside the command sandbox', () => {
     [['close-app', 'notepad', '--force'], '--force は使えない'],
     // A forced close never reaches a card, in a batch either: the macOS close note (the app may ask
     // and stay open) is only ever shown for a close that asks the app to quit.
-    [['batch', '[{"command":"close-app","args":{"app":"notepad","force":true}}]'], 'force は使えない'],
+    [
+      ['batch', '[{"command":"close-app","args":{"app":"notepad","force":true}}]'],
+      'force は使えない',
+    ],
     [['permissions', '--guide'], '--guide は使えない'],
     [['cursor-overlay', 'enable', '--image', 'C:\\x.png'], '--image は使えない'],
     [['session', 'start', '--screenshots'], '--screenshots は使えない'],
