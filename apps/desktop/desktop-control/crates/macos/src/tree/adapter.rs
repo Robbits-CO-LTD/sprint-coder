@@ -211,20 +211,6 @@ impl ObservationOps for MacOSAdapter {
         true
     }
 
-    fn element_cursor_window(
-        &self,
-        handle: &NativeHandle,
-        top_level: &str,
-        deadline: Deadline,
-    ) -> Option<String> {
-        let until = std::time::Instant::now().checked_add(deadline.remaining())?;
-        crate::system::window::element_window::attached_window(
-            ax_element(handle).ok()?,
-            top_level,
-            until,
-        )
-    }
-
     fn get_focused_insertion_caret(
         &self,
         process: Option<agent_desktop_core::ProcessId>,

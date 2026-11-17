@@ -1,5 +1,4 @@
-// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
-use std::cell::RefCell;
+use std::cell::Cell;
 
 use super::{ActionabilityPreflight, ResolvedRefAction};
 use crate::cursor_overlay::CursorPhase;
@@ -8,41 +7,8 @@ use crate::{Action, CommandContext, PlatformAdapter};
 const SAME_POINT: f64 = 1.5;
 const FOCUS_READ_MS: u64 = 150;
 
-/// Where the travel before the lease took the cursor, and the window it was
-/// drawn at the height of then.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct Travelled {
-    x: f64,
-    y: f64,
-    window: Option<String>,
-}
-
 thread_local! {
-    static TRAVELLED_BEFORE_LEASE: RefCell<Option<Travelled>> = const { RefCell::new(None) };
-}
-
-fn set_travelled(travelled: Option<Travelled>) {
-    TRAVELLED_BEFORE_LEASE.with(|slot| *slot.borrow_mut() = travelled);
-}
-
-fn travelled() -> Option<Travelled> {
-    TRAVELLED_BEFORE_LEASE.with(|slot| slot.borrow().clone())
-}
-
-/// Whether the travel under the lease is drawn again: unless the travel
-/// before the lease already reached this point at the height of the same
-/// window. It is drawn again when the window changed (the element was found
-/// to live in a sheet or popover of the captured window), so the cursor comes
-/// out above that window before the action, not only at its effect.
-pub(super) fn travels_again(
-    travelled: Option<&Travelled>,
-    destination: &crate::Point,
-    window: Option<&str>,
-) -> bool {
-    !travelled.is_some_and(|travelled| {
-        (destination.x - travelled.x).hypot(destination.y - travelled.y) < SAME_POINT
-            && travelled.window.as_deref() == window
-    })
+    static TRAVELLED_BEFORE_LEASE: Cell<Option<(f64, f64)>> = const { Cell::new(None) };
 }
 
 pub(super) fn before_dispatch(
@@ -54,11 +20,11 @@ pub(super) fn before_dispatch(
     let Some(destination) = destination(preflight) else {
         return;
     };
-    let window = crate::cursor_overlay::current_window();
-    if !travels_again(travelled().as_ref(), &destination, window.as_deref()) {
+    let travelled = TRAVELLED_BEFORE_LEASE.get();
+    if travelled.is_some_and(|(x, y)| (destination.x - x).hypot(destination.y - y) < SAME_POINT) {
         return;
     }
-    set_travelled(None);
+    TRAVELLED_BEFORE_LEASE.set(None);
     let pointer = shows_pointer(&target.entry.identity.role, action);
     crate::cursor_overlay::submit_travel(
         target.adapter,
@@ -82,7 +48,7 @@ pub(super) fn before_lease(
     deadline: crate::Deadline,
     holds_cursor: bool,
 ) {
-    set_travelled(None);
+    TRAVELLED_BEFORE_LEASE.set(None);
     if !holds_cursor || request.policy.is_headed() || !context.context.cursor_overlay().is_enabled()
     {
         return;
@@ -98,11 +64,7 @@ pub(super) fn before_lease(
         deadline,
         pointer,
     ) {
-        set_travelled(Some(Travelled {
-            x: destination.x,
-            y: destination.y,
-            window: crate::cursor_overlay::current_window(),
-        }));
+        TRAVELLED_BEFORE_LEASE.set(Some((destination.x, destination.y)));
     }
 }
 
@@ -190,15 +152,12 @@ pub(super) fn after_dispatch(
         Ok(result) => result.disposition(),
         Err(error) => error.disposition,
     };
-    let travelled = TRAVELLED_BEFORE_LEASE.with(|slot| slot.borrow_mut().take());
+    let travelled = TRAVELLED_BEFORE_LEASE.take();
     if !crate::cursor_overlay::confirms_delivery(disposition) {
         return;
     }
     let Some(destination) = travelled
-        .map(|travelled| crate::Point {
-            x: travelled.x,
-            y: travelled.y,
-        })
+        .map(|(x, y)| crate::Point { x, y })
         .or_else(|| destination(preflight))
     else {
         return;

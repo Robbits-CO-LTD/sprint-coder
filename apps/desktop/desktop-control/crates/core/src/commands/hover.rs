@@ -90,10 +90,9 @@ pub fn execute(
         )?;
         Ok((resolved, lease))
     })?;
-    // A ref's hover draws the cursor at the height of the window the element
-    // lives in, as a ref action does; a bare coordinate names none.
-    let _anchor =
-        crate::cursor_overlay::anchor_window(cursor_window(&resolved, adapter, context, deadline));
+    // A ref's hover draws the cursor at the height of the window the ref was
+    // captured in, as a ref action does; a bare coordinate names none.
+    let _anchor = crate::cursor_overlay::anchor_window(cursor_window(&resolved, adapter));
     let result = crate::cursor_overlay::dispatch_mouse_event_with_cursor(
         adapter,
         context,
@@ -119,29 +118,19 @@ pub fn execute(
 }
 
 /// The window the cursor is drawn at the height of for a pointer gesture at
-/// `resolved`: the element's own window (a sheet or popover of the window the
-/// ref was captured in) or that captured window, or none for a coordinate.
-/// None also where the adapter does not opt in, as before. The element's
-/// window is read within `within` (see `cursor_overlay::element_window`).
+/// `resolved`: the window the ref was captured in, or none for a coordinate.
+/// None also where the adapter does not opt in, as before.
 pub(crate) fn cursor_window(
     resolved: &ResolvedPoint,
     adapter: &dyn PlatformAdapter,
-    context: &CommandContext,
-    within: crate::Deadline,
 ) -> Option<String> {
     if !adapter.names_pointer_gesture_window() {
         return None;
     }
-    let top_level = resolved
+    resolved
         .source_entry
         .as_ref()
-        .and_then(|entry| entry.source.source_window_id.clone());
-    match resolved.handle.as_ref() {
-        Some(handle) => {
-            crate::cursor_overlay::element_window(adapter, context, top_level, handle, within)
-        }
-        None => top_level,
-    }
+        .and_then(|entry| entry.source.source_window_id.clone())
 }
 
 fn confirm_receiver(

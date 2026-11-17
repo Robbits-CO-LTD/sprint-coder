@@ -26,7 +26,6 @@ struct HoverCaptureAdapter {
     receiver_checks: AtomicU32,
     presented: Mutex<Vec<crate::CursorOverlayControl>>,
     opts_in: bool,
-    element_window: Option<&'static str>,
 }
 
 impl HoverCaptureAdapter {
@@ -39,13 +38,11 @@ impl HoverCaptureAdapter {
             receiver_checks: AtomicU32::new(0),
             presented: Mutex::new(Vec::new()),
             opts_in: false,
-            element_window: None,
         }
     }
 
-    fn naming_windows(mut self, element_window: Option<&'static str>) -> Self {
+    fn naming_windows(mut self) -> Self {
         self.opts_in = true;
-        self.element_window = element_window;
         self
     }
 
@@ -71,15 +68,6 @@ impl ObservationOps for HoverCaptureAdapter {
 
     fn names_pointer_gesture_window(&self) -> bool {
         self.opts_in
-    }
-
-    fn element_cursor_window(
-        &self,
-        _handle: &NativeHandle,
-        _top_level: &str,
-        _deadline: crate::Deadline,
-    ) -> Option<String> {
-        self.element_window.map(str::to_owned)
     }
 
     fn get_element_bounds(
@@ -211,71 +199,11 @@ fn a_ref_hover_names_no_window_where_the_adapter_does_not_opt_in() {
 #[test]
 fn a_ref_hover_names_its_window_where_the_adapter_opts_in() {
     let _guard = HomeGuard::new();
-    let captured = HoverCaptureAdapter::new().naming_windows(None);
+    let captured = HoverCaptureAdapter::new().naming_windows();
     assert!(
         hover_windows(&captured)
             .iter()
             .all(|window| window.as_deref() == Some("w-42"))
-    );
-    let in_sheet = HoverCaptureAdapter::new().naming_windows(Some("w-43"));
-    assert!(
-        hover_windows(&in_sheet)
-            .iter()
-            .all(|window| window.as_deref() == Some("w-43"))
-    );
-}
-
-fn resolved_point(handle: bool) -> ResolvedPoint {
-    let snapshot_id = ref_snapshot(42);
-    let entry = crate::commands::helpers::load_ref_entry(
-        &format!("@{snapshot_id}:e1"),
-        &CommandContext::default(),
-    )
-    .unwrap();
-    ResolvedPoint {
-        point: crate::Point { x: 1.0, y: 1.0 },
-        focused: false,
-        source_entry: Some(entry),
-        bounds_hash: None,
-        handle: handle.then(|| NativeHandle::new(CORE_RESOLVED)),
-    }
-}
-
-/// `drag` names each end's window through the same `cursor_window`.
-#[test]
-fn a_drag_end_names_a_window_only_where_the_adapter_opts_in() {
-    let _guard = HomeGuard::new();
-    let context = overlay_context();
-    let resolved = resolved_point(true);
-    assert_eq!(
-        cursor_window(
-            &resolved,
-            &HoverCaptureAdapter::new(),
-            &context,
-            crate::Deadline::standard().unwrap()
-        ),
-        None
-    );
-    assert_eq!(
-        cursor_window(
-            &resolved,
-            &HoverCaptureAdapter::new().naming_windows(Some("w-43")),
-            &context,
-            crate::Deadline::standard().unwrap()
-        )
-        .as_deref(),
-        Some("w-43")
-    );
-    assert_eq!(
-        cursor_window(
-            &resolved_point(false),
-            &HoverCaptureAdapter::new().naming_windows(Some("w-43")),
-            &context,
-            crate::Deadline::standard().unwrap()
-        )
-        .as_deref(),
-        Some("w-42"),
-        "without a live element the captured window is named"
     );
 }
 

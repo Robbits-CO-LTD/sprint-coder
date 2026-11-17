@@ -1,4 +1,3 @@
-// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::actions::action_request::ActionRequest;
 use crate::actions::action_result::ActionResult;
 use crate::adapter::{NativeHandle, PlatformAdapter};
@@ -131,17 +130,6 @@ pub(crate) fn dispatch_resolved_landing(
         .with_verified_point(preflight.verified_point.clone())
         .with_expected_process(expected_process.clone());
     let final_target = ResolvedRefAction::new(target, &handle);
-    // From here the cursor is drawn at the height of the window the element
-    // itself lives in: a sheet or popover is a separate window in front of the
-    // one the ref was captured in, and a cursor under it would be hidden.
-    let _element_window =
-        crate::cursor_overlay::anchor_window(crate::cursor_overlay::element_window(
-            final_target.adapter,
-            final_target.context,
-            crate::cursor_overlay::current_window(),
-            final_target.handle,
-            final_target.deadline,
-        ));
     final_target.context.trace_lazy(
         "action.dispatch.start",
         || json!({ "ref": final_target.ref_id, "action": request.action.name() }),
