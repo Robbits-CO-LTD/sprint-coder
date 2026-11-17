@@ -3,7 +3,7 @@
 // Main's own handler for the Codex runtime (`createGenericManagedRuntimeToolHandlers().codexRuntime`),
 // its managed dispatch, the ToolBroker and the managed `exec_command` with its command sessions,
 // and back: the `tool_result` Main posts, through the IPC's JSON, into the Codex adapter's own
-// conversion to the dynamic-tool response the CLI gets.
+// conversion to the dynamic-tool response the CLI gets and the message it adds to the thread.
 import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -38,7 +38,7 @@ vi.mock('electron', async (importOriginal) => {
   };
 });
 
-import { IpcRouter } from './ipc';
+import { IpcRouter, SCREENSHOT_CATALOG_TIMEOUT_MS } from './ipc';
 import { RuntimeHostClient } from './runtime-host';
 import { ToolBroker } from './tool-broker';
 import {
@@ -58,7 +58,11 @@ import {
   releaseScreenshotPicturesForTurn,
   screenshotCallKey,
 } from './desktop-control-screenshot';
-import { codexDynamicToolResponseFromManaged } from '../runtime-host/codex-adapter';
+import {
+  CODEX_PICTURE_FOLLOWS,
+  codexDynamicToolResponseFromManaged,
+  codexManagedPictureItem,
+} from '../runtime-host/codex-adapter';
 import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
 
 const SLOW_TOOL = createToolDefinition({
@@ -91,7 +95,11 @@ const turn = { taskId: 'task-1', turnId: 'turn-1', workspaceId: 'workspace-1', p
 async function setUp(
   modelTakesImages: boolean | null,
   cursors: boolean,
-  options: { cloneResult?: boolean; catalogBuilt?: boolean } = {},
+  options: {
+    cloneResult?: boolean;
+    catalogBuilt?: boolean;
+    probe?: () => Promise<unknown>;
+  } = {},
 ) {
   const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-screenshot-chain-'));
   roots.push(workspace);
@@ -223,6 +231,9 @@ async function setUp(
   });
   const toolCatalog = broker.startTurn(turn, 'codex');
   const catalog = { revision: options.catalogBuilt === false ? 0 : 1 };
+  const refreshModelCatalog = vi.fn(async () => {
+    catalog.revision = 1;
+  });
   vi.spyOn(desktopControlModule, 'isDesktopControlExecutable').mockReturnValue(true);
   configureDesktopControlTeamCursors(cursors);
 
@@ -251,9 +262,18 @@ async function setUp(
         resolution: { resolvedProvider: null, resolvedModel: null },
       }),
     },
-    // Not built yet in this app run (nothing opened the model picker) unless asked otherwise.
-    refreshModelCatalog: async () => {
-      catalog.revision = 1;
+    // Not built yet in this app run (nothing opened the model picker) unless asked otherwise. A
+    // screenshot never builds it: that would ask every external Provider for its models.
+    refreshModelCatalog,
+    codexRuntime: {
+      probe:
+        options.probe ??
+        (async () => ({
+          models: models.map(({ modelId, multimodalInput }) => ({
+            id: modelId,
+            capabilities: { multimodalInput },
+          })),
+        })),
     },
     modelCatalog: {
       get revision() {
@@ -325,11 +345,14 @@ async function setUp(
       },
       { timeout: 20_000 },
     );
-    // The adapter's own conversion, given what the runtime host resolves the call with.
-    return codexDynamicToolResponseFromManaged({
-      success: posted!.success,
-      output: posted!.output,
-    });
+    // The adapter's own conversion, given what the runtime host resolves the call with: the
+    // message it adds to the Turn's thread, and its answer once Codex has taken that message.
+    const managed = { success: posted!.success, output: posted!.output };
+    const picture = codexManagedPictureItem(managed);
+    return {
+      picture,
+      response: codexDynamicToolResponseFromManaged(managed, picture !== undefined),
+    };
   };
   /** A call as the Codex runtime's request reaches Main's own handler, without the runtime host. */
   const dispatch = (callId: string, toolName: string, args: unknown) =>
@@ -345,57 +368,47 @@ async function setUp(
     sessions,
     stored,
     catalog,
+    refreshModelCatalog,
     dispatch,
     releaseSlow: () => releaseSlow(),
     png,
   };
 }
 
-/**
- * The value a nested dynamic tool call gives a Codex exec script: the response's items joined with
- * newlines, a text item as its text and an image item as its URL. Observed with the installed
- * codex-cli 0.153.4 (code mode, model metadata `tool_mode: code_mode_only`) answering a probe
- * script, for text + image, image alone and text alone, with a 661 KB data URL passed whole.
- */
-function codexCodeModeNestedResult(
-  items: ReturnType<typeof codexDynamicToolResponseFromManaged>['contentItems'],
-): string {
-  return items.map((item) => (item.type === 'inputText' ? item.text : item.imageUrl)).join('\n');
+/** The picture a message the Codex adapter adds to the thread carries, and that message's label. */
+function injectedPicture(item: Record<string, unknown> | undefined): {
+  label: string;
+  dataUrl: string;
+} {
+  const content = (item?.['content'] ?? []) as Array<Record<string, unknown>>;
+  expect(item).toMatchObject({ type: 'message', role: 'user' });
+  expect(content.map(({ type }) => type)).toEqual(['input_text', 'input_image']);
+  return { label: content[0]!['text'] as string, dataUrl: content[1]!['image_url'] as string };
 }
 
 describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler', () => {
   it.each([false, true])(
-    'reaches the Codex adapter as an image beside its metadata and sentence (cursors on: %s)',
+    'reaches the Codex thread as a message the host adds, and the call’s answer as text (cursors on: %s)',
     async (cursors) => {
       const { call, client, sessions, stored, png } = await setUp(true, cursors);
-      const response = await call(['screenshot', '--window-id', 'w-1']);
+      const { response, picture } = await call(['screenshot', '--window-id', 'w-1']);
       expect(response.success).toBe(true);
-      expect(response.contentItems).toHaveLength(2);
-      const [text, image] = response.contentItems;
-      expect(image).toMatchObject({ type: 'inputImage' });
-      expect((image as { imageUrl: string }).imageUrl).toMatch(/^data:image\/png;base64,/u);
-      expect(text?.type).toBe('inputText');
-      const shown = JSON.parse((text as { text: string }).text) as Record<string, unknown>;
-      expect(shown['picture']).toBe(SCREENSHOT_PICTURE_ATTACHED);
+      // The answer the model's script gets is text only: no picture to pass on, none to print.
+      expect(response.contentItems.map(({ type }) => type)).toEqual(['inputText']);
+      const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
+      expect(shown['picture']).toBe(CODEX_PICTURE_FOLLOWS);
       expect(shown['stdout']).toBe(stored.at(-1)!.text);
+      expect(JSON.stringify(response)).not.toContain('base64');
+      // The picture goes to the Turn's own thread, labelled with the digest the answer names.
+      const { label, dataUrl } = injectedPicture(picture);
+      expect(dataUrl).toMatch(/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u);
+      expect(dataUrl.length).toBeLessThan(RUNTIME_TOOL_RESULT_MAX_BYTES);
+      expect(label).toContain(`sha256 ${String(shown['sha256'])}`);
+      expect(Buffer.from(dataUrl.split(',')[1]!, 'base64').byteLength).toBe(shown['byteLength']);
       // Nothing of the picture is stored: neither the capture's own base64 nor any PNG's.
       const storedText = JSON.stringify(stored);
       expect(storedText).not.toContain(png.toString('base64').slice(0, 64));
       expect(storedText).not.toContain('iVBORw0KGgo');
-
-      // What a script inside Codex's exec receives for the same response (probed against the
-      // installed codex-cli 0.153.4 with a local stand-in for the model): one string, the items
-      // in order, one per line, an image as its data URL; and the steps the host guidance gives.
-      const nested = codexCodeModeNestedResult(response.contentItems);
-      expect(nested.length).toBeLessThan(RUNTIME_TOOL_RESULT_MAX_BYTES);
-      const cut = nested.indexOf('\n');
-      const firstLine = JSON.parse(nested.slice(0, cut)) as Record<string, unknown>;
-      const url = nested.slice(cut + 1);
-      expect(url).toMatch(/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u);
-      expect(url.length).toBe(firstLine['pictureChars']);
-      expect(url).toBe((image as { imageUrl: string }).imageUrl);
-      expect(firstLine['picture']).toBe(SCREENSHOT_PICTURE_ATTACHED);
-      expect(Buffer.from(url.split(',')[1]!, 'base64').byteLength).toBe(firstLine['byteLength']);
       client.dispose();
       await sessions.dispose();
     },
@@ -453,20 +466,60 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
     ['a copy of the result', { cloneResult: true }],
     ['a model catalog not built yet', { catalogBuilt: false }],
   ] as const)(
-    'still reaches the adapter as an image from %s',
+    'still reaches the Codex thread from %s',
     async (_name, options) => {
-      const { call, client, sessions, catalog } = await setUp(true, false, options);
-      const response = await call(['screenshot', '--window-id', 'w-1']);
-      expect(response.contentItems.map(({ type }) => type)).toEqual(['inputText', 'inputImage']);
-      const shown = JSON.parse((response.contentItems[0] as { text: string }).text) as Record<
-        string,
-        unknown
-      >;
-      expect(shown['picture']).toBe(SCREENSHOT_PICTURE_ATTACHED);
-      expect(catalog.revision).toBe(1);
+      const { call, client, sessions, catalog, refreshModelCatalog } = await setUp(
+        true,
+        false,
+        options,
+      );
+      const { response, picture } = await call(['screenshot', '--window-id', 'w-1']);
+      expect(response.contentItems.map(({ type }) => type)).toEqual(['inputText']);
+      const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
+      expect(shown['picture']).toBe(CODEX_PICTURE_FOLLOWS);
+      injectedPicture(picture);
+      // Learned from the Turn's own CLI runtime: the catalog (and every external Provider's model
+      // list with it) is not built for a screenshot.
+      expect(refreshModelCatalog).not.toHaveBeenCalled();
+      expect(catalog.revision).toBe('catalogBuilt' in options ? 0 : 1);
       expect(heldScreenshotPictureCount()).toBe(0);
       client.dispose();
       await sessions.dispose();
+    },
+    30_000,
+  );
+
+  it.each([
+    ['fails', () => Promise.reject(new Error('probe failed'))],
+    ['does not answer in time', () => new Promise<never>(() => undefined)],
+  ] as const)(
+    'gives only the sentence when the CLI’s model list %s and no catalog is built',
+    async (_name, probe) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        let asked = false;
+        const { call, client, sessions, refreshModelCatalog } = await setUp(true, false, {
+          catalogBuilt: false,
+          probe: () => {
+            asked = true;
+            return probe();
+          },
+        });
+        const answered = call(['screenshot', '--window-id', 'w-1']);
+        await vi.waitUntil(() => asked, { timeout: 20_000 });
+        await vi.advanceTimersByTimeAsync(SCREENSHOT_CATALOG_TIMEOUT_MS + 1);
+        const { response, picture } = await answered;
+        expect(picture).toBeUndefined();
+        const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
+        expect(shown['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
+        expect(shown).not.toHaveProperty('dataUrl');
+        expect(refreshModelCatalog).not.toHaveBeenCalled();
+        expect(heldScreenshotPictureCount()).toBe(0);
+        client.dispose();
+        await sessions.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
     },
     30_000,
   );
@@ -475,12 +528,10 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
     'gives a model that does not take images (%s) only the sentence',
     async (takesImages) => {
       const { call, client, sessions } = await setUp(takesImages, false);
-      const response = await call(['screenshot', '--window-id', 'w-1']);
+      const { response, picture } = await call(['screenshot', '--window-id', 'w-1']);
+      expect(picture).toBeUndefined();
       expect(response.contentItems).toHaveLength(1);
-      const shown = JSON.parse((response.contentItems[0] as { text: string }).text) as Record<
-        string,
-        unknown
-      >;
+      const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
       expect(shown['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
       expect(shown).not.toHaveProperty('dataUrl');
       client.dispose();

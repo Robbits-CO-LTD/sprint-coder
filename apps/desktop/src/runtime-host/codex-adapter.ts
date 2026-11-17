@@ -118,12 +118,12 @@ finish by saying its result has not come back yet: the host withdraws an unanswe
 turn ends, and the call never runs. If exec returns "Script running with cell ID ..." while a host
 call inside it waits, call wait with that cell ID until the script completes, then continue from
 its result.
-A desktop-control screenshot's host call result carries its picture. Called directly, the picture
-comes back as an image. Called inside an exec script, the call returns one string: the result as
-JSON on the first line, then a newline, then the picture as a data:image/...;base64 URL. To see the
-picture, split that string at the first newline, check that the part after it is as long as
-pictureChars in the JSON, and pass that part to image(...). Pass the first line to text(...) (or
-JSON.parse it to read picture, stdout and the picture's sizes). Do not pass the URL to text(...).`;
+A host call whose result has a picture (a desktop-control screenshot, or an image file) returns
+only text. The host itself then adds the picture to this conversation as a separate message right
+after that call's result, naming the same sha256, whether the call was made directly or inside an
+exec script. The script does not need to pass anything to image(...) for it: let the script finish
+and look at that message. When the result's picture field says the picture could not be given,
+there is no such message.`;
 const unknownCapability = { value: null, source: 'unknown' as const };
 const codexRuntimeCapability = (value: boolean, sourceReference: string) => ({
   value,
@@ -580,7 +580,17 @@ export class CodexRuntimeAdapter {
                       arguments: params['arguments'],
                       catalogDigest: toolCatalogSnapshot.digest,
                     });
-                    response = codexDynamicToolResponseFromManaged(result);
+                    // The picture goes into this Turn's own thread before the call is answered,
+                    // so the model's next request has it right after the call's result.
+                    const picture = codexManagedPictureItem(result);
+                    const pictureGiven =
+                      picture !== undefined &&
+                      canRespond() &&
+                      (await injectWithin(
+                        send('thread/inject_items', { threadId, items: [picture] }),
+                        CODEX_PICTURE_INJECT_TIMEOUT_MS,
+                      ));
+                    response = codexDynamicToolResponseFromManaged(result, pictureGiven);
                   } finally {
                     resumeActivity();
                   }
@@ -1268,25 +1278,103 @@ export function buildCodexTeamDynamicTools(
 
 type CodexDynamicToolResponse = {
   success: boolean;
-  contentItems: ({ type: 'inputText'; text: string } | { type: 'inputImage'; imageUrl: string })[];
+  contentItems: { type: 'inputText'; text: string }[];
 };
 
+/** Told to the model in a managed result whose picture the host adds as the next message. */
+export const CODEX_PICTURE_FOLLOWS =
+  '撮った画像は、この結果のすぐ後に別のメッセージとして渡す（同じ sha256 を書く）。画像の 1 px は points_per_pixel ポイントに当たる。部品の ref は snapshot で取る。';
+/** Told to the model when the host could not add the picture to the conversation. */
+export const CODEX_PICTURE_NOT_GIVEN =
+  '撮った画像を AI に渡せなかった。画面の中身を確かめる時は snapshot を使う。';
+/** The longest the host waits for Codex to take the picture before answering the call without it. */
+export const CODEX_PICTURE_INJECT_TIMEOUT_MS = 10_000;
+
+const MANAGED_IMAGE_DATA_URL = /^data:image\/(?:png|jpeg|webp);base64,[a-zA-Z0-9+/=]+$/u;
+
+function managedImageOutput(
+  response: unknown,
+): { output: Record<string, unknown>; dataUrl: string } | undefined {
+  const result = asRecord(response);
+  const output = result['output'];
+  if (result['success'] !== true || typeof output !== 'object' || output === null) return undefined;
+  const dataUrl = (output as Record<string, unknown>)['dataUrl'];
+  if (
+    typeof dataUrl !== 'string' ||
+    dataUrl.length > 8 * 1024 * 1024 ||
+    !MANAGED_IMAGE_DATA_URL.test(dataUrl)
+  )
+    return undefined;
+  return { output: output as Record<string, unknown>, dataUrl };
+}
+
 /**
- * The text item beside a managed tool's image: what the image is, and for a desktop-control
- * screenshot what the run printed beside it and how long its picture's URL is. Inside an exec
- * script, the installed Codex CLI hands the call's items to the script as one string, each item on
- * its own line and an image as its data URL (probed against codex-cli 0.153.4), so this stays one
- * line of whole JSON: fields are left out, never cut, to keep it within its bound.
+ * The message the host adds to the Turn's own Codex thread (`thread/inject_items`) for a managed
+ * result's picture, or `undefined` when the result has none. In code mode (every model the
+ * installed CLI lists has `tool_mode: code_mode_only`) a nested call's image reaches the model only
+ * if the model's own script passes it on; a message the host adds reaches the next model request
+ * either way (probed against codex-cli 0.153.4), and app-server sends no notification carrying it.
  */
-function managedImageText(output: Record<string, unknown>, dataUrl: string): string {
+export function codexManagedPictureItem(response: unknown): Record<string, unknown> | undefined {
+  const image = managedImageOutput(response);
+  if (image === undefined) return undefined;
+  const sha256 = image.output['sha256'];
+  return {
+    type: 'message',
+    role: 'user',
+    content: [
+      {
+        type: 'input_text',
+        text: `The picture of the host tool call result just above${
+          typeof sha256 === 'string' ? ` (sha256 ${sha256})` : ''
+        }, added by the host.`,
+      },
+      { type: 'input_image', image_url: image.dataUrl },
+    ],
+  };
+}
+
+/** Whether `request` succeeded within `timeoutMs` (a failure or a late answer counts as no). */
+async function injectWithin(request: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      request.then(
+        () => true,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The text of a managed result that has a picture: what the picture is, whether the host added it
+ * as the next message, and for a desktop-control screenshot what the run printed beside it. The
+ * picture itself is never in it. Fields are left out, never cut, to keep it within its bound.
+ */
+function managedImageText(output: Record<string, unknown>, pictureGiven: boolean): string {
   const base = {
     path: output['path'],
     mimeType: output['mimeType'],
     byteLength: output['byteLength'],
     sha256: output['sha256'],
   };
-  if (typeof output['picture'] !== 'string') return JSON.stringify(base).slice(0, 16_384);
-  const screenshot = { ...base, picture: output['picture'], pictureChars: dataUrl.length };
+  if (typeof output['picture'] !== 'string')
+    return JSON.stringify({
+      ...base,
+      picture: pictureGiven
+        ? 'The picture follows as a separate message right after this result, with the same sha256.'
+        : 'The picture could not be given.',
+    }).slice(0, 16_384);
+  const screenshot = {
+    ...base,
+    picture: pictureGiven ? CODEX_PICTURE_FOLLOWS : CODEX_PICTURE_NOT_GIVEN,
+  };
   for (const candidate of [
     {
       ...screenshot,
@@ -1300,31 +1388,23 @@ function managedImageText(output: Record<string, unknown>, dataUrl: string): str
     const text = JSON.stringify(candidate);
     if (text.length <= 16_384) return text;
   }
-  return JSON.stringify({ picture: output['picture'], pictureChars: dataUrl.length });
+  return JSON.stringify({ picture: screenshot.picture });
 }
 
-export function codexDynamicToolResponseFromManaged(response: unknown): CodexDynamicToolResponse {
+/**
+ * The dynamic-tool response for a managed result. A picture is never in it: `pictureGiven` says
+ * whether the host added it to the thread (`codexManagedPictureItem`) before answering.
+ */
+export function codexDynamicToolResponseFromManaged(
+  response: unknown,
+  pictureGiven: boolean,
+): CodexDynamicToolResponse {
   const result = asRecord(response);
-  const output =
-    typeof result['output'] === 'object' && result['output'] !== null
-      ? (result['output'] as Record<string, unknown>)
-      : {};
-  const dataUrl = output['dataUrl'];
-  if (
-    result['success'] === true &&
-    typeof dataUrl === 'string' &&
-    dataUrl.length <= 8 * 1024 * 1024 &&
-    /^data:image\/(?:png|jpeg|webp);base64,[a-zA-Z0-9+/=]+$/u.test(dataUrl)
-  )
+  const image = managedImageOutput(response);
+  if (image !== undefined)
     return {
       success: true,
-      contentItems: [
-        {
-          type: 'inputText',
-          text: managedImageText(output, dataUrl),
-        },
-        { type: 'inputImage', imageUrl: dataUrl },
-      ],
+      contentItems: [{ type: 'inputText', text: managedImageText(image.output, pictureGiven) }],
     };
   return {
     success: result['success'] === true,

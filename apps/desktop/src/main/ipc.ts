@@ -357,6 +357,8 @@ import { clipPublicMessage } from './zod-issue-message';
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
+/** The longest a screenshot waits to learn whether its Turn's CLI model takes images. */
+export const SCREENSHOT_CATALOG_TIMEOUT_MS = 5_000;
 /**
  * Shown when the completion gate refuses a Turn. The edits are kept either way; what the Turn does
  * not get is the claim that it finished, so each reason has to say which of the two it was.
@@ -742,7 +744,9 @@ import { type WorkspacePatchDeps } from './workspace-patch-tool';
 import { workspaceWriteLimitsOf } from './workspace-write-limits';
 import { probeSandboxRunner, type SandboxRunnerCapability } from './sandbox-runner';
 import {
+  BUILTIN_CLAUDE_CONNECTION_ID,
   BUILTIN_CODEX_CONNECTION_ID,
+  BUILTIN_GROK_CONNECTION_ID,
   builtinRuntimeForModelSelection,
   modelSelectionForRuntime,
 } from './connection-identity';
@@ -4778,28 +4782,65 @@ export class IpcRouter {
    */
   private async screenshotPictureAccepted(taskId: string, turnId: string): Promise<boolean> {
     try {
-      // Built once in this app run if nothing has asked for it yet (the model picker opens it).
-      if (this.modelCatalog.revision === 0) await this.refreshModelCatalog();
-      const catalog = {
-        find: (connectionId: string, modelId: string) =>
-          this.modelCatalog.find(connectionId, modelId),
-        list: (connectionId: string) => this.modelCatalog.list(connectionId),
-      };
+      let identity: Parameters<typeof turnModelTakesPictures>[0];
       if (this.managedWorkerTurn.has(turnId)) {
         const choice = this.cliTeamWorkerRuntime.runtimeChoiceForTurn(turnId);
         if (choice === undefined) return false;
-        return turnModelTakesPictures(
-          {
-            selection: modelSelectionForRuntime(choice.kind, choice.model),
-            resolution: { resolvedModel: null },
-          },
-          catalog,
-        );
-      }
-      return turnModelTakesPictures(this.persistence.getTurnModelIdentity(taskId, turnId), catalog);
+        identity = {
+          selection: modelSelectionForRuntime(choice.kind, choice.model),
+          resolution: { resolvedModel: null },
+        };
+      } else identity = this.persistence.getTurnModelIdentity(taskId, turnId);
+      return turnModelTakesPictures(
+        identity,
+        await this.screenshotModelCatalog(identity.selection.connectionId),
+      );
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The models a screenshot's decision reads: the model catalog once something in this app run has
+   * built it; before that only the Turn's own CLI runtime's model list (its cached capability probe,
+   * at most `SCREENSHOT_CATALOG_TIMEOUT_MS`), never an external Provider. A connection that is not a
+   * CLI's, or a probe that fails or is late, lists nothing, so the model gets no picture.
+   */
+  private async screenshotModelCatalog(
+    connectionId: string | null,
+  ): Promise<Parameters<typeof turnModelTakesPictures>[1]> {
+    if (this.modelCatalog.revision > 0)
+      return {
+        find: (id: string, modelId: string) => this.modelCatalog.find(id, modelId),
+        list: (id: string) => this.modelCatalog.list(id),
+      };
+    const runtime =
+      connectionId === BUILTIN_CODEX_CONNECTION_ID
+        ? this.codexRuntime
+        : connectionId === BUILTIN_CLAUDE_CONNECTION_ID
+          ? this.claudeRuntime
+          : connectionId === BUILTIN_GROK_CONNECTION_ID
+            ? this.grokRuntime
+            : undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const report =
+      runtime === undefined
+        ? undefined
+        : await Promise.race([
+            runtime.probe().catch(() => undefined),
+            new Promise<undefined>((resolve) => {
+              timer = setTimeout(() => resolve(undefined), SCREENSHOT_CATALOG_TIMEOUT_MS);
+            }),
+          ]).finally(() => clearTimeout(timer));
+    const models = (report?.models ?? []).map((model) => ({
+      modelId: model.id,
+      multimodalInput: model.capabilities?.multimodalInput ?? { value: null },
+    }));
+    return {
+      find: (id: string, modelId: string) =>
+        id === connectionId ? models.find((model) => model.modelId === modelId) : undefined,
+      list: (id: string) => (id === connectionId ? models : []),
+    };
   }
 
   /**
