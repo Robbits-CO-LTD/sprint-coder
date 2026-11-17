@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, AppError, Deadline, DeliverySemantics, ErrorCode, PermissionReport,
     PlatformAdapter, SignalBaseline, SignalFilter, context::CommandContext,
@@ -23,6 +24,8 @@ pub(super) fn execute(
     let batch_context = context.clone().with_inherited_deadline(deadline);
     let mut commands = prepare(&args.commands_json, permission_report, &batch_context)?;
     let total = commands.len();
+    // Nothing left before the batch is any entry's note.
+    let _ = agent_desktop_core::response::result_note::take();
     let mut results = Vec::with_capacity(total);
     let mut results_bytes = 0;
     let mut completed = 0;
@@ -100,10 +103,15 @@ pub(super) fn execute(
             .with_inherited_deadline(deadline)
             .with_event_baseline(current_baseline);
         let command = std::mem::replace(&mut commands[index].command, Commands::Version);
-        let entry = super::result_entry::completed_entry(
+        let result = crate::dispatch::dispatch(command, adapter, permission_report, &item_context);
+        // A note the step left belongs to its own entry, never to a later one or to the
+        // batch envelope.
+        let note = agent_desktop_core::response::result_note::take();
+        let entry = super::result_entry::completed_entry_with_note(
             index,
             &commands[index].name,
-            crate::dispatch::dispatch(command, adapter, permission_report, &item_context),
+            result,
+            note,
         );
         let failed = entry["ok"] != true;
         let (entry, oversized) = super::result_entry::bounded_completed_entry(

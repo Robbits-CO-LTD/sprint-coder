@@ -332,7 +332,8 @@ fn finish(cmd_name: &str, result: Result<serde_json::Value, AppError>) -> ExitCo
 
 fn response(cmd_name: &str, result: Result<serde_json::Value, AppError>) -> Response {
     match result {
-        Ok(data) => Response::ok(cmd_name, data),
+        Ok(data) => Response::ok(cmd_name, data)
+            .with_suggestion(agent_desktop_core::response::result_note::take()),
         Err(error) => Response::err(cmd_name, ErrorPayload::from_app_error(&error)),
     }
 }
