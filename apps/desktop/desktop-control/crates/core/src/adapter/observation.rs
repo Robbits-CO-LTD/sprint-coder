@@ -315,6 +315,13 @@ pub trait ObservationOps: Send + Sync {
         Err(AdapterError::not_supported("get_insertion_caret"))
     }
 
+    /// Whether a ref `hover` or `drag` names the window the ref was captured
+    /// in for the agent's cursor, as a ref action does. Off by default: those
+    /// instructions then name no window, as they always have.
+    fn names_pointer_gesture_window(&self) -> bool {
+        false
+    }
+
     /// The insertion point of the text element that has keyboard focus, in
     /// `process` when given and system-wide otherwise, as
     /// [`get_insertion_caret`](Self::get_insertion_caret) reports it. `None`
