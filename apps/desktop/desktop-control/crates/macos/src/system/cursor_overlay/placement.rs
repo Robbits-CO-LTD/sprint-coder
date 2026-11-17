@@ -77,9 +77,12 @@ impl Placement {
 /// using, another window of the same app included, and is never left above
 /// one once the user brings it to the front.
 ///
-/// The cost: the named window's own sheets and popovers are separate windows
-/// in front of it, so the overlay is hidden under them. Keeping it off the
-/// user's windows comes first.
+/// A sheet or popover is a separate window in front of the window it belongs
+/// to. For an element inside one, the command names the sheet's or popover's
+/// own window, so the overlay goes directly above that. Where that window
+/// could not be read, the window the ref was captured in is named and the
+/// overlay is hidden under its sheets and popovers: keeping it off the user's
+/// windows comes first.
 pub(super) fn resolve(windows: &[ListedWindow], named: bool, number: u32) -> Placement {
     if !named {
         return Placement::FREE;

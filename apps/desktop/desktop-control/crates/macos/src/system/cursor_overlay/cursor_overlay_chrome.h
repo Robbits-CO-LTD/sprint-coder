@@ -16,6 +16,8 @@ bool ADSetAnchor(bool named, uint32_t number);
 bool ADAnchored(void);
 /// Whether the named window is not on the screen now, so the overlay is held off it.
 bool ADPlacementHidden(void);
+/// Whether the overlay is placed directly above the named window now.
+bool ADPlacedAbove(void);
 /// On the screen, or held off it only while the named window is not.
 bool ADShown(NSWindow *window);
 /// Takes `window` off the screen for good (not held to come back).

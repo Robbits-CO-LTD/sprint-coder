@@ -14,6 +14,12 @@
 
 use std::cell::RefCell;
 
+use crate::{CommandContext, NativeHandle, PlatformAdapter};
+
+/// How long the read of an element's own window may take. It runs once per
+/// action, only while the overlay is on.
+const ELEMENT_WINDOW_READ_MS: u64 = 150;
+
 thread_local! {
     static ANCHOR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -40,6 +46,41 @@ pub(crate) fn anchor_window(window: Option<String>) -> AnchorScope {
 /// The window the current action works in, if it named one.
 pub(crate) fn current_window() -> Option<String> {
     ANCHOR.with(|anchor| anchor.borrow().clone())
+}
+
+/// The window to name for an action on `handle`: the separate window the
+/// element itself lives in (a sheet or popover of `top_level`) when the
+/// adapter reports one, otherwise `top_level`. With the overlay off nothing
+/// is read.
+pub(crate) fn element_window(
+    adapter: &dyn PlatformAdapter,
+    context: &CommandContext,
+    top_level: Option<String>,
+    handle: &NativeHandle,
+) -> Option<String> {
+    if !context.cursor_overlay().is_enabled() {
+        return top_level;
+    }
+    choose_window(top_level, |top_level| {
+        let deadline = crate::Deadline::after(ELEMENT_WINDOW_READ_MS).ok()?;
+        adapter.element_cursor_window(handle, top_level, deadline)
+    })
+}
+
+/// The choice behind [`element_window`]. A ref that names no window keeps
+/// none (nothing is read for it); one that names a window keeps a window
+/// whatever the element's read says, so the cursor never falls back to above
+/// every window. An empty answer, or the top-level window itself, keeps the
+/// top-level window.
+pub(crate) fn choose_window(
+    top_level: Option<String>,
+    element: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    let top_level = top_level?;
+    match element(&top_level) {
+        Some(own) if !own.is_empty() && own != top_level => Some(own),
+        _ => Some(top_level),
+    }
 }
 
 #[cfg(test)]

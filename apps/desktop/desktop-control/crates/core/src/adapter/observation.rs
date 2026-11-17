@@ -302,6 +302,20 @@ pub trait ObservationOps: Send + Sync {
         Err(AdapterError::not_supported("get_insertion_caret"))
     }
 
+    /// The window the agent's cursor is drawn at the height of for an action
+    /// on `handle`, in place of `top_level` (the window the ref was captured
+    /// in), when the element itself lives in a separate window attached to
+    /// it, such as a sheet or a popover. `None` keeps `top_level`; so does any
+    /// failure to read it, which never fails the action.
+    fn element_cursor_window(
+        &self,
+        _handle: &NativeHandle,
+        _top_level: &str,
+        _deadline: Deadline,
+    ) -> Option<String> {
+        None
+    }
+
     /// The insertion point of the text element that has keyboard focus, in
     /// `process` when given and system-wide otherwise, as
     /// [`get_insertion_caret`](Self::get_insertion_caret) reports it. `None`

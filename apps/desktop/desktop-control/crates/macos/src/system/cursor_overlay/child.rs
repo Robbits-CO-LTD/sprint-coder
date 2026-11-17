@@ -44,6 +44,11 @@ pub(super) enum Anchor {
 /// How often the shown cursor is put back at its window's height, as the
 /// Windows renderer does between actions.
 const RESTACK_EVERY: Duration = Duration::from_millis(1_500);
+/// How often the shown cursor checks that its named window is still on the
+/// screen, by that one window's record (not the whole window list), so a
+/// closed, minimized or hidden window takes the cursor with it promptly
+/// rather than at the next restack.
+const QUICK_CHECK_EVERY: Duration = Duration::from_millis(200);
 /// How often the host and the session are checked.
 const CHECK_EVERY: Duration = Duration::from_secs(1);
 /// How long an awake renderer waits for the next control between frames.
@@ -103,6 +108,7 @@ fn run() -> Result<(), AdapterError> {
     let mut quiet_since = std::time::Instant::now();
     let mut checked_session = quiet_since;
     let mut restacked = quiet_since;
+    let mut quick_checked = quiet_since;
     loop {
         if checked_session.elapsed() >= CHECK_EVERY {
             if checks_end_renderer(&mut host, || {
@@ -161,6 +167,19 @@ fn run() -> Result<(), AdapterError> {
                     bridge::rest();
                     state.resting = true;
                 }
+                if let Some(number) = quick_check_window(&state, quick_checked.elapsed())
+                    && bridge::placed_above()
+                {
+                    quick_checked = std::time::Instant::now();
+                    if quick_check_hides(bridge::window_listed(number)) {
+                        // The restack reads the whole list and hides the
+                        // cursor itself, so it stays the one judge of where
+                        // the cursor goes (and shows it again when the window
+                        // is back).
+                        bridge::restack();
+                        restacked = std::time::Instant::now();
+                    }
+                }
                 if !state.resting && restacked.elapsed() >= RESTACK_EVERY {
                     bridge::restack();
                     restacked = std::time::Instant::now();
@@ -179,6 +198,26 @@ fn run() -> Result<(), AdapterError> {
             }
         }
     }
+}
+
+/// The window whose own record the idle loop reads now: the named window,
+/// while the cursor is shown (not resting) and the last read was at least
+/// `QUICK_CHECK_EVERY` ago. None for a cursor named to no window or to an
+/// unreadable one (already hidden).
+fn quick_check_window(state: &OverlayState, since_check: Duration) -> Option<u32> {
+    match state.anchor {
+        Anchor::Window(number) if !state.resting && since_check >= QUICK_CHECK_EVERY => {
+            Some(number)
+        }
+        _ => None,
+    }
+}
+
+/// Whether the quick read of the named window's record sends the cursor to
+/// the restack: the window is not on the screen (`Listed::Off`). A read that
+/// failed leaves the cursor to the regular restack.
+fn quick_check_hides(listed: bridge::Listed) -> bool {
+    listed == bridge::Listed::Off
 }
 
 /// Whether the periodic check ends the renderer: the host has exited, or the

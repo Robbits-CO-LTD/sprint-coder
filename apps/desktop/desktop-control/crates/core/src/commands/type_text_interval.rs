@@ -53,9 +53,7 @@ pub(crate) fn execute(
         let mut landed = None;
         let delivered = match &burst {
             Some(burst) => deliver(adapter, burst, request, budget(unit)).map(|_| {
-                let _anchor = crate::cursor_overlay::anchor_window(
-                    burst.entry.source.source_window_id.clone(),
-                );
+                let _anchor = crate::cursor_overlay::anchor_window(burst.window.clone());
                 crate::ref_action::presentation::move_caret(adapter, context, &burst.handle);
             }),
             None => execute_landing(
@@ -76,7 +74,7 @@ pub(crate) fn execute(
         clock.delivered(slot);
         if let Some(handle) = landed.filter(|_| index + 1 < units.len()) {
             burst = Some(
-                burst_around(handle, &args.ref_id, context)
+                burst_around(handle, &args.ref_id, adapter, context)
                     .map_err(|error| after_partial_delivery(error, index + 1, units.len()))?,
             );
         }
@@ -149,6 +147,9 @@ struct Burst {
     entry: crate::RefEntry,
     handle: crate::NativeHandle,
     process: Option<crate::ProcessIdentity>,
+    /// The window the caret is drawn at the height of: the one the element
+    /// itself lives in (a sheet or popover of the captured window), read once.
+    window: Option<String>,
 }
 
 /// Runs the first unit as a full ref action and returns the element it landed
@@ -182,6 +183,7 @@ fn execute_landing(
 fn burst_around(
     handle: crate::NativeHandle,
     ref_id: &str,
+    adapter: &dyn PlatformAdapter,
     context: &CommandContext,
 ) -> Result<Burst, AppError> {
     let entry = crate::commands::helpers::load_ref_entry(ref_id, context)?;
@@ -191,10 +193,17 @@ fn burst_around(
         .as_deref()
         .filter(|instance| !instance.is_empty())
         .map(|instance| crate::ProcessIdentity::new(entry.process.pid, instance));
+    let window = crate::cursor_overlay::element_window(
+        adapter,
+        context,
+        entry.source.source_window_id.clone(),
+        &handle,
+    );
     Ok(Burst {
         entry,
         handle,
         process,
+        window,
     })
 }
 

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::shows_pointer;
 use crate::Action;
 
@@ -53,3 +54,33 @@ mod shared_cursor;
 
 #[path = "presentation_caret_tests.rs"]
 mod caret;
+
+fn travelled(x: f64, y: f64, window: Option<&str>) -> super::Travelled {
+    super::Travelled {
+        x,
+        y,
+        window: window.map(str::to_owned),
+    }
+}
+
+#[test]
+fn the_travel_under_the_lease_is_skipped_only_at_the_same_point_and_window() {
+    let at = crate::Point { x: 100.0, y: 50.0 };
+    let before = travelled(100.5, 50.5, Some("w-1"));
+    assert!(!super::travels_again(Some(&before), &at, Some("w-1")));
+    assert!(
+        super::travels_again(Some(&before), &at, Some("w-2")),
+        "an element found in a sheet of w-1 draws the cursor again above the sheet"
+    );
+    assert!(super::travels_again(
+        Some(&before),
+        &crate::Point { x: 140.0, y: 50.0 },
+        Some("w-1")
+    ));
+    assert!(super::travels_again(None, &at, Some("w-1")));
+    assert!(!super::travels_again(
+        Some(&travelled(100.0, 50.0, None)),
+        &at,
+        None
+    ));
+}

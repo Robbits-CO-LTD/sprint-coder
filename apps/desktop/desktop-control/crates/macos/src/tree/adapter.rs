@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::adapter::{MacOSAdapter, ax_element};
 use agent_desktop_core::{
     AccessibilityNode, AdapterError, AppInfo, Deadline, ElementState, LiveElement, NativeHandle,
@@ -193,6 +194,20 @@ impl ObservationOps for MacOSAdapter {
             ax_element(handle)?,
             deadline,
         ))
+    }
+
+    fn element_cursor_window(
+        &self,
+        handle: &NativeHandle,
+        top_level: &str,
+        deadline: Deadline,
+    ) -> Option<String> {
+        let until = std::time::Instant::now().checked_add(deadline.remaining())?;
+        crate::system::window::element_window::attached_window(
+            ax_element(handle).ok()?,
+            top_level,
+            until,
+        )
     }
 
     fn get_focused_insertion_caret(
