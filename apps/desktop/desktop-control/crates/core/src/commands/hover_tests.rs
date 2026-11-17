@@ -24,8 +24,6 @@ struct HoverCaptureAdapter {
     focused_bounds: Option<Rect>,
     refuses_receiver: bool,
     receiver_checks: AtomicU32,
-    presented: Mutex<Vec<crate::CursorOverlayControl>>,
-    opts_in: bool,
 }
 
 impl HoverCaptureAdapter {
@@ -36,14 +34,7 @@ impl HoverCaptureAdapter {
             focused_bounds: None,
             refuses_receiver: false,
             receiver_checks: AtomicU32::new(0),
-            presented: Mutex::new(Vec::new()),
-            opts_in: false,
         }
-    }
-
-    fn naming_windows(mut self) -> Self {
-        self.opts_in = true;
-        self
     }
 
     fn refusing_receiver(mut self) -> Self {
@@ -64,10 +55,6 @@ impl ObservationOps for HoverCaptureAdapter {
         _deadline: crate::Deadline,
     ) -> Result<NativeHandle, AdapterError> {
         Ok(NativeHandle::new(CORE_RESOLVED))
-    }
-
-    fn names_pointer_gesture_window(&self) -> bool {
-        self.opts_in
     }
 
     fn get_element_bounds(
@@ -154,64 +141,10 @@ impl SystemOps for HoverCaptureAdapter {
         self.focused_pids.lock().unwrap().push(window.pid);
         Ok(())
     }
-
-    fn update_cursor_overlay(
-        &self,
-        control: &crate::CursorOverlayControl,
-    ) -> Result<(), AdapterError> {
-        self.presented.lock().unwrap().push(control.clone());
-        Ok(())
-    }
-}
-
-fn overlay_context() -> CommandContext {
-    let config = crate::CursorOverlayConfig::enabled(None, 6).expect("valid config");
-    CommandContext::default()
-        .with_headed(true)
-        .with_cursor_overlay_session("test-session", config)
-}
-
-fn hover_windows(adapter: &HoverCaptureAdapter) -> Vec<Option<String>> {
-    let snapshot_id = ref_snapshot_in(42, RefStore::for_session(Some("test-session")).unwrap());
-    execute(ref_args(snapshot_id), adapter, &overlay_context()).unwrap();
-    let presented = adapter.presented.lock().unwrap();
-    assert!(!presented.is_empty(), "the hover drew the cursor");
-    presented
-        .iter()
-        .map(|control| {
-            control
-                .instruction()
-                .and_then(|instruction| instruction.window().map(str::to_owned))
-        })
-        .collect()
-}
-
-#[test]
-fn a_ref_hover_names_no_window_where_the_adapter_does_not_opt_in() {
-    let _guard = HomeGuard::new();
-    let adapter = HoverCaptureAdapter::new();
-    assert!(
-        hover_windows(&adapter).iter().all(Option::is_none),
-        "the default sends hover instructions without a window, as before"
-    );
-}
-
-#[test]
-fn a_ref_hover_names_its_window_where_the_adapter_opts_in() {
-    let _guard = HomeGuard::new();
-    let captured = HoverCaptureAdapter::new().naming_windows();
-    assert!(
-        hover_windows(&captured)
-            .iter()
-            .all(|window| window.as_deref() == Some("w-42"))
-    );
 }
 
 fn ref_snapshot(pid: u32) -> String {
-    ref_snapshot_in(pid, RefStore::new().unwrap())
-}
-
-fn ref_snapshot_in(pid: u32, store: RefStore) -> String {
+    let store = RefStore::new().unwrap();
     let mut refmap = RefMap::new();
     refmap.allocate(RefEntry {
         process: crate::RefProcess {

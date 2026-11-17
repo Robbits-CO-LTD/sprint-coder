@@ -207,10 +207,6 @@ impl ObservationOps for MacOSAdapter {
         ))
     }
 
-    fn names_pointer_gesture_window(&self) -> bool {
-        true
-    }
-
     fn get_focused_insertion_caret(
         &self,
         process: Option<agent_desktop_core::ProcessId>,

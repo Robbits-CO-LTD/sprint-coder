@@ -1,4 +1,3 @@
-// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AppError, MouseButton, MouseEvent, MouseEventKind,
     adapter::PlatformAdapter,
@@ -90,9 +89,6 @@ pub fn execute(
         )?;
         Ok((resolved, lease))
     })?;
-    // A ref's hover draws the cursor at the height of the window the ref was
-    // captured in, as a ref action does; a bare coordinate names none.
-    let _anchor = crate::cursor_overlay::anchor_window(cursor_window(&resolved, adapter));
     let result = crate::cursor_overlay::dispatch_mouse_event_with_cursor(
         adapter,
         context,
@@ -115,22 +111,6 @@ pub fn execute(
     drop(lease);
     drop(cursor);
     apply_post_action_wait(response, resolved.source_entry.as_ref(), adapter, context)
-}
-
-/// The window the cursor is drawn at the height of for a pointer gesture at
-/// `resolved`: the window the ref was captured in, or none for a coordinate.
-/// None also where the adapter does not opt in, as before.
-pub(crate) fn cursor_window(
-    resolved: &ResolvedPoint,
-    adapter: &dyn PlatformAdapter,
-) -> Option<String> {
-    if !adapter.names_pointer_gesture_window() {
-        return None;
-    }
-    resolved
-        .source_entry
-        .as_ref()
-        .and_then(|entry| entry.source.source_window_id.clone())
 }
 
 fn confirm_receiver(
