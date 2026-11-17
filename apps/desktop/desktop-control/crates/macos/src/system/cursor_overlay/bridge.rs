@@ -73,6 +73,8 @@ unsafe extern "C" {
     fn agent_desktop_cursor_overlay_stop();
     fn sc_cursor_overlay_anchor(named: bool, number: u32);
     fn sc_cursor_overlay_restack();
+    fn sc_cursor_overlay_placed_above() -> bool;
+    fn sc_cursor_overlay_window_listed(number: u32) -> i8;
 }
 
 pub(super) fn is_caret(instruction: &CursorOverlayInstruction) -> bool {
@@ -296,6 +298,37 @@ pub(super) fn anchor_arguments(anchor: super::child::Anchor) -> (bool, u32) {
 /// have moved in the stacking order since it was drawn.
 pub(super) fn restack() {
     unsafe { sc_cursor_overlay_restack() }
+}
+
+/// Whether the cursor is drawn directly above its named window now (not above
+/// every window, and not held off the screen).
+pub(super) fn placed_above() -> bool {
+    unsafe { sc_cursor_overlay_placed_above() }
+}
+
+/// What one window's own CoreGraphics record says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Listed {
+    /// The window is on the screen now.
+    On,
+    /// The window is closed, minimized, hidden with its app, or on another
+    /// Space.
+    Off,
+    /// The record could not be read.
+    Unknown,
+}
+
+pub(super) fn listed_from(answer: i8) -> Listed {
+    match answer {
+        1 => Listed::On,
+        0 => Listed::Off,
+        _ => Listed::Unknown,
+    }
+}
+
+/// Reads window `number`'s own record (one window, not the whole list).
+pub(super) fn window_listed(number: u32) -> Listed {
+    listed_from(unsafe { sc_cursor_overlay_window_listed(number) })
 }
 
 #[cfg(test)]
