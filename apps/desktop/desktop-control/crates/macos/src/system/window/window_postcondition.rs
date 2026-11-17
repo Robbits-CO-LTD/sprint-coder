@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, DeliverySemantics, Rect};
 
 pub(crate) const TOLERANCE: f64 = 2.0;
@@ -38,8 +39,16 @@ fn wait_until(
     mut complete: impl FnMut() -> Result<bool, AdapterError>,
 ) -> Result<(), AdapterError> {
     loop {
-        if complete().map_err(after_delivery)? {
-            return Ok(());
+        match complete() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            // While the app animates the change (a window going to the Dock, or coming back
+            // from it), it answers a read with "cannot complete". The change was delivered and
+            // is still happening, so that read is tried again until the deadline: measured on
+            // macOS 27, a minimize and a restore each failed this way at the first read and
+            // had happened by the time the window was listed again.
+            Err(error) if app_is_busy(&error) && !deadline.is_expired() => {}
+            Err(error) => return Err(after_delivery(error)),
         }
         if deadline.is_expired() {
             return Err(after_delivery(AdapterError::timeout(
@@ -51,6 +60,18 @@ fn wait_until(
             .map_err(after_delivery)?;
         std::thread::sleep(pause.min(std::time::Duration::from_millis(10)));
     }
+}
+
+/// Whether `error` is a read the app could not answer for now (`surface_read` marks an
+/// accessibility "cannot complete" as retryable), as opposed to a read that says the element
+/// is gone, the permission is missing, or the deadline has come.
+fn app_is_busy(error: &AdapterError) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("retryable"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 fn geometry_matches(actual: Rect, expected: Rect, position: bool) -> bool {
@@ -80,6 +101,51 @@ fn after_delivery(error: AdapterError) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn busy() -> AdapterError {
+        crate::tree::surface_read::map_error(
+            "AXMinimized",
+            accessibility_sys::kAXErrorCannotComplete,
+        )
+    }
+
+    #[test]
+    fn a_read_the_app_cannot_answer_while_it_animates_is_tried_again() {
+        // Two reads fail while the window goes to the Dock; the third sees it minimized.
+        let mut reads = 0;
+        let result = wait_until(Deadline::after(2_000).unwrap(), || {
+            reads += 1;
+            if reads < 3 { Err(busy()) } else { Ok(true) }
+        });
+        assert!(result.is_ok());
+        assert_eq!(reads, 3);
+    }
+
+    #[test]
+    fn a_read_that_says_the_element_is_gone_ends_the_wait_at_once() {
+        let mut reads = 0;
+        let gone = || {
+            crate::tree::surface_read::map_error(
+                "AXMinimized",
+                accessibility_sys::kAXErrorInvalidUIElement,
+            )
+        };
+        let error = wait_until(Deadline::after(2_000).unwrap(), || {
+            reads += 1;
+            Err(gone())
+        })
+        .unwrap_err();
+        assert_eq!(reads, 1);
+        assert_eq!(error.code, agent_desktop_core::ErrorCode::ElementNotFound);
+        assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
+    }
+
+    #[test]
+    fn an_app_that_stays_busy_until_the_deadline_is_a_postcondition_timeout() {
+        let error = wait_until(Deadline::after(60).unwrap(), || Err(busy())).unwrap_err();
+        assert_eq!(error.code, agent_desktop_core::ErrorCode::Timeout);
+        assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
+    }
 
     #[test]
     fn geometry_verification_tolerates_ax_rounding_only() {
