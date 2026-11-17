@@ -138,12 +138,25 @@ function desktopControlPath(root, platform) {
 
 /**
  * The cached desktop-control build is a regular file whose bytes match its own seal (and, off
- * Windows, that can be executed).
+ * Windows, that can be executed). On macOS the clipboard helper built beside it must be the same:
+ * a cache from before the helper was built is not valid. The helper is never started here.
  * @param {string} root @param {string} [platform]
  */
 export function desktopControlCacheValid(root, platform = process.platform) {
+  const executable = desktopControlPath(root, platform);
+  return (
+    sealedExecutableValid(executable, platform) &&
+    (platform !== 'darwin' ||
+      sealedExecutableValid(
+        join(root, DESKTOP_CONTROL_RELEASE, 'sprint-coder-desktop-control-helper'),
+        platform,
+      ))
+  );
+}
+
+/** @param {string} executable @param {string} platform */
+function sealedExecutableValid(executable, platform) {
   try {
-    const executable = desktopControlPath(root, platform);
     for (const path of [executable, `${executable}.sha256`]) {
       const entry = lstatSync(path);
       if (!entry.isFile() || entry.isSymbolicLink()) return false;

@@ -115,6 +115,30 @@ describe('desktop-control run environment', () => {
     ).toEqual({ Path: '', AGENT_DESKTOP_HOME: desktopControlStateFolder() });
   });
 
+  it("never passes the macOS clipboard helper's variables, in any letter case", () => {
+    const environment = {
+      PATH: '/usr/bin:/bin',
+      LANG: 'ja_JP.UTF-8',
+      AGENT_DESKTOP_MACOS_HELPER_PATH: '/Users/me/work/sprint-coder-desktop-control-helper',
+      AGENT_DESKTOP_MACOS_HELPER_MODE: 'clipboard',
+      AGENT_DESKTOP_MACOS_HELPER_TOKEN: 'a'.repeat(64),
+      agent_desktop_macos_helper_path: '/Users/me/work/helper',
+    };
+    for (const platform of ['darwin', 'win32'] as const) {
+      const filtered = desktopControlEnvironment(environment, ['/Users/me/work'], {
+        platform,
+        realpath: (path) => path,
+      });
+      expect(
+        Object.keys(filtered).filter((key) =>
+          key.toUpperCase().startsWith('AGENT_DESKTOP_MACOS_HELPER_'),
+        ),
+        platform,
+      ).toEqual([]);
+      expect(filtered['LANG'], platform).toBe('ja_JP.UTF-8');
+    }
+  });
+
   it('drops any entry with a quote unread, and rebuilds PATH from the normalized folders', () => {
     const windows = { platform: 'win32' as const, realpath: (path: string) => path };
     const filtered = desktopControlEnvironment(
@@ -1265,14 +1289,157 @@ describe('desktop control on Apple silicon macOS', () => {
     ]);
   });
 
-  it('refuses what macOS cannot do yet before any card, alone or in a batch', () => {
-    const refused = (argv: string[]) => desktopControlArgvRefusal(argv, ['/Users/me/work'], mac);
-    const later = 'は macOS ではまだ使えない';
-    expect(refused(['clipboard-set', 'text'])).toContain(`clipboard-set ${later}`);
-    expect(refused(['clipboard-clear'])).toContain(`clipboard-clear ${later}`);
+  it('writes the clipboard only while the helper beside the executable matches its seal', () => {
+    const HELPER = posix.join(posix.dirname(BUILD), 'sprint-coder-desktop-control-helper');
+    const withHelper = (content: string | null, sealed: string | null) => ({
+      ...mac,
+      contentDigest: digests({
+        [BUILD]: SEALED,
+        ...(content === null ? {} : { [HELPER]: content }),
+      }),
+      sealedDigest: digests({ [BUILD]: SEALED, ...(sealed === null ? {} : { [HELPER]: sealed }) }),
+    });
+    const refusedWith = (lookup: typeof mac, argv: string[]) =>
+      desktopControlArgvRefusal(argv, ['/Users/me/work'], lookup);
+    const writes: string[][] = [
+      ['clipboard-set', 'text'],
+      ['clipboard-clear'],
+      [
+        'batch',
+        JSON.stringify([{ command: 'clipboard-set', args: { text: 'x' } }]),
+        '--stop-on-error',
+      ],
+      ['batch', '--stop-on-error', JSON.stringify([{ command: 'clipboard-clear', args: {} }])],
+    ];
+    const where = 'apps/desktop/desktop-control/build/Release/sprint-coder-desktop-control-helper';
+    // Missing, unsealed or not matching its seal: only the two writes are refused, before any card.
+    for (const [lookup, reason] of [
+      [mac, 'が無いか、読めない'],
+      [withHelper(SEALED, null), 'の .sha256 の封印が無い'],
+      [withHelper(SEALED, 'not a digest'), 'の .sha256 の封印が無い'],
+      [withHelper(OTHER, SEALED), 'の中身が .sha256 の封印と一致しない'],
+    ] as const) {
+      for (const argv of writes)
+        expect(refusedWith(lookup, argv), argv.join(' ')).toContain(`（${where}）${reason}`);
+      expect(refusedWith(lookup, ['clipboard-clear'])).toContain('clipboard-clear は使えない');
+      expect(refusedWith(lookup, writes[2]!)).toContain('batch の中の clipboard-set は使えない');
+      expect(refusedWith(lookup, ['clipboard-clear'])).toContain('npm run build:desktop-control');
+      expect(refusedWith(lookup, ['launch', 'TextEdit'])).toBeNull();
+      expect(refusedWith(lookup, ['clipboard-get'])).toContain('clipboard-get は使えない');
+    }
+    // Sealed: the same approval flow as on Windows, with the same refused options.
+    const sealed = withHelper(SEALED, SEALED);
+    for (const argv of writes) expect(refusedWith(sealed, argv), argv.join(' ')).toBeNull();
+    expect(refusedWith(sealed, ['clipboard-set', '--file-url', '/tmp/secret.txt'])).toContain(
+      '--file-url は使えない',
+    );
+    expect(refusedWith(sealed, ['clipboard-get'])).toContain('clipboard-get は使えない');
     expect(
-      refused(['batch', JSON.stringify([{ command: 'clipboard-set', args: { text: 'x' } }])]),
-    ).toContain(`batch の中の clipboard-set ${later}`);
+      refusedWith(sealed, ['batch', JSON.stringify([{ command: 'clipboard-get', args: {} }])]),
+    ).toContain('clipboard-get は使えない');
+    // In a batch too, an image or a file URL stays refused with --stop-on-error (and the batch
+    // without it is refused anyway).
+    for (const [args, key] of [
+      [{ image: '/tmp/picture.png' }, 'image'],
+      [{ file_url: ['/tmp/secret.txt'] }, 'file_url'],
+    ] as const) {
+      const entries = JSON.stringify([{ command: 'clipboard-set', args }]);
+      expect(refusedWith(sealed, ['batch', '--stop-on-error', entries]), key).toContain(
+        `batch の中の ${key} は使えない`,
+      );
+      expect(refusedWith(sealed, ['batch', entries]), key).not.toBeNull();
+    }
+  });
+
+  it('on macOS lets a batch write the clipboard only when it stops on an error', () => {
+    const HELPER = posix.join(posix.dirname(BUILD), 'sprint-coder-desktop-control-helper');
+    const sealed = {
+      ...mac,
+      contentDigest: digests({ [BUILD]: SEALED, [HELPER]: SEALED }),
+      sealedDigest: digests({ [BUILD]: SEALED, [HELPER]: SEALED }),
+    };
+    const batch = (entries: unknown[], ...flags: string[]) => [
+      'batch',
+      ...flags,
+      JSON.stringify(entries),
+    ];
+    const pasteAfter = (command: string, args: Record<string, unknown>) => [
+      { command, args },
+      { command: 'press', args: { combo: 'cmd+v', app: 'TextEdit' } },
+    ];
+    for (const [command, args] of [
+      ['clipboard-set', { text: 'x' }],
+      ['clipboard-clear', {}],
+    ] as const) {
+      const refusalText = desktopControlArgvRefusal(
+        batch(pasteAfter(command, args)),
+        ['/Users/me/work'],
+        sealed,
+      );
+      expect(refusalText, command).toContain(
+        `batch の中の ${command} は、--stop-on-error を付けた batch でだけ使える`,
+      );
+      expect(refusalText, command).toContain('batch に --stop-on-error を付けて出し直す');
+      expect(
+        desktopControlArgvRefusal(
+          batch(pasteAfter(command, args), '--stop-on-error'),
+          ['/Users/me/work'],
+          sealed,
+        ),
+        command,
+      ).toBeNull();
+    }
+    // A batch without a clipboard write is as it was.
+    expect(
+      desktopControlArgvRefusal(
+        batch([{ command: 'press', args: { combo: 'cmd+v', app: 'TextEdit' } }]),
+        ['/Users/me/work'],
+        sealed,
+      ),
+    ).toBeNull();
+    // Windows is unchanged: no --stop-on-error is required there.
+    const windows = { ...mac, platform: 'win32' as const };
+    expect(
+      desktopControlArgvRefusal(
+        batch(pasteAfter('clipboard-set', { text: 'x' })),
+        ['C:\\work'],
+        windows,
+      ),
+    ).toBeNull();
+  });
+
+  it('names the packaged helper by where it lives in the bundle', () => {
+    const refusedWith = (lookup: typeof mac, argv: string[]) =>
+      desktopControlArgvRefusal(argv, ['/Users/me/work'], lookup);
+    // A packaged app names the helper by where it lives in the bundle, without the build hint.
+    const resources = '/Applications/Sprint Coder.app/Contents/Resources';
+    const shipped = posix.join(resources, 'sprint-coder-desktop-control');
+    const packagedHelper = posix.join(resources, 'sprint-coder-desktop-control-helper');
+    const packagedMac = {
+      ...mac,
+      packaged: true,
+      resourcesPath: resources,
+      contentDigest: digests({ [shipped]: SEALED }),
+      sealedDigest: digests({ [shipped]: SEALED, [packagedHelper]: SEALED }),
+    };
+    const packagedRefusal = refusedWith(packagedMac, ['clipboard-set', 'text']);
+    expect(packagedRefusal).toContain(
+      '（Contents/Resources/sprint-coder-desktop-control-helper）が無いか、読めない',
+    );
+    expect(packagedRefusal).not.toContain('npm run');
+    expect(
+      refusedWith(
+        {
+          ...packagedMac,
+          contentDigest: digests({ [shipped]: SEALED, [packagedHelper]: SEALED }),
+        },
+        ['clipboard-set', 'text'],
+      ),
+    ).toBeNull();
+  });
+
+  it('judges launch --url by the known browsers on macOS, alone or in a batch', () => {
+    const refused = (argv: string[]) => desktopControlArgvRefusal(argv, ['/Users/me/work'], mac);
     // launch --url is for the known browsers by their macOS names; Safari takes no URL.
     expect(refused(['launch', 'Google Chrome', '--url', 'https://example.com/'])).toBeNull();
     expect(refused(['launch', 'com.google.Chrome', '--url', 'https://example.com/'])).toBeNull();

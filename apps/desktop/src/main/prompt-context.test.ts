@@ -488,7 +488,16 @@ describe('prompt context compiler', () => {
       '開発版では、一覧に出る Electron か、起動に使ったアプリ（npm start を実行した端末や IDE）を許可してください',
     );
     expect(text).toContain('PERM_DENIED');
-    expect(text).toContain('clipboard-set・clipboard-clear');
+    // The clipboard writes work on macOS too now.
+    expect(text).not.toContain(
+      'クリップボードへの書き込み（clipboard-set・clipboard-clear）はまだ使えない',
+    );
+    // A batch that writes the clipboard stops on an error, and a failed write is never pasted.
+    expect(text).toContain(
+      'clipboard-set・clipboard-clear を batch に入れる時は、batch に --stop-on-error を付ける',
+    );
+    expect(text).toContain('書き込みが失敗したら、その後の貼り付け（cmd+v など）はしない');
+    expect(windows.content).not.toContain('--stop-on-error を付ける');
     expect(text).not.toContain('launch の --url はまだ使えない');
     // launch --url by the macOS names of the browsers, never Safari.
     expect(text).toContain('launch <ブラウザー名> --url <URL>');

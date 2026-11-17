@@ -5,7 +5,8 @@ Source: tag v1.2.0, commit 2b0a7334fc111730454b726e6800aa41cdafc093
 Sprint Coder's desktop control is built from the agent-desktop 1.2.0 source, copied into this
 repository at apps/desktop/desktop-control (only the parts the Windows and macOS command-line
 builds need) and built there; the packaged app ships that build as
-sprint-coder-desktop-control.exe on Windows and sprint-coder-desktop-control on macOS. The files
+sprint-coder-desktop-control.exe on Windows and sprint-coder-desktop-control on macOS, with the
+macOS clipboard helper built from the same source as sprint-coder-desktop-control-helper. The files
 Sprint Coder has changed, and what was left out, are listed in
 apps/desktop/desktop-control/VENDORED.md; further changes are made in this repository and recorded
 there. agent-desktop is licensed under the Apache License, Version 2.0, reproduced in full below

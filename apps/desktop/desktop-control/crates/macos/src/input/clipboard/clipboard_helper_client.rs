@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, ClipboardContent, ClipboardFormat, Deadline, ErrorCode, ImageBuffer, ImageFormat,
     MAX_PNG_INPUT_BYTES,
@@ -115,9 +116,14 @@ fn run(
             "AGENT_DESKTOP_MACOS_HELPER_DEADLINE_MS",
             deadline.remaining_ms().to_string(),
         );
-    let output =
-        super::clipboard_helper_process::run(&mut command, input, deadline, Some(&identity))
-            .map_err(|error| classify_mutation_failure(operation, error, false))?;
+    let output = super::clipboard_helper_process::run(
+        &mut command,
+        input,
+        deadline,
+        Some(&identity),
+        identity.termination(),
+    )
+    .map_err(|error| classify_mutation_failure(operation, error, false))?;
     let response = parse_output(&output, &token, operation)
         .map_err(|error| classify_mutation_failure(operation, error, true))?;
     if protocol::is_mutating(operation)

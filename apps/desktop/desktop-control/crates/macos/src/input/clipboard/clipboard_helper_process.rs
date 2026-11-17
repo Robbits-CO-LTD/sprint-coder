@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -12,11 +13,23 @@ use super::clipboard_helper_protocol as protocol;
 const CLEANUP_RESERVE: Duration = Duration::from_millis(100);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// Where the helper runs and how a failed run ends it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Termination {
+    /// Upstream: a process group of its own, ended as a group.
+    OwnGroup,
+    /// Sprint Coder: the caller's process group, so a signal to that group (Sprint Coder's Stop)
+    /// ends the helper with the CLI; a failed run ends only the helper's own pid. The helper starts
+    /// no processes of its own.
+    CallerGroup,
+}
+
 pub(crate) fn run(
     command: &mut Command,
     input: &[u8],
     deadline: Deadline,
     identity: Option<&HelperIdentity>,
+    termination: Termination,
 ) -> Result<Vec<u8>, AdapterError> {
     let absolute = Instant::now()
         .checked_add(deadline.remaining())
@@ -28,14 +41,20 @@ pub(crate) fn run(
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
+    if termination == Termination::OwnGroup {
+        command.process_group(0);
+    }
     let mut child = command.spawn().map_err(spawn_error)?;
-    let process_group = i32::try_from(child.id()).map_err(|_| {
+    let pid = i32::try_from(child.id()).map_err(|_| {
         let _ = child.kill();
         let _ = child.wait();
         AdapterError::internal("Clipboard helper PID exceeds the macOS pid_t range")
     })?;
+    let process_group = match termination {
+        Termination::OwnGroup => Target::Group(pid),
+        Termination::CallerGroup => Target::Child,
+    };
     let Some(stdin) = child.stdin.take() else {
         return cleanup_bare(
             child,
@@ -159,9 +178,17 @@ fn receive<T>(thread: &IoThread<T>, deadline: Instant, phase: &str) -> Result<T,
         .map_err(|error| AdapterError::internal(format!("Clipboard helper {phase}: {error}")))
 }
 
+/// What a failed run kills: the helper's own group, or only the helper (never the caller's group,
+/// which holds the CLI itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Group(i32),
+    Child,
+}
+
 fn cleanup(
     mut child: Child,
-    process_group: i32,
+    process_group: Target,
     writer: IoThread<()>,
     reader: IoThread<Vec<u8>>,
     deadline: Instant,
@@ -175,7 +202,7 @@ fn cleanup(
 
 fn cleanup_bare(
     mut child: Child,
-    process_group: i32,
+    process_group: Target,
     deadline: Instant,
     error: AdapterError,
 ) -> Result<Vec<u8>, AdapterError> {
@@ -183,9 +210,14 @@ fn cleanup_bare(
     Err(mark_dispatched(error))
 }
 
-fn kill_and_reap(child: &mut Child, process_group: i32, deadline: Instant) {
-    unsafe {
-        libc::kill(-process_group, libc::SIGKILL);
+fn kill_and_reap(child: &mut Child, process_group: Target, deadline: Instant) {
+    match process_group {
+        Target::Group(group) => unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        },
+        Target::Child => {
+            let _ = child.kill();
+        }
     }
     while Instant::now() < deadline {
         if child.try_wait().ok().flatten().is_some() {
@@ -231,7 +263,14 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "echo $$ > \"$1\"; sleep 60 & wait", "sh"]);
         command.arg(&pgid_file);
-        let error = run(&mut command, &[], Deadline::after(800).unwrap(), None).unwrap_err();
+        let error = run(
+            &mut command,
+            &[],
+            Deadline::after(800).unwrap(),
+            None,
+            Termination::OwnGroup,
+        )
+        .unwrap_err();
 
         assert_eq!(error.code, ErrorCode::Timeout);
         assert_eq!(error.details.unwrap()["helper_dispatched"], true);
@@ -253,6 +292,164 @@ mod tests {
 
     fn group_has_live_member(pgid: i32) -> bool {
         unsafe { libc::kill(-pgid, 0) == 0 }
+    }
+
+    fn process_is_alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn fixture_dir(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "clipboard-helper-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn wait_for_pid(file: &std::path::Path) -> i32 {
+        let give_up = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < give_up, "the stand-in never started");
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    fn wait_until_gone(pid: i32) -> bool {
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while process_is_alive(pid) && Instant::now() < give_up {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        !process_is_alive(pid)
+    }
+
+    #[test]
+    fn a_caller_group_helper_shares_the_group_and_a_deadline_ends_only_the_helper() {
+        let dir = fixture_dir("caller-deadline");
+        let pid_file = dir.join("helper.pid");
+        let mut command = Command::new("/bin/sh");
+        // `exec` keeps the stand-in a single process, as the helper is.
+        command.args(["-c", "echo $$ > \"$1\"; exec /bin/sleep 60", "sh"]);
+        command.arg(&pid_file);
+        let running = std::thread::spawn(move || {
+            run(
+                &mut command,
+                &[],
+                Deadline::after(1_500).unwrap(),
+                None,
+                Termination::CallerGroup,
+            )
+        });
+        let pid = wait_for_pid(&pid_file);
+        // Not moved to a group of its own: a signal to the caller's group reaches it.
+        assert_eq!(unsafe { libc::getpgid(pid) }, unsafe { libc::getpgrp() });
+        let error = running.join().unwrap().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.details.unwrap()["helper_dispatched"], true);
+        // The deadline ended the helper's pid alone; this process, in the same group, lives on.
+        assert!(
+            wait_until_gone(pid),
+            "the helper {pid} survived the deadline"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const STOP_WORKER_DIR: &str = "SPRINT_CODER_CLIPBOARD_STOP_TEST_DIR";
+    const STOP_WORKER_MODE: &str = "SPRINT_CODER_CLIPBOARD_STOP_TEST_MODE";
+    const STOP_TEST: &str = "input::clipboard::clipboard_helper_process::tests::a_stop_sent_to_the_callers_group_ends_a_helper_waiting_before_its_change";
+
+    /// Stands in for the CLI: runs a helper stand-in that waits for `go` before its "change".
+    fn stop_worker(dir: &str, mode: &str) {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "echo $$ > \"$1/helper.pid\"; while [ ! -e \"$1/go\" ]; do /bin/sleep 0.05; done; echo changed > \"$1/changed\"",
+            "sh",
+            dir,
+        ]);
+        let termination = if mode == "caller" {
+            Termination::CallerGroup
+        } else {
+            Termination::OwnGroup
+        };
+        let _ = run(
+            &mut command,
+            &[],
+            Deadline::after(10_000).unwrap(),
+            None,
+            termination,
+        );
+    }
+
+    #[test]
+    fn a_stop_sent_to_the_callers_group_ends_a_helper_waiting_before_its_change() {
+        if let (Ok(dir), Ok(mode)) = (
+            std::env::var(STOP_WORKER_DIR),
+            std::env::var(STOP_WORKER_MODE),
+        ) {
+            stop_worker(&dir, &mode);
+            return;
+        }
+        for (mode, ends_with_the_stop) in [("caller", true), ("own", false)] {
+            let dir = fixture_dir(&format!("stop-{mode}"));
+            // The worker leads a group of its own, as Sprint Coder starts the CLI.
+            let mut worker = Command::new(std::env::current_exe().unwrap())
+                .args([STOP_TEST, "--exact", "--nocapture", "--test-threads=1"])
+                .env(STOP_WORKER_DIR, &dir)
+                .env(STOP_WORKER_MODE, mode)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let worker_group = i32::try_from(worker.id()).unwrap();
+            let helper = wait_for_pid(&dir.join("helper.pid"));
+            // Sprint Coder's forced Stop: SIGKILL to the CLI's process group.
+            unsafe { libc::kill(-worker_group, libc::SIGKILL) };
+            worker.wait().unwrap();
+            if ends_with_the_stop {
+                assert!(
+                    wait_until_gone(helper),
+                    "{mode}: the helper outlived the Stop"
+                );
+                std::fs::write(dir.join("go"), b"").unwrap();
+                std::thread::sleep(Duration::from_millis(400));
+                assert!(
+                    !dir.join("changed").exists(),
+                    "{mode}: the change ran after the Stop"
+                );
+            } else {
+                // Upstream's own group is out of the Stop's reach: the helper lives on and, once
+                // let go, still makes its change. This is what the caller group prevents.
+                std::thread::sleep(Duration::from_millis(200));
+                assert!(
+                    process_is_alive(helper),
+                    "{mode}: expected the helper to survive"
+                );
+                std::fs::write(dir.join("go"), b"").unwrap();
+                let give_up = Instant::now() + Duration::from_secs(5);
+                while !dir.join("changed").exists() && Instant::now() < give_up {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                unsafe { libc::kill(-helper, libc::SIGKILL) };
+                assert!(
+                    dir.join("changed").exists(),
+                    "{mode}: expected the change to run"
+                );
+                assert!(wait_until_gone(helper));
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

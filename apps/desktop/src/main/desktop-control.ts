@@ -12,6 +12,7 @@ import {
 import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
 import {
+  DESKTOP_CONTROL_MAC_HELPER,
   desktopControlExecutableName,
   desktopControlPackaged,
   desktopControlSupported,
@@ -275,9 +276,12 @@ export function desktopControlEnvironment(
           DESKTOP_CONTROL_INTERACTION_LEASE_VARIABLE,
         ]),
   ];
-  const filtered = Object.entries(environment).filter(
-    ([key]) => !owned.includes(windows ? key.toUpperCase() : key),
-  );
+  // The macOS clipboard helper's variables (its path above all) are never passed: under its Sprint
+  // Coder name the executable ignores them too, and finds the sealed helper beside itself.
+  const filtered = Object.entries(environment).filter(([key]) => {
+    const name = windows ? key.toUpperCase() : key;
+    return !owned.includes(name) && !name.toUpperCase().startsWith(DESKTOP_CONTROL_HELPER_PREFIX);
+  });
   filtered.push([DESKTOP_CONTROL_STATE_VARIABLE, desktopControlStateFolder()]);
   if (expectedWindowOwner !== undefined)
     filtered.push([DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE, expectedWindowOwner]);
@@ -315,6 +319,12 @@ export function desktopControlEnvironment(
     }),
   );
 }
+
+/**
+ * The prefix of the variables the macOS clipboard helper reads and the executable reads to find it
+ * (`crates/macos/src/input/clipboard/clipboard_helper_identity.rs`), in any letter case.
+ */
+const DESKTOP_CONTROL_HELPER_PREFIX = 'AGENT_DESKTOP_MACOS_HELPER_';
 
 /** The variable the desktop-control binary 1.2.0 reads its state folder from (an absolute path). */
 const DESKTOP_CONTROL_STATE_VARIABLE = 'AGENT_DESKTOP_HOME';
@@ -1191,7 +1201,10 @@ export function desktopControlArgvRefusal(
   // Help and version print and exit without acting.
   if (read.help.length > 0 || key === undefined) return null;
   const platform = lookup.platform ?? process.platform;
-  if (platform === 'darwin' && MAC_UNAVAILABLE_COMMANDS.has(key)) return macUnavailable(key);
+  if (platform === 'darwin' && MAC_HELPER_COMMANDS.has(key)) {
+    const helper = macClipboardHelperRefusal(key, lookup);
+    if (helper !== null) return helper;
+  }
   if (key === 'screenshot' && positionals.length > 0)
     return refusal('screenshot の保存先は指定できない');
   if (key === 'launch') {
@@ -1205,7 +1218,7 @@ export function desktopControlArgvRefusal(
   }
   if (key === 'batch')
     return positionals.length === 1
-      ? batchRefusal(positionals[0]!, workspaceRoots, lookup)
+      ? batchRefusal(positionals[0]!, workspaceRoots, lookup, read.options.has('--stop-on-error'))
       : refusal('batch には JSON の配列を 1 つだけ渡す');
   const keyTarget = keyTargetRefusal(key, (name) =>
     name === ''
@@ -1367,11 +1380,37 @@ function refusal(reason: string): string {
   return `デスクトップ操作の実行を拒否した: ${reason}。`;
 }
 
-// Not on macOS yet: writing the clipboard needs an executable of its own there.
-const MAC_UNAVAILABLE_COMMANDS = new Set(['clipboard-set', 'clipboard-clear']);
+// On macOS the executable writes and clears the clipboard through a helper executable of its own
+// (`DESKTOP_CONTROL_MAC_HELPER`), so these run only while that helper is sealed beside it.
+const MAC_HELPER_COMMANDS = new Set(['clipboard-set', 'clipboard-clear']);
 
-function macUnavailable(what: string): string {
-  return refusal(`${what} は macOS ではまだ使えない`);
+/**
+ * Why a macOS clipboard write may not run, or `null` when the helper lies beside the shipped
+ * executable (the folder the executable, started from its own path, looks in under its Sprint Coder
+ * name) and its bytes match its `.sha256` manifest. Judged on the cached digest like the executable
+ * itself (`shippedDesktopControl`). Before starting the helper the executable checks only how the
+ * file is held (a regular single-link file of this user, its permissions, ACLs and folders), never
+ * its bytes again, so a same-user swap of both the helper and its seal between the card and the run
+ * is not caught. Only these two commands are refused: everything else stays as it was.
+ */
+function macClipboardHelperRefusal(what: string, lookup: DesktopControlLookup): string | null {
+  const shipped = shippedDesktopControl(lookup);
+  const packaged = shippedCandidate(lookup)?.packaged ?? false;
+  const where = packaged
+    ? `Contents/Resources/${DESKTOP_CONTROL_MAC_HELPER}`
+    : [...DEVELOPMENT_BUILD_FOLDER, DESKTOP_CONTROL_MAC_HELPER].join('/');
+  const unusable = (reason: string) =>
+    refusal(
+      `${what} は使えない: macOS でクリップボードに書く実行ファイル（${where}）${reason}${packaged ? '' : '。リポジトリの root で `npm run build:desktop-control` を実行してから、Sprint Coder を起動し直す'}`,
+    );
+  if (shipped === null) return unusable('の隣のデスクトップ操作の実行ファイルを確かめられない');
+  const helper = posix.join(posix.dirname(shipped.path), DESKTOP_CONTROL_MAC_HELPER);
+  const content = (lookup.contentDigest ?? cachedFileDigest)(helper);
+  const sealed = (lookup.sealedDigest ?? sealedFileDigest)(helper);
+  if (content === null) return unusable('が無いか、読めない');
+  if (sealed === null || !SHA256.test(sealed)) return unusable('の .sha256 の封印が無い');
+  if (content !== sealed) return unusable('の中身が .sha256 の封印と一致しない');
+  return null;
 }
 
 function optionName(token: string): string {
@@ -1460,6 +1499,7 @@ function batchRefusal(
   json: string,
   workspaceRoots: readonly string[],
   lookup: DesktopControlLookup,
+  stopOnError: boolean,
 ): string | null {
   let entries: unknown;
   try {
@@ -1482,8 +1522,17 @@ function batchRefusal(
       return refusal(`batch の中の ${command} を判定できない`);
     const fields = (args ?? {}) as Record<string, unknown>;
     const platform = lookup.platform ?? process.platform;
-    if (platform === 'darwin' && MAC_UNAVAILABLE_COMMANDS.has(command))
-      return macUnavailable(`batch の中の ${command}`);
+    if (platform === 'darwin' && MAC_HELPER_COMMANDS.has(command)) {
+      const helper = macClipboardHelperRefusal(`batch の中の ${command}`, lookup);
+      if (helper !== null) return helper;
+      // The executable may still refuse the helper after the card (its owner, mode or folders,
+      // which Main does not check), and a batch goes on to the next entry by default: a paste
+      // after a refused write would then paste what the user had on the clipboard before.
+      if (!stopOnError)
+        return refusal(
+          `batch の中の ${command} は、--stop-on-error を付けた batch でだけ使える（macOS では、書き込みが失敗しても batch が次の操作へ進み、貼り付けが前のクリップボードの中身を貼り得るため）。batch に --stop-on-error を付けて出し直す`,
+        );
+    }
     if (command === 'launch') {
       const unknown = Object.keys(fields).find((name) => !BATCH_LAUNCH_KEYS.has(name));
       if (unknown !== undefined) return refusal(`batch の中の launch の ${unknown} は使えない`);

@@ -20,6 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
 import {
+  DESKTOP_CONTROL_MAC_HELPER,
   DESKTOP_CONTROL_VERSION,
   desktopControlExecutableName,
   desktopControlPackaged,
@@ -145,15 +146,30 @@ export function desktopControlSource(
   );
 }
 
+/**
+ * macOS: the clipboard helper the executable writes and clears the clipboard through, built beside
+ * it (`DESKTOP_CONTROL_MAC_HELPER`), or `null` where it is not shipped (Windows has none).
+ */
+export function desktopControlHelperSource(
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string | null {
+  const executable = desktopControlSource(platform, arch);
+  if (executable === null || platform !== 'darwin') return null;
+  return join(dirname(executable), DESKTOP_CONTROL_MAC_HELPER);
+}
+
 export function desktopControlResources(
   platform: string = process.platform,
   arch: string = process.arch,
 ): string[] {
   const executable = desktopControlSource(platform, arch);
   if (executable === null) return [];
+  const helper = desktopControlHelperSource(platform, arch);
   return [
     executable,
     `${executable}.sha256`,
+    ...(helper === null ? [] : [helper, `${helper}.sha256`]),
     resolve(__dirname, '..', '..', 'docs', 'licenses', 'desktop-control-license.txt'),
   ];
 }
@@ -182,6 +198,24 @@ export function packagedDesktopControlExecutable(
   return platform === 'win32'
     ? join(appPath, 'resources', desktopControlExecutableName(platform))
     : join(appPath, 'Contents', 'Resources', desktopControlExecutableName(platform));
+}
+
+/** The macOS clipboard helper inside a packaged `.app`, beside the desktop-control executable. */
+export function packagedDesktopControlHelper(appPath: string): string {
+  return join(appPath, 'Contents', 'Resources', DESKTOP_CONTROL_MAC_HELPER);
+}
+
+/**
+ * Seals the packaged macOS clipboard helper's final bytes after Mach-O signing changed them, as
+ * for the executable beside it.
+ */
+export function refreshPackagedDesktopControlHelperDigest(appPath: string): string {
+  const helper = packagedDesktopControlHelper(appPath);
+  if (!lstatSync(helper).isFile())
+    throw new Error('Packaged desktop-control clipboard helper was not found');
+  const digest = createHash('sha256').update(readFileSync(helper)).digest('hex');
+  writeFileSync(`${helper}.sha256`, `${digest}\n`, { mode: 0o600 });
+  return digest;
 }
 
 /**
@@ -382,13 +416,16 @@ function isPackagedMacNode(path: string): boolean {
 }
 
 function isPackagedMacDesktopControl(path: string): boolean {
-  return path.endsWith(`/Contents/Resources/${desktopControlExecutableName('darwin')}`);
+  return [desktopControlExecutableName('darwin'), DESKTOP_CONTROL_MAC_HELPER].some((name) =>
+    path.endsWith(`/Contents/Resources/${name}`),
+  );
 }
 
 /**
  * Per-file options for @electron/osx-sign. Its default gives every other Mach-O hardened runtime
  * plus Electron's default.darwin.plist (JIT, camera, microphone, location, ...), and it always
- * passes `--entitlements`, so the desktop-control executable gets an explicitly empty set.
+ * passes `--entitlements`, so the desktop-control executable and its clipboard helper get an
+ * explicitly empty set.
  */
 export function macSignOptionsForFile(file: string) {
   if (isPackagedMacNode(file)) return { entitlements: bundledNodeEntitlements };
@@ -487,12 +524,16 @@ const config: ForgeConfig = {
     afterCopyExtraResources: [
       (buildPath, _electronVersion, platform, arch, done) => {
         try {
-          if (desktopControlPackaged(platform, arch))
-            verifyDesktopControlBinary(
-              platform === 'win32'
-                ? packagedDesktopControlExecutable(buildPath, 'win32')
-                : packagedDesktopControlExecutable(singleMacAppBundle(buildPath), 'darwin'),
-            );
+          if (desktopControlPackaged(platform, arch)) {
+            if (platform === 'win32')
+              verifyDesktopControlBinary(packagedDesktopControlExecutable(buildPath, 'win32'));
+            else {
+              const appPath = singleMacAppBundle(buildPath);
+              verifyDesktopControlBinary(packagedDesktopControlExecutable(appPath, 'darwin'));
+              // The clipboard helper beside it, the same way.
+              verifyDesktopControlBinary(packagedDesktopControlHelper(appPath));
+            }
+          }
           done();
         } catch (error) {
           done(error instanceof Error ? error : new Error(String(error)));
@@ -509,6 +550,8 @@ const config: ForgeConfig = {
         if (arch !== process.arch)
           throw new Error(`desktop-control for ${platform}-${arch} must be packaged on ${arch}`);
         verifyDesktopControlBinary(desktopControlSource(platform, arch)!);
+        const helper = desktopControlHelperSource(platform, arch);
+        if (helper !== null) verifyDesktopControlBinary(helper);
       }
     },
     postPackage: async (_forgeConfig, packageResult) => {
@@ -538,9 +581,11 @@ const config: ForgeConfig = {
         // Seal the signed bytes, then refresh only the outer app signature so CodeResources
         // covers the new manifest without rewriting the already-signed nested executable.
         refreshPackagedSandboxRunnerDigest(appPath);
-        // The same for the desktop-control executable.
-        if (desktopControlPackaged('darwin', packageResult.arch))
+        // The same for the desktop-control executable and its clipboard helper.
+        if (desktopControlPackaged('darwin', packageResult.arch)) {
           refreshPackagedDesktopControlDigest(appPath, 'darwin');
+          refreshPackagedDesktopControlHelperDigest(appPath);
+        }
         resealMacAppBundle(appPath);
         execFileSync(
           '/usr/bin/codesign',

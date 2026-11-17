@@ -324,6 +324,8 @@ describe('CI cache reuse and fallback', () => {
     expect(desktopControlCacheValid(root, 'win32')).toBe(true);
     // The Windows build is not taken for the macOS one.
     expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
+    // Windows needs no clipboard helper.
+    expect(existsSync(join(directory, 'sprint-coder-desktop-control-helper'))).toBe(false);
     writeFileSync(executable, 'changed');
     expect(desktopControlCacheValid(root, 'win32')).toBe(false);
     writeFileSync(`${executable}.sha256`, 'invalid');
@@ -356,6 +358,18 @@ describe('CI cache reuse and fallback', () => {
       // A sealed file that cannot be executed is not the build.
       expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
       chmodSync(executable, 0o755);
+      // Nor is a cache without the clipboard helper beside it, sealed and executable too.
+      expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
+      const helper = join(directory, 'sprint-coder-desktop-control-helper');
+      const helperContent = 'fixture-clipboard-helper';
+      write(helper, helperContent, 0o644);
+      write(`${helper}.sha256`, `${createHash('sha256').update(helperContent).digest('hex')}\n`);
+      expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
+      chmodSync(helper, 0o755);
+      expect(desktopControlCacheValid(root, 'darwin')).toBe(true);
+      writeFileSync(helper, 'changed');
+      expect(desktopControlCacheValid(root, 'darwin')).toBe(false);
+      writeFileSync(helper, helperContent);
       expect(desktopControlCacheValid(root, 'darwin')).toBe(true);
       expect(desktopControlCacheValid(root, 'win32')).toBe(false);
       expect(desktopControlProbeValid(root, 'darwin')).toBe(true);
