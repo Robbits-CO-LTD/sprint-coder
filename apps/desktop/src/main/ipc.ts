@@ -597,6 +597,7 @@ import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
 import {
   isScreenshotToolResult,
   screenshotCallKey,
+  type ScreenshotPicture,
   screenshotToolResultFor,
   takeScreenshotPicture,
   turnModelTakesPictures,
@@ -4728,13 +4729,22 @@ export class IpcRouter {
         toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
         accepted: false,
       } satisfies ProviderImageBridgeDispatchResult);
-    const result = await this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
+    let picture: ScreenshotPicture | undefined;
+    const result = await this.dispatchManagedRuntimeTool(
+      taskId,
+      turnId,
+      request,
+      signal,
+      undefined,
+      undefined,
+      (taken) => {
+        picture = taken;
+      },
+    );
     if (!isScreenshotToolResult(result)) return result;
     // A desktop-control screenshot's picture goes to the Turn's own model as an image (the CLI
     // adapters hand a `dataUrl` over as one), only when that model takes images, and only within
-    // what the runtime protocol carries. It is held beside the call as the broker ran it.
-    const { ownerTurnId, brokerCallId } = this.managedBrokerCall(turnId, request.callId);
-    const picture = takeScreenshotPicture(screenshotCallKey(taskId, ownerTurnId, brokerCallId));
+    // what the runtime protocol carries.
     return screenshotToolResultFor(
       result,
       picture,
@@ -4891,6 +4901,7 @@ export class IpcRouter {
     signal: AbortSignal,
     providerImageBridge?: ToolImageBridge,
     publishProviderImageBinding?: () => void,
+    onScreenshotPicture?: (picture: ScreenshotPicture) => void,
   ): Promise<unknown> {
     if (request.toolName === 'view_image' && providerImageBridge === undefined) {
       signal.throwIfAborted();
@@ -4986,6 +4997,11 @@ export class IpcRouter {
       throw error;
     } finally {
       if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
+      // A desktop-control screenshot's picture lives as long as its call: it is taken here, as the
+      // call returns, fails or is canceled (however long an earlier call of the Turn kept its
+      // result waiting), and handed only to a caller that asked for it.
+      const picture = takeScreenshotPicture(screenshotCallKey(taskId, ownerTurnId, brokerCallId));
+      if (picture !== undefined) onScreenshotPicture?.(picture);
     }
     const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, ownerTurnId);
     if (isCompleteProviderWorkspaceRead(result))

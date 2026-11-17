@@ -14,9 +14,9 @@ import {
   SCREENSHOT_PICTURE_ATTACHED,
   SCREENSHOT_PICTURE_UNAVAILABLE,
   fitScreenshotPicture,
-  SCREENSHOT_PICTURE_HOLD_MS,
   heldScreenshotPictureCount,
   holdScreenshotPicture,
+  releaseScreenshotPicturesForTurn,
   isDesktopControlScreenshot,
   isScreenshotToolResult,
   prepareScreenshotOutput,
@@ -309,17 +309,22 @@ describe('giving the picture to the model', () => {
     });
   });
 
-  it('holds a picture beside its call, once, and drops one nobody takes', () => {
+  it('holds a picture beside its call until it is taken, once, or its Turn ends', () => {
     vi.useFakeTimers();
     try {
       const key = screenshotCallKey('task', 'turn', 'call');
       holdScreenshotPicture(key, picture);
       expect(takeScreenshotPicture(screenshotCallKey('task', 'turn', 'other'))).toBeUndefined();
+      // No clock decides it: a call whose result waits for an earlier one keeps its picture.
+      vi.advanceTimersByTime(3_600_000);
       expect(takeScreenshotPicture(key)).toBe(picture);
       expect(takeScreenshotPicture(key)).toBeUndefined();
       holdScreenshotPicture(key, picture);
-      vi.advanceTimersByTime(SCREENSHOT_PICTURE_HOLD_MS);
+      holdScreenshotPicture(screenshotCallKey('task', 'other-turn', 'call'), picture);
+      releaseScreenshotPicturesForTurn('task', 'turn');
       expect(takeScreenshotPicture(key)).toBeUndefined();
+      expect(heldScreenshotPictureCount()).toBe(1);
+      releaseScreenshotPicturesForTurn('task', 'other-turn');
       expect(heldScreenshotPictureCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -558,6 +563,8 @@ describe('a screenshot run through exec_command', () => {
       expect(harness.stored[0]).toMatchObject({ seq: 1, stream: 'stdout' });
       const shown = JSON.stringify([harness.stored, harness.published]);
       expect(shown).not.toContain(png.toString('base64').slice(100, 160));
+      expect(shown).not.toContain(png.toString('base64').slice(0, 64));
+      expect(shown).not.toContain('iVBORw0KGgo');
       expect(dataOf(harness.stored[0]!.text)).toMatchObject({
         format: 'png',
         width: SCREENSHOT_MAX_EDGE,
@@ -572,7 +579,7 @@ describe('a screenshot run through exec_command', () => {
       // The tool result: the same metadata, the no-picture sentence, and the picture beside it.
       expect(result['stdout']).toBe(harness.stored[0]!.text);
       expect(result['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
-      expect(JSON.stringify(result)).not.toContain('base64');
+      expect(JSON.stringify(result)).not.toContain('iVBORw0KGgo');
       const held = takeScreenshotPicture(harness.lastCallKey());
       expect(held?.mimeType).toBe('image/png');
       expect(held?.sha256).toBe(dataOf(harness.stored[0]!.text)['sha256']);
@@ -590,6 +597,9 @@ describe('a screenshot run through exec_command', () => {
     ).sessions;
     expect(kept.size).toBeGreaterThan(0);
     for (const session of kept.values()) expect(session.chunks).toEqual([]);
+    expect(JSON.stringify([...kept.values()].map(({ chunks }) => chunks))).not.toContain(
+      'iVBORw0KGgo',
+    );
     await harness.sessions?.dispose();
   });
 

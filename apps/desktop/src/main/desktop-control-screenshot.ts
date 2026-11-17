@@ -267,12 +267,9 @@ export async function prepareScreenshotOutput(
 // The picture of a screenshot run's tool call, kept in Main beside the call (the Task, the Turn and
 // the call id the ToolBroker ran it under) and never in the result object, so no route that does
 // not ask for it (a stored record, an API provider's text, a log) can carry it, and no copy of the
-// result made on the way loses it. A picture nobody takes is dropped after a while.
-export const SCREENSHOT_PICTURE_HOLD_MS = 120_000;
-const pictures = new Map<
-  string,
-  { picture: ScreenshotPicture; timer: ReturnType<typeof setTimeout> }
->();
+// result made on the way loses it. It lives as long as the call: Main's managed dispatch takes it
+// as the call returns, fails or is canceled, and the Turn's end drops any left.
+const pictures = new Map<string, ScreenshotPicture>();
 
 /** The key a screenshot's picture is held under: the call as the ToolBroker ran it. */
 export function screenshotCallKey(taskId: string, turnId: string, callId: string): string {
@@ -280,19 +277,22 @@ export function screenshotCallKey(taskId: string, turnId: string, callId: string
 }
 
 export function holdScreenshotPicture(key: string, picture: ScreenshotPicture): void {
-  takeScreenshotPicture(key);
-  const timer = setTimeout(() => pictures.delete(key), SCREENSHOT_PICTURE_HOLD_MS);
-  timer.unref?.();
-  pictures.set(key, { picture, timer });
+  pictures.set(key, picture);
 }
 
 /** The picture held for this call, once; `undefined` for any other call. */
 export function takeScreenshotPicture(key: string): ScreenshotPicture | undefined {
-  const held = pictures.get(key);
-  if (held === undefined) return undefined;
-  clearTimeout(held.timer);
+  const picture = pictures.get(key);
   pictures.delete(key);
-  return held.picture;
+  return picture;
+}
+
+/** Drops every picture still held for a Turn's calls (as the Turn ends). */
+export function releaseScreenshotPicturesForTurn(taskId: string, turnId: string): void {
+  for (const key of [...pictures.keys()]) {
+    const [keyTask, keyTurn] = JSON.parse(key) as [string, string, string];
+    if (keyTask === taskId && keyTurn === turnId) pictures.delete(key);
+  }
 }
 
 /** How many pictures are held (for tests). */

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '@sprint-coder/domain';
+import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 
 class FakeUtilityProcess extends EventEmitter {
   readonly messages: unknown[] = [];
@@ -54,9 +54,29 @@ import {
   SCREENSHOT_PICTURE_ATTACHED,
   SCREENSHOT_PICTURE_UNAVAILABLE,
   heldScreenshotPictureCount,
+  holdScreenshotPicture,
+  releaseScreenshotPicturesForTurn,
+  screenshotCallKey,
 } from './desktop-control-screenshot';
 import { codexDynamicToolResponseFromManaged } from '../runtime-host/codex-adapter';
 import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
+
+const SLOW_TOOL = createToolDefinition({
+  toolId: createToolId({ provider: 'builtin', namespace: 'test', name: 'slow', version: '1' }),
+  providerName: 'slow_probe',
+  kind: 'fileRead',
+  schemaVersion: 1,
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  outputSchema: { type: 'object' },
+  sideEffect: 'read',
+  risk: 'low',
+  requiredCapabilities: ['workspace.read'],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 1,
+  workspaceBinding: { kind: 'any' },
+  providerCompatibility: ['*'],
+});
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -169,6 +189,9 @@ async function setUp(
   } as unknown as CommandToolBoundary;
   const registry = new ToolRegistry();
   registry.register(MANAGED_EXEC_COMMAND_TOOL);
+  // A call of the same Turn whose result is held until the test lets it go (an approval card
+  // answered late, for one): the ToolBroker returns later calls' results only after it.
+  registry.register(SLOW_TOOL);
   const broker = new ToolBroker(
     registry,
     () => 1,
@@ -189,6 +212,15 @@ async function setUp(
   }
   const sessions = new ManagedCommandSessions(runner);
   registerCommandRunnerTool(broker, runner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions, 10_000);
+  let releaseSlow = (): void => undefined;
+  broker.registerImplementation({
+    toolId: SLOW_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: () =>
+      new Promise((resolve) => {
+        releaseSlow = () => resolve({ ok: true });
+      }),
+  });
   const toolCatalog = broker.startTurn(turn, 'codex');
   const catalog = { revision: options.catalogBuilt === false ? 0 : 1 };
   vi.spyOn(desktopControlModule, 'isDesktopControlExecutable').mockReturnValue(true);
@@ -299,7 +331,24 @@ async function setUp(
       output: posted!.output,
     });
   };
-  return { call, client, sessions, stored, catalog };
+  /** A call as the Codex runtime's request reaches Main's own handler, without the runtime host. */
+  const dispatch = (callId: string, toolName: string, args: unknown) =>
+    handlers.codexRuntime!(
+      turn.taskId,
+      turn.turnId,
+      { callId, toolName, arguments: args, catalogDigest: toolCatalog.digest },
+      new AbortController().signal,
+    );
+  return {
+    call,
+    client,
+    sessions,
+    stored,
+    catalog,
+    dispatch,
+    releaseSlow: () => releaseSlow(),
+    png,
+  };
 }
 
 /**
@@ -318,7 +367,7 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
   it.each([false, true])(
     'reaches the Codex adapter as an image beside its metadata and sentence (cursors on: %s)',
     async (cursors) => {
-      const { call, client, sessions, stored } = await setUp(true, cursors);
+      const { call, client, sessions, stored, png } = await setUp(true, cursors);
       const response = await call(['screenshot', '--window-id', 'w-1']);
       expect(response.success).toBe(true);
       expect(response.contentItems).toHaveLength(2);
@@ -329,7 +378,10 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
       const shown = JSON.parse((text as { text: string }).text) as Record<string, unknown>;
       expect(shown['picture']).toBe(SCREENSHOT_PICTURE_ATTACHED);
       expect(shown['stdout']).toBe(stored.at(-1)!.text);
-      expect(JSON.stringify(stored)).not.toContain('base64');
+      // Nothing of the picture is stored: neither the capture's own base64 nor any PNG's.
+      const storedText = JSON.stringify(stored);
+      expect(storedText).not.toContain(png.toString('base64').slice(0, 64));
+      expect(storedText).not.toContain('iVBORw0KGgo');
 
       // What a script inside Codex's exec receives for the same response (probed against the
       // installed codex-cli 0.153.4 with a local stand-in for the model): one string, the items
@@ -349,6 +401,53 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
     },
     30_000,
   );
+
+  it('keeps the picture while an earlier call of the Turn holds the result back past 120 s', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const { dispatch, releaseSlow, client, sessions } = await setUp(true, false);
+      const earlier = dispatch('call-earlier', 'slow_probe', {});
+      const screenshot = dispatch('call-screenshot', 'exec_command', {
+        executable: process.execPath,
+        argv: ['screenshot', '--window-id', 'w-1'],
+        purpose: 'look at the window',
+      });
+      // The screenshot ran and its picture is held, waiting for the earlier call's result.
+      await vi.waitUntil(() => heldScreenshotPictureCount() === 1, { timeout: 20_000 });
+      vi.advanceTimersByTime(130_000);
+      expect(heldScreenshotPictureCount()).toBe(1);
+      releaseSlow();
+      await earlier;
+      const result = (await screenshot) as Record<string, unknown>;
+      expect(result['picture']).toBe(SCREENSHOT_PICTURE_ATTACHED);
+      expect(result['dataUrl']).toMatch(/^data:image\/png;base64,/u);
+      expect(heldScreenshotPictureCount()).toBe(0);
+      client.dispose();
+      await sessions.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it('holds no picture once its call has returned, and drops any left when the Turn ends', async () => {
+    const { dispatch, client, sessions } = await setUp(true, false);
+    await dispatch('call-screenshot', 'exec_command', {
+      executable: process.execPath,
+      argv: ['screenshot', '--window-id', 'w-1'],
+      purpose: 'look at the window',
+    });
+    expect(heldScreenshotPictureCount()).toBe(0);
+    holdScreenshotPicture(screenshotCallKey(turn.taskId, turn.turnId, 'never-taken'), {
+      mimeType: 'image/png',
+      dataUrl: 'data:image/png;base64,QUFB',
+      byteLength: 3,
+      sha256: 'a'.repeat(64),
+    });
+    releaseScreenshotPicturesForTurn(turn.taskId, turn.turnId);
+    expect(heldScreenshotPictureCount()).toBe(0);
+    client.dispose();
+    await sessions.dispose();
+  }, 30_000);
 
   it.each([
     ['a copy of the result', { cloneResult: true }],
