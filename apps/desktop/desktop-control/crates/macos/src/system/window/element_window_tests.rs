@@ -3,8 +3,12 @@ use super::names_attached;
 
 const APP: i32 = 400;
 
+/// Only the pid and layer are compared: a sheet, a popover and another
+/// ordinary window of the same app all pass. The element's own window is
+/// named whichever it is, which is safe because the cursor goes directly above
+/// it and never past a window in front of it.
 #[test]
-fn a_sheet_or_popover_of_the_same_process_and_layer_is_named() {
+fn another_window_of_the_same_process_and_layer_is_named() {
     assert!(names_attached(10, 11, Some((APP, 0)), Some((APP, 0))));
 }
 

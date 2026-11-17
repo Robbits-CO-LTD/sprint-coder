@@ -141,10 +141,14 @@ pub fn execute(
         Ok((from, to, lease, params))
     })?;
     // The pickup is drawn at the height of the window the pickup element lives
-    // in, and the drop at the drop element's, as a ref action is; a bare
-    // coordinate names none.
-    let from_window = crate::commands::hover::cursor_window(&from, adapter, context);
-    let to_window = crate::commands::hover::cursor_window(&to, adapter, context);
+    // in, and the drop at the drop element's, as a ref action is. A bare
+    // coordinate pickup names none; a bare coordinate drop keeps the pickup's
+    // window, so the drop is not drawn above every window. Both reads share
+    // one budget, inside the drag's own deadline.
+    let reads = crate::cursor_overlay::read_deadline(deadline).unwrap_or(deadline);
+    let from_window = crate::commands::hover::cursor_window(&from, adapter, context, reads);
+    let to_window = crate::commands::hover::cursor_window(&to, adapter, context, reads)
+        .or_else(|| from_window.clone());
     let pickup = crate::cursor_overlay::anchor_window(from_window);
     crate::cursor_overlay::submit_travel(adapter, context, from.point.clone(), &lease, false);
     let drag_tracking = crate::cursor_overlay::submit_drag(

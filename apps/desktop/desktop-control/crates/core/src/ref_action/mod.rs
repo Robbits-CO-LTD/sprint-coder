@@ -140,6 +140,7 @@ pub(crate) fn dispatch_resolved_landing(
             final_target.context,
             crate::cursor_overlay::current_window(),
             final_target.handle,
+            final_target.deadline,
         ));
     final_target.context.trace_lazy(
         "action.dispatch.start",

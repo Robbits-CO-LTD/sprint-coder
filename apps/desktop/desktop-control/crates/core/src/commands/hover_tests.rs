@@ -248,14 +248,20 @@ fn a_drag_end_names_a_window_only_where_the_adapter_opts_in() {
     let context = overlay_context();
     let resolved = resolved_point(true);
     assert_eq!(
-        cursor_window(&resolved, &HoverCaptureAdapter::new(), &context),
+        cursor_window(
+            &resolved,
+            &HoverCaptureAdapter::new(),
+            &context,
+            crate::Deadline::standard().unwrap()
+        ),
         None
     );
     assert_eq!(
         cursor_window(
             &resolved,
             &HoverCaptureAdapter::new().naming_windows(Some("w-43")),
-            &context
+            &context,
+            crate::Deadline::standard().unwrap()
         )
         .as_deref(),
         Some("w-43")
@@ -264,7 +270,8 @@ fn a_drag_end_names_a_window_only_where_the_adapter_opts_in() {
         cursor_window(
             &resolved_point(false),
             &HoverCaptureAdapter::new().naming_windows(Some("w-43")),
-            &context
+            &context,
+            crate::Deadline::standard().unwrap()
         )
         .as_deref(),
         Some("w-42"),

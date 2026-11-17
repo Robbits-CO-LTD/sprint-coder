@@ -193,12 +193,14 @@ fn burst_around(
         .as_deref()
         .filter(|instance| !instance.is_empty())
         .map(|instance| crate::ProcessIdentity::new(entry.process.pid, instance));
-    let window = crate::cursor_overlay::element_window(
-        adapter,
-        context,
-        entry.source.source_window_id.clone(),
-        &handle,
-    );
+    // Read between keystrokes, before the next one's own deadline starts.
+    let top_level = entry.source.source_window_id.clone();
+    let window = match crate::Deadline::standard() {
+        Ok(within) => {
+            crate::cursor_overlay::element_window(adapter, context, top_level, &handle, within)
+        }
+        Err(_) => top_level,
+    };
     Ok(Burst {
         entry,
         handle,

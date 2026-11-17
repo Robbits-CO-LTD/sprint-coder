@@ -50,3 +50,24 @@ fn a_ref_without_a_window_reads_nothing_and_names_none() {
     let chosen = super::choose_window(None, |_| panic!("no read without a top-level window"));
     assert_eq!(chosen, None);
 }
+
+#[test]
+fn the_element_window_read_is_capped_by_the_actions_own_deadline() {
+    let long = crate::Deadline::after(10_000).unwrap();
+    let read = super::read_deadline(long).expect("time is left");
+    assert!(read.remaining() <= std::time::Duration::from_millis(super::ELEMENT_WINDOW_READ_MS));
+
+    let short = crate::Deadline::after(20).unwrap();
+    let read = super::read_deadline(short).expect("time is left");
+    assert!(
+        read.remaining() <= short.remaining() + std::time::Duration::from_millis(1),
+        "never past the action's deadline"
+    );
+
+    let spent = crate::Deadline::detached_after(1).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    assert!(
+        super::read_deadline(spent).is_none(),
+        "nothing left, nothing read"
+    );
+}

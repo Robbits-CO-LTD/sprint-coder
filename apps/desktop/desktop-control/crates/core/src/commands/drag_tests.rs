@@ -25,6 +25,7 @@ struct DragCaptureAdapter {
     focused_bounds: Option<Rect>,
     drag_failure: Option<DeliverySemantics>,
     drag_report: Option<crate::OperationReport>,
+    names_windows: bool,
 }
 
 impl DragCaptureAdapter {
@@ -38,7 +39,13 @@ impl DragCaptureAdapter {
             focused_bounds: None,
             drag_failure: None,
             drag_report: None,
+            names_windows: false,
         }
+    }
+
+    fn naming_windows(mut self) -> Self {
+        self.names_windows = true;
+        self
     }
 
     fn with_focused_bounds(mut self, bounds: Rect) -> Self {
@@ -65,6 +72,10 @@ impl ObservationOps for DragCaptureAdapter {
     ) -> Result<NativeHandle, AdapterError> {
         self.resolve_calls.fetch_add(1, Ordering::SeqCst);
         Ok(NativeHandle::null())
+    }
+
+    fn names_pointer_gesture_window(&self) -> bool {
+        self.names_windows
     }
 
     fn get_element_bounds(
@@ -402,3 +413,92 @@ mod wait_scope_tests;
 
 #[path = "drag_overlay_report_tests.rs"]
 mod overlay_report_tests;
+
+fn overlay_context() -> CommandContext {
+    let config = crate::CursorOverlayConfig::enabled(None, 6).expect("valid config");
+    CommandContext::default()
+        .with_headed(true)
+        .with_cursor_overlay_session("test-session", config)
+}
+
+fn session_snapshot() -> String {
+    let store = RefStore::for_session(Some("test-session")).unwrap();
+    let mut refmap = RefMap::new();
+    refmap.allocate(ref_entry(1));
+    refmap.allocate(ref_entry(2));
+    store.save_new_snapshot(&refmap).unwrap()
+}
+
+/// The window each drawn instruction names, with its phase.
+fn drawn_windows(adapter: &DragCaptureAdapter) -> Vec<(crate::CursorPhase, Option<String>)> {
+    adapter
+        .presented
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|control| control.instruction())
+        .map(|instruction| (instruction.phase(), instruction.window().map(str::to_owned)))
+        .collect()
+}
+
+#[test]
+fn a_ref_drag_names_the_pickup_window_then_the_drop_window_where_the_adapter_opts_in() {
+    let _guard = HomeGuard::new();
+    let adapter = DragCaptureAdapter::new().naming_windows();
+    execute(
+        cross_app_args(session_snapshot()),
+        &adapter,
+        &overlay_context(),
+    )
+    .unwrap();
+    let pickup = Some("w-1".to_owned());
+    assert_eq!(
+        drawn_windows(&adapter),
+        [
+            (crate::CursorPhase::Travel, pickup.clone()),
+            (crate::CursorPhase::Drag, pickup),
+            (crate::CursorPhase::Effect, Some("w-2".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn a_bare_coordinate_drop_keeps_the_pickup_window_where_the_adapter_opts_in() {
+    let _guard = HomeGuard::new();
+    let adapter = DragCaptureAdapter::new().naming_windows();
+    let mut args = cross_app_args(session_snapshot());
+    args.to = DragEndpoint {
+        ref_id: None,
+        xy: Some((3.0, 4.0)),
+    };
+    execute(args, &adapter, &overlay_context()).unwrap();
+    let drawn = drawn_windows(&adapter);
+    assert_eq!(
+        drawn.last().map(|(phase, _)| *phase),
+        Some(crate::CursorPhase::Effect)
+    );
+    assert!(
+        drawn
+            .iter()
+            .all(|(_, window)| window.as_deref() == Some("w-1")),
+        "the drop is drawn at the pickup window's height, not above every window: {drawn:?}"
+    );
+}
+
+#[test]
+fn a_ref_drag_names_no_window_where_the_adapter_does_not_opt_in() {
+    let _guard = HomeGuard::new();
+    let adapter = DragCaptureAdapter::new();
+    execute(
+        cross_app_args(session_snapshot()),
+        &adapter,
+        &overlay_context(),
+    )
+    .unwrap();
+    let drawn = drawn_windows(&adapter);
+    assert_eq!(drawn.len(), 3);
+    assert!(
+        drawn.iter().all(|(_, window)| window.is_none()),
+        "{drawn:?}"
+    );
+}
