@@ -333,3 +333,14 @@ main に入ったもの:
 
 - Computer Use での製品の経路の確認（この夕方の分は、debug の口からの操作）。必須 Skill の正式な lane。Windows の実機。
 - 頼むアプリ自身が前面にある時の `launch`、隠されたアプリへの `launch`（どちらも単体試験のみ）。
+
+### 前面を使う操作の確認（2026-11-17 夜）
+
+実機の記録は `tasks/evidence/macos-desktop-control-foreground-20261117.md`。オーナーから、その場で了承をもらって実行した（常の了承ではない。次に前面を使う確認をする時は、また了承をもらう）。
+
+- 前面を使う操作（`focus-window`、`--headed` の `click`・`type`・`press`、`hover`、`drag`、`maximize`）は、main で届いた。製品の経路でも、実際の AI が「前面を使います」のカードを経て、計算機に実際のキー入力をした。
+- 見つけて直したもの:
+  - ref の `hover` と `drag` の後、Team のカーソルが全部の窓の上に残る（#1359、Issue #1351）。#1350 の時に作って外していた変更を、実機で測ってから入れ直した。
+  - `minimize` と、最小化した窓の `restore` が、窓は動いたのに `TIMEOUT` を返す（#1360）。
+- 変えていないもの: `restore` は、`maximize` で広げた窓を元の大きさに戻さない（説明書に前から書いてある）。
+- まだ確かめていないもの: 落とす先も部品の `drag`、`right-click`・`double-click`・`scroll` などの `--headed`、製品の経路での `hover`・`drag` のカーソル。
