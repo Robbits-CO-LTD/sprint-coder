@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -6,11 +7,11 @@ use std::path::Path;
 fn list_returns_known_skills() {
     let v = list().expect("list");
     let arr = v["skills"].as_array().expect("array");
-    assert!(arr.iter().any(|s| s["name"] == "agent-desktop"));
-    assert!(arr.iter().any(|s| s["name"] == "agent-desktop-ffi"));
-    assert!(arr.iter().any(|s| s["name"] == "agent-desktop-windows"));
-    assert!(arr.iter().any(|s| s["name"] == "agent-desktop-macos"));
-    assert!(arr.iter().any(|s| s["name"] == "agent-desktop-linux"));
+    assert!(arr.iter().any(|s| s["name"] == "desktop-control"));
+    assert!(arr.iter().any(|s| s["name"] == "desktop-control-ffi"));
+    assert!(arr.iter().any(|s| s["name"] == "desktop-control-windows"));
+    assert!(arr.iter().any(|s| s["name"] == "desktop-control-macos"));
+    assert!(arr.iter().any(|s| s["name"] == "desktop-control-linux"));
 }
 
 #[test]
@@ -23,20 +24,20 @@ fn list_marks_platform_skills_and_the_one_for_this_build() {
             .expect("skill listed")
             .clone()
     };
-    assert_eq!(entry("agent-desktop-macos")["platform"], "macos");
-    assert_eq!(entry("agent-desktop-windows")["platform"], "windows");
-    assert_eq!(entry("agent-desktop-linux")["platform"], "linux");
-    assert!(entry("agent-desktop").get("platform").is_none());
+    assert_eq!(entry("desktop-control-macos")["platform"], "macos");
+    assert_eq!(entry("desktop-control-windows")["platform"], "windows");
+    assert_eq!(entry("desktop-control-linux")["platform"], "linux");
+    assert!(entry("desktop-control").get("platform").is_none());
     assert_eq!(
-        entry("agent-desktop-macos")["current"],
+        entry("desktop-control-macos")["current"],
         cfg!(target_os = "macos")
     );
     assert_eq!(
-        entry("agent-desktop-windows")["current"],
+        entry("desktop-control-windows")["current"],
         cfg!(target_os = "windows")
     );
     assert_eq!(
-        entry("agent-desktop-linux")["current"],
+        entry("desktop-control-linux")["current"],
         cfg!(target_os = "linux")
     );
 }
@@ -49,11 +50,11 @@ fn the_platform_alias_serves_this_build_s_platform_skill() {
         reference: None,
     });
     if cfg!(target_os = "macos") {
-        assert_eq!(result.expect("macos")["skill"], "agent-desktop-macos");
+        assert_eq!(result.expect("macos")["skill"], "desktop-control-macos");
     } else if cfg!(target_os = "windows") {
-        assert_eq!(result.expect("windows")["skill"], "agent-desktop-windows");
+        assert_eq!(result.expect("windows")["skill"], "desktop-control-windows");
     } else if cfg!(target_os = "linux") {
-        assert_eq!(result.expect("linux")["skill"], "agent-desktop-linux");
+        assert_eq!(result.expect("linux")["skill"], "desktop-control-linux");
     } else {
         let err = result.expect_err("no platform skill on this OS yet");
         assert!(format!("{err}").contains("no platform skill"));
@@ -68,7 +69,7 @@ fn windows_skill_serves_main_and_references() {
         reference: None,
     })
     .expect("get windows");
-    assert_eq!(body["skill"], "agent-desktop-windows");
+    assert_eq!(body["skill"], "desktop-control-windows");
     assert!(
         body["content"]
             .as_str()
@@ -77,7 +78,7 @@ fn windows_skill_serves_main_and_references() {
     );
 
     let reference = get(GetArgs {
-        name: "agent-desktop-windows".into(),
+        name: "desktop-control-windows".into(),
         full: false,
         reference: Some("permissions-and-elevation.md".into()),
     })
@@ -104,8 +105,13 @@ fn get_resolves_alias() {
         reference: None,
     })
     .expect("get");
-    assert_eq!(v["skill"], "agent-desktop");
-    assert!(v["content"].as_str().unwrap().contains("agent-desktop"));
+    assert_eq!(v["skill"], "desktop-control");
+    assert!(
+        v["content"]
+            .as_str()
+            .unwrap()
+            .contains("sprint-coder-desktop-control")
+    );
 }
 
 #[test]
@@ -189,7 +195,7 @@ fn path_lists_canonical_names() {
     let v = path().expect("path");
     assert_eq!(v["location"], "embedded");
     let avail = v["available"].as_array().expect("arr");
-    assert!(avail.iter().any(|s| s == "agent-desktop"));
+    assert!(avail.iter().any(|s| s == "desktop-control"));
 }
 
 #[test]

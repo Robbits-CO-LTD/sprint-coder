@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AppError, CursorOverlayConfig, CursorOverlayControl, PlatformAdapter,
     commands::{cursor_overlay, session},
@@ -86,7 +87,7 @@ fn resolve_end_session_id(
         .ok_or_else(|| {
             AppError::invalid_input_with_suggestion(
                 "No session id was supplied and no active session scope is configured",
-                "Pass `session end <id>`, global `--session <id>`, or AGENT_DESKTOP_SESSION",
+                "Pass `session end <id>` or global `--session <id>`",
             )
         })
 }

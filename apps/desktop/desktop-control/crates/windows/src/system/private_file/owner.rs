@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Ownership validation against the set of SIDs Windows itself would permit
 //! this process's token to hold as a file owner.
 //!
@@ -95,7 +96,7 @@ fn require_owner_in_set(
         return Err(permission_denied(format!(
             "{what} is owned by a foreign principal, not this process's token user, token \
              owner, or an owner-eligible token group; if a different principal owns this path \
-             intentionally, relocate the state root with AGENT_DESKTOP_HOME instead of reusing it"
+             intentionally, relocate the state root instead of reusing it"
         )));
     }
     Ok(())

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! UIPI elevation detection: a token-integrity comparison, never the
 //! `SendInput` verdict. `GetTokenInformation(TokenIntegrityLevel)`
 //! reads the caller's own token and, where a target process is named, that
@@ -85,7 +86,7 @@ fn elevation_denied_error() -> AdapterError {
         "raw_input_emitted": false,
     }))
     .with_suggestion(
-        "Run agent-desktop at the target's integrity level, or act on an element that does not cross the UIPI boundary",
+        "Run sprint-coder-desktop-control at the target's integrity level, or act on an element that does not cross the UIPI boundary",
     )
     .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
 }
@@ -103,7 +104,7 @@ pub(crate) fn activation_elevation_denied() -> AdapterError {
         "physical_delivery_started": false,
     }))
     .with_suggestion(
-        "Run agent-desktop at the target's integrity level, or activate a window that does not cross the UIPI boundary",
+        "Run sprint-coder-desktop-control at the target's integrity level, or activate a window that does not cross the UIPI boundary",
     )
     .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
 }

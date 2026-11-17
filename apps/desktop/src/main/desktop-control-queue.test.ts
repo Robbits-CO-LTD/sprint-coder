@@ -252,7 +252,7 @@ describe('the Task’s desktop-control order', () => {
       envelope('TIMEOUT', 'not_delivered', 'safe', 'snapshot', {}),
       {},
     ],
-    ['an answer that is not JSON', 'agent-desktop: failed to write response\n', {}],
+    ['an answer that is not JSON', 'sprint-coder-desktop-control: failed to write response\n', {}],
     ['two answers', `${UNDELIVERED}${UNDELIVERED}`, {}],
     ['no answer', '', {}],
     ['an answer that says ok', UNDELIVERED.replace('"ok":false', '"ok":true'), {}],

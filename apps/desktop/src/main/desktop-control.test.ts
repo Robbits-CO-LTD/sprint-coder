@@ -921,15 +921,14 @@ describe('desktop-control runs that touch no other app', () => {
     [['help']],
     [['help', 'launch']],
     [['help', 'skills', 'get']],
-    [['skills', 'get', 'jev']],
     // A guide's reference, by its name or by its path as the guides write it.
-    [['skills', 'get', 'agent-desktop-windows']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/troubleshooting.md']],
+    [['skills', 'get', 'desktop-control-windows']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/troubleshooting.md']],
     [['skills', 'get', 'windows', 'shell-and-overlay']],
     [['skills', 'get', 'platform', 'references/permissions-and-elevation.md']],
     [['skills', 'get', 'desktop', 'references/workflows.md']],
-    [['skills', 'get', 'agent-desktop-linux', 'references/troubleshooting.md']],
+    [['skills', 'get', 'desktop-control-linux', 'references/troubleshooting.md']],
     [['launch', '--help']],
     [['snapshot', '--help']],
     [['select', '--help']],
@@ -944,7 +943,7 @@ describe('desktop-control runs that touch no other app', () => {
   it('reads `platform` as the macOS guide on macOS', () => {
     expect(desktopControlSkillReferences('platform', 'darwin')).toEqual(['troubleshooting']);
     expect(desktopControlSkillReferences('platform', 'win32')).toEqual(
-      DESKTOP_CONTROL_SKILL_REFERENCES.get('agent-desktop-windows'),
+      DESKTOP_CONTROL_SKILL_REFERENCES.get('desktop-control-windows'),
     );
     expect(
       desktopControlArgvIsInert(['skills', 'get', 'platform', 'troubleshooting'], 'darwin'),
@@ -985,36 +984,37 @@ describe('desktop-control runs that touch no other app', () => {
     [['skills', 'get', 'desktop', 'a', 'b']],
     // A reference only by its exact name or path, among the ones that skill carries.
     [['skills', 'get', 'desktop', 'references/../SKILL.md']],
-    [['skills', 'get', 'desktop', 'references/../../agent-desktop-windows/SKILL.md']],
-    [['skills', 'get', 'agent-desktop-windows', '../references/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', '/references/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', './references/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references\\chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references//chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'C:\\references\\chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'C:references/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', '\\\\server\\share\\x.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md:x']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.txt']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron']],
-    [['skills', 'get', 'agent-desktop-windows', 'chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/Chromium-and-Electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'References/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md ']],
-    [['skills', 'get', 'agent-desktop-windows', ' references/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium and electron.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/unknown.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'unknown']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/workflows.md']],
+    [['skills', 'get', 'desktop', 'references/../../desktop-control-windows/SKILL.md']],
+    [['skills', 'get', 'desktop-control-windows', '../references/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', '/references/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', './references/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references\\chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references//chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'C:\\references\\chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'C:references/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', '\\\\server\\share\\x.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.md:x']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.txt']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.md.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron']],
+    [['skills', 'get', 'desktop-control-windows', 'chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/Chromium-and-Electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'References/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.md ']],
+    [['skills', 'get', 'desktop-control-windows', ' references/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium and electron.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/unknown.md']],
+    [['skills', 'get', 'desktop-control-windows', 'unknown']],
+    [['skills', 'get', 'desktop-control-windows', 'references/workflows.md']],
     [['skills', 'get', 'desktop', 'references/chromium-and-electron.md']],
+    [['skills', 'get', 'jev']],
     [['skills', 'get', 'jev', 'references/workflows.md']],
-    [['skills', 'get', 'Agent-Desktop-Windows', 'references/chromium-and-electron.md']],
-    [['skills', 'get', 'agent-desktop-unknown', 'references/troubleshooting.md']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md', 'x']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md', '--full']],
-    [['skills', 'get', 'agent-desktop-windows', '--full', 'troubleshooting']],
-    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md', '-h']],
+    [['skills', 'get', 'Desktop-Control-Windows', 'references/chromium-and-electron.md']],
+    [['skills', 'get', 'desktop-control-unknown', 'references/troubleshooting.md']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.md', 'x']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.md', '--full']],
+    [['skills', 'get', 'desktop-control-windows', '--full', 'troubleshooting']],
+    [['skills', 'get', 'desktop-control-windows', 'references/chromium-and-electron.md', '-h']],
     [['skills', 'get', '--session', 's1', 'windows', 'references/troubleshooting.md']],
     [['skills', 'get', 'windows', '--', 'references/troubleshooting.md']],
     [['skills', 'get', 'unknown']],
@@ -1053,12 +1053,11 @@ describe('desktop-control runs that touch no other app', () => {
       .map(({ name }) => name);
     expect(guides.sort()).toEqual(
       [
-        'agent-desktop',
-        'agent-desktop-ffi',
-        'agent-desktop-linux',
-        'agent-desktop-macos',
-        'agent-desktop-windows',
-        'jev-desktop',
+        'desktop-control',
+        'desktop-control-ffi',
+        'desktop-control-linux',
+        'desktop-control-macos',
+        'desktop-control-windows',
       ].sort(),
     );
     for (const guide of guides) {
@@ -1071,7 +1070,7 @@ describe('desktop-control runs that touch no other app', () => {
       );
       // The short name (`windows`) carries the same ones as the full name.
       const alias =
-        guide === 'jev-desktop' ? 'jev' : guide.replace(/^agent-/u, '').replace(/^desktop-/u, '');
+        guide === 'desktop-control' ? 'desktop' : guide.replace(/^desktop-control-/u, '');
       expect([...(DESKTOP_CONTROL_SKILL_REFERENCES.get(alias) ?? ['missing'])].sort()).toEqual(
         names,
       );
@@ -1083,7 +1082,7 @@ describe('desktop-control runs that touch no other app', () => {
       }
     }
     expect([...DESKTOP_CONTROL_SKILL_REFERENCES.get('platform')!]).toEqual([
-      ...DESKTOP_CONTROL_SKILL_REFERENCES.get('agent-desktop-windows')!,
+      ...DESKTOP_CONTROL_SKILL_REFERENCES.get('desktop-control-windows')!,
     ]);
     expect(DESKTOP_CONTROL_SKILL_REFERENCES.size).toBe(guides.length * 2 + 1);
   });

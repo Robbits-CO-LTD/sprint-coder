@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! MCP tools derived from the clap command tree, so the CLI stays the only definition of a command.
 
 use clap::{Arg, ArgAction, Command, CommandFactory};
@@ -118,7 +119,10 @@ impl Tool {
             .or_else(|| self.command.get_about())
             .map(ToString::to_string)
             .unwrap_or_default();
-        format!("agent-desktop {}: {about}", self.path.join(" "))
+        format!(
+            "sprint-coder-desktop-control {}: {about}",
+            self.path.join(" ")
+        )
     }
 
     fn unknown_argument(&self, key: &str) -> String {

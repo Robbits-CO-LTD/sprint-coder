@@ -1,6 +1,6 @@
 For AI agents, read this first:
-  agent-desktop skills get desktop     Core guide: the snapshot/ref loop, verification, retries
-  agent-desktop skills get platform    What differs on the operating system you run on
-  agent-desktop <command> --help       Flags and arguments for one command
+  sprint-coder-desktop-control skills get desktop     Core guide: the snapshot/ref loop, verification, retries
+  sprint-coder-desktop-control skills get platform    What differs on the operating system you run on
+  sprint-coder-desktop-control <command> --help       Flags and arguments for one command
 
 Skills are compiled into this binary, so they always match this exact version.

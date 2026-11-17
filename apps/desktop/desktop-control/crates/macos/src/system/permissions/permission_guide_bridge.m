@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <stdbool.h>
@@ -456,8 +457,8 @@ static NSColor *ADGuideGray(CGFloat white) {
         : @"Accessibility";
     self.titleLabel.stringValue = accessibility ? [@"Allow " stringByAppendingString:accessibilityList]
                                                 : @"Allow Screen Recording";
-    self.reasonLabel.stringValue = accessibility ? @"agent-desktop needs this to see and use your apps."
-                                                 : @"agent-desktop needs this to take screenshots of your apps.";
+    self.reasonLabel.stringValue = accessibility ? @"Sprint Coder desktop control needs this to see and use your apps."
+                                                 : @"Sprint Coder desktop control needs this to take screenshots of your apps.";
     self.reasonLabel.hidden = NO;
     [self showInstructions];
     NSString *pane = accessibility ? @"Privacy_Accessibility" : @"Privacy_ScreenCapture";
@@ -661,7 +662,7 @@ static NSColor *ADGuideGray(CGFloat white) {
     self.reasonLabel.hidden = YES;
     self.stepLabel.stringValue = @"";
     self.titleLabel.stringValue = @"You are all set";
-    self.bodyLabel.stringValue = @"agent-desktop can now see and use your apps.";
+    self.bodyLabel.stringValue = @"Sprint Coder desktop control can now see and use your apps.";
     [self resizePanel];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self finish];

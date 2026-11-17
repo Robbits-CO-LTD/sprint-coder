@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Stdio MCP server. Every leaf CLI command is one tool, and every call runs that command through the CLI.
 
 mod call;
@@ -20,11 +21,11 @@ const TOOLS_TTL_MS: u64 = 86_400_000;
 const MAX_CONCURRENT_CALLS: usize = 8;
 const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const INSTRUCTIONS: &str = "\
-agent-desktop reads native accessibility trees and operates desktop apps. Each tool runs the \
-agent-desktop CLI command of the same name and returns its JSON envelope: ok with data, or ok \
+sprint-coder-desktop-control reads native accessibility trees and operates desktop apps. Each tool runs the \
+sprint-coder-desktop-control CLI command of the same name and returns its JSON envelope: ok with data, or ok \
 false with error; a call rejected before the command runs returns plain text. Read \
 desktop_skills_get with name \"desktop\" first for the observe-act loop, and with name \
-\"platform\" for what differs on this OS. The skills use CLI syntax: `agent-desktop snapshot \
+\"platform\" for what differs on this OS. The skills use CLI syntax: `sprint-coder-desktop-control snapshot \
 --app Finder` is desktop_snapshot with {\"app\": \"Finder\"}, and the input schema replaces \
 --help. Global flags (--session, --agent-id, --headed, --wait-for, --trace) are fixed \
 by how this server was started and cannot be passed per call. Refs such as @s8f3k2p9:e1 come from \
@@ -237,7 +238,7 @@ fn supported_versions() -> Vec<&'static str> {
 }
 
 fn server_info() -> Value {
-    json!({ "name": "agent-desktop", "version": env!("CARGO_PKG_VERSION") })
+    json!({ "name": "sprint-coder-desktop-control", "version": env!("CARGO_PKG_VERSION") })
 }
 
 fn forwarded_globals(matches: &ArgMatches) -> Vec<String> {
@@ -267,7 +268,7 @@ fn write_line(out: &Mutex<std::io::Stdout>, message: &Value) {
         .and_then(|()| out.flush())
         .is_err()
     {
-        eprintln!("agent-desktop mcp: failed to write to stdout");
+        eprintln!("sprint-coder-desktop-control mcp: failed to write to stdout");
     }
 }
 

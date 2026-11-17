@@ -887,18 +887,16 @@ const LINUX_REFERENCES = [
 const FFI_REFERENCES = ['build-and-link', 'error-handling', 'ownership', 'threading'];
 export const DESKTOP_CONTROL_SKILL_REFERENCES: ReadonlyMap<string, readonly string[]> = new Map([
   ['desktop', DESKTOP_REFERENCES],
-  ['agent-desktop', DESKTOP_REFERENCES],
+  ['desktop-control', DESKTOP_REFERENCES],
   ['platform', WINDOWS_REFERENCES],
   ['windows', WINDOWS_REFERENCES],
-  ['agent-desktop-windows', WINDOWS_REFERENCES],
+  ['desktop-control-windows', WINDOWS_REFERENCES],
   ['macos', MACOS_REFERENCES],
-  ['agent-desktop-macos', MACOS_REFERENCES],
+  ['desktop-control-macos', MACOS_REFERENCES],
   ['linux', LINUX_REFERENCES],
-  ['agent-desktop-linux', LINUX_REFERENCES],
+  ['desktop-control-linux', LINUX_REFERENCES],
   ['ffi', FFI_REFERENCES],
-  ['agent-desktop-ffi', FFI_REFERENCES],
-  ['jev', []],
-  ['jev-desktop', []],
+  ['desktop-control-ffi', FFI_REFERENCES],
 ]);
 
 /** The references of a skill `skills get` prints on this platform, or `undefined` for none. */

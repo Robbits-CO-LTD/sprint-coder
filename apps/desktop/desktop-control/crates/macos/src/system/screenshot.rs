@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, Deadline, DisplayInfo, ErrorCode, ImageBuffer, ImageFormat, WindowInfo,
     parse_png_dimensions,
@@ -274,7 +275,7 @@ mod imp {
         {
             return AdapterError::new(ErrorCode::PermDenied, "Screen Recording permission denied")
                 .with_suggestion(
-                    "Run agent-desktop permissions --guide. It opens System Settings > Privacy & Security > Screen Recording with a guide that shows which app to add.",
+                    "Run sprint-coder-desktop-control permissions --guide. It opens System Settings > Privacy & Security > Screen Recording with a guide that shows which app to add.",
                 )
                 .with_platform_detail(combined.trim());
         }

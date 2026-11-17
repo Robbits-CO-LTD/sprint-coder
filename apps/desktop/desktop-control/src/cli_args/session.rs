@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
@@ -41,7 +42,7 @@ pub(crate) struct SessionStartArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct SessionEndArgs {
-    #[arg(help = "Session id to end; defaults to global --session or AGENT_DESKTOP_SESSION")]
+    #[arg(help = "Session id to end; defaults to global --session or the inherited session id")]
     pub id: Option<String>,
 }
 

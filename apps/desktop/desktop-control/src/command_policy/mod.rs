@@ -126,7 +126,7 @@ pub(crate) fn preflight_context(
     if agent_id_missing(cmd, context.multi_agent(), context.agent_id()) {
         return Err(AppError::invalid_input_with_suggestion(
             "Multi-agent sessions require --agent-id for desktop actions",
-            "Set --agent-id or AGENT_DESKTOP_AGENT_ID before running the command.",
+            "Pass --agent-id before running the command.",
         ));
     }
     Ok(())

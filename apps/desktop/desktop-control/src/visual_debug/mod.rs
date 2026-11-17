@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 mod capture;
 pub(crate) mod options;
 mod render;
@@ -147,7 +148,7 @@ impl DebugCapture {
             }
             data["debug"] = metadata;
         } else {
-            eprintln!("agent-desktop debug: {metadata}");
+            eprintln!("sprint-coder-desktop-control debug: {metadata}");
         }
     }
 }

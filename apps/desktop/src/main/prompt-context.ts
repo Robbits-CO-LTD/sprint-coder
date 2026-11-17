@@ -376,7 +376,7 @@ function renderDesktopControl(command: string, macos: boolean): string[] {
   // operated. The rest is the same on every OS.
   return [
     'Sprint Coder のデスクトップ操作:',
-    `- 起動中のデスクトップアプリは、shell のコマンドで ${cli} を実行して見て操作できる。この実行ファイルは Sprint Coder に同梱のデスクトップ操作の道具。この実行ファイルが出す説明書（skills の文書）の中の agent-desktop は、この実行ファイルのこと。初めて使う前に ${cli} skills get desktop と ${cli} skills get platform を実行し、その手順に従う。説明書（skills）・status・version・--help は、--headed などを付けなければ承認なしで実行できる。同じ Task で既に読んでいれば読み直さない。`,
+    `- 起動中のデスクトップアプリは、shell のコマンドで ${cli} を実行して見て操作できる。この実行ファイルは Sprint Coder に同梱のデスクトップ操作の道具。初めて使う前に ${cli} skills get desktop と ${cli} skills get platform を実行し、その手順に従う。説明書（skills）・status・version・--help は、--headed などを付けなければ承認なしで実行できる。同じ Task で既に読んでいれば読み直さない。`,
     ...(macos
       ? [
           `- アプリを起動する時は ${cli} launch <アプリ名> を使う。--activate は、利用者が自分で見る・使うためにアプリを開いてほしいと頼んだ時だけ付ける（窓が前面に出る。結果の activated が false なら前に出せなかった）。自分が続けて裏で操作するための起動には付けない（窓は今使っている窓の後ろに開く）。迷ったら付けずに開く。付けずに開いた時は、結果の window.is_focused で利用者に伝える: false なら「後ろに開きました」、true で suggestion に「戻せなかった」旨の注記があれば「前面に開きました」、true で注記が無ければ「後ろに開いた」とも誰が前に出したかとも言わず「窓は開いていて、今は前面にあります」とだけ伝える。アプリの実行ファイルを直接実行しない。アプリ名には、.app の名前から .app を除いたもの（TextEdit・Calculator など）か bundle ID（com.apple.TextEdit など）をそのまま渡す。起動できるのは標準のアプリの場所（/Applications・/System/Applications・~/Applications など）にあるアプリだけ。パスは渡さない。アプリのフォルダーを自分で探さない。`,

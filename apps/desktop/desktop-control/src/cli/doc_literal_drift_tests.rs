@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 const ENVELOPE_DOCS: &[(&str, &str)] = &[
@@ -15,8 +16,8 @@ const ENVELOPE_DOCS: &[(&str, &str)] = &[
 const ABI_DOCS: &[(&str, &str)] = &[
     ("README.md", include_str!("../../README.md")),
     (
-        "skills/agent-desktop-ffi/references/build-and-link.md",
-        include_str!("../../skills/agent-desktop-ffi/references/build-and-link.md"),
+        "skills/desktop-control-ffi/references/build-and-link.md",
+        include_str!("../../skills/desktop-control-ffi/references/build-and-link.md"),
     ),
 ];
 
