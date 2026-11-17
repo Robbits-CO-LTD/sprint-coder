@@ -178,7 +178,8 @@ fn attach_without_window(
 ) -> Result<LaunchResult, AdapterError> {
     use super::launch_reopen as reopen;
     let regular = app.presentation == Some(agent_desktop_core::AppPresentation::Foreground);
-    let allowed = reopen::may_reopen(options, regular, || {
+    // Reached only when the attach found no usable window.
+    let allowed = reopen::may_reopen(options, false, regular, || {
         deadline_instant(deadline).map_or(reopen::Minimized::Unknown, |until| {
             reopen::read_minimized(pid, until)
         })

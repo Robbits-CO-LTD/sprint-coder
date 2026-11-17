@@ -29,17 +29,25 @@ fn minimized_is_proven_none_only_from_a_complete_read_where_every_window_answere
 
 #[test]
 fn only_a_plain_attach_of_a_regular_app_without_a_minimized_window_is_reopened() {
-    assert_eq!(may_reopen(&attach(), true, || Minimized::None), Ok(()));
     assert_eq!(
-        may_reopen(&attach(), true, || Minimized::Some),
+        may_reopen(&attach(), false, true, || Minimized::None),
+        Ok(())
+    );
+    assert_eq!(
+        may_reopen(&attach(), false, true, || Minimized::Some),
         Err(Reopen::NotSent { minimized: true })
     );
     assert_eq!(
-        may_reopen(&attach(), true, || Minimized::Unknown),
+        may_reopen(&attach(), false, true, || Minimized::Unknown),
         Err(Reopen::NotSent { minimized: false })
     );
     assert_eq!(
-        may_reopen(&attach(), false, || Minimized::None),
+        may_reopen(&attach(), false, false, || Minimized::None),
+        Err(Reopen::NotSent { minimized: false })
+    );
+    // An app that has a usable window is never asked.
+    assert_eq!(
+        may_reopen(&attach(), true, true, || Minimized::None),
         Err(Reopen::NotSent { minimized: false })
     );
     let activate = LaunchOptions {
@@ -62,7 +70,7 @@ fn only_a_plain_attach_of_a_regular_app_without_a_minimized_window_is_reopened()
     };
     for options in [activate, no_attach, url, limited] {
         assert_eq!(
-            may_reopen(&options, true, || Minimized::None),
+            may_reopen(&options, false, true, || Minimized::None),
             Err(Reopen::NotSent { minimized: false }),
             "{options:?}"
         );
@@ -80,10 +88,11 @@ fn the_minimized_windows_are_read_only_when_everything_else_allows_the_reopen() 
         activate: true,
         ..attach()
     };
-    let _ = may_reopen(&activate, true, read);
-    let _ = may_reopen(&attach(), false, read);
+    let _ = may_reopen(&activate, false, true, read);
+    let _ = may_reopen(&attach(), false, false, read);
+    let _ = may_reopen(&attach(), true, true, read);
     assert_eq!(reads.get(), 0);
-    let _ = may_reopen(&attach(), true, read);
+    let _ = may_reopen(&attach(), false, true, read);
     assert_eq!(reads.get(), 1);
 }
 
@@ -170,7 +179,7 @@ fn each_outcome_says_what_was_done() {
         reopen_suggestion(minimized, false),
         Some(MINIMIZED_NOT_REOPENED)
     );
-    assert_eq!(reopen_suggestion(not_sent, false), None);
+    assert_eq!(reopen_suggestion(not_sent, false), Some(NOT_REOPENED));
     assert_eq!(reopen_suggestion(not_sent, true), None);
 }
 
@@ -194,11 +203,16 @@ fn the_texts_say_what_was_asked_what_to_do_and_never_to_wait_or_loop() {
     assert!(MINIMIZED_NOT_REOPENED.contains("did not ask"));
     assert!(MINIMIZED_NOT_REOPENED.contains("Do not restore it on your own"));
 
+    assert!(NOT_REOPENED.contains("did not ask it to open one"));
+    assert!(NOT_REOPENED.contains("Waiting will not help"));
+    assert!(NOT_REOPENED.contains("Tell the user"));
+
     for text in [
         REOPENED_WINDOW,
         REOPENED_NO_WINDOW,
         REOPENED_NOT_WAITED,
         MINIMIZED_NOT_REOPENED,
+        NOT_REOPENED,
         NO_WINDOW_GUIDANCE,
     ] {
         assert!(!text.contains("Wait for the app"), "{text}");
@@ -217,7 +231,11 @@ fn a_running_app_with_no_window_is_told_to_launch_once() {
     assert!(NO_WINDOW_GUIDANCE.contains("Waiting will not make one appear"));
     assert!(NO_WINDOW_GUIDANCE.contains("Run `launch` once"));
     assert!(NO_WINDOW_GUIDANCE.contains("without bringing it to the front"));
-    assert!(NO_WINDOW_GUIDANCE.contains("If that returns no window, tell the user."));
+    // Never a cycle back to `launch` after a launch already returned no window.
+    assert!(NO_WINDOW_GUIDANCE.contains(
+        "If that returns no window, or a `launch` of this app already returned none, do not run \
+         it again: tell the user."
+    ));
     assert_eq!(
         reason.details,
         serde_json::json!({ "kind": NO_WINDOW_KIND, "pid": 42 })
@@ -225,9 +243,18 @@ fn a_running_app_with_no_window_is_told_to_launch_once() {
 }
 
 #[test]
-fn only_the_single_process_of_a_regular_app_is_explained() {
-    assert_eq!(single_regular(&[(7, true)]), Some(7));
-    assert_eq!(single_regular(&[(7, false)]), None);
-    assert_eq!(single_regular(&[]), None);
-    assert_eq!(single_regular(&[(7, true), (8, true)]), None);
+fn only_the_single_process_of_a_regular_app_read_to_show_no_window_is_explained() {
+    let none = |_| Some(false);
+    assert_eq!(single_windowless_regular(&[(7, true)], none), Some(7));
+    assert_eq!(
+        single_windowless_regular(&[(7, true)], |_| Some(true)),
+        None
+    );
+    assert_eq!(single_windowless_regular(&[(7, true)], |_| None), None);
+    assert_eq!(single_windowless_regular(&[(7, false)], none), None);
+    assert_eq!(single_windowless_regular(&[], none), None);
+    assert_eq!(
+        single_windowless_regular(&[(7, true), (8, true)], none),
+        None
+    );
 }
