@@ -253,21 +253,29 @@ async function setUp(
     managedCodingHarness: { broker },
     persistence: {
       readTurnWorkspaceSetForTask: () => null,
-      getTurnModelIdentity: () => ({
-        selection: {
-          connectionId: 'builtin:codex-cli',
-          requestedProvider: 'openai',
-          requestedModel: 'gpt-5.6-terra',
-        },
-        resolution: { resolvedProvider: null, resolvedModel: null },
-      }),
+      getTurnModelIdentity: () => (
+        mark('model identity read'),
+        {
+          selection: {
+            connectionId: 'builtin:codex-cli',
+            requestedProvider: 'openai',
+            requestedModel: 'gpt-5.6-terra',
+          },
+          resolution: { resolvedProvider: null, resolvedModel: null },
+        }
+      ),
     },
     // Not built yet in this app run (nothing opened the model picker) unless asked otherwise. A
     // screenshot never builds it: that would ask every external Provider for its models.
     refreshModelCatalog,
     codexRuntime: {
       probe:
-        options.probe ??
+        (options.probe === undefined
+          ? undefined
+          : () => {
+              mark('model list asked');
+              return options.probe!();
+            }) ??
         (async () => ({
           models: models.map(({ modelId, multimodalInput }) => ({
             id: modelId,
@@ -287,16 +295,34 @@ async function setUp(
     },
   });
   const handlers = router.createGenericManagedRuntimeToolHandlers();
+  // What happened to the call, for the message of a call that never answers: where Main's
+  // handler stopped, and what the client was told meanwhile.
+  const traceStart = Date.now();
+  const trace: string[] = [];
+  const mark = (what: string): void => {
+    trace.push(`${Date.now() - traceStart}ms ${what}`);
+  };
+  const tracedHandler: NonNullable<typeof handlers.codexRuntime> = async (...args) => {
+    mark('handler entered');
+    try {
+      const output = await handlers.codexRuntime!(...args);
+      mark('handler resolved');
+      return output;
+    } catch (error) {
+      mark(`handler rejected: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  };
 
   const client = new RuntimeHostClient(
-    vi.fn(),
-    vi.fn(),
+    vi.fn((...args: unknown[]) => mark(`client event: ${JSON.stringify(args).slice(0, 300)}`)),
+    vi.fn((...args: unknown[]) => mark(`client failure: ${JSON.stringify(args).slice(0, 300)}`)),
     undefined,
     undefined,
     'codex',
     undefined,
     undefined,
-    handlers.codexRuntime,
+    tracedHandler,
   );
   const child = children[0] as FakeUtilityProcess;
   child.emit('spawn');
@@ -312,15 +338,21 @@ async function setUp(
     turnId: start['turnId'],
     operationId: start['operationId'],
   };
+  // The runtime host's answer that it took the start, naming what Main sent. An answer that
+  // does not match makes the client cancel the Turn and, once the stop is not confirmed (about
+  // 5 s on Windows, 9 s elsewhere), drop every later tool result: so the answer must match, and
+  // the client must have reported no failure.
+  const ids = (items: unknown): string[] => ((items ?? []) as { id: string }[]).map(({ id }) => id);
   child.emit('message', {
     ...envelope,
     seq: 1,
     type: 'started',
-    acceptedContextFragmentIds: [],
-    acceptedProjectItemIds: [],
-    acceptedProjectSnapshotDigest: null,
+    acceptedContextFragmentIds: ids(start['contextFragments']),
+    acceptedProjectItemIds: ids(start['projectItems']),
+    acceptedProjectSnapshotDigest: start['projectSnapshotDigest'] ?? null,
     acceptedPayloadDigest: start['payloadDigest'],
   });
+  expect(trace.filter((line) => line.includes('client failure'))).toEqual([]);
 
   /** The Codex runtime's call of `sprint_exec_command`, as its tool_request reaches Main. */
   const call = async (argv: string[]) => {
@@ -341,7 +373,12 @@ async function setUp(
         posted = child.messages.find(
           (message) => (message as { type?: unknown }).type === 'tool_result',
         ) as typeof posted;
-        expect(posted).toBeDefined();
+        expect(
+          posted,
+          `no tool_result; trace: ${JSON.stringify(trace)}; posted: ${JSON.stringify(
+            child.messages.map((message) => (message as { type?: unknown }).type),
+          )}`,
+        ).toBeDefined();
       },
       { timeout: 20_000 },
     );
@@ -493,36 +530,34 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
   );
 
   it.each([
-    ['fails', () => Promise.reject(new Error('probe failed'))],
-    ['does not answer in time', () => new Promise<never>(() => undefined)],
+    ['fails', () => Promise.reject(new Error('probe failed')), false],
+    ['does not answer in time', () => new Promise<never>(() => undefined), true],
   ] as const)(
     'gives only the sentence when the CLI’s model list %s and no catalog is built',
-    async (_name, probe) => {
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-      try {
-        let asked = false;
-        const { call, client, sessions, refreshModelCatalog } = await setUp(true, false, {
-          catalogBuilt: false,
-          probe: () => {
-            asked = true;
-            return probe();
-          },
-        });
-        const answered = call(['screenshot', '--window-id', 'w-1']);
-        await vi.waitUntil(() => asked, { timeout: 20_000 });
-        await vi.advanceTimersByTimeAsync(SCREENSHOT_CATALOG_TIMEOUT_MS + 1);
-        const { response, picture } = await answered;
-        expect(picture).toBeUndefined();
-        const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
-        expect(shown['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
-        expect(shown).not.toHaveProperty('dataUrl');
-        expect(refreshModelCatalog).not.toHaveBeenCalled();
-        expect(heldScreenshotPictureCount()).toBe(0);
-        client.dispose();
-        await sessions.dispose();
-      } finally {
-        vi.useRealTimers();
-      }
+    async (_name, probe, waitsOut) => {
+      // Real timers: the wait for the model list is the real `SCREENSHOT_CATALOG_TIMEOUT_MS`.
+      let asked = false;
+      const { call, client, sessions, refreshModelCatalog } = await setUp(true, false, {
+        catalogBuilt: false,
+        probe: () => {
+          asked = true;
+          return probe();
+        },
+      });
+      const began = Date.now();
+      const { response, picture } = await call(['screenshot', '--window-id', 'w-1']);
+      expect(asked).toBe(true);
+      // A list that never answers is waited for, and no longer than the bound.
+      if (waitsOut)
+        expect(Date.now() - began).toBeGreaterThanOrEqual(SCREENSHOT_CATALOG_TIMEOUT_MS - 250);
+      expect(picture).toBeUndefined();
+      const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
+      expect(shown['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
+      expect(shown).not.toHaveProperty('dataUrl');
+      expect(refreshModelCatalog).not.toHaveBeenCalled();
+      expect(heldScreenshotPictureCount()).toBe(0);
+      client.dispose();
+      await sessions.dispose();
     },
     30_000,
   );

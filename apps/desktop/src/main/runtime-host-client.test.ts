@@ -574,9 +574,10 @@ describe('RuntimeHostClient start acknowledgement', () => {
     const handleTool = vi.fn(async (_taskId, _turnId, request) => ({
       path: request.arguments.path,
     }));
+    const failed = vi.fn();
     const client = new RuntimeHostClient(
       vi.fn(),
-      vi.fn(),
+      failed,
       undefined,
       undefined,
       'codex',
@@ -601,11 +602,15 @@ describe('RuntimeHostClient start acknowledgement', () => {
       operationId: start['operationId'],
       seq: 1,
       type: 'started',
-      acceptedContextFragmentIds: [],
+      // Names what Main sent: an answer that does not match makes the client cancel the Turn.
+      acceptedContextFragmentIds: (start['contextFragments'] as Array<{ id: string }>).map(
+        ({ id }) => id,
+      ),
       acceptedProjectItemIds: [],
       acceptedProjectSnapshotDigest: null,
       acceptedPayloadDigest: start['payloadDigest'],
     });
+    expect(failed).not.toHaveBeenCalled();
     child.emit('message', {
       protocolVersion: start['protocolVersion'],
       runtimeInstanceId: start['runtimeInstanceId'],
@@ -638,9 +643,10 @@ describe('RuntimeHostClient start acknowledgement', () => {
   // failure it can read instead.
   it('never sends the CLI Runtime a tool result larger than it reads', async () => {
     const handleTool = vi.fn(async () => ({ stdout: 'x'.repeat(1024 * 1024) }));
+    const failed = vi.fn();
     const client = new RuntimeHostClient(
       vi.fn(),
-      vi.fn(),
+      failed,
       undefined,
       undefined,
       'codex',
@@ -668,11 +674,15 @@ describe('RuntimeHostClient start acknowledgement', () => {
       ...envelope,
       seq: 1,
       type: 'started',
-      acceptedContextFragmentIds: [],
+      // Names what Main sent: an answer that does not match makes the client cancel the Turn.
+      acceptedContextFragmentIds: (start['contextFragments'] as Array<{ id: string }>).map(
+        ({ id }) => id,
+      ),
       acceptedProjectItemIds: [],
       acceptedProjectSnapshotDigest: null,
       acceptedPayloadDigest: start['payloadDigest'],
     });
+    expect(failed).not.toHaveBeenCalled();
     child.emit('message', {
       ...envelope,
       seq: 2,
@@ -702,9 +712,10 @@ describe('RuntimeHostClient start acknowledgement', () => {
     const handleTool = vi.fn(async () => {
       throw mismatch;
     });
+    const failed = vi.fn();
     const client = new RuntimeHostClient(
       vi.fn(),
-      vi.fn(),
+      failed,
       undefined,
       undefined,
       'codex',
@@ -732,11 +743,15 @@ describe('RuntimeHostClient start acknowledgement', () => {
       ...envelope,
       seq: 1,
       type: 'started',
-      acceptedContextFragmentIds: [],
+      // Names what Main sent: an answer that does not match makes the client cancel the Turn.
+      acceptedContextFragmentIds: (start['contextFragments'] as Array<{ id: string }>).map(
+        ({ id }) => id,
+      ),
       acceptedProjectItemIds: [],
       acceptedProjectSnapshotDigest: null,
       acceptedPayloadDigest: start['payloadDigest'],
     });
+    expect(failed).not.toHaveBeenCalled();
     child.emit('message', {
       ...envelope,
       seq: 2,
