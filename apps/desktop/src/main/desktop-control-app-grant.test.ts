@@ -649,6 +649,14 @@ describe('desktop-control app-wide Task grant on macOS', () => {
         expect.objectContaining({ pid: 900, instance: 'macos-proc-v1:1763251200:900' }),
       );
       expect(desktopAppGrantCovering(['click', '@smac:e1'], [key!], lookup)).toEqual(key);
+      // close-app runs in the background on macOS, and is still never covered or offered.
+      for (const argv of [
+        ['close-app', 'TextEdit'],
+        ['batch', JSON.stringify([{ command: 'close-app', args: { app: 'TextEdit' } }])],
+      ]) {
+        expect(desktopAppGrantOffer(argv, lookup), argv.join(' ')).toBeNull();
+        expect(desktopAppGrantCovering(argv, [key!], lookup), argv.join(' ')).toBeNull();
+      }
       // The shell, a browser (by its outermost bundle), a terminal, Sprint Coder, an editor, and
       // a process whose bundle cannot be read or that runs from no bundle at all.
       for (const ref of ['e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8'])
