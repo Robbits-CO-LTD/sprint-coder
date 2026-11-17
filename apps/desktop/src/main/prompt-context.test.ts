@@ -537,6 +537,18 @@ describe('prompt context compiler', () => {
       'スタートメニューの名前。Google Chrome・Microsoft Edge',
     ])
       expect(text, windowsOnly).not.toContain(windowsOnly);
+    // A running app without a window is asked once for one, in the background, never started.
+    expect(text).toContain(
+      'Dock のアイコンを押した時と同じように、前に出さずに窓を開くよう 1 回だけ頼む（attached は true のまま）',
+    );
+    expect(text).toContain(
+      'アプリが閉じたまま持っていた窓（利用者の内容が入っている）のこともある。中身は利用者の物として扱い、利用者が頼んだ作業だけをする',
+    );
+    expect(text).not.toContain('その窓はこの launch が開かせた窓で、自分の作業に使ってよい');
+    expect(text).toContain('窓が出なければ、待ったり launch を繰り返したりせず、suggestion に従う');
+    expect(text).not.toContain('running_without_window が true');
+    expect(windows.content).toContain('running_without_window が true');
+    expect(windows.content).not.toContain('Dock のアイコン');
     // And the Windows guidance keeps its own lines.
     expect(windows.content).toContain('スタートメニュー');
     expect(windows.content).not.toContain('PERM_DENIED');

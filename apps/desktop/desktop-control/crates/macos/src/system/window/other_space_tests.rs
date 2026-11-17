@@ -1,7 +1,7 @@
 // Changed by Sprint Coder (new file); see VENDORED.md in apps/desktop/desktop-control.
 use super::{
-    AppSignals, GUIDANCE, WindowSignals, app_reason, launch_suggestion, likely_on_other_space,
-    other_space_windows, single_qualifying, window_error,
+    ASKED_NO_WINDOW, AppSignals, GUIDANCE, LAUNCH_GUIDANCE, WindowSignals, app_reason,
+    launch_suggestion, likely_on_other_space, other_space_windows, single_qualifying, window_error,
 };
 use agent_desktop_core::ErrorCode;
 
@@ -159,15 +159,35 @@ fn the_guidance_names_both_causes_and_forbids_a_retry_loop() {
     assert!(GUIDANCE.contains("Do not activate the app on your own"));
     assert!(GUIDANCE.contains("Tell the user"));
     assert!(GUIDANCE.contains("with their agreement"));
+    // Before any launch, the step the agent may take itself comes before telling the user.
+    let step = "If `launch` has not been run for this app yet, run it once with the app's name: \
+                for an app that only closed its window, it asks the app to show one without \
+                bringing it to the front; for a window on another Space, it changes nothing.";
+    let at = GUIDANCE.find(step).expect("launch step");
+    assert!(at < GUIDANCE.find("Tell the user").unwrap());
+    // After a launch, the same causes and advice, never to run `launch` again.
+    assert!(!LAUNCH_GUIDANCE.contains("run it once"));
+    assert_eq!(GUIDANCE.replace(&format!("{step} "), ""), LAUNCH_GUIDANCE);
+    for text in [GUIDANCE, LAUNCH_GUIDANCE] {
+        assert!(!text.contains("  "), "{text}");
+    }
 }
 
 #[test]
 fn the_launch_suggestion_names_the_windows_and_says_not_to_launch_again() {
-    assert_eq!(launch_suggestion(&[]), None);
-    let suggestion = launch_suggestion(&[7]).expect("suggestion");
-    assert!(suggestion.contains("(w-7)"));
+    assert_eq!(launch_suggestion(&[], None), None);
+    let suggestion = launch_suggestion(&[7], None).expect("suggestion");
+    assert!(suggestion.starts_with("The app is running, but its window (w-7)"));
     assert!(suggestion.contains("Do not repeat the launch."));
-    assert!(suggestion.ends_with(GUIDANCE));
+    assert!(suggestion.ends_with(LAUNCH_GUIDANCE));
+    assert!(!suggestion.contains("run it once"));
+    // A launch that asked the app for a window says so first, then the causes.
+    let asked = launch_suggestion(&[7], Some(ASKED_NO_WINDOW)).expect("suggestion");
+    assert_eq!(asked, format!("{ASKED_NO_WINDOW} {suggestion}"));
+    assert!(asked.starts_with(
+        "This launch asked the app to open a window without bringing it to the front, and none \
+         appeared. The app is running"
+    ));
 }
 
 #[test]

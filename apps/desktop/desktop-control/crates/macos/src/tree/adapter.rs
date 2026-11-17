@@ -64,10 +64,11 @@ impl ObservationOps for MacOSAdapter {
         app: &str,
         deadline: Deadline,
     ) -> Option<agent_desktop_core::WindowlessReason> {
-        crate::system::window::other_space::reason_for_app(
-            app,
-            crate::tree::locator_deadline::from_operation(deadline).ok()?,
-        )
+        let until = crate::tree::locator_deadline::from_operation(deadline).ok()?;
+        // A window probably on another Space is explained first; an app with no window at all
+        // is told what `launch` does for it instead of to wait.
+        crate::system::window::other_space::reason_for_app(app, until)
+            .or_else(|| crate::system::launch_reopen::reason_for_app(app, until))
     }
 
     fn list_apps(&self, deadline: Deadline) -> Result<Vec<AppInfo>, AdapterError> {
