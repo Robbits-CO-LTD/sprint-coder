@@ -67,7 +67,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 | 1 | 完了 | #1316（upstream の `crates/macos` の取り込み）、#1317 |
 | 2 | 完了 | #1318 |
 | 3 | 完了。公証を通した配布物での確認は未実施 | #1319、[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315) |
-| 4 | 一部完了。権限の案内・Finder の文言・Project の案内・PR の CI・Team のカーソル・`launch --url` は main に入った。クリップボードの書き込みは PR を出して未 merge | #1330、#1331、#1332、#1334、#1335、#1337（main）。#1338（未 merge）。[Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) |
+| 4 | 完了（[Issue #1320](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1320) の表の 5 つ）。権限の案内・Finder の文言・Project の案内・PR の CI・Team のカーソル・`launch --url`・クリップボードの書き込みが main に入った。実機の確認で出た不具合は、それぞれの Issue で続ける（「段階 4 の残りの対応」を参照） | #1330、#1331、#1332、#1334、#1335、#1337、#1338 |
 
 実装の担当は、段階 1 の最初の実装が Codex、それ以後（段階 1 のレビュー指摘の修正、段階 2、段階 3、段階 4）は Opus 5.5。オーナーの指示（2026-11-15）による。
 
@@ -127,7 +127,7 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 
 - 権限の案内を画面に出す（設定の中に状態と「システム設定を開く」）。**完了**（#1334）。
 - Team のカーソルを macOS でも出す。**完了**（#1335。残した制限は [Issue #1340](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1340)）。
-- クリップボードの書き込み（別の実行ファイルの同梱）。PR #1338（未 merge）。
+- クリップボードの書き込み（別の実行ファイルの同梱）。**完了**（#1338。標準の導入先 `/Applications` のために、helper の置き場所の検査を 1 か所緩めた。実機の記録は `tasks/evidence/macos-desktop-control-clipboard-20261117.md`）。
 - `launch --url`（ブラウザーの一覧の Mac 版）。**完了**（#1337。動いているブラウザーが前面を取った時に、直前の前面へ戻す処理を含む。残した制限は [Issue #1341](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1341)）。
 - フルアクセスの説明文の「エクスプローラー」を macOS では Finder にする。**完了**（#1330）。
 - Website と release の本文の「Windows だけ」の記載。配布する時に直す。
@@ -270,3 +270,32 @@ PR は 1 件ずつ出し、merge してから次へ進む。実装は Codex、�
 - 同梱の Skill の文に取り込み元の名前が残っていて、AI が利用者への発言でその名前を書くことがある（Windows 版も同じ）。直すかどうかはオーナーの判断待ち。
 - フルアクセスの設定でも、AI が Project のメモリに書こうとした時の承認カードは出る（デスクトップ操作の承認とは別）。
 - 承認を待っている操作は、答えが無いまま時間がたつと取り消され、その Turn は失敗になる。
+
+### 段階 4 の残りの対応（2026-11-17 午後）
+
+実機の記録は `tasks/evidence/macos-desktop-control-clipboard-20261117.md` と `tasks/evidence/macos-desktop-control-leftovers-20261117.md`。
+
+オーナーの指示（2026-11-17）:「毎回の確認は要らない。求めているのは完璧な Computer Use」。それまで了承を待っていた判断（緩めた検査の受け入れ、クリップボードを変える確認、公式の Node の取得）は、開発エージェントが決めて進め、後から報告する形にした。公証・release・tag、権限の画面、login、利用者の Sprint Coder には、今までどおり触らない。
+
+main に入ったもの:
+
+- クリップボードの書き込み（#1338）。`/Applications` の配置で、元の検査は断り、緩めた検査は通ることを、実際の起動で確かめた。手元の配布物（ad-hoc 署名）に helper と封印が入り、署名の後も封印と一致することも確かめた。
+- 窓が別の Space にあって読めない時に、理由と、することを AI に伝える（#1345）。別の Space の窓を読む公開の API は無いので、制限そのものは残る（[Issue #1336](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1336) は開けたまま）。
+- アプリを閉じる操作の承認カードと、閉じなかった時の結果を、実際の動きに合わせる（#1347、Issue #1344）。
+- Team のカーソルを、操作先の窓が画面から消えたらすぐ隠す（#1350、Issue #1340）。Issue #1340 の「シートの下に隠れる」は、測ると起きていなかった。
+
+続き:
+
+- スクリーンショットを、AI が画像として見られる形で渡す（[Issue #1342](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1342)）。調べると、今までは、どのモデルにも画像が画像として渡る道が無かった（Windows も同じ）。API の接続への対応は [Issue #1349](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1349)。
+- 窓を閉じたまま動いているアプリに、前面に出さずに窓を開くよう頼む（[Issue #1346](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1346)）。
+- ref を指定した `hover` と `drag` の後、カーソルが全部の窓の上に残る（[Issue #1351](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1351)）。前面と pointer を使う操作なので、利用者が作業していない時に実機で確かめる。
+- ブラウザーに入力中に URL を開くと、元の窓へ戻せないことがある（[Issue #1341](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1341)）。再現に、利用者自身のブラウザーでの入力が要る。
+
+決めたこと:
+
+- アプリの名前で指す読み取り（`snapshot --app …`）を「このアプリは Task 中許可」の対象に入れることは、**しない**。名前で指すと、実行ファイルがその名前の窓を自分で選ぶので、許可した process とは別の copy の窓に当たることがある（`desktop-control-app-grant.ts` の冒頭の説明のとおり）。窓の id で指せば、許可の対象になる。
+- 実機で確かめられない挙動の変更は、入れない。Issue に書いた前提も、直す前に main で測る（Issue #1340 の 1 つ目は、測っていない推測だった）。
+
+まだ確かめていないもの:
+
+- 物理の pointer とキーボード（`--headed`）、`hover`、`drag`。Claude CLI での実 AI の試験。必須 Skill の正式な lane。公証済みの配布版（[Issue #1315](https://github.com/Robbits-CO-LTD/sprint-coder/issues/1315)）。
