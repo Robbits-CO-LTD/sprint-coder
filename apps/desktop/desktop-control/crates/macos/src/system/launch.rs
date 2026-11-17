@@ -67,7 +67,10 @@ pub(crate) fn launch_app_impl(
         let instance = required_instance(&app).map_err(before_launch)?;
         let pid = super::process::process_identity::to_pid_t(app.pid).map_err(before_launch)?;
         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
-        return Ok(result_from_app(&app, window));
+        return Ok(with_other_space_suggestion(
+            result_from_app(&app, window),
+            deadline,
+        ));
     }
     let target = launch_target(options, initial.clone()).map_err(before_launch)?;
     // Checked before opening exactly as before (`prepare`, the checks `open` always made).
@@ -143,6 +146,7 @@ pub(crate) fn launch_app_impl(
     };
     let result = window.map_err(after_launch).and_then(|window| {
         result_from_launched(&launched, window, id, &target, options, deadline)
+            .map(|result| with_other_space_suggestion(result, deadline))
             .map_err(after_launch)
     });
     super::launch_front::finish(front.as_ref(), result)
@@ -1020,6 +1024,25 @@ pub(crate) fn looks_like_bundle_id(id: &str) -> bool {
 #[cfg(target_os = "macos")]
 fn after_launch(error: AdapterError) -> AdapterError {
     error.with_disposition(DeliverySemantics::delivered_unverified())
+}
+
+/// A launch that ends without a window, while the app has a window that is probably on another
+/// Space (the user is in a full-screen app, say), says so instead of saying nothing. Read once,
+/// after the wait, and only when the result has no window and no other guidance.
+#[cfg(target_os = "macos")]
+fn with_other_space_suggestion(mut result: LaunchResult, deadline: Deadline) -> LaunchResult {
+    if result.window.is_some() || result.suggestion.is_some() {
+        return result;
+    }
+    let (Ok(pid), Ok(until)) = (
+        super::process::process_identity::to_pid_t(result.pid),
+        deadline_instant(deadline),
+    ) else {
+        return result;
+    };
+    result.suggestion = crate::system::window::other_space::read_for_pid(pid, until)
+        .and_then(|numbers| crate::system::window::other_space::launch_suggestion(&numbers));
+    result
 }
 
 #[cfg(target_os = "macos")]

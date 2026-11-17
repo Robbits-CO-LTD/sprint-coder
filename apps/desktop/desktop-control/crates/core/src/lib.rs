@@ -90,15 +90,15 @@ pub use notifications::notification_info::NotificationInfo;
 pub use refs::RefMap;
 pub use refs::ref_capabilities::RefCapabilities;
 pub use refs::ref_entry::RefEntry;
-pub use refs::ref_menu::{
-    MenuMismatch, confirm_leaf as confirm_menu_leaf, item_name as menu_item_display_name,
-    match_step as match_menu_step, menu_mismatch_error, menu_ref_refused,
-};
 pub use refs::ref_entry_identity::{
     RefAncestorIdentity, RefEntryIdentity, RefMenuProof, RefMenuStep, RefViewProof,
 };
 pub use refs::ref_geometry::RefGeometry;
 pub use refs::ref_identity_match::IdentityMatch;
+pub use refs::ref_menu::{
+    MenuMismatch, confirm_leaf as confirm_menu_leaf, item_name as menu_item_display_name,
+    match_step as match_menu_step, menu_mismatch_error, menu_ref_refused,
+};
 pub use refs::ref_process::RefProcess;
 pub use refs::ref_scope::RefScope;
 pub use refs::ref_source::RefSource;
@@ -147,6 +147,7 @@ pub use system::window_info::WindowInfo;
 pub use system::window_op::WindowOp;
 pub use system::window_readback::WindowReadback;
 pub use system::window_state::WindowState;
+pub use system::windowless_reason::WindowlessReason;
 pub use trace::trace_sanitize::sanitize_trace_value;
 pub use tree::accname::{compute_description, compute_name, resolve_description, resolve_name};
 pub use tree::bounds_space::BoundsSpace;

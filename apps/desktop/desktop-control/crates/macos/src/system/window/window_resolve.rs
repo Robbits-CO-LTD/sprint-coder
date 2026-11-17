@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ErrorCode, WindowInfo};
 
 use crate::system::window::cg_window::WindowRecord;
@@ -138,7 +139,40 @@ fn resolve_window_element_strict(
     crate::tree::locator_deadline::remaining(deadline)?;
     let pid = crate::system::process::process_identity::to_pid_t(win.pid)?;
     ax_window_element_for_number(pid, window_number, record.title.as_deref(), deadline)?
-        .ok_or_else(|| window_not_accessible(&win.id))
+        .ok_or_else(|| unreadable_window(&win.id, pid, &record, deadline))
+}
+
+/// A listed window that accessibility does not show: off screen, of a real
+/// size, and in an app that is not hidden, it is probably on another Space,
+/// which only the user can change; otherwise the app does not expose it.
+fn unreadable_window(
+    id: &str,
+    pid: i32,
+    record: &WindowRecord,
+    deadline: std::time::Instant,
+) -> AdapterError {
+    use crate::system::window::other_space;
+    let window = other_space::WindowSignals {
+        number: record.window_number,
+        on_screen: record.visible,
+        width: record.bounds.width,
+        height: record.bounds.height,
+        in_accessibility: false,
+        minimized: None,
+    };
+    // Read only when the window could be on another Space at all.
+    let hidden = (!record.visible)
+        .then(|| other_space::read_app_hidden(pid, deadline))
+        .flatten();
+    let app = other_space::AppSignals {
+        hidden,
+        accessibility_complete: true,
+    };
+    if other_space::likely_on_other_space(&window, &app) {
+        other_space::window_error(id)
+    } else {
+        window_not_accessible(id)
+    }
 }
 
 pub(crate) fn parse_window_number(id: &str) -> Option<i64> {
