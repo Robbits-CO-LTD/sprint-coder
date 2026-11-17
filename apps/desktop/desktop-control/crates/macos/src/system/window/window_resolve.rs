@@ -142,34 +142,21 @@ fn resolve_window_element_strict(
         .ok_or_else(|| unreadable_window(&win.id, pid, &record, deadline))
 }
 
-/// A listed window that accessibility does not show: off screen, of a real
-/// size, and in an app that is not hidden, it is probably on another Space,
-/// which only the user can change; otherwise the app does not expose it.
+/// A listed window that accessibility does not show: when it reads as probably
+/// on another Space (`other_space`), which only the user can change, it says
+/// so; otherwise the app does not expose it.
 fn unreadable_window(
     id: &str,
     pid: i32,
     record: &WindowRecord,
     deadline: std::time::Instant,
 ) -> AdapterError {
-    use crate::system::window::other_space;
-    let window = other_space::WindowSignals {
-        number: record.window_number,
-        on_screen: record.visible,
-        width: record.bounds.width,
-        height: record.bounds.height,
-        in_accessibility: false,
-        minimized: None,
-    };
-    // Read only when the window could be on another Space at all.
-    let hidden = (!record.visible)
-        .then(|| other_space::read_app_hidden(pid, deadline))
-        .flatten();
-    let app = other_space::AppSignals {
-        hidden,
-        accessibility_complete: true,
-    };
-    if other_space::likely_on_other_space(&window, &app) {
-        other_space::window_error(id)
+    // An on-screen window is never on another Space, so nothing more is read.
+    let other_space = !record.visible
+        && crate::system::window::other_space::read_for_pid(pid, deadline)
+            .is_some_and(|numbers| numbers.contains(&record.window_number));
+    if other_space {
+        crate::system::window::other_space::window_error(id)
     } else {
         window_not_accessible(id)
     }

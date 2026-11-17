@@ -18,6 +18,7 @@ fn off_space_window(number: i64) -> WindowSignals {
 
 fn shown_app() -> AppSignals {
     AppSignals {
+        regular: true,
         hidden: Some(false),
         accessibility_complete: true,
     }
@@ -68,6 +69,15 @@ fn a_hidden_app_or_one_whose_hidden_state_is_unread_names_no_cause() {
         };
         assert!(!likely_on_other_space(&off_space_window(7), &app));
     }
+}
+
+#[test]
+fn a_menu_bar_or_background_app_names_no_cause() {
+    let app = AppSignals {
+        regular: false,
+        ..shown_app()
+    };
+    assert!(!likely_on_other_space(&off_space_window(7), &app));
 }
 
 #[test]
@@ -138,12 +148,14 @@ fn the_app_reason_names_the_likely_cause_and_what_to_do() {
 }
 
 #[test]
-fn the_guidance_is_honest_about_uncertainty_and_forbids_a_retry_loop() {
-    assert!(GUIDANCE.contains("likely cause, not a certainty"));
+fn the_guidance_names_both_causes_and_forbids_a_retry_loop() {
+    assert!(GUIDANCE.contains("no public way to tell them apart"));
+    assert!(GUIDANCE.contains("closed or hidden the window but keeps it"));
     assert!(GUIDANCE.contains("Do not retry in a tight loop"));
     assert!(GUIDANCE.contains("do not conclude that the app is broken"));
-    assert!(GUIDANCE.contains("returns to the Space"));
-    assert!(GUIDANCE.contains("tell the user"));
+    assert!(GUIDANCE.contains("Do not activate the app on your own"));
+    assert!(GUIDANCE.contains("Tell the user"));
+    assert!(GUIDANCE.contains("with their agreement"));
 }
 
 #[test]

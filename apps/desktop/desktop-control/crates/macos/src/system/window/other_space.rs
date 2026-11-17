@@ -20,15 +20,19 @@ const MIN_WINDOW_POINTS: f64 = 100.0;
 pub(crate) const LIKELY_CAUSE: &str = "other_space";
 const APP_KIND: &str = "window_probably_on_other_space";
 
-/// What to do, shared by every answer that names this cause.
-pub(crate) const GUIDANCE: &str = "macOS shows a window to accessibility only while it is on \
-     the Space the user is on, and offers no public way to tell which Space a window is on, so \
-     this is the likely cause, not a certainty. The window becomes readable again when the user \
-     returns to the Space it is on. Do not retry in a tight loop, do not activate or raise the \
-     app to reach it (that would take the user away from what they are doing), and do not \
-     conclude that the app is broken: tell the user the window is on another Space and ask them \
-     to switch back to it when they can, or do other work meanwhile. If it is still unreadable \
-     while the user is on its Space, the app may have hidden or closed the window.";
+/// What to do, shared by every answer that names this cause. A window the app
+/// closed but keeps (or never showed) reads the same way, so it is named too.
+pub(crate) const GUIDANCE: &str = "Two causes fit what can be read, and macOS offers no public \
+     way to tell them apart (it cannot say which Space a window is on): most often the window is \
+     on another Space, which accessibility does not show until the user returns to it, for \
+     example while the user is working in a full-screen app; or the app has closed or hidden the \
+     window but keeps it. Do not retry in a tight loop, and do not conclude that the app is \
+     broken. Do not activate the app on your own to reach the window: on another Space that \
+     would switch the user away from what they are doing. Tell the user, and ask them to switch \
+     back to the Space with the window when they can (it becomes readable then), or do other work \
+     meanwhile. If the user says no window of the app is open on any Space, the app has no open \
+     window: ask the user to open one, or bring the app forward with their agreement (for \
+     example `launch` with `--activate`).";
 
 /// One window of the app as the window server and accessibility read it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,9 +47,12 @@ pub(crate) struct WindowSignals {
     pub(crate) minimized: Option<bool>,
 }
 
-/// The app as accessibility reads it.
+/// The app as the workspace and accessibility read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppSignals {
+    /// A regular app (one with a Dock icon). Menu-bar and background apps keep
+    /// windows they show only now and then, so theirs are never named.
+    pub(crate) regular: bool,
     /// `AXHidden` of the app; `None` when it could not be read.
     pub(crate) hidden: Option<bool>,
     /// Whether every accessibility window of the app was read and identified,
@@ -55,7 +62,8 @@ pub(crate) struct AppSignals {
 
 /// Whether `window` is, most likely, on a Space the user is not on.
 pub(crate) fn likely_on_other_space(window: &WindowSignals, app: &AppSignals) -> bool {
-    app.hidden == Some(false)
+    app.regular
+        && app.hidden == Some(false)
         && app.accessibility_complete
         && !window.on_screen
         && !window.in_accessibility
@@ -88,7 +96,8 @@ pub(crate) fn app_reason(app: &str, pid: i32, numbers: &[i64]) -> Option<Windowl
         message: format!(
             "Application '{app}' is running, but its window cannot be read now: the window \
              exists off screen and is not exposed through accessibility, probably because it \
-             is on another Space (for example, the user is working in a full-screen app)."
+             is on another Space (for example, the user is working in a full-screen app), or because \
+             the app closed it but keeps it."
         ),
         suggestion: GUIDANCE.to_owned(),
         details: serde_json::json!({
@@ -107,8 +116,8 @@ pub(crate) fn launch_suggestion(numbers: &[i64]) -> Option<String> {
         format!(
             "The app is running, but its window cannot be read now: the window ({}) exists off \
              screen and is not exposed through accessibility, probably because it is on another \
-             Space (for example, the user is working in a full-screen app). Do not repeat the \
-             launch. {GUIDANCE}",
+             Space (for example, the user is working in a full-screen app), or because the app \
+             closed it but keeps it. Do not repeat the launch. {GUIDANCE}",
             window_ids(numbers).join(", ")
         )
     })
@@ -123,7 +132,7 @@ pub(crate) fn window_error(id: &str) -> AdapterError {
         format!(
             "Window '{id}' exists but cannot be read now: it is off screen and not exposed \
              through accessibility, probably because it is on another Space (for example, the \
-             user is working in a full-screen app)"
+             user is working in a full-screen app), or because the app closed it but keeps it"
         ),
     )
     .with_details(serde_json::json!({
@@ -146,9 +155,19 @@ pub(crate) fn read_for_pid(pid: i32, deadline: std::time::Instant) -> Option<Vec
     if !records.iter().any(|record| !record.visible) {
         return Some(Vec::new());
     }
+    let regular = crate::system::app::workspace_apps::window_owner_snapshot_until(deadline)
+        .ok()?
+        .owner(pid)
+        .is_some_and(|owner| {
+            owner.activation_policy == crate::system::app::workspace_apps::ActivationPolicy::Regular
+        });
+    if !regular {
+        return Some(Vec::new());
+    }
     let app = crate::tree::element_for_pid(pid);
     let (listed, accessibility_complete) = read_accessibility_windows(&app, deadline);
     let signals = AppSignals {
+        regular,
         hidden: read_hidden(&app, deadline),
         accessibility_complete,
     };
@@ -182,12 +201,6 @@ pub(crate) fn reason_for_app(app: &str, deadline: std::time::Instant) -> Option<
         return None;
     }
     app_reason(app, pid, &numbers)
-}
-
-/// `AXHidden` of the app element of `pid`.
-#[cfg(target_os = "macos")]
-pub(crate) fn read_app_hidden(pid: i32, deadline: std::time::Instant) -> Option<bool> {
-    read_hidden(&crate::tree::element_for_pid(pid), deadline)
 }
 
 #[cfg(target_os = "macos")]
@@ -234,11 +247,6 @@ pub(crate) fn reason_for_app(
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn read_for_pid(_pid: i32, _deadline: std::time::Instant) -> Option<Vec<i64>> {
-    None
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn read_app_hidden(_pid: i32, _deadline: std::time::Instant) -> Option<bool> {
     None
 }
 
