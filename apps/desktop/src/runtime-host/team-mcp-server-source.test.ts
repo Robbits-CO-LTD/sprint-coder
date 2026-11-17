@@ -501,6 +501,57 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     ]);
   });
 
+  it('relays a desktop-control screenshot as its metadata text and MCP image content', async () => {
+    const harness = await startHarness();
+    harness.send({
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'tools/call',
+      params: {
+        name: 'exec_command',
+        arguments: { executable: '/x', argv: ['screenshot', '--window-id', 'w-1'], purpose: 'p' },
+      },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 1);
+    const stdout = JSON.stringify({
+      version: '2.6',
+      ok: true,
+      command: 'screenshot',
+      data: { format: 'png', width: 800, height: 600, scale_factor: 2, points_per_pixel: 1 },
+    });
+    harness.bridgeRespond({
+      ok: true,
+      result: {
+        executionId: 'e-1',
+        exitCode: 0,
+        stdout,
+        stderr: '',
+        truncated: false,
+        picture: '撮った画像をこの結果に添えた。',
+        mimeType: 'image/png',
+        byteLength: 3,
+        sha256: 'a'.repeat(64),
+        dataUrl: 'data:image/png;base64,QUFB',
+      },
+    });
+    const reply = await harness.nextMessage();
+    expect((reply['result'] as { content: unknown[] }).content).toEqual([
+      {
+        type: 'text',
+        text: JSON.stringify({
+          mimeType: 'image/png',
+          byteLength: 3,
+          sha256: 'a'.repeat(64),
+          picture: '撮った画像をこの結果に添えた。',
+          exitCode: 0,
+          stdout,
+          stderr: '',
+        }),
+      },
+      { type: 'image', mimeType: 'image/png', data: 'QUFB' },
+    ]);
+  });
+
   it('treats the exact allowed list as authoritative over broad capability booleans', async () => {
     const harness = await startHarness({
       allowedTools: ['project_memory_remember'],

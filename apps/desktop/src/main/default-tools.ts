@@ -32,6 +32,15 @@ import {
 } from './desktop-control-session';
 import { DesktopControlQueueError, queuedDesktopControlRun } from './desktop-control-queue';
 import {
+  SCREENSHOT_PICTURE_UNAVAILABLE,
+  SCREENSHOT_WAIT_MS,
+  clipScreenshotStderr,
+  holdScreenshotPicture,
+  isDesktopControlScreenshot,
+  prepareScreenshotOutput,
+  screenshotCallKey,
+} from './desktop-control-screenshot';
+import {
   CommandRunner,
   CommandRunnerError,
   executionSpecContentDigest,
@@ -681,6 +690,13 @@ export function registerCommandRunnerTool(
           : null;
       if (sessionRefusal !== null)
         throw new CommandRunnerError('EXECUTION_SPEC_INVALID', sessionRefusal);
+      // A screenshot's picture is made fit for the model when the run ends, which a run gone on in
+      // the background never does for the call that asked.
+      if (desktopControl && request.background === true && isDesktopControlScreenshot(spec.argv))
+        throw new CommandRunnerError(
+          'EXECUTION_SPEC_INVALID',
+          'デスクトップ操作の実行を拒否した: screenshot は background では実行できない。background を付けずに出し直す。',
+        );
       const persisted = command.persistence.prepareCommand({
         id: randomUUID(),
         taskId: context.taskId,
@@ -740,6 +756,35 @@ export function registerCommandRunnerTool(
       const commandId = commandIds.get(spec);
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
       const toolOutput = { stdout: '', stderr: '', truncated: false };
+      // A desktop-control screenshot prints its whole picture as base64. That output is held here
+      // instead of being stored and shown as it arrives; when the run ends, only what the picture
+      // is gets stored and shown (`finishScreenshot`), and the picture goes with the tool result.
+      const screenshotRun = desktopControlRoots.has(spec) && isDesktopControlScreenshot(spec.argv);
+      const printed: { stdout: string[]; stderr: string[] } = { stdout: [], stderr: [] };
+      const dropPrinted = (): void => {
+        printed.stdout = [];
+        printed.stderr = [];
+      };
+      // Ends a command record still open as failed (a run that threw before its record ended).
+      const failOpenRecord = (): void => {
+        const current = command.persistence.getCommand(commandId);
+        if (
+          current.state !== 'prepared' &&
+          current.state !== 'starting' &&
+          current.state !== 'running'
+        )
+          return;
+        const persisted = command.persistence.completeCommand({
+          commandId,
+          state: 'failed',
+          exitCode: null,
+          signal: null,
+          outputBytes: screenshotRun ? 0 : current.outputBytes,
+          truncated: !screenshotRun && current.state === 'running',
+          finishedAt: new Date().toISOString(),
+        });
+        command.publish(persisted.event);
+      };
       // Only a call prepared as the shipped desktop control and allowed on its own card ("allow
       // once", or "allow for the Task" kept for exactly this command), or allowed by the Task's
       // Full access preset (the ApprovalCoordinator's `access_preset_full`, the owner's decision of
@@ -896,6 +941,10 @@ export function registerCommandRunnerTool(
           command.publish(persisted.event);
         },
         onBatch: (chunks: readonly CommandOutputChunk[]) => {
+          if (screenshotRun) {
+            for (const chunk of chunks) printed[chunk.stream].push(chunk.text);
+            return;
+          }
           for (const chunk of chunks) appendCommandToolOutput(toolOutput, chunk);
           const events = command.persistence.appendCommandOutputBatch({
             commandId,
@@ -904,6 +953,58 @@ export function registerCommandRunnerTool(
           });
           for (const event of events) command.publish(event);
         },
+      };
+      // A screenshot run that ended: its output is stored and shown without the picture, and the
+      // picture is held beside the call (`holdScreenshotPicture`), for Main to give the
+      // Turn's model where it may. The result says the model has no picture until Main adds it.
+      const finishScreenshot = async (result: CommandResult): Promise<Record<string, unknown>> => {
+        const stdoutText = printed.stdout.join('');
+        const stderr = clipScreenshotStderr(printed.stderr.join(''));
+        dropPrinted();
+        const output = await prepareScreenshotOutput(stdoutText, result.truncated);
+        const chunks = (
+          [
+            { stream: 'stdout', text: output.stdout },
+            { stream: 'stderr', text: stderr },
+          ] as const
+        )
+          .filter(({ text }) => text.length > 0)
+          .map(({ stream, text }, index) => ({
+            seq: index + 1,
+            stream,
+            text,
+            byteLength: Buffer.byteLength(text, 'utf8'),
+          }));
+        let outputBytes = 0;
+        if (chunks.length > 0 && command.persistence.getCommand(commandId).state === 'running') {
+          const events = command.persistence.appendCommandOutputBatch({
+            commandId,
+            chunks,
+            createdAt: new Date().toISOString(),
+          });
+          for (const event of events) command.publish(event);
+          outputBytes = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+        }
+        const persisted = completePersistedCommand(command.persistence, commandId, {
+          ...result,
+          outputBytes,
+          truncated: false,
+        });
+        command.publish(persisted.event);
+        const toolResult: Record<string, unknown> = {
+          ...result,
+          outputBytes,
+          stdout: output.stdout,
+          stderr,
+          truncated: false,
+          picture: SCREENSHOT_PICTURE_UNAVAILABLE,
+        };
+        if (output.picture !== undefined)
+          holdScreenshotPicture(
+            screenshotCallKey(_context.taskId, _context.turnId, control.callId),
+            output.picture,
+          );
+        return toolResult;
       };
       if (sessions !== undefined) {
         const owner = { taskId: _context.taskId, turnId: _context.turnId };
@@ -937,8 +1038,10 @@ export function registerCommandRunnerTool(
         try {
           // A run of the desktop-control executable is stopped when the Task is archived
           // (`terminateTaskDesktopControl`), whether or not it runs in the Task's session.
+          // A screenshot's printed output (the whole picture) is held here only, never kept in
+          // the session for `poll_command`.
           const sessionHooks = desktopControlRoots.has(spec)
-            ? { ...hooks, desktopControl: true }
+            ? { ...hooks, desktopControl: true, ...(screenshotRun ? { keepOutput: false } : {}) }
             : hooks;
           started = await sessions.start(
             spec,
@@ -960,6 +1063,7 @@ export function registerCommandRunnerTool(
           );
         } catch (caught) {
           const error = notRun ?? caught;
+          dropPrinted();
           const current = command.persistence.getCommand(commandId);
           if (
             current.state === 'prepared' ||
@@ -1039,14 +1143,20 @@ export function registerCommandRunnerTool(
         // A Team Worker cannot poll a run that went on in the background (its catalog has no
         // `poll_command`), so its desktop-control run is waited for to the end, within a bound;
         // past the bound it is stopped and reported as failed, never left running unseen.
+        // A screenshot run is waited for to the end in the same way: its picture is made fit for
+        // the model only as it ends, and its output is never left to `poll_command`.
         const workerRun = desktopControlWorkers.has(spec);
         let completed = await sessions.waitFor(
           started.sessionId,
           owner,
-          workerRun ? desktopControlWorkerWaitMs(spec.argv) : foregroundToBackgroundMs,
+          screenshotRun
+            ? SCREENSHOT_WAIT_MS
+            : workerRun
+              ? desktopControlWorkerWaitMs(spec.argv)
+              : foregroundToBackgroundMs,
         );
         let overran = false;
-        if (completed === null && workerRun) {
+        if (completed === null && (workerRun || screenshotRun)) {
           overran = true;
           sessions.terminate(started.sessionId, owner);
           completed = await sessions.wait(started.sessionId, owner);
@@ -1056,6 +1166,17 @@ export function registerCommandRunnerTool(
           observeBackground();
           return sessions.poll(started.sessionId, owner);
         }
+        if (screenshotRun && !overran && completed.result !== null) {
+          try {
+            return await finishScreenshot(completed.result);
+          } catch (error) {
+            dropPrinted();
+            failOpenRecord();
+            throw error;
+          }
+        }
+        // Whatever else ended the run, nothing of a screenshot's printed output is kept.
+        if (screenshotRun) dropPrinted();
         const persisted =
           completed.result === null
             ? command.persistence.completeCommand({
@@ -1063,12 +1184,22 @@ export function registerCommandRunnerTool(
                 state: completed.state === 'canceled' ? 'canceled' : 'failed',
                 exitCode: null,
                 signal: null,
-                outputBytes: command.persistence.getCommand(commandId).outputBytes,
+                outputBytes: screenshotRun
+                  ? 0
+                  : command.persistence.getCommand(commandId).outputBytes,
                 truncated: false,
                 finishedAt: new Date().toISOString(),
               })
-            : completePersistedCommand(command.persistence, commandId, completed.result);
+            : completePersistedCommand(
+                command.persistence,
+                commandId,
+                screenshotRun ? { ...completed.result, outputBytes: 0 } : completed.result,
+              );
         command.publish(persisted.event);
+        if (overran && screenshotRun)
+          throw new Error(
+            `画面を撮る操作が ${Math.round(SCREENSHOT_WAIT_MS / 1000)} 秒以内に終わらなかったため、止めた。画面の中身は snapshot で読む。`,
+          );
         if (overran)
           throw new Error(
             `デスクトップ操作が ${Math.round(desktopControlWorkerWaitMs(spec.argv) / 1000)} 秒以内に終わらなかったため、止めた。操作が届いたかは分からない。snapshot で状態を確かめてから続ける。`,
@@ -1091,6 +1222,7 @@ export function registerCommandRunnerTool(
             : await queuedDesktopControlRun(_context.taskId, (runSpec, options) =>
                 commandRunner.run(runSpec, options),
               )(spec, hooks);
+        if (screenshotRun) return await finishScreenshot(result);
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
         rememberWindows();
@@ -1100,6 +1232,7 @@ export function registerCommandRunnerTool(
           truncated: commandToolTruncated(result.truncated, toolOutput.truncated),
         };
       } catch (error) {
+        dropPrinted();
         const current = command.persistence.getCommand(commandId);
         if (
           current.state === 'prepared' ||

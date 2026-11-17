@@ -86,6 +86,11 @@ export class ManagedCommandSessions {
        * (`terminateTaskDesktopControl`), in the foreground or gone on in the background.
        */
       desktopControl?: boolean;
+      /**
+       * False for a run whose printed output its caller holds itself and must not be kept here
+       * (a desktop-control screenshot, whose output is the whole picture): `poll` then shows none.
+       */
+      keepOutput?: boolean;
     } = {},
     sessionId = randomUUID(),
   ): Promise<ManagedCommandSnapshot> {
@@ -143,7 +148,7 @@ export class ManagedCommandSessions {
         },
         onBatch: async (chunks) => {
           for (const chunk of chunks) {
-            session.chunks.push(chunk);
+            if (hooks.keepOutput !== false) session.chunks.push(chunk);
             await hooks.onChunk?.(chunk);
           }
           if (session.chunks.length > this.maxChunks)

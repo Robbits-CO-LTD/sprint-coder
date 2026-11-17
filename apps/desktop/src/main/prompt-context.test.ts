@@ -334,6 +334,10 @@ describe('prompt context compiler', () => {
     const look = lines.findIndex((line) => line.startsWith('- 見る（snapshot）→ 操作する'));
     expect(lines[look + 1]).toMatch(/^- 結果の disposition\.delivery: /u);
     expect(lines[look + 2]).toMatch(/^- 結果を確かめる時は -i なしの snapshot/u);
+    // What a screenshot gives: a picture to look at and its sizes; no save path, not in a batch.
+    expect(lines[look + 3]).toBe(
+      '- screenshot は、撮った画像を見られる形で渡し（結果に添えるか、結果のすぐ後の別のメッセージで届く）、画像の大きさ（width・height）、元の大きさ（source_width・source_height）、scale_factor、points_per_pixel（画像の 1 px が何ポイントか）を返す。接続が画像を受け取れない時は画像を渡さず、結果の picture にそう書く。保存先は指定できず、batch の中では使えない（screenshot だけで実行する）。部品の ref は snapshot で取る。',
+    );
 
     const without = compilePromptGuidance({ ...base, desktopControlCommand: null });
     expect(without.context).not.toHaveProperty('desktopControl');

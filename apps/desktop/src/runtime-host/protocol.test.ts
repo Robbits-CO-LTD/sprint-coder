@@ -12,10 +12,12 @@ import {
   GROK_SESSION_UPDATE_KINDS,
   GROK_STOP_REASONS,
   RUNTIME_PROTOCOL_VERSION,
+  RUNTIME_TOOL_RESULT_MAX_BYTES,
   correlatedRuntimeStartRejection,
   isRuntimeFailureDiagnostic,
   isMainToRuntimeEnvelope,
   isRuntimeToMainEnvelope,
+  runtimeToolResultFits,
   runtimeWorkspaceSetFromLegacyPath,
 } from './protocol';
 
@@ -273,6 +275,27 @@ describe('Runtime Host protocol', () => {
       }),
     ).toBe(true);
     expect(isRuntimeToMainEnvelope({ ...base, type: 'tool_cancel', callId: 'call-1' })).toBe(true);
+  });
+
+  it('bounds a tool result to what the runtime reads, and says so before it is sent', () => {
+    const base = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 2,
+      operationId: 'operation-1',
+      type: 'tool_result',
+      callId: 'call-1',
+      success: true,
+    } as const;
+    const padding = RUNTIME_TOOL_RESULT_MAX_BYTES - JSON.stringify({ text: '' }).length;
+    const largest = { text: 'x'.repeat(padding) };
+    const over = { text: 'x'.repeat(padding + 1) };
+    expect(runtimeToolResultFits(largest)).toBe(true);
+    expect(isMainToRuntimeEnvelope({ ...base, output: largest })).toBe(true);
+    expect(runtimeToolResultFits(over)).toBe(false);
+    expect(isMainToRuntimeEnvelope({ ...base, output: over })).toBe(false);
   });
 
   it('rejects old protocol versions', () => {

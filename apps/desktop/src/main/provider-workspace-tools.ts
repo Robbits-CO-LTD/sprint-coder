@@ -1,3 +1,4 @@
+import { releaseScreenshotPicturesForTurn } from './desktop-control-screenshot';
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
@@ -831,6 +832,7 @@ export class ManagedCodingHarness {
   }
 
   finishTurn(taskId: string, turnId: string): void {
+    releaseScreenshotPicturesForTurn(taskId, turnId);
     this.graphReads.finishTurn(taskId, turnId);
     this.deps.graphs?.finishTurn?.(taskId, turnId);
     this.broker.finishTurn(taskId, turnId);
