@@ -59,6 +59,17 @@ impl ObservationOps for MacOSAdapter {
         )
     }
 
+    fn windowless_app_reason(
+        &self,
+        app: &str,
+        deadline: Deadline,
+    ) -> Option<agent_desktop_core::WindowlessReason> {
+        crate::system::window::other_space::reason_for_app(
+            app,
+            crate::tree::locator_deadline::from_operation(deadline).ok()?,
+        )
+    }
+
     fn list_apps(&self, deadline: Deadline) -> Result<Vec<AppInfo>, AdapterError> {
         crate::system::app::app_inventory::list_apps_complete_until(
             crate::tree::locator_deadline::from_operation(deadline)?,

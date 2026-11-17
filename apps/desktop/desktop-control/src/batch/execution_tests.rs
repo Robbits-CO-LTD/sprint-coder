@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::batch::result_entry::bounded_entry;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -276,4 +277,58 @@ fn inherited_batch_deadline_caps_sleep_without_variant_rewriting() {
     .expect("entry timeout remains a structured batch result");
 
     assert_eq!(output["results"][0]["error"]["code"], "TIMEOUT");
+}
+
+struct OffSpaceAdapter;
+
+impl agent_desktop_core::ObservationOps for OffSpaceAdapter {
+    fn list_windows(
+        &self,
+        _filter: &agent_desktop_core::WindowFilter,
+        _deadline: agent_desktop_core::Deadline,
+    ) -> Result<Vec<agent_desktop_core::WindowInfo>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    fn windowless_app_reason(
+        &self,
+        app: &str,
+        _deadline: agent_desktop_core::Deadline,
+    ) -> Option<agent_desktop_core::WindowlessReason> {
+        (app == "Calculator").then(|| agent_desktop_core::WindowlessReason {
+            message: "M.".into(),
+            suggestion: "S.".into(),
+            details: json!({}),
+        })
+    }
+}
+impl agent_desktop_core::ActionOps for OffSpaceAdapter {}
+impl agent_desktop_core::InputOps for OffSpaceAdapter {}
+impl agent_desktop_core::SystemOps for OffSpaceAdapter {}
+
+#[test]
+fn a_list_windows_note_lands_on_its_own_entry_and_not_on_a_later_one_or_the_envelope() {
+    let output = execute(
+        args(
+            json!([
+                {"command": "list-windows", "args": {"app": "Calculator"}},
+                {"command": "list-windows", "args": {"app": "Other"}}
+            ]),
+            60_000,
+        ),
+        &OffSpaceAdapter,
+        &PermissionReport::default(),
+        &CommandContext::default(),
+    )
+    .expect("batch executes");
+
+    assert_eq!(output["results"][0]["data"], json!([]));
+    assert_eq!(output["results"][0]["suggestion"], "M. S.");
+    assert!(output["results"][1].get("suggestion").is_none());
+    assert!(output.get("suggestion").is_none());
+    assert_eq!(
+        agent_desktop_core::response::result_note::take(),
+        None,
+        "nothing is left for the batch envelope"
+    );
 }

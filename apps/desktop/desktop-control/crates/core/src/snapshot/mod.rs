@@ -175,7 +175,7 @@ pub(crate) fn resolve_window_for_surface(
         return crate::system::app_lookup::windowless_app_owner(adapter, app, deadline);
     }
     if let (crate::SnapshotSurface::Window, Some(app)) = (surface, app_name) {
-        return select_app_window(windows, app);
+        return select_app_window(adapter, windows, app, deadline);
     }
     crate::system::window_lookup::select_surface_owner(
         windows,
@@ -218,10 +218,21 @@ fn is_process_surface(surface: crate::SnapshotSurface) -> bool {
     )
 }
 
-fn select_app_window(windows: Vec<WindowInfo>, app: &str) -> Result<WindowInfo, AppError> {
+fn select_app_window(
+    adapter: &dyn PlatformAdapter,
+    windows: Vec<WindowInfo>,
+    app: &str,
+    deadline: crate::Deadline,
+) -> Result<WindowInfo, AppError> {
+    // The reason is read only when there is no window to choose.
+    let missing = if windows.is_empty() {
+        crate::system::windowless_reason::no_window_error(adapter, app, deadline)
+    } else {
+        crate::AdapterError::app_has_no_window(app)
+    };
     crate::system::window_lookup::select_window(
         windows,
-        crate::AdapterError::app_has_no_window(app),
+        missing,
         "More than one window matches the target",
     )
 }
@@ -317,7 +328,7 @@ pub(crate) fn resolve_window(
                 }
             }
         }
-        select_app_window(windows, app)
+        select_app_window(adapter, windows, app, deadline)
     } else {
         crate::system::window_lookup::select_window(
             windows,
