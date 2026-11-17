@@ -14,10 +14,13 @@ import {
   SCREENSHOT_PICTURE_ATTACHED,
   SCREENSHOT_PICTURE_UNAVAILABLE,
   fitScreenshotPicture,
+  SCREENSHOT_PICTURE_HOLD_MS,
+  heldScreenshotPictureCount,
   holdScreenshotPicture,
   isDesktopControlScreenshot,
   isScreenshotToolResult,
   prepareScreenshotOutput,
+  screenshotCallKey,
   screenshotToolResultFor,
   takeScreenshotPicture,
   turnModelTakesPictures,
@@ -253,9 +256,9 @@ describe('fitting the picture', () => {
       truncated: false,
       picture: SCREENSHOT_PICTURE_UNAVAILABLE,
     };
-    holdScreenshotPicture(result, output.picture!);
     const toModel = screenshotToolResultFor(
       result,
+      output.picture,
       true,
       RUNTIME_TOOL_RESULT_MAX_BYTES - 64 * 1024,
     ) as Record<string, unknown>;
@@ -286,13 +289,17 @@ describe('giving the picture to the model', () => {
     byteLength: 3,
     sha256: 'a'.repeat(64),
   };
-  const resultOf = () => ({ exitCode: 0, stdout: '{}', picture: SCREENSHOT_PICTURE_UNAVAILABLE });
+  const resultOf = (sha256 = 'a'.repeat(64)) => ({
+    exitCode: 0,
+    stdout: JSON.stringify({ ok: true, command: 'screenshot', data: { sha256 } }),
+    picture: SCREENSHOT_PICTURE_UNAVAILABLE,
+  });
 
-  it('adds the picture for a connection that takes images', () => {
-    const result = resultOf();
-    holdScreenshotPicture(result, picture);
+  it('adds the picture for a connection that takes images, from a copy of the result', () => {
+    // What reaches Main may be a copy of the object the command tool made.
+    const result = JSON.parse(JSON.stringify(resultOf())) as ReturnType<typeof resultOf>;
     expect(isScreenshotToolResult(result)).toBe(true);
-    expect(screenshotToolResultFor(result, true, RUNTIME_TOOL_RESULT_MAX_BYTES)).toEqual({
+    expect(screenshotToolResultFor(result, picture, true, RUNTIME_TOOL_RESULT_MAX_BYTES)).toEqual({
       ...result,
       picture: SCREENSHOT_PICTURE_ATTACHED,
       mimeType: 'image/png',
@@ -300,25 +307,47 @@ describe('giving the picture to the model', () => {
       sha256: 'a'.repeat(64),
       dataUrl: 'data:image/png;base64,QUFB',
     });
-    // Once only.
-    expect(takeScreenshotPicture(result)).toBeUndefined();
   });
 
-  it('leaves a connection without images, or a result too large to carry, with the sentence only', () => {
+  it('holds a picture beside its call, once, and drops one nobody takes', () => {
+    vi.useFakeTimers();
+    try {
+      const key = screenshotCallKey('task', 'turn', 'call');
+      holdScreenshotPicture(key, picture);
+      expect(takeScreenshotPicture(screenshotCallKey('task', 'turn', 'other'))).toBeUndefined();
+      expect(takeScreenshotPicture(key)).toBe(picture);
+      expect(takeScreenshotPicture(key)).toBeUndefined();
+      holdScreenshotPicture(key, picture);
+      vi.advanceTimersByTime(SCREENSHOT_PICTURE_HOLD_MS);
+      expect(takeScreenshotPicture(key)).toBeUndefined();
+      expect(heldScreenshotPictureCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves a connection without images, another picture, or a result too large, with the sentence only', () => {
     const plain = resultOf();
-    holdScreenshotPicture(plain, picture);
-    expect(screenshotToolResultFor(plain, false, RUNTIME_TOOL_RESULT_MAX_BYTES)).toBe(plain);
-    expect(JSON.stringify(plain)).not.toContain('QUFB');
+    expect(screenshotToolResultFor(plain, picture, false, RUNTIME_TOOL_RESULT_MAX_BYTES)).toBe(
+      plain,
+    );
     expect(plain.picture).toBe(
       'この接続では、撮った画像を AI に渡せない。画面の中身を確かめる時は snapshot を使う。',
     );
-    const tight = resultOf();
-    holdScreenshotPicture(tight, picture);
-    expect(screenshotToolResultFor(tight, true, 64)).toBe(tight);
+    const otherPicture = resultOf('b'.repeat(64));
+    expect(
+      screenshotToolResultFor(otherPicture, picture, true, RUNTIME_TOOL_RESULT_MAX_BYTES),
+    ).toBe(otherPicture);
+    expect(screenshotToolResultFor(plain, undefined, true, RUNTIME_TOOL_RESULT_MAX_BYTES)).toBe(
+      plain,
+    );
+    expect(screenshotToolResultFor(plain, picture, true, 64)).toBe(plain);
     // Any other result passes untouched.
     const other = { stdout: 'x' };
     expect(isScreenshotToolResult(other)).toBe(false);
-    expect(screenshotToolResultFor(other, true, RUNTIME_TOOL_RESULT_MAX_BYTES)).toBe(other);
+    expect(screenshotToolResultFor(other, picture, true, RUNTIME_TOOL_RESULT_MAX_BYTES)).toBe(
+      other,
+    );
   });
 });
 
@@ -493,10 +522,11 @@ async function setUp(printed: string, withSessions: boolean) {
   registerCommandRunnerTool(broker, runner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions, 50);
   broker.startTurn(owner, 'codex');
   vi.spyOn(desktopControlModule, 'isDesktopControlExecutable').mockReturnValue(true);
+  let lastCallId = '';
   const dispatch = (argv: string[], background?: boolean) =>
     broker.dispatch({
       ...owner,
-      callId: `call-${Math.random()}`,
+      callId: (lastCallId = `call-${Math.random()}`),
       providerName: 'exec_command',
       input: {
         executable: process.execPath,
@@ -508,7 +538,8 @@ async function setUp(printed: string, withSessions: boolean) {
   const failStore = () => {
     storeFails = true;
   };
-  return { dispatch, stored, completed, published, sessions, failStore };
+  const lastCallKey = () => screenshotCallKey(owner.taskId, owner.turnId, lastCallId);
+  return { dispatch, stored, completed, published, sessions, failStore, lastCallKey };
 }
 
 describe('a screenshot run through exec_command', () => {
@@ -542,7 +573,7 @@ describe('a screenshot run through exec_command', () => {
       expect(result['stdout']).toBe(harness.stored[0]!.text);
       expect(result['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
       expect(JSON.stringify(result)).not.toContain('base64');
-      const held = takeScreenshotPicture(result);
+      const held = takeScreenshotPicture(harness.lastCallKey());
       expect(held?.mimeType).toBe('image/png');
       expect(held?.sha256).toBe(dataOf(harness.stored[0]!.text)['sha256']);
       await harness.sessions?.dispose();

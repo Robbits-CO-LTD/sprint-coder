@@ -1034,6 +1034,10 @@ describe('Codex runtime probe', () => {
     expect(CODEX_MANAGED_TOOL_GUIDANCE).toContain(
       'If exec returns "Script running with cell ID ..." while a host\ncall inside it waits, call wait with that cell ID',
     );
+    // A nested call's picture reaches the model only through the script's own image(...).
+    expect(CODEX_MANAGED_TOOL_GUIDANCE).toContain(
+      'starts with data:image/ and pass it to image(...)',
+    );
   });
 
   it('never asks the native runtime for approval', () => {

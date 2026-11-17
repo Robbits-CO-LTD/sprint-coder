@@ -38,6 +38,7 @@ import {
   holdScreenshotPicture,
   isDesktopControlScreenshot,
   prepareScreenshotOutput,
+  screenshotCallKey,
 } from './desktop-control-screenshot';
 import {
   CommandRunner,
@@ -954,7 +955,7 @@ export function registerCommandRunnerTool(
         },
       };
       // A screenshot run that ended: its output is stored and shown without the picture, and the
-      // tool result carries the picture beside it (`holdScreenshotPicture`), for Main to give the
+      // picture is held beside the call (`holdScreenshotPicture`), for Main to give the
       // Turn's model where it may. The result says the model has no picture until Main adds it.
       const finishScreenshot = async (result: CommandResult): Promise<Record<string, unknown>> => {
         const stdoutText = printed.stdout.join('');
@@ -998,7 +999,11 @@ export function registerCommandRunnerTool(
           truncated: false,
           picture: SCREENSHOT_PICTURE_UNAVAILABLE,
         };
-        if (output.picture !== undefined) holdScreenshotPicture(toolResult, output.picture);
+        if (output.picture !== undefined)
+          holdScreenshotPicture(
+            screenshotCallKey(_context.taskId, _context.turnId, control.callId),
+            output.picture,
+          );
         return toolResult;
       };
       if (sessions !== undefined) {

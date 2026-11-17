@@ -596,7 +596,9 @@ import type {
 import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
 import {
   isScreenshotToolResult,
+  screenshotCallKey,
   screenshotToolResultFor,
+  takeScreenshotPicture,
   turnModelTakesPictures,
 } from './desktop-control-screenshot';
 
@@ -4727,14 +4729,36 @@ export class IpcRouter {
         accepted: false,
       } satisfies ProviderImageBridgeDispatchResult);
     const result = await this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
+    if (!isScreenshotToolResult(result)) return result;
     // A desktop-control screenshot's picture goes to the Turn's own model as an image (the CLI
     // adapters hand a `dataUrl` over as one), only when that model takes images, and only within
-    // what the runtime protocol carries. Every other result is as it was.
+    // what the runtime protocol carries. It is held beside the call as the broker ran it.
+    const { ownerTurnId, brokerCallId } = this.managedBrokerCall(turnId, request.callId);
+    const picture = takeScreenshotPicture(screenshotCallKey(taskId, ownerTurnId, brokerCallId));
     return screenshotToolResultFor(
       result,
-      isScreenshotToolResult(result) && this.screenshotPictureAccepted(taskId, turnId),
+      picture,
+      picture !== undefined && (await this.screenshotPictureAccepted(taskId, turnId)),
       RUNTIME_TOOL_RESULT_MAX_BYTES - 64 * 1024,
     );
+  }
+
+  /** The Turn and call id a managed call reaches the ToolBroker under (a Worker's: its parent's). */
+  private managedBrokerCall(
+    turnId: string,
+    callId: string,
+  ): Readonly<{ ownerTurnId: string; brokerCallId: string }> {
+    const worker = this.managedWorkerTurn.get(turnId);
+    return {
+      ownerTurnId: worker?.parentTurnId ?? turnId,
+      brokerCallId:
+        worker === undefined
+          ? callId
+          : `${createHash('sha256').update(turnId).digest('hex').slice(0, 16)}:${callId}`.slice(
+              0,
+              128,
+            ),
+    };
   }
 
   /**
@@ -4742,8 +4766,10 @@ export class IpcRouter {
    * from its recorded model identity, a Team Worker's from the runtime and model its own Turn was
    * started with. Anything that cannot be read gets no picture.
    */
-  private screenshotPictureAccepted(taskId: string, turnId: string): boolean {
+  private async screenshotPictureAccepted(taskId: string, turnId: string): Promise<boolean> {
     try {
+      // Built once in this app run if nothing has asked for it yet (the model picker opens it).
+      if (this.modelCatalog.revision === 0) await this.refreshModelCatalog();
       const catalog = {
         find: (connectionId: string, modelId: string) =>
           this.modelCatalog.find(connectionId, modelId),
@@ -4883,14 +4909,7 @@ export class IpcRouter {
       )
         throw new Error('Managed Worker tool is outside its capability ceiling');
     }
-    const ownerTurnId = worker?.parentTurnId ?? turnId;
-    const brokerCallId =
-      worker === undefined
-        ? request.callId
-        : `${createHash('sha256').update(turnId).digest('hex').slice(0, 16)}:${request.callId}`.slice(
-            0,
-            128,
-          );
+    const { ownerTurnId, brokerCallId } = this.managedBrokerCall(turnId, request.callId);
     const workerCallKey = JSON.stringify([ownerTurnId, brokerCallId]);
     const callSignal =
       worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]);

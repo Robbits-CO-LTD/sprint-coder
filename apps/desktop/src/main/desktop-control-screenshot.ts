@@ -264,20 +264,40 @@ export async function prepareScreenshotOutput(
   };
 }
 
-// The picture of a screenshot run's tool result, kept beside the result object and never in it, so
-// no route that does not ask for it (a stored record, an API provider's text) can carry it.
-const pictures = new WeakMap<object, ScreenshotPicture>();
+// The picture of a screenshot run's tool call, kept in Main beside the call (the Task, the Turn and
+// the call id the ToolBroker ran it under) and never in the result object, so no route that does
+// not ask for it (a stored record, an API provider's text, a log) can carry it, and no copy of the
+// result made on the way loses it. A picture nobody takes is dropped after a while.
+export const SCREENSHOT_PICTURE_HOLD_MS = 120_000;
+const pictures = new Map<
+  string,
+  { picture: ScreenshotPicture; timer: ReturnType<typeof setTimeout> }
+>();
 
-export function holdScreenshotPicture(result: object, picture: ScreenshotPicture): void {
-  pictures.set(result, picture);
+/** The key a screenshot's picture is held under: the call as the ToolBroker ran it. */
+export function screenshotCallKey(taskId: string, turnId: string, callId: string): string {
+  return JSON.stringify([taskId, turnId, callId]);
 }
 
-/** The picture held for this tool result, once; `undefined` for any other result. */
-export function takeScreenshotPicture(result: unknown): ScreenshotPicture | undefined {
-  if (typeof result !== 'object' || result === null) return undefined;
-  const picture = pictures.get(result);
-  pictures.delete(result);
-  return picture;
+export function holdScreenshotPicture(key: string, picture: ScreenshotPicture): void {
+  takeScreenshotPicture(key);
+  const timer = setTimeout(() => pictures.delete(key), SCREENSHOT_PICTURE_HOLD_MS);
+  timer.unref?.();
+  pictures.set(key, { picture, timer });
+}
+
+/** The picture held for this call, once; `undefined` for any other call. */
+export function takeScreenshotPicture(key: string): ScreenshotPicture | undefined {
+  const held = pictures.get(key);
+  if (held === undefined) return undefined;
+  clearTimeout(held.timer);
+  pictures.delete(key);
+  return held.picture;
+}
+
+/** How many pictures are held (for tests). */
+export function heldScreenshotPictureCount(): number {
+  return pictures.size;
 }
 
 /** Whether this tool result is a screenshot run's (it has a `picture` sentence). */
@@ -334,16 +354,18 @@ export function turnModelTakesPictures(
 
 /**
  * The tool result a Turn's model gets: with the picture as `dataUrl` (which the CLI adapters hand
- * over as an image) when `accepted` and the whole result stays within `maxResultBytes`, else the
- * result as it is, which tells the model it has no picture.
+ * over as an image) when `accepted`, the picture is the one the result's own metadata names (its
+ * digest), and the whole result stays within `maxResultBytes`; else the result as it is, which
+ * tells the model it has no picture.
  */
 export function screenshotToolResultFor(
   result: unknown,
+  picture: ScreenshotPicture | undefined,
   accepted: boolean,
   maxResultBytes: number,
 ): unknown {
-  const picture = takeScreenshotPicture(result);
-  if (!accepted || picture === undefined || !isRecord(result)) return result;
+  if (!accepted || picture === undefined || !isScreenshotToolResult(result)) return result;
+  if (screenshotDigestOf(result) !== picture.sha256) return result;
   const withPicture = {
     ...result,
     picture: SCREENSHOT_PICTURE_ATTACHED,
@@ -355,4 +377,15 @@ export function screenshotToolResultFor(
   return Buffer.byteLength(JSON.stringify(withPicture), 'utf8') <= maxResultBytes
     ? withPicture
     : result;
+}
+
+function screenshotDigestOf(result: Record<string, unknown>): string | undefined {
+  if (typeof result['stdout'] !== 'string') return undefined;
+  try {
+    const envelope: unknown = JSON.parse(result['stdout']);
+    const data = isRecord(envelope) ? envelope['data'] : undefined;
+    return isRecord(data) && typeof data['sha256'] === 'string' ? data['sha256'] : undefined;
+  } catch {
+    return undefined;
+  }
 }

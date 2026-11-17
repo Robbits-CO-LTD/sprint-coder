@@ -117,7 +117,11 @@ card, which can take minutes. While a host call has not returned, do not end the
 finish by saying its result has not come back yet: the host withdraws an unanswered card when the
 turn ends, and the call never runs. If exec returns "Script running with cell ID ..." while a host
 call inside it waits, call wait with that cell ID until the script completes, then continue from
-its result.`;
+its result.
+A host call result can carry a picture: a desktop-control screenshot, whose result has a picture
+field. Inside an exec script a nested call's picture is not shown to you by itself: take the string
+in the call's result that starts with data:image/ and pass it to image(...), and pass the rest of the
+result to text(...) without that string; otherwise you see neither.`;
 const unknownCapability = { value: null, source: 'unknown' as const };
 const codexRuntimeCapability = (value: boolean, sourceReference: string) => ({
   value,
