@@ -249,7 +249,10 @@ pub(crate) fn reason_for_app(app: &str, deadline: std::time::Instant) -> Option<
 }
 
 #[cfg(target_os = "macos")]
-fn read_hidden(app: &crate::tree::AXElement, deadline: std::time::Instant) -> Option<bool> {
+pub(crate) fn read_hidden(
+    app: &crate::tree::AXElement,
+    deadline: std::time::Instant,
+) -> Option<bool> {
     crate::tree::surface_read::boolean(app, "AXHidden", deadline)
         .ok()
         .flatten()

@@ -541,7 +541,10 @@ describe('prompt context compiler', () => {
     expect(text).toContain(
       'Dock のアイコンを押した時と同じように、前に出さずに窓を開くよう 1 回だけ頼む（attached は true のまま）',
     );
-    expect(text).toContain('その窓はこの launch が開かせた窓で、自分の作業に使ってよい');
+    expect(text).toContain(
+      'アプリが閉じたまま持っていた窓（利用者の内容が入っている）のこともある。中身は利用者の物として扱い、利用者が頼んだ作業だけをする',
+    );
+    expect(text).not.toContain('その窓はこの launch が開かせた窓で、自分の作業に使ってよい');
     expect(text).toContain('窓が出なければ、待ったり launch を繰り返したりせず、suggestion に従う');
     expect(text).not.toContain('running_without_window が true');
     expect(windows.content).toContain('running_without_window が true');

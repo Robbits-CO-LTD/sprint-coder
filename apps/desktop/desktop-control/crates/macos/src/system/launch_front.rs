@@ -561,16 +561,27 @@ fn with_note(suggestion: Option<String>, note: &str) -> String {
 /// Everything else of the result stays as it was, and any other result (a launch that was not
 /// passed on, another error) is returned as it is: the sentences speak of the instance the
 /// launch was passed to.
+#[cfg(test)]
 pub(crate) fn annotate(
     result: Result<LaunchResult, AdapterError>,
     outcome: Option<FrontOutcome>,
+) -> Result<LaunchResult, AdapterError> {
+    annotate_for(result, outcome, false)
+}
+
+/// `annotate`, where `asked` marks a launch that asked the running instance for a window
+/// (`launch_reopen`): its successful result gets the sentence too, handed off or not.
+pub(crate) fn annotate_for(
+    result: Result<LaunchResult, AdapterError>,
+    outcome: Option<FrontOutcome>,
+    asked: bool,
 ) -> Result<LaunchResult, AdapterError> {
     let Some(outcome) = outcome else {
         return result;
     };
     let note = front_note(outcome);
     match result {
-        Ok(mut result) if result.handed_off => {
+        Ok(mut result) if result.handed_off || asked => {
             result.suggestion = Some(with_note(result.suggestion.take(), note));
             Ok(result)
         }
@@ -653,7 +664,17 @@ impl FrontGuard {
         &self,
         result: Result<LaunchResult, AdapterError>,
     ) -> Result<LaunchResult, AdapterError> {
-        if is_handoff(&result) {
+        self.finish_for(result, false)
+    }
+
+    /// `finish`, where `asked` marks a launch that asked the running instance for a window: it
+    /// is read a little longer and says what happened to the front, as a hand-off does.
+    pub(crate) fn finish_for(
+        &self,
+        result: Result<LaunchResult, AdapterError>,
+        asked: bool,
+    ) -> Result<LaunchResult, AdapterError> {
+        if asked || is_handoff(&result) {
             // The hand-off may have been judged without one pause (its window was already
             // there at the first look): the front is read at least once here, so a take that
             // came with that window is seen and the time to settle starts from it.
@@ -674,7 +695,7 @@ impl FrontGuard {
             |target| behind_now(target, &candidates, deadline),
             |target| restore(target, deadline),
         );
-        annotate(result, outcome)
+        annotate_for(result, outcome, asked)
     }
 }
 
@@ -684,6 +705,18 @@ pub(crate) fn pause(guard: Option<&FrontGuard>, wait: Duration) {
     match guard {
         Some(guard) => guard.pause(wait),
         None => std::thread::sleep(wait),
+    }
+}
+
+/// `finish` for a launch that asked the running instance for a window (`launch_reopen`).
+#[cfg(target_os = "macos")]
+pub(crate) fn finish_asked(
+    guard: Option<&FrontGuard>,
+    result: Result<LaunchResult, AdapterError>,
+) -> Result<LaunchResult, AdapterError> {
+    match guard {
+        Some(guard) => guard.finish_for(result, true),
+        None => result,
     }
 }
 

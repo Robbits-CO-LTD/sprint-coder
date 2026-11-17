@@ -3,10 +3,14 @@
 //! closed (TextEdit, Preview, Mail, Notes), and show a window again only when asked to reopen,
 //! as a click on their Dock icon asks. `launch` without `--activate` asks such an app once,
 //! through the same open a background launch uses (never activating), and then waits for a
-//! window as a fresh launch does. It does not ask an app with a minimized window (the request
-//! would restore it, changing the user's window layout), nor when that cannot be told.
+//! window as a fresh launch does, while `launch_front` watches the front: the app may bring
+//! itself forward when it answers. It does not ask a hidden app, nor one with a minimized window
+//! (the request could unhide it or restore that window, changing the user's window layout), nor
+//! when that cannot be told.
 
-use agent_desktop_core::{AdapterError, WindowlessReason, system::launch_options::LaunchOptions};
+use agent_desktop_core::{
+    AdapterError, ErrorCode, WindowlessReason, system::launch_options::LaunchOptions,
+};
 
 /// Whether the app has a minimized window, as its accessibility windows read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,21 +23,36 @@ pub(crate) enum Minimized {
     Unknown,
 }
 
+/// Why a running app without a window was not asked for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotSent {
+    /// Not a plain attach of a regular app (one with a Dock icon): said nothing, as before.
+    NotAsked,
+    /// The app is hidden (`AXHidden`).
+    Hidden,
+    /// The app has a minimized window.
+    Minimized,
+    /// Whether it is hidden, its windows, or whether one is minimized could not be read.
+    Unknown,
+}
+
 /// What a launch did for a running app that had no window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reopen {
-    /// The app was not asked to open a window; `minimized` when that is why.
-    NotSent { minimized: bool },
+    NotSent(NotSent),
     /// The app was asked once; `waited` is false for a zero timeout, which does not wait.
-    Sent { waited: bool },
+    Sent {
+        waited: bool,
+    },
 }
 
 /// The suggestion of a launch whose running app showed a window after it was asked to.
 pub(crate) const REOPENED_WINDOW: &str = "The app was running without a window, so this launch \
      asked it to open one, the way a click on its Dock icon does, without bringing it to the \
-     front. `window` is the window it then showed: the app showed no window before, so it is \
-     not a window the user was using. Check `window.is_focused` before telling the user where it \
-     opened. Do not repeat the launch.";
+     front. The app showed no window before this launch and showed `window` in answer. It may \
+     be a window the app had kept, with the user's content in it: treat what is in it as the \
+     user's and do only what the user asked. Check `window.is_focused` before telling the user \
+     where it opened. Do not repeat the launch.";
 
 /// The suggestion of a launch whose running app showed no window after it was asked to.
 pub(crate) const REOPENED_NO_WINDOW: &str = "The app is running, and this launch asked it to \
@@ -56,22 +75,38 @@ pub(crate) const MINIMIZED_NOT_REOPENED: &str = "The app is running and shows no
      the user; with their agreement, `launch` with `--activate` brings the app and that window \
      to the front.";
 
-/// The suggestion of a launch whose running app shows no window and was not asked for one.
+/// The suggestion of a launch whose running app is hidden.
+pub(crate) const HIDDEN_NOT_REOPENED: &str = "The app is running but hidden (as with Cmd+H) and \
+     shows no window, so this launch did not ask it to open one: that could unhide it and \
+     change the user's window layout. Do not unhide it on your own, and do not repeat the \
+     launch. Tell the user; with their agreement, `launch` with `--activate` brings the app to \
+     the front.";
+
+/// The suggestion of a launch that could not tell whether asking the app for a window is safe.
 pub(crate) const NOT_REOPENED: &str = "The app is running but shows no window, and this launch \
-     did not ask it to open one: it is not an app with a Dock icon, or its windows could not \
-     all be read. Waiting will not help: do not repeat the launch or retry it in a loop. Tell \
-     the user; with their agreement, `launch` with `--activate` brings the app to the front.";
+     did not ask it to open one: whether the app is hidden, or whether it has a minimized \
+     window, could not be read. Waiting will not help: do not repeat the launch or retry it in \
+     a loop. Tell the user; with their agreement, `launch` with `--activate` brings the app to \
+     the front.";
 
 /// The `details.kind` of a running app that shows no window at all.
 pub(crate) const NO_WINDOW_KIND: &str = "app_running_without_window";
 
+/// The `details.kind` of a running hidden app that shows no window.
+pub(crate) const HIDDEN_KIND: &str = "app_hidden_without_window";
+
 /// The suggestion of `snapshot --app` and `list-windows --app` for a running app that shows no
-/// window at all (no window on screen, none minimized, none on another Space).
+/// window at all (no window on screen, none minimized, none on another Space, not hidden).
 pub(crate) const NO_WINDOW_GUIDANCE: &str = "Waiting will not make one appear: many apps keep \
      running after their last window was closed. Run `launch` once with the same app name: it \
      asks the app to open a window without bringing it to the front. If that returns no \
      window, or a `launch` of this app already returned none, do not run it again: tell the \
      user.";
+
+/// The suggestion of `snapshot --app` and `list-windows --app` for a hidden app with no window.
+pub(crate) const HIDDEN_GUIDANCE: &str = "Waiting will not make one appear, and `launch` does not \
+     ask a hidden app for a window. Do not unhide it on your own. Tell the user; with their \
+     agreement, `launch` with `--activate` brings the app to the front.";
 
 /// Whether the app has a minimized window, from the `AXMinimized` of each accessibility window
 /// (`None` where a window did not answer) and whether every window was read (`complete`).
@@ -98,27 +133,35 @@ pub(crate) fn minimized_from(
 }
 
 /// Whether an attaching launch of a running app asks it to open a window: only when it has no
-/// usable window (`has_window` is false), for a plain attach (not `--activate`, not `--no-attach` or `--url`, which never attach, and
-/// with no bundle id limit), of a regular app (one with a Dock icon, whose click this mirrors),
-/// proven to have no minimized window. `minimized` is read only when everything else allows it.
+/// usable window (`has_window` is false), for a plain attach (not `--activate`, not
+/// `--no-attach` or `--url`, which never attach, and with no bundle id limit), of a regular app
+/// (one with a Dock icon, whose click this mirrors), read to be not hidden (`hidden`, `AXHidden`;
+/// `None` when it cannot be read) and proven to have no minimized window. `hidden` and
+/// `minimized` are read only when everything before them allows the request.
 pub(crate) fn may_reopen(
     options: &LaunchOptions,
     has_window: bool,
     regular: bool,
+    hidden: impl FnOnce() -> Option<bool>,
     minimized: impl FnOnce() -> Minimized,
-) -> Result<(), Reopen> {
+) -> Result<(), NotSent> {
     if has_window
         || !options.attach_if_running
         || options.activate
         || !options.bundle_ids.is_empty()
         || !regular
     {
-        return Err(Reopen::NotSent { minimized: false });
+        return Err(NotSent::NotAsked);
+    }
+    match hidden() {
+        Some(false) => {}
+        Some(true) => return Err(NotSent::Hidden),
+        None => return Err(NotSent::Unknown),
     }
     match minimized() {
         Minimized::None => Ok(()),
-        Minimized::Some => Err(Reopen::NotSent { minimized: true }),
-        Minimized::Unknown => Err(Reopen::NotSent { minimized: false }),
+        Minimized::Some => Err(NotSent::Minimized),
+        Minimized::Unknown => Err(NotSent::Unknown),
     }
 }
 
@@ -133,31 +176,77 @@ pub(crate) fn reopen_options(options: &LaunchOptions) -> LaunchOptions {
     }
 }
 
-/// Asks the app for a window at most once (`send`, only when `allowed`), then looks for it
-/// (`wait`, which waits only when `waits`): the window, if one came, and what was done.
-pub(crate) fn reopen_once<W>(
-    allowed: Result<(), Reopen>,
-    waits: bool,
-    send: impl FnOnce() -> Result<(), AdapterError>,
-    wait: impl FnOnce() -> Result<Option<W>, AdapterError>,
-) -> Result<(Option<W>, Reopen), AdapterError> {
-    if let Err(not_sent) = allowed {
-        return Ok((None, not_sent));
+/// The windows the app shows now, the baseline of the front's watch over the request: only
+/// the shown ones, so a window the app kept off screen and shows again in answer counts as its
+/// new window (a hand-off counts every window, since there the instance only shows its own new
+/// one). `None` when they cannot be read.
+pub(crate) fn shown_numbers(windows: Option<Vec<super::launch::WindowSeen>>) -> Option<Vec<i64>> {
+    Some(
+        windows?
+            .into_iter()
+            .filter(|window| window.shown)
+            .map(|window| window.number)
+            .collect(),
+    )
+}
+
+/// What the open of the request returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Opened {
+    /// The instance that was running: it got the request.
+    Same,
+    /// Another process, while the instance that was running is gone: the app quit just before,
+    /// and the open started it anew, as a launch of an app that does not run does.
+    Fresh,
+}
+
+/// What the open of the request returned (`launched`), against the instance that was running
+/// (`expected`); `runs` tells whether that instance still runs (`None` when it cannot be read,
+/// taken as running). Another process while that instance may still run is an error that says
+/// a new instance was started and is left running.
+pub(crate) fn opened(
+    expected: (i32, &str),
+    launched: &(i32, String),
+    runs: impl FnOnce() -> Option<bool>,
+) -> Result<Opened, AdapterError> {
+    if launched.0 == expected.0 && launched.1 == expected.1 {
+        return Ok(Opened::Same);
     }
-    send()?;
-    Ok((wait()?, Reopen::Sent { waited: waits }))
+    if runs() == Some(false) {
+        return Ok(Opened::Fresh);
+    }
+    Err(AdapterError::new(
+        ErrorCode::AppUnresponsive,
+        format!(
+            "Asking the running app for a window started a new instance of it (pid {}) instead; \
+             that new instance was not stopped and is still running",
+            launched.0
+        ),
+    )
+    .with_details(serde_json::json!({
+        "expected_pid": expected.0,
+        "returned_pid": launched.0,
+        "complete": false,
+        "kind": "reopen_started_new_instance",
+    }))
+    .with_suggestion(
+        "Do not repeat the launch. Run `list-windows` for the app to see its windows, and tell \
+         the user that a second instance of the app was started.",
+    ))
 }
 
 /// The suggestion of a launch for what was done, when it has a window (`has_window`) or none
-/// and no other explanation (the other-Space one is given before this).
+/// and no other explanation (the other-Space one is chosen before this, in `suggestion`).
 pub(crate) fn reopen_suggestion(reopen: Reopen, has_window: bool) -> Option<&'static str> {
     match (reopen, has_window) {
         (Reopen::Sent { .. }, true) => Some(REOPENED_WINDOW),
-        (_, true) => None,
+        (Reopen::NotSent(_), true) => None,
         (Reopen::Sent { waited: true }, false) => Some(REOPENED_NO_WINDOW),
         (Reopen::Sent { waited: false }, false) => Some(REOPENED_NOT_WAITED),
-        (Reopen::NotSent { minimized: true }, false) => Some(MINIMIZED_NOT_REOPENED),
-        (Reopen::NotSent { minimized: false }, false) => Some(NOT_REOPENED),
+        (Reopen::NotSent(NotSent::Minimized), false) => Some(MINIMIZED_NOT_REOPENED),
+        (Reopen::NotSent(NotSent::Hidden), false) => Some(HIDDEN_NOT_REOPENED),
+        (Reopen::NotSent(NotSent::Unknown), false) => Some(NOT_REOPENED),
+        (Reopen::NotSent(NotSent::NotAsked), false) => None,
     }
 }
 
@@ -167,16 +256,58 @@ pub(crate) fn asked_prefix(reopen: Reopen) -> Option<&'static str> {
     match reopen {
         Reopen::Sent { waited: true } => Some(ASKED_NO_WINDOW),
         Reopen::Sent { waited: false } => Some(ASKED_NOT_WAITED),
-        Reopen::NotSent { .. } => None,
+        Reopen::NotSent(_) => None,
     }
 }
 
-/// The reason a running regular app `app` (process `pid`) lists no window at all.
-pub(crate) fn no_window_reason(app: &str, pid: i32) -> WindowlessReason {
-    WindowlessReason {
-        message: format!("Application '{app}' is running but shows no window."),
-        suggestion: NO_WINDOW_GUIDANCE.to_owned(),
-        details: serde_json::json!({ "kind": NO_WINDOW_KIND, "pid": pid }),
+/// The suggestion of an attach to a running app without a usable window, from what was done
+/// (`reopen`) and whether a window came: without one, the other-Space explanation when the app
+/// has such windows (`other_space`, read only then: the numbers, `None` when not read), with the
+/// asked sentence first; otherwise the text for what was done. For a Chromium app, core's hint
+/// (which core adds only to a result without a suggestion) is appended to any such text.
+pub(crate) fn suggestion(
+    reopen: Reopen,
+    has_window: bool,
+    other_space: impl FnOnce() -> Option<Vec<i64>>,
+    chromium: bool,
+) -> Option<String> {
+    let text = (!has_window)
+        .then(other_space)
+        .flatten()
+        .and_then(|numbers| {
+            crate::system::window::other_space::launch_suggestion(&numbers, asked_prefix(reopen))
+        })
+        .or_else(|| reopen_suggestion(reopen, has_window).map(str::to_owned))?;
+    Some(if chromium {
+        format!(
+            "{text} {}",
+            agent_desktop_core::commands::launch::CHROMIUM_CDP_HINT
+        )
+    } else {
+        text
+    })
+}
+
+/// The reason a running regular app `app` (process `pid`) that shows no window gives, from
+/// whether it is hidden (`AXHidden`; `None` when that cannot be read, which names no reason).
+pub(crate) fn windowless_reason(
+    app: &str,
+    pid: i32,
+    hidden: Option<bool>,
+) -> Option<WindowlessReason> {
+    match hidden? {
+        false => Some(WindowlessReason {
+            message: format!("Application '{app}' is running but shows no window."),
+            suggestion: NO_WINDOW_GUIDANCE.to_owned(),
+            details: serde_json::json!({ "kind": NO_WINDOW_KIND, "pid": pid }),
+        }),
+        true => Some(WindowlessReason {
+            message: format!(
+                "Application '{app}' is running but hidden (as with Cmd+H), and shows no window."
+            ),
+            suggestion: HIDDEN_GUIDANCE.to_owned(),
+            details: serde_json::json!({ "kind": HIDDEN_KIND, "pid": pid }),
+        }),
     }
 }
 
@@ -194,7 +325,7 @@ pub(crate) fn single_windowless_regular(
 
 /// The reason of `snapshot --app` and `list-windows --app` for a running app with no window,
 /// when it is not the other-Space case: only for an app with exactly one process, a regular one
-/// that shows no window on screen.
+/// that shows no window on screen, and whose `AXHidden` can be read.
 #[cfg(target_os = "macos")]
 pub(crate) fn reason_for_app(app: &str, deadline: std::time::Instant) -> Option<WindowlessReason> {
     let owners = crate::system::app::workspace_apps::window_owner_snapshot_until(deadline).ok()?;
@@ -209,7 +340,7 @@ pub(crate) fn reason_for_app(app: &str, deadline: std::time::Instant) -> Option<
             (pid, regular)
         })
         .collect::<Vec<_>>();
-    single_windowless_regular(&pids, |pid| {
+    let pid = single_windowless_regular(&pids, |pid| {
         let records = crate::system::window::cg_window::window_records_until(
             deadline,
             crate::system::window::cg_window::WindowRecordScope::Pid(pid),
@@ -223,8 +354,8 @@ pub(crate) fn reason_for_app(app: &str, deadline: std::time::Instant) -> Option<
                     record.bounds.height,
                 )
         }))
-    })
-    .map(|pid| no_window_reason(app, pid))
+    })?;
+    windowless_reason(app, pid, read_hidden(pid, deadline))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -242,6 +373,12 @@ pub(crate) fn read_minimized(pid: i32, deadline: std::time::Instant) -> Minimize
     let (listed, complete) =
         crate::system::window::other_space::read_accessibility_windows(&app, deadline);
     minimized_from(listed.into_values(), complete)
+}
+
+/// The `AXHidden` of the app `pid`, or `None` when it cannot be read.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_hidden(pid: i32, deadline: std::time::Instant) -> Option<bool> {
+    crate::system::window::other_space::read_hidden(&crate::tree::element_for_pid(pid), deadline)
 }
 
 #[cfg(test)]
