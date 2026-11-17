@@ -979,8 +979,8 @@ export function desktopControlArgvIsInert(
  * How a desktop-control run meets the person's own use of the desktop, judged on the sealed argv.
  * `inert` prints only what the binary carries (see `desktopControlArgvIsInert`); `read` only reads
  * the screen; `background` operates an app through its accessibility interface without taking the
- * foreground, the cursor or the keyboard; `foreground` uses one of those, or may close an app the
- * person has open. Anything not known to be weaker is `foreground`.
+ * foreground, the cursor or the keyboard; `foreground` uses one of those, or, on Windows, may close
+ * an app the person has open. Anything not known to be weaker is `foreground`.
  */
 export type DesktopControlMode = 'inert' | 'read' | 'background' | 'foreground';
 
@@ -995,7 +995,8 @@ const MODE_STRENGTH: Readonly<Record<DesktopControlMode, number>> = {
 // semantic accessibility calls without `--headed`, except type, focus and the multi- and
 // right-clicks, which are physical or take focus; `press` goes to the foreground queue; and
 // `focus-window`, `restore`, `maximize` and `launch --activate` bring a window to the front. Every
-// command of `COMMAND_OPTIONS` is listed here, and the table is tested to stay complete.
+// command of `COMMAND_OPTIONS` is listed here, and the table is tested to stay complete. The table
+// is the Windows one; `commandMode` lists what differs on macOS (`MAC_COMMAND_MODES`).
 const COMMAND_MODES: Readonly<Record<string, Exclude<DesktopControlMode, 'inert'>>> = {
   snapshot: 'read',
   find: 'read',
@@ -1069,6 +1070,15 @@ const COMMAND_MODES: Readonly<Record<string, Exclude<DesktopControlMode, 'inert'
   'close-app': 'foreground',
 };
 
+// macOS: `close-app` only asks the app to quit (`NSRunningApplication terminate`). Measured on
+// macOS 27, the app is not activated and no mouse or keyboard is used; an app holding the quit for
+// its confirmation sheet orders that window in front of every inactive window (usually just behind
+// the one in use, but on top when the active app has no window on screen), and the run ends with
+// `TIMEOUT` while the app stays open (`--force` is refused before the run, `REFUSED_OPTIONS`).
+const MAC_COMMAND_MODES: Readonly<Record<string, Exclude<DesktopControlMode, 'inert'>>> = {
+  'close-app': 'background',
+};
+
 /** The commands the mode table leaves out (none), for its completeness test. */
 export function desktopControlCommandsWithoutMode(): string[] {
   return Object.keys(COMMAND_OPTIONS).filter((command) => !Object.hasOwn(COMMAND_MODES, command));
@@ -1079,7 +1089,10 @@ export function desktopControlCommandsWithoutMode(): string[] {
  * run is `foreground`, and so is anything this cannot read, including a batch whose JSON it cannot
  * read. A batch is as strong as its strongest entry.
  */
-export function desktopControlArgvMode(argv: readonly string[]): DesktopControlMode {
+export function desktopControlArgvMode(
+  argv: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): DesktopControlMode {
   if (desktopControlArgvIsInert(argv)) return 'inert';
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string' || argv.some((token) => optionName(token) === '--headed'))
@@ -1089,16 +1102,16 @@ export function desktopControlArgvMode(argv: readonly string[]): DesktopControlM
   const command = read.command;
   if (command === 'launch')
     return argv.some((token) => optionName(token) === '--activate') ? 'foreground' : 'background';
-  if (command === 'batch') return batchMode(read.positionals);
-  return commandMode(command);
+  if (command === 'batch') return batchMode(read.positionals, platform);
+  return commandMode(command, platform);
 }
 
-function batchMode(positionals: readonly string[]): DesktopControlMode {
+function batchMode(positionals: readonly string[], platform: NodeJS.Platform): DesktopControlMode {
   const entries = readBatchEntries(positionals);
   if (entries === null || entries.length === 0) return 'foreground';
   let strongest: DesktopControlMode = 'read';
   for (const { command, args } of entries) {
-    const mode = desktopControlBatchEntryMode(command, args);
+    const mode = desktopControlBatchEntryMode(command, args, platform);
     if (MODE_STRENGTH[mode] > MODE_STRENGTH[strongest]) strongest = mode;
   }
   return strongest;
@@ -1108,16 +1121,22 @@ function batchMode(positionals: readonly string[]): DesktopControlMode {
 export function desktopControlBatchEntryMode(
   command: string,
   args: Readonly<Record<string, unknown>>,
+  platform: NodeJS.Platform = process.platform,
 ): Exclude<DesktopControlMode, 'inert'> {
   if (command === 'launch')
     return args['activate'] === undefined || args['activate'] === false
       ? 'background'
       : 'foreground';
   if (command === 'batch' || WITH_SUBCOMMANDS.has(command)) return 'foreground';
-  return commandMode(command);
+  return commandMode(command, platform);
 }
 
-function commandMode(command: string): Exclude<DesktopControlMode, 'inert'> {
+function commandMode(
+  command: string,
+  platform: NodeJS.Platform,
+): Exclude<DesktopControlMode, 'inert'> {
+  if (platform === 'darwin' && Object.hasOwn(MAC_COMMAND_MODES, command))
+    return MAC_COMMAND_MODES[command]!;
   return Object.hasOwn(COMMAND_MODES, command) ? COMMAND_MODES[command]! : 'foreground';
 }
 

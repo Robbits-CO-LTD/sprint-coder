@@ -255,6 +255,11 @@ const CLOSE_NOTE = '開いているアプリを閉じます。';
 // (`desktop-control-screenshot.ts`); elsewhere only what the picture is.
 const SCREENSHOT_NOTE =
   '撮った画像は、この Task の AI（接続先のサービス）に送ります。画像を受け取れない接続には、画像の大きさなどだけを送ります。';
+// macOS `close-app` without `--headed` only asks the app to quit (`MAC_COMMAND_MODES`). An app with
+// unsaved changes may bring its confirmation window forward (it may land on top of what the person
+// is looking at) and stay open; the run then ends with `TIMEOUT`. Never said to stay behind.
+const MAC_CLOSE_NOTE =
+  'アプリに終了を頼みます。マウスとキーボードは使いません。保存していない変更があると、アプリが確認の窓を前に出して、閉じずに待つことがあります。';
 // Minimizing hands the front to another window, so it is never covered by an app-wide grant.
 const MINIMIZE_NOTE = '窓を最小化します。最小化すると、次の窓が手前に来ます。';
 // `select <ref>` without a value chooses the part the ref names itself, not an option inside it.
@@ -480,7 +485,7 @@ export function desktopControlApprovalAction(
     // Never in the way of the approval itself: the card then says it could not describe the run.
     let mode: Mode = 'foreground';
     try {
-      mode = displayMode(desktopControlArgvMode(argv));
+      mode = displayMode(desktopControlArgvMode(argv, lookup.platform ?? process.platform));
     } catch {
       // Stays on the stronger side.
     }
@@ -501,7 +506,7 @@ function describe(
   snapshots: SnapshotReader,
   platform: NodeJS.Platform,
 ): DesktopApprovalAction {
-  const mode = displayMode(desktopControlArgvMode(argv));
+  const mode = displayMode(desktopControlArgvMode(argv, platform));
   const read = readDesktopControlCommand(argv);
   const notes: string[] = [];
   let openDetails = false;
@@ -524,7 +529,7 @@ function describe(
         command,
         mode === 'foreground' && read.options.has('--headed')
           ? 'foreground'
-          : displayMode(desktopControlBatchEntryMode(command, args)),
+          : displayMode(desktopControlBatchEntryMode(command, args, platform)),
         {
           ref: stringField(args, ROOT_COMMANDS.has(command) ? 'root' : 'ref_id'),
           windowId: stringField(args, 'window_id'),
@@ -617,7 +622,7 @@ function describe(
   if (mode === 'background' && commands.some((command) => PART_OPERATIONS.has(command)))
     notes.unshift(BEHIND_NOTE);
   // A launch that opens a URL is decided on its own card every time, never by a Task grant.
-  const urls = urlLaunches(read, mode);
+  const urls = urlLaunches(read, mode, platform);
   const urlLaunch = all.some((step) => step.textRole === 'url') || urls.any;
   const behind = all.filter((step) => step.kind === 'launch' && step.mode !== 'foreground');
   // On macOS a URL launch has its own note; a plain launch beside it in a batch keeps its own.
@@ -630,7 +635,18 @@ function describe(
   if (urlLaunch) notes.unshift(URL_NOTE);
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
-  if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
+  // On macOS a close that does not use the foreground only asks the app to quit; judged by the
+  // run's and the close steps' own mode, so a `--headed` one, or one in a batch that uses the
+  // foreground, keeps the plain note beside the foreground one.
+  const closes = all.filter(({ kind }) => kind === 'close');
+  if (closes.length > 0)
+    notes.unshift(
+      platform === 'darwin' &&
+        mode === 'background' &&
+        closes.every((step) => step.mode === 'background')
+        ? MAC_CLOSE_NOTE
+        : CLOSE_NOTE,
+    );
   if (commands.includes('screenshot')) notes.unshift(SCREENSHOT_NOTE);
   if (commands.includes('minimize')) notes.unshift(MINIMIZE_NOTE);
   if (menuItems) notes.unshift(MENU_NOTE);
@@ -820,6 +836,7 @@ function cutNote({ step }: { step: DesktopActionStep }): string {
 function urlLaunches(
   read: ReturnType<typeof readDesktopControlCommand>,
   mode: Mode,
+  platform: NodeJS.Platform,
 ): { any: boolean; behind: boolean } {
   if (read === null || read.help) return { any: false, behind: false };
   if (read.command === 'launch') {
@@ -836,7 +853,8 @@ function urlLaunches(
     behind:
       !headed &&
       urls.some(
-        ({ command, args }) => desktopControlBatchEntryMode(command, args) !== 'foreground',
+        ({ command, args }) =>
+          desktopControlBatchEntryMode(command, args, platform) !== 'foreground',
       ),
   };
 }

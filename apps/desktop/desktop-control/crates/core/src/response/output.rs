@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde::Serialize;
 use serde_json::Value;
 
@@ -14,6 +15,10 @@ pub struct Response {
     pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+    /// Guidance on a successful result whose `data` has a fixed shape that has
+    /// no room for it (a `list-windows` array). Absent when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorPayload>,
 }
@@ -40,8 +45,17 @@ impl Response {
             ok: true,
             command: command.into(),
             data: Some(data),
+            suggestion: None,
             error: None,
         }
+    }
+
+    /// Adds `suggestion` to a successful response; `None` leaves it as it is.
+    pub fn with_suggestion(mut self, suggestion: Option<String>) -> Self {
+        if self.ok && suggestion.is_some() {
+            self.suggestion = suggestion;
+        }
+        self
     }
 
     pub fn err(command: impl Into<String>, payload: ErrorPayload) -> Self {
@@ -50,6 +64,7 @@ impl Response {
             ok: false,
             command: command.into(),
             data: None,
+            suggestion: None,
             error: Some(payload),
         }
     }

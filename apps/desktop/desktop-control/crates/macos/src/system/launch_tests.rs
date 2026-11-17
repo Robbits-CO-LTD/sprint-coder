@@ -900,3 +900,12 @@ fn the_live_watch_asks_whether_another_instance_of_the_same_app_still_runs() {
         HandoffWatch::NoInstance
     );
 }
+
+#[test]
+fn only_a_launch_that_waited_or_found_the_app_running_explains_a_missing_window() {
+    use super::may_explain_missing_window;
+    assert!(may_explain_missing_window(5_000, false));
+    assert!(may_explain_missing_window(0, true));
+    assert!(may_explain_missing_window(5_000, true));
+    assert!(!may_explain_missing_window(0, false));
+}
