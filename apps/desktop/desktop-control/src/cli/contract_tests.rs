@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::cli::{Cli, Commands};
 use clap::{CommandFactory, Parser, error::ErrorKind};
 
@@ -9,7 +10,7 @@ fn standard_version_flag_reports_the_package_version() {
     assert_eq!(error.kind(), ErrorKind::DisplayVersion);
     assert_eq!(
         error.to_string().trim(),
-        format!("agent-desktop {}", env!("CARGO_PKG_VERSION"))
+        format!("sprint-coder-desktop-control {}", env!("CARGO_PKG_VERSION"))
     );
 }
 

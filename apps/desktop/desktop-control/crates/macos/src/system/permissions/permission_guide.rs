@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::AdapterError;
 use std::ffi::{CString, c_char};
 use std::fs::File;
@@ -36,7 +37,7 @@ pub(crate) fn start() -> Result<&'static str, AdapterError> {
         }
     };
     let executable = std::env::current_exe().map_err(|error| {
-        AdapterError::internal("Could not locate the agent-desktop executable")
+        AdapterError::internal("Could not locate the sprint-coder-desktop-control executable")
             .with_platform_detail(error.to_string())
     })?;
     let host = host_app().unwrap_or_else(|| executable.clone());

@@ -1,15 +1,16 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
-const WINDOWS_SKILL_DOC: &str = include_str!("../../skills/agent-desktop-windows/SKILL.md");
+const WINDOWS_SKILL_DOC: &str = include_str!("../../skills/desktop-control-windows/SKILL.md");
 
 /// The whole Windows skill package. Behaviour notes may live in any of its
 /// references; only the capability table is required to stay in SKILL.md.
 const WINDOWS_SKILL_PACKAGE: &str = concat!(
-    include_str!("../../skills/agent-desktop-windows/SKILL.md"),
-    include_str!("../../skills/agent-desktop-windows/references/shell-and-overlay.md"),
-    include_str!("../../skills/agent-desktop-windows/references/permissions-and-elevation.md"),
-    include_str!("../../skills/agent-desktop-windows/references/chromium-and-electron.md"),
-    include_str!("../../skills/agent-desktop-windows/references/troubleshooting.md"),
+    include_str!("../../skills/desktop-control-windows/SKILL.md"),
+    include_str!("../../skills/desktop-control-windows/references/shell-and-overlay.md"),
+    include_str!("../../skills/desktop-control-windows/references/permissions-and-elevation.md"),
+    include_str!("../../skills/desktop-control-windows/references/chromium-and-electron.md"),
+    include_str!("../../skills/desktop-control-windows/references/troubleshooting.md"),
 );
 
 /// Commands the Windows table documents as unavailable that no adapter method

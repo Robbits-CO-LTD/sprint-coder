@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Clipboard open/close RAII, hidden write owner window, and contention retry.
 //!
 //! Writes and clears must open with the process-owned `HWND_MESSAGE` window
@@ -113,7 +114,7 @@ fn owner_hwnd() -> Result<HWND, AdapterError> {
 
 fn create_message_owner_window() -> HWND {
     let class = wide("STATIC");
-    let title = wide("agent-desktop-clipboard-owner");
+    let title = wide("sprint-coder-desktop-control-clipboard-owner");
     unsafe {
         CreateWindowExW(
             0,

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ErrorCode};
 use std::ffi::c_void;
 
@@ -106,7 +107,7 @@ pub(crate) fn ensure_read_access(pasteboard: Pasteboard) -> Result<(), AdapterEr
             "System clipboard read access is denied",
         )
         .with_suggestion(
-            "Allow pasteboard access for the app that launches agent-desktop in System Settings, then retry.",
+            "Allow pasteboard access for the app that launches sprint-coder-desktop-control in System Settings, then retry.",
         ))
     }
 }

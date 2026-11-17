@@ -1,6 +1,7 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, PermissionReport, PermissionState};
 
-const ACCESSIBILITY_SUGGESTION: &str = "Run agent-desktop in an interactive desktop session as a user allowed to use the UI Automation COM runtime; restricted tokens and AppContainer processes are denied UIA access.";
+const ACCESSIBILITY_SUGGESTION: &str = "Run sprint-coder-desktop-control in an interactive desktop session as a user allowed to use the UI Automation COM runtime; restricted tokens and AppContainer processes are denied UIA access.";
 
 pub(crate) use crate::system::runtime::hresult::com_hresult_detail;
 use crate::system::runtime::hresult::{E_ACCESSDENIED, S_OK};

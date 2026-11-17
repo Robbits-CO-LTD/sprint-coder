@@ -194,11 +194,7 @@ describe('prompt context compiler', () => {
     expect(compiled.content).toContain(
       'この実行ファイルは Sprint Coder に同梱のデスクトップ操作の道具',
     );
-    // The binary's own manual calls it agent-desktop; that one mention maps the name to the file.
-    expect(compiled.content).toContain(
-      '説明書（skills の文書）の中の agent-desktop は、この実行ファイルのこと',
-    );
-    expect(compiled.content.match(/agent-desktop/gu)).toHaveLength(1);
+    expect(compiled.content.match(/agent-desktop/gu)).toBeNull();
     expect(compiled.content).toContain(`${JSON.stringify(command)} skills get desktop`);
     // Background only: the person keeps their mouse, keyboard and foreground window.
     expect(compiled.content).toContain(

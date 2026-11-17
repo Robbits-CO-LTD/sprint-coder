@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Runs one tool call as a child process of this same binary and maps its JSON envelope to an MCP result.
 
 use serde_json::{Map, Value, json};
@@ -24,7 +25,11 @@ pub(crate) fn call(
     };
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
-        Err(error) => return error_result(&format!("Cannot locate agent-desktop: {error}")),
+        Err(error) => {
+            return error_result(&format!(
+                "Cannot locate sprint-coder-desktop-control: {error}"
+            ));
+        }
     };
     let mut command = Command::new(exe);
     command
@@ -35,7 +40,9 @@ pub(crate) fn call(
         .stderr(Stdio::piped());
     let (stdout, stderr) = match calls.start(id, &mut command) {
         None => return error_result(CANCELLED),
-        Some(Err(error)) => return error_result(&format!("Cannot run agent-desktop: {error}")),
+        Some(Err(error)) => {
+            return error_result(&format!("Cannot run sprint-coder-desktop-control: {error}"));
+        }
         Some(Ok(pipes)) => pipes,
     };
     let (stdout, stderr) = std::thread::scope(|scope| {
@@ -51,7 +58,7 @@ pub(crate) fn call(
     match serde_json::from_slice::<Value>(&stdout) {
         Ok(envelope) => envelope_result(envelope),
         Err(_) => error_result(&format!(
-            "agent-desktop {} exited with {status} and no JSON envelope: {}",
+            "sprint-coder-desktop-control {} exited with {status} and no JSON envelope: {}",
             tool.path.join(" "),
             String::from_utf8_lossy(&stderr).trim()
         )),

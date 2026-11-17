@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::time::Duration;
 
 use crate::{
@@ -76,7 +77,7 @@ fn launch_suggestion(cdp_requested: bool, launched: &LaunchResult) -> Option<Str
              Puppeteer. If neither is available, ask the user to install agent-browser or \
              continue with accessibility commands. Do not hand-roll raw CDP or call \
              app-internal APIs — that path is unverified and app-specific. Native menus, \
-             dialogs, windows, and screenshots stay with agent-desktop.",
+             dialogs, windows, and screenshots stay with sprint-coder-desktop-control.",
             cdp.port
         ));
     }

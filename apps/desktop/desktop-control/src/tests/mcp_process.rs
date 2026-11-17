@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde_json::{Value, json};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -109,7 +110,7 @@ fn malformed_messages_get_errors_and_the_server_keeps_serving() {
     assert!(
         nul["content"][0]["text"]
             .as_str()
-            .is_some_and(|text| text.starts_with("Cannot run agent-desktop")),
+            .is_some_and(|text| text.starts_with("Cannot run sprint-coder-desktop-control")),
         "{nul}"
     );
     assert_eq!(responses[4]["result"]["isError"], false);

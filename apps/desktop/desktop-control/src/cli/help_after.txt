@@ -1,8 +1,8 @@
 THE LOOP
-  agent-desktop snapshot --app Finder --skeleton -i --compact
-  agent-desktop snapshot --root @s8f3k2p9:e3 -i --compact
-  agent-desktop click @s8f3k2p9:e5
-  agent-desktop wait --element @s8f3k2p9:e9 --predicate actionable --timeout 5000
+  sprint-coder-desktop-control snapshot --app Finder --skeleton -i --compact
+  sprint-coder-desktop-control snapshot --root @s8f3k2p9:e3 -i --compact
+  sprint-coder-desktop-control click @s8f3k2p9:e5
+  sprint-coder-desktop-control wait --element @s8f3k2p9:e9 --predicate actionable --timeout 5000
   Observe, act on a ref, then observe again to verify. Use `wait` instead of
   sleeping, and `wait --event <kind>` for window, app, focus or surface changes.
 
@@ -36,4 +36,5 @@ ENVIRONMENT
   AGENT_DESKTOP_AGENT_ID     Subagent ID fallback when --agent-id is not passed
                              (1-64 letters, digits, hyphen or underscore)
   AGENT_DESKTOP_HOME         Relocates the state root (absolute path; default
-                             ~/.agent-desktop); `status` reports it as state_root
+                             a hidden folder in the home directory); `status`
+                             reports it as state_root

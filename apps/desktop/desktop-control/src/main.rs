@@ -339,7 +339,7 @@ fn response(cmd_name: &str, result: Result<serde_json::Value, AppError>) -> Resp
 }
 
 fn report_output_failure(write_err: std::io::Error) -> ExitCode {
-    eprintln!("agent-desktop: failed to write response to stdout: {write_err}");
+    eprintln!("sprint-coder-desktop-control: failed to write response to stdout: {write_err}");
     ExitCode::FAILURE
 }
 
@@ -385,6 +385,7 @@ fn init_tracing(verbose: bool) {
         )
         .with_writer(std::io::stderr)
         .with_ansi(false)
+        .with_target(false)
         .init();
 }
 

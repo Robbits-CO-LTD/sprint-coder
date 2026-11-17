@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -10,7 +11,7 @@ const AFTER_HELP: &str = include_str!("help_after.txt");
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "agent-desktop",
+    name = "sprint-coder-desktop-control",
     version,
     about = "Reliable computer use for AI agents — see and operate desktop apps",
     long_about = None,

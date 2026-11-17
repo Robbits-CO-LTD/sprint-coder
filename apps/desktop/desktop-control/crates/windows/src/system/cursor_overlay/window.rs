@@ -74,7 +74,7 @@ impl OverlayWindow {
         });
 
         let class = wide(CLASS_NAME);
-        let title = wide("agent-desktop cursor overlay");
+        let title = wide("Sprint Coder desktop control cursor overlay");
         let handle = unsafe {
             CreateWindowExW(
                 WS_EX_LAYERED
