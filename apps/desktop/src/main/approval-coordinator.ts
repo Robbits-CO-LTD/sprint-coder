@@ -194,6 +194,10 @@ export class ApprovalCoordinator {
    */
   private readonly desktopAppGrants = new Map<string, Map<string, DesktopAppGrant>>();
 
+  private get desktopControlPlatform(): NodeJS.Platform {
+    return this.options.desktopControlPlatform ?? process.platform;
+  }
+
   constructor(
     private readonly options: {
       persistence: ApprovalPersistencePort;
@@ -226,6 +230,11 @@ export class ApprovalCoordinator {
        * its card under Full access too, as before; without it, it always is.
        */
       fullAccessDesktopControlAcknowledged?: () => boolean;
+      /**
+       * The OS whose desktop-control rules apply to a run's mode and card (`desktopControlArgvMode`);
+       * by default this one. Given only by tests.
+       */
+      desktopControlPlatform?: NodeJS.Platform;
       publish: {
         bivarianceHack(approval: ApprovalLike, event?: unknown): void;
       }['bivarianceHack'];
@@ -301,7 +310,8 @@ export class ApprovalCoordinator {
     // A desktop-control run that takes the foreground, the cursor or the keyboard is never covered
     // by a Task grant, including one given before this rule: outside the Full preset it is decided
     // on its own card every time.
-    const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
+    const desktopForeground =
+      desktopControl && isForegroundDesktopControlCall(request, this.desktopControlPlatform);
     for (const evaluation of evaluations) {
       // The policy engine never allows a per-call capability, and if it ever did, the person would
       // still be asked: only their decision on this call's card covers this call.
@@ -478,7 +488,8 @@ export class ApprovalCoordinator {
     if (perCallSubject === null)
       return { decision: 'deny', reason: 'per_call_approval_subject_unbound' };
     const desktopControl = isDesktopControlCall(request);
-    const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
+    const desktopForeground =
+      desktopControl && isForegroundDesktopControlCall(request, this.desktopControlPlatform);
     // A read or background run on an app the person allowed for the Task on an earlier card of
     // this Task, judged again from the executable's own records before it starts.
     // The executable checks each window id the run names against the granted process instance as
@@ -547,8 +558,16 @@ export class ApprovalCoordinator {
         ? desktopControlApprovalAction(
             request.input.argv,
             readScope === null
-              ? { taskId: request.context.taskId, names: false }
-              : { taskId: request.context.taskId, ...readScope },
+              ? {
+                  taskId: request.context.taskId,
+                  names: false,
+                  platform: this.desktopControlPlatform,
+                }
+              : {
+                  taskId: request.context.taskId,
+                  ...readScope,
+                  platform: this.desktopControlPlatform,
+                },
           )
         : undefined;
     // Offered only beside 「Task中許可」, for a run the app-wide grant could cover, and only for an
@@ -776,7 +795,7 @@ export class ApprovalCoordinator {
         waiter.desktopAppGrant === null ||
         desktopControlExpectedWindowOwner(waiter.desktopAppGrant) === null ||
         !isDesktopControlCall(waiter.request) ||
-        isForegroundDesktopControlCall(waiter.request))
+        isForegroundDesktopControlCall(waiter.request, this.desktopControlPlatform))
     )
       throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
     const appScope = command.grantScope === 'app';
@@ -796,7 +815,7 @@ export class ApprovalCoordinator {
         // A desktop-control run that uses the foreground is allowed one run at a time.
         (waiter !== undefined &&
           isDesktopControlCall(waiter.request) &&
-          isForegroundDesktopControlCall(waiter.request)) ||
+          isForegroundDesktopControlCall(waiter.request, this.desktopControlPlatform)) ||
         // So is one whose card did not offer 「Task中許可」 (a standard menu item, a part Main cannot
         // tell), and one judged so now. Without the waiter no Task grant is saved below.
         (waiter !== undefined &&
@@ -989,7 +1008,9 @@ export class ApprovalCoordinator {
     return (
       desktopControlApprovalAction(
         request.input.argv,
-        readScope === null ? { taskId, names: false } : { taskId, ...readScope },
+        readScope === null
+          ? { taskId, names: false, platform: this.desktopControlPlatform }
+          : { taskId, ...readScope, platform: this.desktopControlPlatform },
       ).allowTaskGrant === true
     );
   }
@@ -1407,10 +1428,13 @@ function desktopAppGrantEnvironmentAllows(spec: ExecutionSpec): boolean {
  * run is never covered by a Task grant: outside the Full preset it is decided on its own card
  * every time.
  */
-function isForegroundDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+function isForegroundDesktopControlCall(
+  request: ToolAuthorizationRequest,
+  platform: NodeJS.Platform,
+): boolean {
   return (
     validateExecutionSpec(request.input) &&
-    desktopControlArgvMode(request.input.argv) === 'foreground'
+    desktopControlArgvMode(request.input.argv, platform) === 'foreground'
   );
 }
 

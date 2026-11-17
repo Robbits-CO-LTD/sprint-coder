@@ -518,6 +518,14 @@ describe('prompt context compiler', () => {
     expect(text).not.toContain('ブラウザーが自分で前に出ることがある');
     expect(text).toContain('delivery_uncertain');
     expect(text).toContain('Terminal・iTerm・Ghostty・Warp など');
+    // close-app only asks the app to quit; a held quit is told to the person, never retried.
+    expect(text).toContain(
+      'close-app <アプリ名> は、アプリに終了を頼むだけで、マウスとキーボードは使わず',
+    );
+    expect(text).toContain('確認の窓を前に出して閉じずに待つことがあり');
+    expect(text).toContain('details.pending_dialog が true なら');
+    expect(text).toContain('close-app を繰り返さず、確かめる画面に自分で答えず');
+    expect(windows.content).not.toContain('close-app');
     // Nothing of Windows.
     for (const windowsOnly of [
       'スタートメニュー',

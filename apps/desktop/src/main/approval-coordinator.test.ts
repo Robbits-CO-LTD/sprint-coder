@@ -306,6 +306,8 @@ function createHarness(input?: {
    * true wherever a preset is given.
    */
   fullAccessAcknowledged?: boolean;
+  /** The OS whose desktop-control rules apply; by default this one. */
+  desktopControlPlatform?: NodeJS.Platform;
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
@@ -329,6 +331,9 @@ function createHarness(input?: {
     ...(input?.workerRequesterFor === undefined
       ? {}
       : { workerRequesterFor: input.workerRequesterFor }),
+    ...(input?.desktopControlPlatform === undefined
+      ? {}
+      : { desktopControlPlatform: input.desktopControlPlatform }),
     ...(accessPreset === undefined
       ? {}
       : {
@@ -2854,6 +2859,8 @@ describe('ApprovalCoordinator desktop control card', () => {
     let reason = 'remembered_grant';
     const harness = createHarness({
       evaluatePermission: () => ({ decision: 'allow', reason, beforeExecute: () => true }),
+      // close-app uses the foreground on Windows only.
+      desktopControlPlatform: 'win32',
     });
     const desktop = vi
       .spyOn(desktopControlModule, 'isDesktopControlExecutable')
@@ -2925,6 +2932,57 @@ describe('ApprovalCoordinator desktop control card', () => {
         ).toMatchObject({ title: '窓を動かします', mode: 'background', allowTaskGrant: true });
         harness.coordinator.resolve(resolveCommand(approval, 'allow_task'));
         await expect(asked).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  it('on macOS offers closing an app for the Task as a launch is, for that exact command only', async () => {
+    const harness = createHarness({ desktopControlPlatform: 'darwin' });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        const calculator = await prepare(['close-app', 'Calculator']);
+        const first = harness.coordinator.authorizeTool(request(calculator, 'close-1'));
+        const approval = await waitForPublished(harness);
+        const display = (approval as unknown as { display: { desktopAction?: unknown } }).display;
+        expect(display.desktopAction).toMatchObject({
+          kind: 'close',
+          mode: 'background',
+          allowTaskGrant: true,
+          notes: [
+            'アプリに終了を頼みます。マウスとキーボードは使いません。保存していない変更があると、アプリが確認の窓を前に出して、閉じずに待つことがあります。',
+          ],
+        });
+        // Never the app-wide grant: the card names no app for it, and Main refuses one.
+        expect(display.desktopAction).not.toHaveProperty('appGrant');
+        expect(() =>
+          harness.coordinator.resolve({
+            ...resolveCommand(approval, 'allow_task'),
+            grantScope: 'app',
+          }),
+        ).toThrow('APPROVAL_DECISION_NOT_ALLOWED');
+        harness.coordinator.resolve(resolveCommand(approval, 'allow_task'));
+        await expect(first).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+        expect(harness.persistence.grants).toHaveLength(1);
+
+        // The same command again runs on that grant, without a card.
+        harness.published.length = 0;
+        await expect(
+          harness.coordinator.authorizeTool(request(calculator, 'close-2')),
+        ).resolves.toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(harness.published).toHaveLength(0);
+
+        // Closing any other app is asked on its own card.
+        const other = harness.coordinator.authorizeTool(
+          request(await prepare(['close-app', 'TextEdit']), 'close-3'),
+        );
+        const card = await waitForPublished(harness);
+        harness.coordinator.resolve(resolveCommand(card, 'deny'));
+        await expect(other).resolves.toMatchObject({ decision: 'deny' });
       });
     } finally {
       desktop.mockRestore();

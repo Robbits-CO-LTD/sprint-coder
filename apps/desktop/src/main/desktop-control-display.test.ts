@@ -153,8 +153,11 @@ beforeAll(() => {
 
 afterAll(() => rmSync(stateRoot, { recursive: true, force: true }));
 
-const describeArgv = (argv: readonly string[]) => {
-  const action = desktopControlApprovalAction(argv, { stateRoot });
+const describeArgv = (argv: readonly string[], platform?: NodeJS.Platform) => {
+  const action = desktopControlApprovalAction(argv, {
+    stateRoot,
+    ...(platform === undefined ? {} : { platform }),
+  });
   // Main only ever hands over what the contract accepts.
   expect(desktopApprovalActionSchema.parse(action)).toEqual(action);
   return action;
@@ -427,13 +430,16 @@ describe('desktop-control approval description', () => {
       kind: 'launch',
       target: { resolved: true, app: 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe' },
     });
-    expect(describeArgv(['close-app', 'charmap'])).toMatchObject({
+    expect(describeArgv(['close-app', 'charmap'], 'win32')).toMatchObject({
       kind: 'close',
       title: 'アプリを閉じます',
       mode: 'foreground',
       allowTaskGrant: false,
+      notes: [
+        '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。',
+        '開いているアプリを閉じます。',
+      ],
     });
-    expect(describeArgv(['close-app', 'charmap']).notes).toContain('開いているアプリを閉じます。');
     expect(describeArgv(['press', 'ctrl+c', '--app', 'charmap'])).toMatchObject({
       title: 'キーを押します',
       text: 'ctrl+c',
@@ -521,6 +527,46 @@ describe('desktop-control approval description', () => {
     expect(action.notes[0]).toBe(
       '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。',
     );
+  });
+
+  it('says on macOS that closing only asks the app to quit, which may stay open to confirm', () => {
+    const macNote =
+      'アプリに終了を頼みます。マウスとキーボードは使いません。保存していない変更があると、アプリが確認の窓を前に出して、閉じずに待つことがあります。';
+    const foregroundNote =
+      '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。';
+    // No mouse or keyboard, so it is offered for the Task like a launch (that exact command only).
+    expect(describeArgv(['close-app', 'Calculator'], 'darwin')).toEqual({
+      kind: 'close',
+      title: 'アプリを閉じます',
+      mode: 'background',
+      target: { resolved: true, app: 'Calculator' },
+      allowTaskGrant: true,
+      notes: [macNote],
+      openDetails: false,
+    });
+    const inBatch = describeArgv(
+      ['batch', JSON.stringify([{ command: 'close-app', args: { app: 'Calculator' } }])],
+      'darwin',
+    );
+    expect(inBatch).toMatchObject({ mode: 'background', allowTaskGrant: true, notes: [macNote] });
+    expect(inBatch.steps).toEqual([expect.objectContaining({ kind: 'close', mode: 'background' })]);
+    // With --headed, or beside a step that uses the foreground, it keeps the foreground card.
+    for (const argv of [
+      ['--headed', 'close-app', 'Calculator'],
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'close-app', args: { app: 'Calculator' } },
+          { command: 'press', args: { combo: 'cmd+q', app: 'Calculator' } },
+        ]),
+      ],
+    ]) {
+      const action = describeArgv(argv, 'darwin');
+      expect(action, argv.join(' ')).toMatchObject({ mode: 'foreground', allowTaskGrant: false });
+      expect(action.notes).toContain(foregroundNote);
+      expect(action.notes).toContain('開いているアプリを閉じます。');
+      expect(action.notes).not.toContain(macNote);
+    }
   });
 
   it('lists the steps of a batch with the strongest mode on top', () => {
