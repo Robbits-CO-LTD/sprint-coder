@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AppError, DragParams,
     adapter::PlatformAdapter,
@@ -139,6 +140,14 @@ pub fn execute(
         params.validate(deadline)?;
         Ok((from, to, lease, params))
     })?;
+    // The pickup is drawn at the height of the window its ref was captured
+    // in, and the drop at the drop ref's, as a ref action is. A bare
+    // coordinate pickup names none; a bare coordinate drop keeps the pickup's
+    // window, so the drop is not drawn above every window.
+    let from_window = crate::commands::hover::cursor_window(&from, adapter);
+    let to_window =
+        crate::commands::hover::cursor_window(&to, adapter).or_else(|| from_window.clone());
+    let pickup = crate::cursor_overlay::anchor_window(from_window);
     crate::cursor_overlay::submit_travel(adapter, context, from.point.clone(), &lease, false);
     let drag_tracking = crate::cursor_overlay::submit_drag(
         adapter,
@@ -148,6 +157,8 @@ pub fn execute(
         &lease,
     );
     let result = adapter.drag(params, &lease);
+    drop(pickup);
+    let _drop_window = crate::cursor_overlay::anchor_window(to_window);
     let delivered = result
         .as_ref()
         .is_ok_and(|report| crate::cursor_overlay::confirms_delivery(report.disposition()));
