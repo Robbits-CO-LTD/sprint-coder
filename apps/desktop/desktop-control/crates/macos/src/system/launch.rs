@@ -69,6 +69,7 @@ pub(crate) fn launch_app_impl(
         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
         return Ok(with_other_space_suggestion(
             result_from_app(&app, window),
+            may_explain_missing_window(options.timeout_ms, true),
             deadline,
         ));
     }
@@ -146,7 +147,14 @@ pub(crate) fn launch_app_impl(
     };
     let result = window.map_err(after_launch).and_then(|window| {
         result_from_launched(&launched, window, id, &target, options, deadline)
-            .map(|result| with_other_space_suggestion(result, deadline))
+            .map(|result| {
+                let already_running = matches!(target, LaunchTarget::Existing { .. });
+                with_other_space_suggestion(
+                    result,
+                    may_explain_missing_window(options.timeout_ms, already_running),
+                    deadline,
+                )
+            })
             .map_err(after_launch)
     });
     super::launch_front::finish(front.as_ref(), result)
@@ -1026,12 +1034,23 @@ fn after_launch(error: AdapterError) -> AdapterError {
     error.with_disposition(DeliverySemantics::delivered_unverified())
 }
 
+/// Whether a launch without a window may say its window is probably on another Space: only when
+/// the app was already running, or the launch waited for a window (a zero `timeout_ms` returns
+/// at once, when a just-started app may not have shown its window yet).
+pub(crate) fn may_explain_missing_window(timeout_ms: u64, already_running: bool) -> bool {
+    already_running || timeout_ms != 0
+}
+
 /// A launch that ends without a window, while the app has a window that is probably on another
 /// Space (the user is in a full-screen app, say), says so instead of saying nothing. Read once,
 /// after the wait, and only when the result has no window and no other guidance.
 #[cfg(target_os = "macos")]
-fn with_other_space_suggestion(mut result: LaunchResult, deadline: Deadline) -> LaunchResult {
-    if result.window.is_some() || result.suggestion.is_some() {
+fn with_other_space_suggestion(
+    mut result: LaunchResult,
+    may_explain: bool,
+    deadline: Deadline,
+) -> LaunchResult {
+    if !may_explain || result.window.is_some() || result.suggestion.is_some() {
         return result;
     }
     let (Ok(pid), Ok(until)) = (
