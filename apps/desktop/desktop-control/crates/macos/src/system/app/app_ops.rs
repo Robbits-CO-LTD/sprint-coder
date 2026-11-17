@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, AppInfo, Deadline, ErrorCode, ProcessIdentity};
 
 pub(crate) use crate::system::app::close_outcome::CloseOutcome;
@@ -142,20 +143,95 @@ fn wait_for_exit(
             return Ok(CloseOutcome::Exited);
         }
         if deadline.is_expired() {
-            return Err(deadline
-                .timeout_error()
-                .with_details(serde_json::json!({
-                    "app": id,
-                    "pid": identity.pid(),
-                    "force": force,
-                }))
-                .with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified()));
+            return still_running_after_request(id, &identity, force, deadline.timeout_error());
         }
-        let pause = deadline
-            .remaining_slice(std::time::Duration::from_millis(25))
-            .map_err(after_termination_request)?;
+        let pause = match deadline.remaining_slice(std::time::Duration::from_millis(25)) {
+            Ok(pause) => pause,
+            Err(error) if error.code == ErrorCode::Timeout => {
+                return still_running_after_request(id, &identity, force, error);
+            }
+            Err(error) => return Err(after_termination_request(error)),
+        };
         std::thread::sleep(pause.min(std::time::Duration::from_millis(25)));
     }
+}
+
+/// How long the look for a confirmation sheet or dialog may take once the wait has run out: a few
+/// accessibility reads of the app's windows, each bounded by it.
+#[cfg(target_os = "macos")]
+const PENDING_DIALOG_PROBE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The app accepted the request to quit and still runs when the wait ran out. Looks once, through
+/// the accessibility reads `snapshot --surface alert` uses, for a sheet or dialog on its windows;
+/// any read that fails only leaves that unsaid. An app that ended meanwhile has exited.
+#[cfg(target_os = "macos")]
+fn still_running_after_request(
+    id: &str,
+    identity: &crate::system::process::process_identity::ProcessIdentity,
+    force: bool,
+    timeout: AdapterError,
+) -> Result<CloseOutcome, AdapterError> {
+    let probe = std::time::Instant::now() + PENDING_DIALOG_PROBE;
+    let dialog = matches!(
+        crate::tree::surfaces::alert_for_pid(identity.pid(), probe),
+        Ok(Some(_))
+    );
+    if matches!(identity.still_matches(), Ok(false)) {
+        return Ok(CloseOutcome::Exited);
+    }
+    Err(quit_request_pending_error(
+        timeout,
+        id,
+        identity.pid(),
+        force,
+        dialog,
+    ))
+}
+
+/// The error for an app that accepted the request to quit but still runs when the wait ran out,
+/// most often because it asks the person something first (whether to save changes). The code of
+/// `timeout` is kept, and the request counts as delivered but not confirmed: sending it again only
+/// asks again, and forcing it would throw away what the person has not saved. `dialog` is set only
+/// when a sheet or dialog was seen on the app's windows; the wording stays a possibility either way.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn quit_request_pending_error(
+    timeout: AdapterError,
+    app: &str,
+    pid: i32,
+    force: bool,
+    dialog: bool,
+) -> AdapterError {
+    let mut details = serde_json::json!({
+        "kind": "quit_request_pending",
+        "app": app,
+        "pid": pid,
+        "force": force,
+    });
+    if let Some(waited) = timeout.details.as_ref() {
+        for key in ["timeout_ms", "elapsed_ms"] {
+            if let Some(value) = waited.get(key) {
+                details[key] = value.clone();
+            }
+        }
+    }
+    let suggestion = if dialog {
+        details["pending_dialog"] = serde_json::Value::Bool(true);
+        "The app is showing a sheet or dialog, so it is probably asking the user something first, \
+         for example whether to save changes; that window may now be visible to the user. Do not \
+         send close-app again and do not force it. Tell the user the app is still open and may be \
+         waiting for their answer."
+    } else {
+        "The app may be asking the user something first, for example whether to save changes, and \
+         its confirmation window may now be visible to the user; or it may be busy. Do not send \
+         close-app again and do not force it. Tell the user the app is still open."
+    };
+    AdapterError::new(
+        timeout.code,
+        format!("'{app}' accepted the request to quit but is still running"),
+    )
+    .with_suggestion(suggestion)
+    .with_details(details)
+    .with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified())
 }
 
 #[cfg(target_os = "macos")]

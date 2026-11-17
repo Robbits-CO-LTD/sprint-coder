@@ -86,9 +86,45 @@ describe('desktop-control mode', () => {
       ['mouse-click', '--xy', '1,1'],
       ['mouse-move', '--xy', '1,1'],
       ['key-down', 'shift'],
-      ['close-app', 'charmap'],
     ])
       expect(desktopControlArgvMode(argv)).toBe('foreground');
+  });
+
+  it('closes an app in the foreground on Windows and in the background on macOS', () => {
+    // On macOS close-app only asks the app to quit: no activation, no mouse or keyboard.
+    for (const [platform, mode] of [
+      ['win32', 'foreground'],
+      ['darwin', 'background'],
+    ] as const) {
+      expect(desktopControlArgvMode(['close-app', 'charmap'], platform), platform).toBe(mode);
+      expect(
+        desktopControlArgvMode(
+          batch([{ command: 'close-app', args: { app: 'charmap' } }]),
+          platform,
+        ),
+        platform,
+      ).toBe(mode);
+    }
+    // --headed, or a foreground step beside it in a batch, still makes it foreground on macOS.
+    expect(desktopControlArgvMode(['--headed', 'close-app', 'TextEdit'], 'darwin')).toBe(
+      'foreground',
+    );
+    expect(
+      desktopControlArgvMode(
+        batch([
+          { command: 'close-app', args: { app: 'TextEdit' } },
+          { command: 'press', args: { combo: 'return' } },
+        ]),
+        'darwin',
+      ),
+    ).toBe('foreground');
+    // Nothing else changes on macOS.
+    for (const argv of [
+      ['focus-window', '--window-id', 'w-1'],
+      ['press', 'return'],
+      ['launch', 'TextEdit', '--activate'],
+    ])
+      expect(desktopControlArgvMode(argv, 'darwin')).toBe('foreground');
   });
 
   it('makes every --headed run foreground, even one that would only read', () => {
