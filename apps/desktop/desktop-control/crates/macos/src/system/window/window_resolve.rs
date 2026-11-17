@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ErrorCode, WindowInfo};
 
 use crate::system::window::cg_window::WindowRecord;
@@ -138,7 +139,27 @@ fn resolve_window_element_strict(
     crate::tree::locator_deadline::remaining(deadline)?;
     let pid = crate::system::process::process_identity::to_pid_t(win.pid)?;
     ax_window_element_for_number(pid, window_number, record.title.as_deref(), deadline)?
-        .ok_or_else(|| window_not_accessible(&win.id))
+        .ok_or_else(|| unreadable_window(&win.id, pid, &record, deadline))
+}
+
+/// A listed window that accessibility does not show: when it reads as probably
+/// on another Space (`other_space`), which only the user can change, it says
+/// so; otherwise the app does not expose it.
+fn unreadable_window(
+    id: &str,
+    pid: i32,
+    record: &WindowRecord,
+    deadline: std::time::Instant,
+) -> AdapterError {
+    // An on-screen window is never on another Space, so nothing more is read.
+    let other_space = !record.visible
+        && crate::system::window::other_space::read_for_pid(pid, deadline)
+            .is_some_and(|numbers| numbers.contains(&record.window_number));
+    if other_space {
+        crate::system::window::other_space::window_error(id)
+    } else {
+        window_not_accessible(id)
+    }
 }
 
 pub(crate) fn parse_window_number(id: &str) -> Option<i64> {

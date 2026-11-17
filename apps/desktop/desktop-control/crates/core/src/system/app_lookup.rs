@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde_json::json;
 
 use crate::{
@@ -18,9 +19,11 @@ pub(crate) fn windowless_app_owner(
         Ok(info) if info.presentation == Some(crate::AppPresentation::Background) => {
             Ok(WindowInfo::for_process(&info))
         }
-        Ok(_) => Err(AdapterError::app_has_no_window(app).into()),
+        Ok(_) => {
+            Err(crate::system::windowless_reason::no_window_error(adapter, app, deadline).into())
+        }
         Err(AppError::Adapter(error)) if error.code == ErrorCode::PlatformNotSupported => {
-            Err(AdapterError::app_has_no_window(app).into())
+            Err(crate::system::windowless_reason::no_window_error(adapter, app, deadline).into())
         }
         Err(error) => Err(error),
     }
