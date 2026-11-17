@@ -1,7 +1,7 @@
 // Changed by Sprint Coder (new file); see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     AppSignals, GUIDANCE, WindowSignals, app_reason, launch_suggestion, likely_on_other_space,
-    other_space_windows, window_error,
+    other_space_windows, single_qualifying, window_error,
 };
 use agent_desktop_core::ErrorCode;
 
@@ -53,7 +53,9 @@ fn a_window_accessibility_lists_is_readable_and_not_on_another_space() {
 
 #[test]
 fn a_minimized_window_is_not_on_another_space() {
+    // Accessibility lists a minimized window, off screen, and says it is minimized.
     let window = WindowSignals {
+        in_accessibility: true,
         minimized: Some(true),
         ..off_space_window(7)
     };
@@ -184,4 +186,15 @@ fn the_window_error_keeps_its_code_and_kind_and_is_not_retryable() {
         }))
     );
     assert!(!error.is_explicitly_retryable());
+}
+
+#[test]
+fn only_a_single_qualifying_process_is_explained() {
+    assert_eq!(single_qualifying(Vec::new()), None);
+    assert_eq!(single_qualifying(vec![(10, Vec::new())]), None);
+    assert_eq!(
+        single_qualifying(vec![(10, Vec::new()), (11, vec![7]), (12, Vec::new())]),
+        Some((11, vec![7]))
+    );
+    assert_eq!(single_qualifying(vec![(10, vec![7]), (11, vec![8])]), None);
 }

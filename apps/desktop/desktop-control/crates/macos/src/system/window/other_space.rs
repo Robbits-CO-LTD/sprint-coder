@@ -138,25 +138,44 @@ pub(crate) fn window_error(id: &str) -> AdapterError {
     .with_suggestion(GUIDANCE)
 }
 
+/// The process to explain, from the windows each process of the app has that
+/// are probably on another Space: only when exactly one process has any, since
+/// with more the answer would have to pick one of them.
+pub(crate) fn single_qualifying(
+    found: impl IntoIterator<Item = (i32, Vec<i64>)>,
+) -> Option<(i32, Vec<i64>)> {
+    let mut found = found.into_iter().filter(|(_, numbers)| !numbers.is_empty());
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
+}
+
 /// Reads the windows of `pid` that are probably on another Space. `None` when
 /// what is needed could not be read, which names no cause.
 #[cfg(target_os = "macos")]
 pub(crate) fn read_for_pid(pid: i32, deadline: std::time::Instant) -> Option<Vec<i64>> {
+    let owners = crate::system::app::workspace_apps::window_owner_snapshot_until(deadline).ok()?;
+    read_for_owner(&owners, pid, deadline)
+}
+
+/// As `read_for_pid`, with the workspace snapshot already read.
+#[cfg(target_os = "macos")]
+fn read_for_owner(
+    owners: &crate::system::app::workspace_apps::WindowOwnerSnapshot,
+    pid: i32,
+    deadline: std::time::Instant,
+) -> Option<Vec<i64>> {
+    let regular = owners.owner(pid).is_some_and(|owner| {
+        owner.activation_policy == crate::system::app::workspace_apps::ActivationPolicy::Regular
+    });
+    if !regular {
+        return Some(Vec::new());
+    }
     let records = crate::system::window::cg_window::window_records_until(
         deadline,
         crate::system::window::cg_window::WindowRecordScope::Pid(pid),
     )
     .ok()?;
     if !records.iter().any(|record| !record.visible) {
-        return Some(Vec::new());
-    }
-    let regular = crate::system::app::workspace_apps::window_owner_snapshot_until(deadline)
-        .ok()?
-        .owner(pid)
-        .is_some_and(|owner| {
-            owner.activation_policy == crate::system::app::workspace_apps::ActivationPolicy::Regular
-        });
-    if !regular {
         return Some(Vec::new());
     }
     let app = crate::tree::element_for_pid(pid);
@@ -186,15 +205,11 @@ pub(crate) fn read_for_pid(pid: i32, deadline: std::time::Instant) -> Option<Vec
 #[cfg(target_os = "macos")]
 pub(crate) fn reason_for_app(app: &str, deadline: std::time::Instant) -> Option<WindowlessReason> {
     let owners = crate::system::app::workspace_apps::window_owner_snapshot_until(deadline).ok()?;
-    let mut found = owners
+    let found = owners
         .matching_pids(app)
         .into_iter()
-        .filter_map(|pid| Some((pid, read_for_pid(pid, deadline)?)))
-        .filter(|(_, numbers)| !numbers.is_empty());
-    let (pid, numbers) = found.next()?;
-    if found.next().is_some() {
-        return None;
-    }
+        .filter_map(|pid| Some((pid, read_for_owner(&owners, pid, deadline)?)));
+    let (pid, numbers) = single_qualifying(found)?;
     app_reason(app, pid, &numbers)
 }
 
