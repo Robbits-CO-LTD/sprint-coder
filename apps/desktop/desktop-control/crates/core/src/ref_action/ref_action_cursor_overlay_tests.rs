@@ -9,6 +9,8 @@ struct CursorAdapter {
     events: Mutex<Vec<CursorEvent>>,
     value: Mutex<Option<String>>,
     fail_presentation: bool,
+    /// The element's own window, as a sheet's or popover's would be.
+    element_window: Option<&'static str>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -25,6 +27,7 @@ impl CursorAdapter {
             events: Mutex::new(Vec::new()),
             value: Mutex::new(None),
             fail_presentation,
+            element_window: None,
         }
     }
 }
@@ -36,6 +39,19 @@ impl ObservationOps for CursorAdapter {
         _deadline: crate::Deadline,
     ) -> Result<NativeHandle, AdapterError> {
         Ok(NativeHandle::null())
+    }
+
+    fn element_cursor_window(
+        &self,
+        _handle: &NativeHandle,
+        top_level: &str,
+        _deadline: crate::Deadline,
+    ) -> Option<String> {
+        assert_eq!(
+            top_level, "w-1",
+            "asked about the window the ref was captured in"
+        );
+        self.element_window.map(str::to_owned)
     }
 
     crate::adapter::complete_live_observation!(
@@ -195,6 +211,52 @@ fn enabled_cursor_moves_before_dispatch_then_clicks_after_it() {
             CursorEvent::Dispatch,
             CursorEvent::Effect
         ]
+    );
+}
+
+#[test]
+fn an_element_in_a_sheet_draws_the_cursor_above_the_sheet_before_and_after_dispatch() {
+    let mut adapter = CursorAdapter::new(false);
+    adapter.element_window = Some("w-2");
+
+    execute_entry_with_context(
+        &adapter,
+        &entry(),
+        ActionRequest::headless(Action::Click),
+        &enabled_context(),
+    )
+    .expect("click succeeds");
+
+    let presented = adapter.presented.lock().unwrap();
+    let windows = presented
+        .iter()
+        .map(|control| {
+            control
+                .instruction()
+                .and_then(|instruction| instruction.window())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        windows,
+        [Some("w-1"), Some("w-2"), Some("w-2")],
+        "the travel before the lease names the captured window; once the element is \
+         found in the sheet, the travel is sent again and the effect follows, both above it"
+    );
+    assert!(presented[1].is_travel() && !presented[1].instruction().unwrap().is_click());
+    assert!(presented[2].instruction().unwrap().is_click());
+    assert_eq!(
+        *adapter.events.lock().unwrap(),
+        [
+            CursorEvent::Travel,
+            CursorEvent::Travel,
+            CursorEvent::Dispatch,
+            CursorEvent::Effect
+        ]
+    );
+    assert_eq!(
+        crate::cursor_overlay::current_window(),
+        None,
+        "no window is left named after the action"
     );
 }
 

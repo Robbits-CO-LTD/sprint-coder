@@ -432,9 +432,10 @@ void sc_cursor_overlay_restack(void) {
     }
 }
 
-/// Whether the overlay is placed directly above its named window now.
+/// Whether the overlay is placed directly above its named window now. A named
+/// window always resolves to above it or held off the screen.
 bool sc_cursor_overlay_placed_above(void) {
-    return ADPlacedAbove();
+    return ADAnchored() && !ADPlacementHidden();
 }
 
 /// Whether window `number` is on the screen, from that one window's record:

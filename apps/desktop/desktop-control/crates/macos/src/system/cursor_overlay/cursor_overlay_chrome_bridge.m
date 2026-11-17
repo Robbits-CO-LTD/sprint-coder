@@ -231,10 +231,6 @@ bool ADPlacementHidden(void) {
     return ADPlacementState == ADPlacementGone;
 }
 
-bool ADPlacedAbove(void) {
-    return ADPlacementState == ADPlacementAbove;
-}
-
 bool ADShown(NSWindow *window) {
     return window != nil && (window.isVisible || [ADHeld objectForKey:window] != nil);
 }
