@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, AppError, DeliverySemantics, ErrorCode,
     response::output::{ENVELOPE_VERSION, ErrorPayload},
@@ -53,6 +54,31 @@ pub(super) fn completed_entry(
     command: &str,
     result: Result<Value, AppError>,
 ) -> Value {
+    completed_entry_with_note(index, command, result, None)
+}
+
+/// A completed entry; the note its command left (`result_note`) becomes the
+/// entry's `suggestion` on success, as on the envelope of the same command run
+/// alone. A failed entry already carries the error's own suggestion.
+pub(super) fn completed_entry_with_note(
+    index: usize,
+    command: &str,
+    result: Result<Value, AppError>,
+    note: Option<String>,
+) -> Value {
+    let mut entry = completed_entry_without_note(index, command, result);
+    let ok = entry["ok"] == true;
+    if let (true, Some(note), Some(fields)) = (ok, note, entry.as_object_mut()) {
+        fields.insert("suggestion".into(), Value::String(note));
+    }
+    entry
+}
+
+fn completed_entry_without_note(
+    index: usize,
+    command: &str,
+    result: Result<Value, AppError>,
+) -> Value {
     match result {
         Ok(data) => json!({
             "version": ENVELOPE_VERSION,
@@ -103,4 +129,33 @@ fn entry_disposition(entry: &Value) -> DeliverySemantics {
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_else(DeliverySemantics::uncertain)
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::completed_entry_with_note;
+    use agent_desktop_core::{AdapterError, ErrorCode};
+    use serde_json::json;
+
+    #[test]
+    fn a_note_lands_on_its_successful_entry_and_the_data_stays_an_array() {
+        let entry = completed_entry_with_note(2, "list-windows", Ok(json!([])), Some("n".into()));
+        assert_eq!(entry["suggestion"], "n");
+        assert_eq!(entry["data"], json!([]));
+        assert_eq!(entry["index"], 2);
+    }
+
+    #[test]
+    fn an_entry_without_a_note_has_no_suggestion() {
+        let entry = completed_entry_with_note(0, "list-windows", Ok(json!([])), None);
+        assert!(entry.get("suggestion").is_none());
+    }
+
+    #[test]
+    fn a_failed_entry_keeps_only_its_error_suggestion() {
+        let error = AdapterError::new(ErrorCode::WindowNotFound, "gone").with_suggestion("own");
+        let entry = completed_entry_with_note(0, "snapshot", Err(error.into()), Some("n".into()));
+        assert!(entry.get("suggestion").is_none());
+        assert_eq!(entry["error"]["suggestion"], "own");
+    }
 }

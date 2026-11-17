@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::adapter::{MacOSAdapter, ax_element};
 use agent_desktop_core::{
     AccessibilityNode, AdapterError, AppInfo, Deadline, ElementState, LiveElement, NativeHandle,
@@ -55,6 +56,17 @@ impl ObservationOps for MacOSAdapter {
         crate::system::app::app_inventory::list_windows_until(
             filter,
             crate::tree::locator_deadline::from_operation(deadline)?,
+        )
+    }
+
+    fn windowless_app_reason(
+        &self,
+        app: &str,
+        deadline: Deadline,
+    ) -> Option<agent_desktop_core::WindowlessReason> {
+        crate::system::window::other_space::reason_for_app(
+            app,
+            crate::tree::locator_deadline::from_operation(deadline).ok()?,
         )
     }
 

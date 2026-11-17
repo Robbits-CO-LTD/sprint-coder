@@ -53,6 +53,19 @@ pub trait ObservationOps: Send + Sync {
         Err(AdapterError::not_supported("list_windows"))
     }
 
+    /// Why the running app `app` lists no window a command can use, when the
+    /// platform can tell from what it reads (for example, a window that exists
+    /// but is on a part of the desktop the user is not on). `None` keeps the
+    /// generic "no matching window" answer, which is what every platform that
+    /// does not override this gives.
+    fn windowless_app_reason(
+        &self,
+        _app: &str,
+        _deadline: Deadline,
+    ) -> Option<crate::WindowlessReason> {
+        None
+    }
+
     fn list_apps(&self, _deadline: Deadline) -> Result<Vec<AppInfo>, AdapterError> {
         Err(AdapterError::not_supported("list_apps"))
     }

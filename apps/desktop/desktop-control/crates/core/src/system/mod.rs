@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 pub(crate) mod app_info;
 pub(crate) mod app_inventory;
 pub(crate) mod app_inventory_query;
@@ -26,3 +27,4 @@ pub(crate) mod window_lookup;
 pub(crate) mod window_op;
 pub(crate) mod window_readback;
 pub(crate) mod window_state;
+pub mod windowless_reason;
