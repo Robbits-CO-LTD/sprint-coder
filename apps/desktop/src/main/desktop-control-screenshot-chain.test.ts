@@ -493,36 +493,36 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
   );
 
   it.each([
-    ['fails', () => Promise.reject(new Error('probe failed'))],
-    ['does not answer in time', () => new Promise<never>(() => undefined)],
+    ['fails', () => Promise.reject(new Error('probe failed')), false],
+    ['does not answer in time', () => new Promise<never>(() => undefined), true],
   ] as const)(
     'gives only the sentence when the CLI’s model list %s and no catalog is built',
-    async (_name, probe) => {
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-      try {
-        let asked = false;
-        const { call, client, sessions, refreshModelCatalog } = await setUp(true, false, {
-          catalogBuilt: false,
-          probe: () => {
-            asked = true;
-            return probe();
-          },
-        });
-        const answered = call(['screenshot', '--window-id', 'w-1']);
-        await vi.waitUntil(() => asked, { timeout: 20_000 });
-        await vi.advanceTimersByTimeAsync(SCREENSHOT_CATALOG_TIMEOUT_MS + 1);
-        const { response, picture } = await answered;
-        expect(picture).toBeUndefined();
-        const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
-        expect(shown['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
-        expect(shown).not.toHaveProperty('dataUrl');
-        expect(refreshModelCatalog).not.toHaveBeenCalled();
-        expect(heldScreenshotPictureCount()).toBe(0);
-        client.dispose();
-        await sessions.dispose();
-      } finally {
-        vi.useRealTimers();
-      }
+    async (_name, probe, waitsOut) => {
+      // Real timers: the wait for the model list is the real `SCREENSHOT_CATALOG_TIMEOUT_MS`, so
+      // the test does not depend on which other timers a platform's path holds meanwhile (with
+      // faked timers this never answered on Windows).
+      let asked = false;
+      const { call, client, sessions, refreshModelCatalog } = await setUp(true, false, {
+        catalogBuilt: false,
+        probe: () => {
+          asked = true;
+          return probe();
+        },
+      });
+      const began = Date.now();
+      const { response, picture } = await call(['screenshot', '--window-id', 'w-1']);
+      expect(asked).toBe(true);
+      // A list that never answers is waited for, and no longer than the bound.
+      if (waitsOut)
+        expect(Date.now() - began).toBeGreaterThanOrEqual(SCREENSHOT_CATALOG_TIMEOUT_MS - 250);
+      expect(picture).toBeUndefined();
+      const shown = JSON.parse(response.contentItems[0]!.text) as Record<string, unknown>;
+      expect(shown['picture']).toBe(SCREENSHOT_PICTURE_UNAVAILABLE);
+      expect(shown).not.toHaveProperty('dataUrl');
+      expect(refreshModelCatalog).not.toHaveBeenCalled();
+      expect(heldScreenshotPictureCount()).toBe(0);
+      client.dispose();
+      await sessions.dispose();
     },
     30_000,
   );
