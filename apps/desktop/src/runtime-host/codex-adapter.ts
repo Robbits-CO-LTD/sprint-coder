@@ -118,10 +118,12 @@ finish by saying its result has not come back yet: the host withdraws an unanswe
 turn ends, and the call never runs. If exec returns "Script running with cell ID ..." while a host
 call inside it waits, call wait with that cell ID until the script completes, then continue from
 its result.
-A host call result can carry a picture: a desktop-control screenshot, whose result has a picture
-field. Inside an exec script a nested call's picture is not shown to you by itself: take the string
-in the call's result that starts with data:image/ and pass it to image(...), and pass the rest of the
-result to text(...) without that string; otherwise you see neither.`;
+A desktop-control screenshot's host call result carries its picture. Called directly, the picture
+comes back as an image. Called inside an exec script, the call returns one string: the result as
+JSON on the first line, then a newline, then the picture as a data:image/...;base64 URL. To see the
+picture, split that string at the first newline, check that the part after it is as long as
+pictureChars in the JSON, and pass that part to image(...). Pass the first line to text(...) (or
+JSON.parse it to read picture, stdout and the picture's sizes). Do not pass the URL to text(...).`;
 const unknownCapability = { value: null, source: 'unknown' as const };
 const codexRuntimeCapability = (value: boolean, sourceReference: string) => ({
   value,
@@ -1269,6 +1271,38 @@ type CodexDynamicToolResponse = {
   contentItems: ({ type: 'inputText'; text: string } | { type: 'inputImage'; imageUrl: string })[];
 };
 
+/**
+ * The text item beside a managed tool's image: what the image is, and for a desktop-control
+ * screenshot what the run printed beside it and how long its picture's URL is. Inside an exec
+ * script, the installed Codex CLI hands the call's items to the script as one string, each item on
+ * its own line and an image as its data URL (probed against codex-cli 0.153.4), so this stays one
+ * line of whole JSON: fields are left out, never cut, to keep it within its bound.
+ */
+function managedImageText(output: Record<string, unknown>, dataUrl: string): string {
+  const base = {
+    path: output['path'],
+    mimeType: output['mimeType'],
+    byteLength: output['byteLength'],
+    sha256: output['sha256'],
+  };
+  if (typeof output['picture'] !== 'string') return JSON.stringify(base).slice(0, 16_384);
+  const screenshot = { ...base, picture: output['picture'], pictureChars: dataUrl.length };
+  for (const candidate of [
+    {
+      ...screenshot,
+      exitCode: output['exitCode'],
+      stdout: output['stdout'],
+      stderr: output['stderr'],
+    },
+    { ...screenshot, exitCode: output['exitCode'], stdout: output['stdout'] },
+    screenshot,
+  ]) {
+    const text = JSON.stringify(candidate);
+    if (text.length <= 16_384) return text;
+  }
+  return JSON.stringify({ picture: output['picture'], pictureChars: dataUrl.length });
+}
+
 export function codexDynamicToolResponseFromManaged(response: unknown): CodexDynamicToolResponse {
   const result = asRecord(response);
   const output =
@@ -1287,21 +1321,7 @@ export function codexDynamicToolResponseFromManaged(response: unknown): CodexDyn
       contentItems: [
         {
           type: 'inputText',
-          text: JSON.stringify({
-            path: output['path'],
-            mimeType: output['mimeType'],
-            byteLength: output['byteLength'],
-            sha256: output['sha256'],
-            // A desktop-control screenshot: what the picture is and what the run printed beside it.
-            ...(typeof output['picture'] === 'string'
-              ? {
-                  picture: output['picture'],
-                  exitCode: output['exitCode'],
-                  stdout: output['stdout'],
-                  stderr: output['stderr'],
-                }
-              : {}),
-          }).slice(0, 16_384),
+          text: managedImageText(output, dataUrl),
         },
         { type: 'inputImage', imageUrl: dataUrl },
       ],

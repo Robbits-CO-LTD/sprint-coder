@@ -56,6 +56,7 @@ import {
   heldScreenshotPictureCount,
 } from './desktop-control-screenshot';
 import { codexDynamicToolResponseFromManaged } from '../runtime-host/codex-adapter';
+import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -301,6 +302,18 @@ async function setUp(
   return { call, client, sessions, stored, catalog };
 }
 
+/**
+ * The value a nested dynamic tool call gives a Codex exec script: the response's items joined with
+ * newlines, a text item as its text and an image item as its URL. Observed with the installed
+ * codex-cli 0.153.4 (code mode, model metadata `tool_mode: code_mode_only`) answering a probe
+ * script, for text + image, image alone and text alone, with a 661 KB data URL passed whole.
+ */
+function codexCodeModeNestedResult(
+  items: ReturnType<typeof codexDynamicToolResponseFromManaged>['contentItems'],
+): string {
+  return items.map((item) => (item.type === 'inputText' ? item.text : item.imageUrl)).join('\n');
+}
+
 describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler', () => {
   it.each([false, true])(
     'reaches the Codex adapter as an image beside its metadata and sentence (cursors on: %s)',
@@ -317,6 +330,20 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
       expect(shown['picture']).toBe(SCREENSHOT_PICTURE_ATTACHED);
       expect(shown['stdout']).toBe(stored.at(-1)!.text);
       expect(JSON.stringify(stored)).not.toContain('base64');
+
+      // What a script inside Codex's exec receives for the same response (probed against the
+      // installed codex-cli 0.153.4 with a local stand-in for the model): one string, the items
+      // in order, one per line, an image as its data URL; and the steps the host guidance gives.
+      const nested = codexCodeModeNestedResult(response.contentItems);
+      expect(nested.length).toBeLessThan(RUNTIME_TOOL_RESULT_MAX_BYTES);
+      const cut = nested.indexOf('\n');
+      const firstLine = JSON.parse(nested.slice(0, cut)) as Record<string, unknown>;
+      const url = nested.slice(cut + 1);
+      expect(url).toMatch(/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u);
+      expect(url.length).toBe(firstLine['pictureChars']);
+      expect(url).toBe((image as { imageUrl: string }).imageUrl);
+      expect(firstLine['picture']).toBe(SCREENSHOT_PICTURE_ATTACHED);
+      expect(Buffer.from(url.split(',')[1]!, 'base64').byteLength).toBe(firstLine['byteLength']);
       client.dispose();
       await sessions.dispose();
     },

@@ -1036,8 +1036,9 @@ describe('Codex runtime probe', () => {
     );
     // A nested call's picture reaches the model only through the script's own image(...).
     expect(CODEX_MANAGED_TOOL_GUIDANCE).toContain(
-      'starts with data:image/ and pass it to image(...)',
+      'the call returns one string: the result as\nJSON on the first line, then a newline, then the picture as a data:image/...;base64 URL.',
     );
+    expect(CODEX_MANAGED_TOOL_GUIDANCE).toContain('pass that part to image(...)');
   });
 
   it('never asks the native runtime for approval', () => {
@@ -1295,6 +1296,7 @@ describe('Codex runtime probe', () => {
             byteLength: 3,
             sha256: 'b'.repeat(64),
             picture: '撮った画像をこの結果に添えた。',
+            pictureChars: 'data:image/jpeg;base64,QUFB'.length,
             exitCode: 0,
             stdout,
             stderr: '',
@@ -1305,6 +1307,35 @@ describe('Codex runtime probe', () => {
     });
     // The base64 travels only as the image, never inside the text.
     expect(JSON.stringify(response.contentItems[0])).not.toContain('QUFB');
+  });
+
+  it('keeps a screenshot’s text item one line of whole JSON, leaving fields out to fit', () => {
+    const dataUrl = 'data:image/png;base64,QUFB';
+    const response = codexDynamicToolResponseFromManaged({
+      success: true,
+      output: {
+        exitCode: 0,
+        stdout: '{"ok":true}',
+        stderr: 'e\n'.repeat(10_000),
+        picture: '撮った画像をこの結果に添えた。',
+        mimeType: 'image/png',
+        byteLength: 3,
+        sha256: 'a'.repeat(64),
+        dataUrl,
+      },
+    });
+    const text = (response.contentItems[0] as { text: string }).text;
+    expect(text).not.toContain('\n');
+    expect(text.length).toBeLessThanOrEqual(16_384);
+    expect(JSON.parse(text)).toEqual({
+      mimeType: 'image/png',
+      byteLength: 3,
+      sha256: 'a'.repeat(64),
+      picture: '撮った画像をこの結果に添えた。',
+      pictureChars: dataUrl.length,
+      exitCode: 0,
+      stdout: '{"ok":true}',
+    });
   });
 
   it('never enables native Web search for a Team turn', () => {
