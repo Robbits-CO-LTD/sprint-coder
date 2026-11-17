@@ -30,6 +30,13 @@ export class ModelCatalogService {
     return this.indexBuildCountValue;
   }
 
+  /** Every model the catalog lists for one connection. */
+  list(connectionId: string): ProviderModel[] {
+    return this.indexed
+      .filter(({ model }) => model.connectionId === connectionId)
+      .map(({ model }) => model);
+  }
+
   find(connectionId: string, modelId: string): ProviderModel | undefined {
     return this.indexed.find(
       ({ model }) => model.connectionId === connectionId && model.modelId === modelId,

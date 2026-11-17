@@ -357,6 +357,8 @@ import { clipPublicMessage } from './zod-issue-message';
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
+/** The longest a screenshot waits to learn whether its Turn's CLI model takes images. */
+export const SCREENSHOT_CATALOG_TIMEOUT_MS = 5_000;
 /**
  * Shown when the completion gate refuses a Turn. The edits are kept either way; what the Turn does
  * not get is the claim that it finished, so each reason has to say which of the two it was.
@@ -593,6 +595,15 @@ import type {
   RuntimePreparedImageAttachments,
   RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
+import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
+import {
+  isScreenshotToolResult,
+  screenshotCallKey,
+  type ScreenshotPicture,
+  screenshotToolResultFor,
+  takeScreenshotPicture,
+  turnModelTakesPictures,
+} from './desktop-control-screenshot';
 
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
@@ -733,7 +744,9 @@ import { type WorkspacePatchDeps } from './workspace-patch-tool';
 import { workspaceWriteLimitsOf } from './workspace-write-limits';
 import { probeSandboxRunner, type SandboxRunnerCapability } from './sandbox-runner';
 import {
+  BUILTIN_CLAUDE_CONNECTION_ID,
   BUILTIN_CODEX_CONNECTION_ID,
+  BUILTIN_GROK_CONNECTION_ID,
   builtinRuntimeForModelSelection,
   modelSelectionForRuntime,
 } from './connection-identity';
@@ -4720,7 +4733,114 @@ export class IpcRouter {
         toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
         accepted: false,
       } satisfies ProviderImageBridgeDispatchResult);
-    return this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
+    let picture: ScreenshotPicture | undefined;
+    const result = await this.dispatchManagedRuntimeTool(
+      taskId,
+      turnId,
+      request,
+      signal,
+      undefined,
+      undefined,
+      (taken) => {
+        picture = taken;
+      },
+    );
+    if (!isScreenshotToolResult(result)) return result;
+    // A desktop-control screenshot's picture goes to the Turn's own model as an image (the CLI
+    // adapters hand a `dataUrl` over as one), only when that model takes images, and only within
+    // what the runtime protocol carries.
+    return screenshotToolResultFor(
+      result,
+      picture,
+      picture !== undefined && (await this.screenshotPictureAccepted(taskId, turnId)),
+      RUNTIME_TOOL_RESULT_MAX_BYTES - 64 * 1024,
+    );
+  }
+
+  /** The Turn and call id a managed call reaches the ToolBroker under (a Worker's: its parent's). */
+  private managedBrokerCall(
+    turnId: string,
+    callId: string,
+  ): Readonly<{ ownerTurnId: string; brokerCallId: string }> {
+    const worker = this.managedWorkerTurn.get(turnId);
+    return {
+      ownerTurnId: worker?.parentTurnId ?? turnId,
+      brokerCallId:
+        worker === undefined
+          ? callId
+          : `${createHash('sha256').update(turnId).digest('hex').slice(0, 16)}:${callId}`.slice(
+              0,
+              128,
+            ),
+    };
+  }
+
+  /**
+   * Whether the model of this CLI Turn takes images (`turnModelTakesPictures`): a primary Turn's
+   * from its recorded model identity, a Team Worker's from the runtime and model its own Turn was
+   * started with. Anything that cannot be read gets no picture.
+   */
+  private async screenshotPictureAccepted(taskId: string, turnId: string): Promise<boolean> {
+    try {
+      let identity: Parameters<typeof turnModelTakesPictures>[0];
+      if (this.managedWorkerTurn.has(turnId)) {
+        const choice = this.cliTeamWorkerRuntime.runtimeChoiceForTurn(turnId);
+        if (choice === undefined) return false;
+        identity = {
+          selection: modelSelectionForRuntime(choice.kind, choice.model),
+          resolution: { resolvedModel: null },
+        };
+      } else identity = this.persistence.getTurnModelIdentity(taskId, turnId);
+      return turnModelTakesPictures(
+        identity,
+        await this.screenshotModelCatalog(identity.selection.connectionId),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The models a screenshot's decision reads: the model catalog once something in this app run has
+   * built it; before that only the Turn's own CLI runtime's model list (its cached capability probe,
+   * at most `SCREENSHOT_CATALOG_TIMEOUT_MS`), never an external Provider. A connection that is not a
+   * CLI's, or a probe that fails or is late, lists nothing, so the model gets no picture.
+   */
+  private async screenshotModelCatalog(
+    connectionId: string | null,
+  ): Promise<Parameters<typeof turnModelTakesPictures>[1]> {
+    if (this.modelCatalog.revision > 0)
+      return {
+        find: (id: string, modelId: string) => this.modelCatalog.find(id, modelId),
+        list: (id: string) => this.modelCatalog.list(id),
+      };
+    const runtime =
+      connectionId === BUILTIN_CODEX_CONNECTION_ID
+        ? this.codexRuntime
+        : connectionId === BUILTIN_CLAUDE_CONNECTION_ID
+          ? this.claudeRuntime
+          : connectionId === BUILTIN_GROK_CONNECTION_ID
+            ? this.grokRuntime
+            : undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const report =
+      runtime === undefined
+        ? undefined
+        : await Promise.race([
+            runtime.probe().catch(() => undefined),
+            new Promise<undefined>((resolve) => {
+              timer = setTimeout(() => resolve(undefined), SCREENSHOT_CATALOG_TIMEOUT_MS);
+            }),
+          ]).finally(() => clearTimeout(timer));
+    const models = (report?.models ?? []).map((model) => ({
+      modelId: model.id,
+      multimodalInput: model.capabilities?.multimodalInput ?? { value: null },
+    }));
+    return {
+      find: (id: string, modelId: string) =>
+        id === connectionId ? models.find((model) => model.modelId === modelId) : undefined,
+      list: (id: string) => (id === connectionId ? models : []),
+    };
   }
 
   /**
@@ -4822,6 +4942,7 @@ export class IpcRouter {
     signal: AbortSignal,
     providerImageBridge?: ToolImageBridge,
     publishProviderImageBinding?: () => void,
+    onScreenshotPicture?: (picture: ScreenshotPicture) => void,
   ): Promise<unknown> {
     if (request.toolName === 'view_image' && providerImageBridge === undefined) {
       signal.throwIfAborted();
@@ -4840,14 +4961,7 @@ export class IpcRouter {
       )
         throw new Error('Managed Worker tool is outside its capability ceiling');
     }
-    const ownerTurnId = worker?.parentTurnId ?? turnId;
-    const brokerCallId =
-      worker === undefined
-        ? request.callId
-        : `${createHash('sha256').update(turnId).digest('hex').slice(0, 16)}:${request.callId}`.slice(
-            0,
-            128,
-          );
+    const { ownerTurnId, brokerCallId } = this.managedBrokerCall(turnId, request.callId);
     const workerCallKey = JSON.stringify([ownerTurnId, brokerCallId]);
     const callSignal =
       worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]);
@@ -4924,6 +5038,11 @@ export class IpcRouter {
       throw error;
     } finally {
       if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
+      // A desktop-control screenshot's picture lives as long as its call: it is taken here, as the
+      // call returns, fails or is canceled (however long an earlier call of the Turn kept its
+      // result waiting), and handed only to a caller that asked for it.
+      const picture = takeScreenshotPicture(screenshotCallKey(taskId, ownerTurnId, brokerCallId));
+      if (picture !== undefined) onScreenshotPicture?.(picture);
     }
     const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, ownerTurnId);
     if (isCompleteProviderWorkspaceRead(result))

@@ -222,7 +222,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly pending = new Map<string, PendingRun>();
   private readonly activeByAgent = new Map<
     string,
-    { kind: 'claude' | 'codex' | 'grok'; taskId: string; turnId: string }
+    { kind: 'claude' | 'codex' | 'grok'; model: string; taskId: string; turnId: string }
   >();
   /**
    * Turns whose process-tree exit Main could not confirm, keyed by Turn id (issue #548). Their
@@ -621,7 +621,12 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           writes,
           output,
         });
-        this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
+        this.activeByAgent.set(input.worker.id, {
+          kind: choice.kind,
+          model: choice.model,
+          taskId,
+          turnId,
+        });
         runtimeStarted = this.client(choice.kind).start(
           taskId,
           turnId,
@@ -863,6 +868,13 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         );
     };
     wait();
+  }
+
+  /** The runtime and model a running Worker Turn was started with, or `undefined`. */
+  runtimeChoiceForTurn(turnId: string): RealRuntimeChoice | undefined {
+    for (const active of this.activeByAgent.values())
+      if (active.turnId === turnId) return { kind: active.kind, model: active.model };
+    return undefined;
   }
 
   recordManagedToolResult(turnId: string, result: unknown): void {

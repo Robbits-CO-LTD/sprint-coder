@@ -634,6 +634,68 @@ describe('RuntimeHostClient start acknowledgement', () => {
     client.dispose();
   });
 
+  // The runtime drops a tool_result over its bound unread, and the call would hang; Main sends a
+  // failure it can read instead.
+  it('never sends the CLI Runtime a tool result larger than it reads', async () => {
+    const handleTool = vi.fn(async () => ({ stdout: 'x'.repeat(1024 * 1024) }));
+    const client = new RuntimeHostClient(
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      'codex',
+      undefined,
+      undefined,
+      handleTool,
+    );
+    const child = children[0]!;
+    child.emit('spawn');
+    const catalog = managedCatalog();
+    client.start('task-tools', 'turn-tools', 'hello', null, 'auto', catalog);
+    await Promise.resolve();
+    const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+      string,
+      unknown
+    >;
+    const envelope = {
+      protocolVersion: start['protocolVersion'],
+      runtimeInstanceId: start['runtimeInstanceId'],
+      taskId: start['taskId'],
+      turnId: start['turnId'],
+      operationId: start['operationId'],
+    };
+    child.emit('message', {
+      ...envelope,
+      seq: 1,
+      type: 'started',
+      acceptedContextFragmentIds: [],
+      acceptedProjectItemIds: [],
+      acceptedProjectSnapshotDigest: null,
+      acceptedPayloadDigest: start['payloadDigest'],
+    });
+    child.emit('message', {
+      ...envelope,
+      seq: 2,
+      type: 'tool_request',
+      request: {
+        callId: 'call-read',
+        toolName: 'read_file',
+        arguments: { path: 'README.md' },
+        catalogDigest: catalog.digest,
+      },
+    });
+    await vi.waitFor(() =>
+      expect(
+        child.messages.find((message) => messageType(message) === 'tool_result'),
+      ).toMatchObject({
+        callId: 'call-read',
+        success: false,
+        output: { code: 'TOOL_RESULT_TOO_LARGE' },
+      }),
+    );
+    client.dispose();
+  });
+
   // Issue #870: the Codex / Claude CLI path keeps its wording; the hint already rides in the message.
   it('returns a schema mismatch to the CLI Runtime with its existing code and wording', async () => {
     const mismatch = new ToolInputSchemaMismatchError('$: missing required key "edits"');
