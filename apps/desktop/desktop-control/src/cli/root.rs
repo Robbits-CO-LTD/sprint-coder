@@ -12,6 +12,7 @@ const AFTER_HELP: &str = include_str!("help_after.txt");
 #[derive(Parser, Debug)]
 #[command(
     name = "sprint-coder-desktop-control",
+    bin_name = "sprint-coder-desktop-control",
     version,
     about = "Reliable computer use for AI agents — see and operate desktop apps",
     long_about = None,

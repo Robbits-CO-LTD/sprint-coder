@@ -171,6 +171,8 @@ Keys are the command's own field names, so a positional argument is named after 
 
 ## Sessions and traces
 
+**Inside Sprint Coder.** By default Sprint Coder sets the session and the agent id of every run itself, and refuses `--session`, `--agent-id`, a `session` field in a `batch` entry, `session start`, `session end`, `session gc` and `cursor-overlay enable`/`disable`. Do not use them there. The session examples here describe the CLI on its own.
+
 A session is an on-disk container under `<state root>/sessions/<id>/` with a manifest, snapshot refmaps and, when tracing is on, a `trace/` directory. The state root is a hidden folder in the home directory by default. An environment variable the CLI reads can relocate it (Sprint Coder sets it for every run). A relocated state root must be an absolute path, or the command fails with `INVALID_ARGS`. `status` reports it as `state_root`.
 
 ```bash

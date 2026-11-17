@@ -21,13 +21,15 @@ description: >
 
 ## Shell syntax
 
-Examples use a POSIX shell. In PowerShell, quote every ref (`'@s8f3k2p9:e1'`), because a bare `@token` is the splatting operator. Use `$env:NAME = 'value'` instead of `export`, and `| ConvertFrom-Json` instead of `$(...)` and `jq`. The Windows skill has the PowerShell forms.
+Examples use a POSIX shell. In PowerShell, quote every ref (`'@s8f3k2p9:e1'`), because a bare `@token` is the splatting operator. Use `| ConvertFrom-Json` instead of `$(...)` and `jq`. The Windows skill has the PowerShell forms.
 
 ## First run
 
 1. Run `sprint-coder-desktop-control status`. It reports the platform, permissions and `supported_surfaces`.
 2. Run `sprint-coder-desktop-control skills get platform`. It loads the skill for the OS the binary runs on (macOS, Windows or Linux).
 3. For flags and syntax, run `sprint-coder-desktop-control <command> --help`. This skill does not repeat flag lists.
+
+**Inside Sprint Coder.** By default Sprint Coder sets the session and the agent id of every run itself, and refuses `--session`, `--agent-id`, a `session` field in a `batch` entry, `session start`, `session end`, `session gc` and `cursor-overlay enable`/`disable`. Do not use them there. The session examples here describe the CLI on its own.
 
 ## The loop
 

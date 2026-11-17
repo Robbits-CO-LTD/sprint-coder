@@ -105,7 +105,7 @@ file lists all work on Linux.
   and its directory before using a build made with a group-writable umask. A
   world-writable directory is accepted only with the sticky bit and without
   group-write permission. A 777 copy is refused with `PLATFORM_NOT_SUPPORTED`, "writable by
-  others". npm installs and release archives ship it in place. A binary copied
+  others". It ships beside the binary. A binary copied
   alone cannot set the clipboard: `PLATFORM_NOT_SUPPORTED` names the missing
   helper. Both refusals are `not_delivered`, `safe`.
 - Without a clipboard manager the content ends with the owner. GNOME's shell

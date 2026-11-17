@@ -59,19 +59,10 @@ physical pixels.
 
 ## The Binary Will Not Start
 
-A sprint-coder-desktop-control build that is not code-signed can be blocked on
-Windows. Three execution controls treat an unsigned binary differently:
-
-- **SmartScreen:** a browser download carries Mark-of-the-Web, so
-  double-clicking it can show "Windows protected your PC". Choose More info,
-  then Run anyway.
-- **Antivirus quarantine:** Defender or another scanner may quarantine a new
-  unsigned executable however it was obtained. Restore or allow-list it after
-  you verify the published SHA-256 checksum.
-- **Smart App Control:** on a clean Windows 11 install it blocks unknown
-  unsigned executables at process creation, including command-line launches.
-  No download path or launch mode avoids it. Turn Smart App Control off or use
-  a signed build.
+sprint-coder-desktop-control comes with Sprint Coder. If Windows blocks it
+(SmartScreen, an antivirus quarantine or Smart App Control), tell the user what
+Windows reported and stop. Do not change security settings, allow-list the
+file, or run it another way.
 
 ## POLICY_DENIED from a Shell-Surface or Notification Command
 

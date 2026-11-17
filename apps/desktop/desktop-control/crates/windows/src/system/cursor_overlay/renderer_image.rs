@@ -51,9 +51,8 @@ pub(crate) fn choose(current: &Path, named: Option<&OsStr>) -> Result<RendererIm
         return Ok(RendererImage::Own(current.to_path_buf()));
     }
     let stem = image_identity::image_stem(current).unwrap_or_default();
-    let bundled = image_identity::BUNDLED_IMAGE_STEM;
     Err(format!(
-        "the overlay renderer is only started from the {bundled} image, not '{stem}'"
+        "the overlay renderer is only started from this CLI's own image, not '{stem}'"
     ))
 }
 

@@ -97,7 +97,7 @@ The cursor overlay is a detached renderer process driven over a named pipe.
 - Another user's process is refused in both directions: each connection's
   token user SID must match.
 - Before it sends a control, the client checks that the pipe server's
-  executable is named `sprint-coder-desktop-control` (case-insensitive, with or without
+  executable has this CLI's own file name (case-insensitive, with or without
   `.exe`). This is a file-name check, not a signature check. A mismatch makes
   `enable` report `rendered: false`.
 - One renderer per session (`FILE_FLAG_FIRST_PIPE_INSTANCE`). A second renderer

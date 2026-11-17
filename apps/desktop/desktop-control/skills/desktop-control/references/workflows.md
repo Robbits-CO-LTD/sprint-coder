@@ -181,6 +181,8 @@ Batch saves process starts. It is not a transaction. Entries after a failure run
 
 ## Trace a multi-step run
 
+**Inside Sprint Coder.** By default Sprint Coder sets the session and the agent id of every run itself, and refuses `--session`, `--agent-id`, a `session` field in a `batch` entry, `session start`, `session end`, `session gc` and `cursor-overlay enable`/`disable`. Do not use them there. The session examples here describe the CLI on its own.
+
 This example uses `jq` to read the session id returned by `session start`.
 
 ```bash
@@ -190,7 +192,7 @@ sprint-coder-desktop-control --session "$session_id" trace show --limit 50
 sprint-coder-desktop-control session end "$session_id"
 ```
 
-`status` confirms `session_id` and `tracing`. Use one session per run. Concurrent agents set the same variable and use qualified refs from their own snapshots.
+`status` confirms `session_id` and `tracing`. Use one session per run. Concurrent agents share the session id and use qualified refs from their own snapshots.
 
 ## Anti-patterns
 

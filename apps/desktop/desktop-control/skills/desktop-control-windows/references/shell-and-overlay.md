@@ -81,6 +81,12 @@ shape when none are, and a top-level `ClearAllButton`.
 `cursor-overlay enable` renders on Windows: a detached renderer process paints a
 presentation-only cursor in a click-through, non-activating window.
 
+**Inside Sprint Coder.** By default Sprint Coder sets the session and the
+agent id of every run itself, and refuses `--session`, `--agent-id`, a
+`session` field in a `batch` entry, `session start`, `session end`,
+`session gc` and `cursor-overlay enable`/`disable`. Do not use them there.
+The session examples here describe the CLI on its own.
+
 ```powershell
 $start = sprint-coder-desktop-control session start --cursor | ConvertFrom-Json
 $session = $start.data.session_id
