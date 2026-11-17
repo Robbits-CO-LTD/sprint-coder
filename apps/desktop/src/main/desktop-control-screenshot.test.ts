@@ -281,36 +281,58 @@ describe('giving the picture to the model', () => {
 });
 
 describe('which Turn models take the picture', () => {
-  const catalog: Record<string, boolean | null> = {
-    'codex:gpt-vision': true,
-    'codex:auto': null,
-    'grok:grok-cli': false,
-    'claude:auto': true,
-  };
-  const find = (connectionId: string, modelId: string) => {
-    const value = catalog[`${connectionId}:${modelId}`];
-    return value === undefined ? undefined : { multimodalInput: { value } };
-  };
+  type Value = boolean | null;
+  const catalogOf = (connections: Record<string, Record<string, Value>>) => ({
+    find: (connectionId: string, modelId: string) => {
+      const value = connections[connectionId]?.[modelId];
+      return value === undefined ? undefined : { modelId, multimodalInput: { value } };
+    },
+    list: (connectionId: string) =>
+      Object.entries(connections[connectionId] ?? {}).map(([modelId, value]) => ({
+        modelId,
+        multimodalInput: { value },
+      })),
+  });
   const identity = (
     connectionId: string | null,
     requested: string | null,
-    resolved: string | null,
+    resolved: string | null = null,
   ) => ({
     selection: { connectionId, requestedModel: requested },
     resolution: { resolvedModel: resolved },
   });
+  // As the Codex CLI catalog lists them: `auto` unknown, each listed model from model/list.
+  const allImages = catalogOf({ codex: { auto: null, 'gpt-a': true, 'gpt-b': true } });
+  const oneUnknown = catalogOf({ codex: { auto: null, 'gpt-a': true, 'gpt-b': null } });
+  const oneTextOnly = catalogOf({ codex: { auto: null, 'gpt-a': true, 'gpt-b': false } });
+  const onlyAuto = catalogOf({ codex: { auto: null } });
 
-  it('is a model the catalog says takes images, asked for or resolved to', () => {
-    expect(turnModelTakesPictures(identity('codex', 'gpt-vision', null), find)).toBe(true);
-    expect(turnModelTakesPictures(identity('claude', 'auto', null), find)).toBe(true);
-    expect(turnModelTakesPictures(identity('codex', 'auto', 'gpt-vision'), find)).toBe(true);
+  it('gives the automatic choice the picture when every listed model takes images', () => {
+    expect(turnModelTakesPictures(identity('codex', 'auto'), allImages)).toBe(true);
   });
 
-  it('is never an unknown, text-only or missing model', () => {
-    expect(turnModelTakesPictures(identity('codex', 'auto', null), find)).toBe(false);
-    expect(turnModelTakesPictures(identity('grok', 'grok-cli', null), find)).toBe(false);
-    expect(turnModelTakesPictures(identity('codex', 'gone', null), find)).toBe(false);
-    expect(turnModelTakesPictures(identity(null, null, null), find)).toBe(false);
+  it('gives the automatic choice none when a listed model is unknown, text-only, or none is listed', () => {
+    expect(turnModelTakesPictures(identity('codex', 'auto'), oneUnknown)).toBe(false);
+    expect(turnModelTakesPictures(identity('codex', 'auto'), oneTextOnly)).toBe(false);
+    expect(turnModelTakesPictures(identity('codex', 'auto'), onlyAuto)).toBe(false);
+  });
+
+  it('follows an automatic choice the catalog itself says takes images (the Claude CLI)', () => {
+    const claude = catalogOf({ claude: { auto: true, sonnet: true } });
+    expect(turnModelTakesPictures(identity('claude', 'auto'), claude)).toBe(true);
+  });
+
+  it('judges an explicit model by its own entry', () => {
+    expect(turnModelTakesPictures(identity('codex', 'gpt-a'), oneTextOnly)).toBe(true);
+    expect(turnModelTakesPictures(identity('codex', 'gpt-b'), oneTextOnly)).toBe(false);
+    expect(turnModelTakesPictures(identity('codex', 'gpt-b'), oneUnknown)).toBe(false);
+    expect(turnModelTakesPictures(identity('codex', 'gone'), allImages)).toBe(false);
+    expect(turnModelTakesPictures(identity(null, null), allImages)).toBe(false);
+  });
+
+  it('lets a recorded resolved model decide', () => {
+    expect(turnModelTakesPictures(identity('codex', 'auto', 'gpt-b'), oneTextOnly)).toBe(false);
+    expect(turnModelTakesPictures(identity('codex', 'auto', 'gpt-a'), oneTextOnly)).toBe(true);
   });
 });
 

@@ -282,24 +282,44 @@ export function isScreenshotToolResult(result: unknown): result is Record<string
   );
 }
 
+/** The model id a CLI connection's catalog gives its own automatic choice. */
+export const AUTOMATIC_MODEL_ID = 'auto';
+
+type CatalogModel = Readonly<{
+  modelId: string;
+  multimodalInput: Readonly<{ value: boolean | null }>;
+}>;
+
 /**
- * Whether a Turn's model takes images, by the model catalog's `multimodalInput`, for the model the
- * Turn asked for or the one it resolved to. Unknown counts as no.
+ * Whether a Turn's model takes images, by the model catalog's `multimodalInput`. Unknown counts as
+ * no. The model the Turn resolved to decides when it is recorded; otherwise the model it asked for.
+ * The connection's automatic choice, whose own entry may say unknown, takes images when every
+ * concrete model the connection's catalog lists is known to take them: whichever it picks does.
  */
 export function turnModelTakesPictures(
   identity: Readonly<{
     selection: Readonly<{ connectionId: string | null; requestedModel: string | null }>;
     resolution: Readonly<{ resolvedModel: string | null }>;
   }>,
-  find: (
-    connectionId: string,
-    modelId: string,
-  ) => Readonly<{ multimodalInput: Readonly<{ value: boolean | null }> }> | undefined,
+  catalog: Readonly<{
+    find(connectionId: string, modelId: string): CatalogModel | undefined;
+    list(connectionId: string): readonly CatalogModel[];
+  }>,
 ): boolean {
   const { connectionId, requestedModel } = identity.selection;
   if (connectionId === null) return false;
-  return [requestedModel, identity.resolution.resolvedModel].some(
-    (modelId) => modelId !== null && find(connectionId, modelId)?.multimodalInput.value === true,
+  const resolved = identity.resolution.resolvedModel;
+  if (resolved !== null && resolved !== AUTOMATIC_MODEL_ID)
+    return catalog.find(connectionId, resolved)?.multimodalInput.value === true;
+  if (requestedModel === null) return false;
+  const requested = catalog.find(connectionId, requestedModel)?.multimodalInput.value;
+  if (requested === true || requested === false) return requested;
+  if (requestedModel !== AUTOMATIC_MODEL_ID) return false;
+  const concrete = catalog
+    .list(connectionId)
+    .filter(({ modelId }) => modelId !== AUTOMATIC_MODEL_ID);
+  return (
+    concrete.length > 0 && concrete.every(({ multimodalInput }) => multimodalInput.value === true)
   );
 }
 

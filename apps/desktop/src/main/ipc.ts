@@ -4738,17 +4738,29 @@ export class IpcRouter {
   }
 
   /**
-   * Whether the model of this primary CLI Turn takes images, from the model catalog
-   * (`multimodalInput`), for the model the Turn asked for or the one it resolved to. A Team
-   * Worker's Turn, or a model whose answer is unknown, gets no picture.
+   * Whether the model of this CLI Turn takes images (`turnModelTakesPictures`): a primary Turn's
+   * from its recorded model identity, a Team Worker's from the runtime and model its own Turn was
+   * started with. Anything that cannot be read gets no picture.
    */
   private screenshotPictureAccepted(taskId: string, turnId: string): boolean {
-    if (this.managedWorkerTurn.has(turnId)) return false;
     try {
-      return turnModelTakesPictures(
-        this.persistence.getTurnModelIdentity(taskId, turnId),
-        (connectionId, modelId) => this.modelCatalog.find(connectionId, modelId),
-      );
+      const catalog = {
+        find: (connectionId: string, modelId: string) =>
+          this.modelCatalog.find(connectionId, modelId),
+        list: (connectionId: string) => this.modelCatalog.list(connectionId),
+      };
+      if (this.managedWorkerTurn.has(turnId)) {
+        const choice = this.cliTeamWorkerRuntime.runtimeChoiceForTurn(turnId);
+        if (choice === undefined) return false;
+        return turnModelTakesPictures(
+          {
+            selection: modelSelectionForRuntime(choice.kind, choice.model),
+            resolution: { resolvedModel: null },
+          },
+          catalog,
+        );
+      }
+      return turnModelTakesPictures(this.persistence.getTurnModelIdentity(taskId, turnId), catalog);
     } catch {
       return false;
     }
