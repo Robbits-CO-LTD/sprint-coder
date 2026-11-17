@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::time::Duration;
 
 use crate::{
@@ -64,6 +65,12 @@ fn probe_reserve(total: Duration) -> Duration {
     (total / 4).min(MAX_PROBE_RESERVE)
 }
 
+/// The hint a launch of a Chromium app without `--cdp` gets. An adapter that sets its own
+/// suggestion on such a result appends this, since core adds it only to a result without one.
+pub const CHROMIUM_CDP_HINT: &str = "Chromium app: for web-content work, run close-app and then \
+     launch --cdp, then drive the web contents with agent-browser or any CDP client. \
+     Accessibility commands still cover everything, including native menus and dialogs.";
+
 /// Guidance the calling agent reads at the moment of use, not prose it has
 /// to infer: a Chromium app launched without `--cdp` is nudged toward the
 /// flag that opens the web-content door, and a verified endpoint is handed
@@ -81,12 +88,7 @@ fn launch_suggestion(cdp_requested: bool, launched: &LaunchResult) -> Option<Str
         ));
     }
     if !cdp_requested && launched.renderer == Some(RendererKind::Chromium) {
-        return Some(
-            "Chromium app: for web-content work, run close-app and then launch --cdp, then \
-             drive the web contents with agent-browser or any CDP client. Accessibility \
-             commands still cover everything, including native menus and dialogs."
-                .to_owned(),
-        );
+        return Some(CHROMIUM_CDP_HINT.to_owned());
     }
     None
 }

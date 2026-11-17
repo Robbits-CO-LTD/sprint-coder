@@ -154,6 +154,11 @@ pub(crate) struct FrontWatch {
     outcome: Option<FrontOutcome>,
     /// Set once a take was left alone or a giving back failed: nothing more is done.
     stopped: bool,
+    /// The watched app was asked for a window (`asked`) while it was itself in front, and has
+    /// been read in front at every look since: its own window taking the focus, with no window
+    /// of its own to give the focus back to and without input from the user, takes nothing
+    /// from anyone and is not a take.
+    own_front: bool,
 }
 
 /// The candidates a launch watches the front for: only a launch that judges a hand-off
@@ -210,9 +215,23 @@ impl FrontWatch {
             pending: None,
             outcome: None,
             stopped: false,
+            own_front: false,
         };
         watch.remember(&before);
         watch
+    }
+
+    /// Marks the watch as one over an app that was asked for a window (`launch_reopen`). When
+    /// that app was itself in front at the read the watch began with, the window it then shows
+    /// is its own move in front, and the watch goes on after it, for the user moving to another
+    /// app and the asked app then taking the front from that one. The mark is dropped at the
+    /// first look that reads another app in front or cannot read the front: from then on the
+    /// app may have taken the front from something this watch did not see.
+    pub(crate) fn asked(&mut self) {
+        self.own_front = self
+            .last_app
+            .as_ref()
+            .is_some_and(|app| self.is_candidate(app));
     }
 
     fn is_candidate(&self, app: &FrontApp) -> bool {
@@ -273,10 +292,14 @@ impl FrontWatch {
         let Some(app) = seen.app.clone() else {
             // Nothing is known of the front now; a take waiting for its window may still be
             // decided by that window.
+            self.own_front = false;
             self.decide(now, input, behind, restore);
             return;
         };
         let candidate = self.is_candidate(&app);
+        if !candidate {
+            self.own_front = false;
+        }
         let focus = Self::focus_of(&seen, &app).map(|(number, _)| number);
         // A take waiting for its window is decided first; a second one is not read meanwhile.
         let take = if candidate && self.pending.is_none() {
@@ -384,6 +407,12 @@ impl FrontWatch {
         let kind = take.kind;
         let Some(target) = take.target.clone() else {
             self.pending = None;
+            if self.own_front && kind == TakeKind::Window && input() == Input::None {
+                // The asked app, in front all along and without input from the user (who
+                // could have moved to another app and back between two looks), showed its
+                // window: not a take, and the watch goes on.
+                return;
+            }
             return self.leave(kind, LeftWhy::NoTarget);
         };
         let give_back = match input() {
@@ -561,23 +590,45 @@ fn with_note(suggestion: Option<String>, note: &str) -> String {
 /// Everything else of the result stays as it was, and any other result (a launch that was not
 /// passed on, another error) is returned as it is: the sentences speak of the instance the
 /// launch was passed to.
+#[cfg(test)]
 pub(crate) fn annotate(
     result: Result<LaunchResult, AdapterError>,
     outcome: Option<FrontOutcome>,
+) -> Result<LaunchResult, AdapterError> {
+    annotate_for(result, outcome, false)
+}
+
+/// `annotate`, where `asked` marks a launch that asked the running instance for a window
+/// (`launch_reopen`): its result gets the sentence too, handed off or not, and an error also
+/// `details.front`, as a launch not confirmed does.
+pub(crate) fn annotate_for(
+    result: Result<LaunchResult, AdapterError>,
+    outcome: Option<FrontOutcome>,
+    asked: bool,
 ) -> Result<LaunchResult, AdapterError> {
     let Some(outcome) = outcome else {
         return result;
     };
     let note = front_note(outcome);
     match result {
-        Ok(mut result) if result.handed_off => {
+        Ok(mut result) if result.handed_off || asked => {
             result.suggestion = Some(with_note(result.suggestion.take(), note));
             Ok(result)
         }
         Ok(result) => Ok(result),
-        Err(mut error) if is_unconfirmed(&error) => {
+        // An error that says nothing was delivered came before the request: the front it
+        // speaks of is not that app's answer.
+        Err(mut error)
+            if (asked
+                && error.disposition != agent_desktop_core::DeliverySemantics::not_delivered())
+                || is_unconfirmed(&error) =>
+        {
             error.suggestion = Some(with_note(error.suggestion.take(), note));
-            if let Some(details) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
+            // An error after a request may have no details yet (a launch not confirmed has).
+            let details = error
+                .details
+                .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+            if let Some(details) = details.as_object_mut() {
                 details.insert("front".into(), front_details(outcome));
             }
             Err(error)
@@ -653,7 +704,22 @@ impl FrontGuard {
         &self,
         result: Result<LaunchResult, AdapterError>,
     ) -> Result<LaunchResult, AdapterError> {
-        if is_handoff(&result) {
+        self.finish_for(result, false)
+    }
+
+    /// See `FrontWatch::asked`.
+    pub(crate) fn asked(&self) {
+        self.watch.borrow_mut().asked();
+    }
+
+    /// `finish`, where `asked` marks a launch that asked the running instance for a window: it
+    /// is read a little longer and says what happened to the front, as a hand-off does.
+    pub(crate) fn finish_for(
+        &self,
+        result: Result<LaunchResult, AdapterError>,
+        asked: bool,
+    ) -> Result<LaunchResult, AdapterError> {
+        if asked || is_handoff(&result) {
             // The hand-off may have been judged without one pause (its window was already
             // there at the first look): the front is read at least once here, so a take that
             // came with that window is seen and the time to settle starts from it.
@@ -674,7 +740,7 @@ impl FrontGuard {
             |target| behind_now(target, &candidates, deadline),
             |target| restore(target, deadline),
         );
-        annotate(result, outcome)
+        annotate_for(result, outcome, asked)
     }
 }
 
@@ -684,6 +750,18 @@ pub(crate) fn pause(guard: Option<&FrontGuard>, wait: Duration) {
     match guard {
         Some(guard) => guard.pause(wait),
         None => std::thread::sleep(wait),
+    }
+}
+
+/// `finish` for a launch that asked the running instance for a window (`launch_reopen`).
+#[cfg(target_os = "macos")]
+pub(crate) fn finish_asked(
+    guard: Option<&FrontGuard>,
+    result: Result<LaunchResult, AdapterError>,
+) -> Result<LaunchResult, AdapterError> {
+    match guard {
+        Some(guard) => guard.finish_for(result, true),
+        None => result,
     }
 }
 

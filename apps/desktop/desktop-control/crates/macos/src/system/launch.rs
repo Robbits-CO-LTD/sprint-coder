@@ -67,11 +67,10 @@ pub(crate) fn launch_app_impl(
         let instance = required_instance(&app).map_err(before_launch)?;
         let pid = super::process::process_identity::to_pid_t(app.pid).map_err(before_launch)?;
         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
-        return Ok(with_other_space_suggestion(
-            result_from_app(&app, window),
-            may_explain_missing_window(options.timeout_ms, true),
-            deadline,
-        ));
+        if window.is_some() {
+            return Ok(result_from_app(&app, window));
+        }
+        return attach_without_window(id, &app, &path, pid, &instance, options, deadline);
     }
     let target = launch_target(options, initial.clone()).map_err(before_launch)?;
     // Checked before opening exactly as before (`prepare`, the checks `open` always made).
@@ -158,6 +157,139 @@ pub(crate) fn launch_app_impl(
             .map_err(after_launch)
     });
     super::launch_front::finish(front.as_ref(), result)
+}
+
+/// The attach to the running app `app` (process `pid`, instance `instance`, running from the
+/// bundle at `path`, already checked) that has no usable window. When `launch_reopen::may_reopen`
+/// allows it (and the windows it shows now can be read), it asks the app once for a window
+/// through the same open a background launch uses (`launch_workspace::open`: never activating,
+/// the bundle and every running instance of it checked again right before it opens), then waits
+/// for the window as a fresh launch does (`settled_window`; a zero timeout looks once and does
+/// not wait). Meanwhile `launch_front` watches the front with the app as the one that may take it,
+/// as for a hand-off, and gives it back under the same rules; every outcome after the guard
+/// began passes through its `finish`. An app that quit just before the open is started anew by
+/// it: that ends as the launch that started it.
+#[cfg(target_os = "macos")]
+fn attach_without_window(
+    id: &str,
+    app: &AppInfo,
+    path: &std::path::Path,
+    pid: i32,
+    instance: &str,
+    options: &LaunchOptions,
+    deadline: Deadline,
+) -> Result<LaunchResult, AdapterError> {
+    use super::launch_reopen as reopen;
+    let regular = app.presentation == Some(agent_desktop_core::AppPresentation::Foreground);
+    let until = deadline_instant(deadline).ok();
+    // Reached only when the attach found no usable window.
+    let allowed = reopen::may_reopen(
+        options,
+        false,
+        regular,
+        || until.and_then(|until| reopen::read_hidden(pid, until)),
+        || {
+            until.map_or(reopen::Minimized::Unknown, |until| {
+                reopen::read_minimized(pid, until)
+            })
+        },
+    )
+    .and_then(|()| {
+        reopen::shown_numbers(window_list(pid, deadline)).ok_or(reopen::NotSent::Unknown)
+    });
+    let chromium =
+        |result: &LaunchResult| result.renderer == Some(agent_desktop_core::RendererKind::Chromium);
+    let windows_before = match allowed {
+        Ok(windows_before) => windows_before,
+        Err(not_sent) => {
+            let mut result = result_from_app(app, None);
+            result.suggestion = reopen::suggestion(
+                reopen::Reopen::NotSent(not_sent),
+                false,
+                || other_space_numbers(pid, deadline),
+                chromium(&result),
+            );
+            return Ok(result);
+        }
+    };
+    let handoff = Handoff {
+        candidates: vec![HandoffCandidate {
+            pid,
+            process_instance: instance.to_owned(),
+            windows_before,
+        }],
+        same_app_ran: true,
+        others: Vec::new(),
+    };
+    // An app already in front (its last window closed while it stayed active) takes nothing
+    // from anyone when it shows its window, so that is not counted as a take (`asked`, from the
+    // watch's own first read of the front). The front is watched all the same, before and after
+    // that window: the user may move to another app during the wait, and the asked app may then
+    // take the front from that one.
+    let front = super::launch_front::FrontGuard::begin(Some(&handoff), false, deadline);
+    if let Some(front) = front.as_ref() {
+        front.asked();
+    }
+    let pause = |wait: Duration| super::launch_front::pause(front.as_ref(), wait);
+    let reopen_options = reopen::reopen_options(options);
+    let outcome = (|| {
+        let launched = crate::system::launch_workspace::open(id, path, &reopen_options, deadline)
+            .map_err(reopen::after_open)?;
+        let opened = reopen::opened((pid, instance), &launched, || {
+            still_runs(pid, Some(instance))
+        })
+        .map_err(after_launch)?;
+        if opened == reopen::Opened::Fresh {
+            let window = settled_window(launched.0, &launched.1, &reopen_options, deadline, &pause)
+                .map_err(after_launch)?;
+            let target = LaunchTarget::New {
+                baseline_instances: vec![instance.to_owned()],
+            };
+            return result_from_launched(&launched, window, id, &target, &reopen_options, deadline)
+                .map(|result| {
+                    with_other_space_suggestion(
+                        result,
+                        may_explain_missing_window(options.timeout_ms, false),
+                        deadline,
+                    )
+                })
+                .map_err(after_launch);
+        }
+        let window = settled_window(pid, instance, &reopen_options, deadline, &pause)
+            .map_err(|error| reopen::after_request(after_launch(error)))?;
+        let has_window = window.is_some();
+        let mut result = result_from_app(app, window);
+        result.suggestion = reopen::suggestion(
+            reopen::Reopen::Sent,
+            has_window,
+            || other_space_numbers(pid, deadline),
+            chromium(&result),
+        );
+        Ok(result)
+    })();
+    let mut result = super::launch_front::finish_asked(front.as_ref(), outcome)?;
+    // The front may have been given back after the window was read: read where it is now (a
+    // front that cannot be read leaves what was read).
+    if front.is_some() {
+        if let Some(window) = result.window.as_mut() {
+            let focused = deadline_instant(deadline)
+                .and_then(crate::system::window::window_inventory::focused_window_until);
+            if let Ok(focused) = focused {
+                window.state.is_focused = focused.is_some_and(|front| {
+                    front.id == window.id
+                        && front.pid == window.pid
+                        && front.process_instance == window.process_instance
+                });
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// The windows of `pid` that are probably on another Space, read once after the wait.
+#[cfg(target_os = "macos")]
+fn other_space_numbers(pid: i32, deadline: Deadline) -> Option<Vec<i64>> {
+    crate::system::window::other_space::read_for_pid(pid, deadline_instant(deadline).ok()?)
 }
 
 /// The smallest window, in points each way, counted as a new window of an instance a launch was
@@ -1060,7 +1192,7 @@ fn with_other_space_suggestion(
         return result;
     };
     result.suggestion = crate::system::window::other_space::read_for_pid(pid, until)
-        .and_then(|numbers| crate::system::window::other_space::launch_suggestion(&numbers));
+        .and_then(|numbers| crate::system::window::other_space::launch_suggestion(&numbers, None));
     result
 }
 

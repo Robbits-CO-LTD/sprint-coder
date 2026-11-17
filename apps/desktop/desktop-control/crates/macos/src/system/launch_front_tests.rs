@@ -417,6 +417,97 @@ fn a_move_of_the_front_that_is_not_a_candidates_take_is_left_alone() {
 }
 
 #[test]
+fn an_asked_app_in_front_is_watched_and_its_own_window_is_not_a_take() {
+    // The asked app (Chrome here) was itself in front, without a window, when it was asked.
+    let asked_in_front = || {
+        let mut run = Run::new(FrontSeen {
+            app: Some(chrome()),
+            ..Default::default()
+        });
+        run.watch.asked();
+        run
+    };
+
+    // The user stayed: the app showed its window while in front, with no window of its own to
+    // give the focus back to. Nothing was taken from anyone, and nothing is said.
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::None);
+    assert!(run.restores().is_empty());
+    assert_eq!(run.finish(700, Input::None), None);
+
+    // The user moved to Discord during the wait (input); Chrome then showed its window and took
+    // the front with it: Discord, still right behind, gets the front back.
+    let mut run = asked_in_front();
+    run.look(200, front(DISCORD), Input::At(ms(run.t0, 190)));
+    assert!(run.restores().is_empty());
+    run.look(400, chrome_on(102, true), Input::At(ms(run.t0, 190)));
+    assert_eq!(run.restores(), ["app 2"]);
+    assert_eq!(
+        run.finish(800, Input::At(ms(run.t0, 190))),
+        Some(FrontOutcome::Restored(TakeKind::App))
+    );
+
+    // The window came first, in front; the watch went on. The user then moved to Discord, and
+    // Chrome took the front again within the grace of its window: given back the same way.
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::None);
+    run.look(380, front(DISCORD), Input::At(ms(run.t0, 370)));
+    run.look(460, chrome_on(102, false), Input::At(ms(run.t0, 370)));
+    assert_eq!(run.restores(), ["app 2"]);
+    assert_eq!(
+        run.finish(800, Input::At(ms(run.t0, 370))),
+        Some(FrontOutcome::Restored(TakeKind::App))
+    );
+
+    // A look that could not read the front drops the mark: the user may have moved to another
+    // app that this watch never saw, so the window the app then shows in front is said.
+    let mut run = asked_in_front();
+    run.look(200, FrontSeen::default(), Input::None);
+    run.look(400, chrome_on(102, true), Input::None);
+    assert_eq!(
+        run.finish(800, Input::None),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+
+    // So does input from the user: they could have moved to another app and the asked app
+    // taken the front back between two looks.
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::At(ms(run.t0, 290)));
+    assert_eq!(
+        run.finish(700, Input::At(ms(run.t0, 290))),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::Unknown);
+    assert_eq!(
+        run.finish(700, Input::Unknown),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+
+    // An asked app that was not in front when the watch began gets no mark: taking the front
+    // from the app that was there is a take, given back as any other.
+    let mut run = Run::new(front(DISCORD));
+    run.watch.asked();
+    run.look(300, chrome_on(102, true), Input::None);
+    assert_eq!(run.restores(), ["app 2"]);
+
+    // Without that mark (a launch passed on to an instance in front), the same first look is
+    // a take with nothing to give back, and the watch stops there, as before.
+    let mut run = Run::new(FrontSeen {
+        app: Some(chrome()),
+        ..Default::default()
+    });
+    run.look(300, chrome_on(102, true), Input::None);
+    run.look(380, front(DISCORD), Input::At(ms(run.t0, 370)));
+    run.look(460, chrome_on(102, false), Input::At(ms(run.t0, 370)));
+    assert!(run.restores().is_empty());
+    assert_eq!(
+        run.finish(800, Input::At(ms(run.t0, 370))),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+}
+
+#[test]
 fn a_take_with_nothing_to_give_back_says_so() {
     // The app before could not be proven (no instance token).
     let mut run = Run::new(FrontSeen {
