@@ -124,6 +124,47 @@ fn a_zero_timeout_never_asks_since_it_could_not_watch_the_front() {
 }
 
 #[test]
+fn an_error_of_the_open_that_carries_the_request_says_the_app_may_have_it() {
+    use agent_desktop_core::DeliverySemantics;
+    // The deadline came while the open was out, or its answer could not be confirmed: the
+    // request may have reached the app.
+    for disposition in [
+        DeliverySemantics::uncertain(),
+        DeliverySemantics::delivered_unverified(),
+        DeliverySemantics::unknown(),
+    ] {
+        let error = after_open(
+            AdapterError::new(ErrorCode::Timeout, "no answer")
+                .with_suggestion("Try later.")
+                .with_disposition(disposition),
+        );
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.disposition, disposition);
+        assert_eq!(
+            error.suggestion.as_deref(),
+            Some(format!("{MAY_HAVE_ASKED_BEFORE_ERROR} Try later.").as_str())
+        );
+    }
+    let bare = after_open(
+        AdapterError::new(ErrorCode::Timeout, "no answer")
+            .with_disposition(DeliverySemantics::uncertain()),
+    );
+    assert_eq!(
+        bare.suggestion.as_deref(),
+        Some(MAY_HAVE_ASKED_BEFORE_ERROR)
+    );
+    // An open that says the request was not delivered stays as it is.
+    let refused = after_open(
+        AdapterError::new(ErrorCode::InvalidArgs, "not a standard place")
+            .with_suggestion("Use an app name.")
+            .with_disposition(DeliverySemantics::not_delivered()),
+    );
+    assert_eq!(refused.suggestion.as_deref(), Some("Use an app name."));
+    assert!(MAY_HAVE_ASKED_BEFORE_ERROR.contains("may already have asked"));
+    assert!(MAY_HAVE_ASKED_BEFORE_ERROR.contains("Do not repeat the launch"));
+}
+
+#[test]
 fn an_error_after_the_request_says_so_first_and_keeps_its_code() {
     let error = after_request(
         AdapterError::new(ErrorCode::AmbiguousTarget, "two windows").with_suggestion("Pick one."),
@@ -145,6 +186,17 @@ fn an_error_after_the_request_says_so_first_and_keeps_its_code() {
         Some(format!("{ASKED_BEFORE_ERROR} {}", front_note(outcome)).as_str())
     );
     assert!(noted.details.as_ref().unwrap().get("front").is_some());
+    // An error from before the request (it says nothing was delivered) gets no word of the
+    // front: what the front did then was not the app's answer.
+    let before = annotate_for(
+        Err(AdapterError::new(ErrorCode::AppUnresponsive, "busy")
+            .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())),
+        Some(outcome),
+        true,
+    )
+    .unwrap_err();
+    assert!(before.suggestion.is_none());
+    assert!(before.details.is_none());
     // A launch that did not ask leaves another error as it is.
     let other = annotate_for(
         Err(AdapterError::new(ErrorCode::AppUnresponsive, "x")),

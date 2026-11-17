@@ -424,7 +424,7 @@ fn an_asked_app_in_front_is_watched_and_its_own_window_is_not_a_take() {
             app: Some(chrome()),
             ..Default::default()
         });
-        run.watch.asked_in_front();
+        run.watch.asked();
         run
     };
 
@@ -458,6 +458,38 @@ fn an_asked_app_in_front_is_watched_and_its_own_window_is_not_a_take() {
         run.finish(800, Input::At(ms(run.t0, 370))),
         Some(FrontOutcome::Restored(TakeKind::App))
     );
+
+    // A look that could not read the front drops the mark: the user may have moved to another
+    // app that this watch never saw, so the window the app then shows in front is said.
+    let mut run = asked_in_front();
+    run.look(200, FrontSeen::default(), Input::None);
+    run.look(400, chrome_on(102, true), Input::None);
+    assert_eq!(
+        run.finish(800, Input::None),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+
+    // So does input from the user: they could have moved to another app and the asked app
+    // taken the front back between two looks.
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::At(ms(run.t0, 290)));
+    assert_eq!(
+        run.finish(700, Input::At(ms(run.t0, 290))),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::Unknown);
+    assert_eq!(
+        run.finish(700, Input::Unknown),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+
+    // An asked app that was not in front when the watch began gets no mark: taking the front
+    // from the app that was there is a take, given back as any other.
+    let mut run = Run::new(front(DISCORD));
+    run.watch.asked();
+    run.look(300, chrome_on(102, true), Input::None);
+    assert_eq!(run.restores(), ["app 2"]);
 
     // Without that mark (a launch passed on to an instance in front), the same first look is
     // a take with nothing to give back, and the watch stops there, as before.

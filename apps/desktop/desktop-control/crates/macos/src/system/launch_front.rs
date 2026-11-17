@@ -154,9 +154,10 @@ pub(crate) struct FrontWatch {
     outcome: Option<FrontOutcome>,
     /// Set once a take was left alone or a giving back failed: nothing more is done.
     stopped: bool,
-    /// The watched app was asked for a window while it was itself in front
-    /// (`asked_in_front`): its own window taking the focus, with no window of its own to give
-    /// the focus back to, takes nothing from anyone and is not a take.
+    /// The watched app was asked for a window (`asked`) while it was itself in front, and has
+    /// been read in front at every look since: its own window taking the focus, with no window
+    /// of its own to give the focus back to and without input from the user, takes nothing
+    /// from anyone and is not a take.
     own_front: bool,
 }
 
@@ -220,12 +221,17 @@ impl FrontWatch {
         watch
     }
 
-    /// Marks the watch as one over an app that was asked for a window while it was itself in
-    /// front (`launch_reopen`): the window it then shows is its own move in front, and the
-    /// watch goes on after it, for the user moving to another app and the asked app then
-    /// taking the front from that one.
-    pub(crate) fn asked_in_front(&mut self) {
-        self.own_front = true;
+    /// Marks the watch as one over an app that was asked for a window (`launch_reopen`). When
+    /// that app was itself in front at the read the watch began with, the window it then shows
+    /// is its own move in front, and the watch goes on after it, for the user moving to another
+    /// app and the asked app then taking the front from that one. The mark is dropped at the
+    /// first look that reads another app in front or cannot read the front: from then on the
+    /// app may have taken the front from something this watch did not see.
+    pub(crate) fn asked(&mut self) {
+        self.own_front = self
+            .last_app
+            .as_ref()
+            .is_some_and(|app| self.is_candidate(app));
     }
 
     fn is_candidate(&self, app: &FrontApp) -> bool {
@@ -286,10 +292,14 @@ impl FrontWatch {
         let Some(app) = seen.app.clone() else {
             // Nothing is known of the front now; a take waiting for its window may still be
             // decided by that window.
+            self.own_front = false;
             self.decide(now, input, behind, restore);
             return;
         };
         let candidate = self.is_candidate(&app);
+        if !candidate {
+            self.own_front = false;
+        }
         let focus = Self::focus_of(&seen, &app).map(|(number, _)| number);
         // A take waiting for its window is decided first; a second one is not read meanwhile.
         let take = if candidate && self.pending.is_none() {
@@ -397,9 +407,10 @@ impl FrontWatch {
         let kind = take.kind;
         let Some(target) = take.target.clone() else {
             self.pending = None;
-            if self.own_front && kind == TakeKind::Window {
-                // The asked app, in front all along, showed its window: not a take, and the
-                // watch goes on.
+            if self.own_front && kind == TakeKind::Window && input() == Input::None {
+                // The asked app, in front all along and without input from the user (who
+                // could have moved to another app and back between two looks), showed its
+                // window: not a take, and the watch goes on.
                 return;
             }
             return self.leave(kind, LeftWhy::NoTarget);
@@ -605,7 +616,13 @@ pub(crate) fn annotate_for(
             Ok(result)
         }
         Ok(result) => Ok(result),
-        Err(mut error) if asked || is_unconfirmed(&error) => {
+        // An error that says nothing was delivered came before the request: the front it
+        // speaks of is not that app's answer.
+        Err(mut error)
+            if (asked
+                && error.disposition != agent_desktop_core::DeliverySemantics::not_delivered())
+                || is_unconfirmed(&error) =>
+        {
             error.suggestion = Some(with_note(error.suggestion.take(), note));
             // An error after a request may have no details yet (a launch not confirmed has).
             let details = error
@@ -690,9 +707,9 @@ impl FrontGuard {
         self.finish_for(result, false)
     }
 
-    /// See `FrontWatch::asked_in_front`.
-    pub(crate) fn asked_in_front(&self) {
-        self.watch.borrow_mut().asked_in_front();
+    /// See `FrontWatch::asked`.
+    pub(crate) fn asked(&self) {
+        self.watch.borrow_mut().asked();
     }
 
     /// `finish`, where `asked` marks a launch that asked the running instance for a window: it
@@ -734,18 +751,6 @@ pub(crate) fn pause(guard: Option<&FrontGuard>, wait: Duration) {
         Some(guard) => guard.pause(wait),
         None => std::thread::sleep(wait),
     }
-}
-
-/// Whether the app `pid` with the instance token `instance` is the front app now, or `None`
-/// when that cannot be read.
-#[cfg(target_os = "macos")]
-pub(crate) fn app_in_front(pid: i32, instance: &str, deadline: Deadline) -> Option<bool> {
-    let front = front_pid(deadline)?;
-    if front != pid {
-        return Some(false);
-    }
-    let token = crate::system::process::process_identity::token_for_pid(pid).ok()??;
-    Some(token == instance)
 }
 
 /// `finish` for a launch that asked the running instance for a window (`launch_reopen`).

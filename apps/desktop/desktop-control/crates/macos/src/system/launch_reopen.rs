@@ -73,6 +73,12 @@ pub(crate) const ASKED_BEFORE_ERROR: &str = "This launch had already asked the r
      open a window (without bringing it to the front) when this failed. Do not repeat the \
      launch: run `list-windows` for the app first.";
 
+/// Said first in the suggestion of an error of the open that carries the request, when that
+/// error does not say the request was not delivered: the app may already have it.
+pub(crate) const MAY_HAVE_ASKED_BEFORE_ERROR: &str = "This launch may already have asked the \
+     running app to open a window (without bringing it to the front) when this failed. Do not \
+     repeat the launch: run `list-windows` for the app first.";
+
 /// The suggestion of a launch whose running app has only a minimized window.
 pub(crate) const MINIMIZED_NOT_REOPENED: &str = "The app is running and shows no window, but it \
      has a minimized window, so this launch did not ask it to open one: that would restore the \
@@ -205,6 +211,20 @@ pub(crate) fn after_request(mut error: AdapterError) -> AdapterError {
     error.suggestion = Some(match error.suggestion.take() {
         Some(suggestion) => format!("{ASKED_BEFORE_ERROR} {suggestion}"),
         None => ASKED_BEFORE_ERROR.to_owned(),
+    });
+    error
+}
+
+/// The error `error` of the open that carries the request. One that says the request was not
+/// delivered stays as it is; any other (the deadline came while the open was out, the answer
+/// could not be confirmed) may have reached the app, and says so first.
+pub(crate) fn after_open(mut error: AdapterError) -> AdapterError {
+    if error.disposition == agent_desktop_core::DeliverySemantics::not_delivered() {
+        return error;
+    }
+    error.suggestion = Some(match error.suggestion.take() {
+        Some(suggestion) => format!("{MAY_HAVE_ASKED_BEFORE_ERROR} {suggestion}"),
+        None => MAY_HAVE_ASKED_BEFORE_ERROR.to_owned(),
     });
     error
 }
