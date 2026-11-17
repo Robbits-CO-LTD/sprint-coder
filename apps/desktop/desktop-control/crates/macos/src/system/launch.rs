@@ -67,11 +67,10 @@ pub(crate) fn launch_app_impl(
         let instance = required_instance(&app).map_err(before_launch)?;
         let pid = super::process::process_identity::to_pid_t(app.pid).map_err(before_launch)?;
         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
-        return Ok(with_other_space_suggestion(
-            result_from_app(&app, window),
-            may_explain_missing_window(options.timeout_ms, true),
-            deadline,
-        ));
+        if window.is_some() {
+            return Ok(result_from_app(&app, window));
+        }
+        return attach_without_window(id, &app, &path, pid, &instance, options, deadline);
     }
     let target = launch_target(options, initial.clone()).map_err(before_launch)?;
     // Checked before opening exactly as before (`prepare`, the checks `open` always made).
@@ -158,6 +157,62 @@ pub(crate) fn launch_app_impl(
             .map_err(after_launch)
     });
     super::launch_front::finish(front.as_ref(), result)
+}
+
+/// The attach to the running app `app` (process `pid`, instance `instance`, running from the
+/// bundle at `path`, already checked) that has no usable window: when `launch_reopen::may_reopen`
+/// allows it, asks the app once for a window through the same open a background launch uses
+/// (`launch_workspace::open`: never activating, the bundle and every running instance of it
+/// checked again right before it opens), then waits for the window as a fresh launch does
+/// (`settled_window`; a zero timeout looks once and does not wait). Without a window, the
+/// other-Space explanation comes first, as before; otherwise the result says what was done.
+#[cfg(target_os = "macos")]
+fn attach_without_window(
+    id: &str,
+    app: &AppInfo,
+    path: &std::path::Path,
+    pid: i32,
+    instance: &str,
+    options: &LaunchOptions,
+    deadline: Deadline,
+) -> Result<LaunchResult, AdapterError> {
+    use super::launch_reopen as reopen;
+    let regular = app.presentation == Some(agent_desktop_core::AppPresentation::Foreground);
+    let allowed = reopen::may_reopen(options, regular, || {
+        deadline_instant(deadline).map_or(reopen::Minimized::Unknown, |until| {
+            reopen::read_minimized(pid, until)
+        })
+    });
+    let reopen_options = reopen::reopen_options(options);
+    let target = LaunchTarget::Existing {
+        pid,
+        process_instance: instance.to_owned(),
+    };
+    let (window, done) = reopen::reopen_once(
+        allowed,
+        options.timeout_ms != 0,
+        || {
+            let launched =
+                crate::system::launch_workspace::open(id, path, &reopen_options, deadline)?;
+            validate_launched_target(&target, &launched).map_err(after_launch)
+        },
+        || {
+            settled_window(
+                pid,
+                instance,
+                &reopen_options,
+                deadline,
+                &std::thread::sleep,
+            )
+            .map_err(after_launch)
+        },
+    )?;
+    let has_window = window.is_some();
+    let mut result = with_other_space_suggestion(result_from_app(app, window), true, deadline);
+    if result.suggestion.is_none() {
+        result.suggestion = reopen::reopen_suggestion(done, has_window).map(str::to_owned);
+    }
+    Ok(result)
 }
 
 /// The smallest window, in points each way, counted as a new window of an instance a launch was

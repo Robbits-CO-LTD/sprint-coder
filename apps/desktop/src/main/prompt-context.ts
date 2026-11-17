@@ -398,7 +398,9 @@ function renderDesktopControl(command: string, macos: boolean): string[] {
       : [
           '- ブラウザーのアドレス欄は、set-value で URL を入れただけでは移らない（Enter は使わない）。結果の post_state.states に focused がある時は、アドレス欄の下に候補の一覧が出るので、すぐ find --window-id <窓の id> --role option で窓の全体から探し（頁の文書の ref を --root にしない。頁の中の項目も option なので、名前が入れた URL で始まる行を選ぶ。%xx は元の文字に直って出る）、その行を click して確定する。focused が無い時（窓が後ろにある、頁の中に焦点が移った後など）は候補が出ず、裏では確定できない。その時は頁の中のリンクやサイトの検索欄（set-value と検索のボタンの click）で進め、それも無ければ、できなかったと報告する。',
         ]),
-    '- launch は、アプリが窓を出して動いていればそれにつなぎ（attached が true。何も起動していない）、窓を出さずに動いている時（裏で動き続けるブラウザー、トレイのアプリなど）は、アイコンを開いた時と同じように起動する（running_without_window が true）。ブラウザーなど、動いているアプリに引き渡して終わるアプリでは handed_off: true が付き、窓は動いていたアプリが出す（持ち主は window.pid）。',
+    macos
+      ? '- launch は、アプリが窓を出して動いていればそれにつなぐ（attached が true。何も起動していない）。窓を出さずに動いている時（最後の窓を閉じても動き続ける TextEdit・メモ・メールなど）は、Dock のアイコンを押した時と同じように、前に出さずに窓を開くよう 1 回だけ頼む（attached は true のまま）。窓が出れば window が付き、suggestion にそう書かれる。その窓はこの launch が開かせた窓で、自分の作業に使ってよい。窓が出なければ、待ったり launch を繰り返したりせず、suggestion に従う。ブラウザーなど、動いているアプリに引き渡して終わるアプリでは handed_off: true が付き、窓は動いていたアプリが出す（持ち主は window.pid）。'
+      : '- launch は、アプリが窓を出して動いていればそれにつなぎ（attached が true。何も起動していない）、窓を出さずに動いている時（裏で動き続けるブラウザー、トレイのアプリなど）は、アイコンを開いた時と同じように起動する（running_without_window が true）。ブラウザーなど、動いているアプリに引き渡して終わるアプリでは handed_off: true が付き、窓は動いていたアプリが出す（持ち主は window.pid）。',
     '- 結果に window があり、new_instance が true か、handed_off が true で existing_window が無いなら、その窓はこの launch が開いた窓で、自分の作業に使ってよい（持ち主が前から動いていたプロセスでも同じ）。handed_off で window が無い時は、どの窓が出たかは確かめられていないので、起動を繰り返さずに list-windows で窓を確かめる。',
     '- attached が true で、handed_off も new_instance も true でない時の窓は、利用者が元から開いていた窓。新しい窓を開けるアプリ（ブラウザー・エディターなど）では、--no-attach を付けて 1 回だけ起動し直し、新しく開いた窓で作業する（利用者の窓の中身、開いているタブや書きかけは変えない）。結果に existing_window: true が付いた時（--no-attach でも新しい窓が出なかった、またはトレイのアプリが隠していた窓を出し直した。window は起動の前からあった窓。メールやチャットのように窓が 1 つのアプリ）は、--no-attach を繰り返さず、利用者が頼んだ作業の範囲でその窓を使ってよい。読むのが目的なら読むだけにし、開いている画面・書きかけ・設定を変えず、閉じない。',
     '- 利用者が「今開いている〇〇の窓で」と頼んだ時は、その窓を使う。同じアプリの窓が複数ある時は list-windows で id を調べて --window-id を付ける。',

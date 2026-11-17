@@ -223,7 +223,7 @@ fn read_hidden(app: &crate::tree::AXElement, deadline: std::time::Instant) -> Op
 /// The app's accessibility windows by number, with `AXMinimized` when it
 /// answers, and whether every window was read and identified.
 #[cfg(target_os = "macos")]
-fn read_accessibility_windows(
+pub(crate) fn read_accessibility_windows(
     app: &crate::tree::AXElement,
     deadline: std::time::Instant,
 ) -> (rustc_hash::FxHashMap<i64, Option<bool>>, bool) {

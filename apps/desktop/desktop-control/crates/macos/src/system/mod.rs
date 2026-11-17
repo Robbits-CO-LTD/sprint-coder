@@ -13,6 +13,7 @@ pub(crate) mod launch_callback_result;
 pub(crate) mod launch_completion;
 pub(crate) mod launch_front;
 pub(crate) mod launch_location;
+pub(crate) mod launch_reopen;
 pub(crate) mod launch_workspace;
 pub(crate) mod own_window;
 pub(crate) mod permissions;
