@@ -126,21 +126,19 @@ fn only_the_windows_that_qualify_are_named() {
 }
 
 #[test]
-fn the_app_reason_names_the_likely_cause_and_what_to_do() {
+fn the_app_reason_says_what_was_read_and_what_to_do() {
     assert_eq!(app_reason("Calculator", 42, &[]), None);
     let reason = app_reason("Calculator", 42, &[7, 9]).expect("reason");
     assert!(reason.message.contains("'Calculator' is running"));
-    assert!(
-        reason
-            .message
-            .contains("probably because it is on another Space")
-    );
+    assert!(reason.message.contains("exists off screen"));
+    // The message states only what was read; both possible causes are in the guidance.
+    assert!(!reason.message.contains("Space"));
     assert_eq!(reason.suggestion, GUIDANCE);
     assert_eq!(
         reason.details,
         serde_json::json!({
-            "kind": "window_probably_on_other_space",
-            "likely_cause": "other_space",
+            "kind": "window_off_screen_not_exposed",
+            "possible_causes": ["other_space", "closed_but_kept"],
             "pid": 42,
             "window_ids": ["w-7", "w-9"],
         })
@@ -149,7 +147,10 @@ fn the_app_reason_names_the_likely_cause_and_what_to_do() {
 
 #[test]
 fn the_guidance_names_both_causes_and_forbids_a_retry_loop() {
+    assert!(GUIDANCE.contains("on another Space"));
     assert!(GUIDANCE.contains("no public way to tell them apart"));
+    // Neither cause is called the more likely one: nothing that can be read says which it is.
+    assert!(!GUIDANCE.contains("most often"));
     assert!(GUIDANCE.contains("closed or hidden the window but keeps it"));
     assert!(GUIDANCE.contains("Do not retry in a tight loop"));
     assert!(GUIDANCE.contains("do not conclude that the app is broken"));
@@ -171,18 +172,15 @@ fn the_launch_suggestion_names_the_windows_and_says_not_to_launch_again() {
 fn the_window_error_keeps_its_code_and_kind_and_is_not_retryable() {
     let error = window_error("w-7");
     assert_eq!(error.code, ErrorCode::ActionNotSupported);
-    assert!(
-        error
-            .message
-            .contains("probably because it is on another Space")
-    );
+    assert!(error.message.contains("it is off screen"));
+    assert!(!error.message.contains("Space"));
     assert_eq!(error.suggestion.as_deref(), Some(GUIDANCE));
     assert_eq!(
         error.details,
         Some(serde_json::json!({
             "kind": "window_without_accessibility_element",
             "window_id": "w-7",
-            "likely_cause": "other_space",
+            "possible_causes": ["other_space", "closed_but_kept"],
         }))
     );
     assert!(!error.is_explicitly_retryable());

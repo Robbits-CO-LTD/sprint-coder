@@ -4,7 +4,8 @@
 //! app). The window server still lists such a window, as off screen, but
 //! accessibility does not show it to the app's window list until the user
 //! returns to its Space. macOS has no public way to say which Space a window is
-//! on, so this is only ever named as the likely cause, from what can be read:
+//! on, and a window the app closed but keeps reads the same way, so the two are
+//! always named together as the possible causes, from what can be read:
 //! the window is off screen, of a real size, and missing from the app's
 //! accessibility windows, which were read in full; the app is not hidden; and
 //! the window is not minimized (a minimized window and the windows of a hidden
@@ -16,23 +17,22 @@ use agent_desktop_core::{AdapterError, ErrorCode, WindowlessReason};
 /// user would switch back to (the same size `launch` counts as a shown window).
 const MIN_WINDOW_POINTS: f64 = 100.0;
 
-/// The `details.likely_cause` value, and the `details.kind` of the app errors.
-pub(crate) const LIKELY_CAUSE: &str = "other_space";
-const APP_KIND: &str = "window_probably_on_other_space";
+/// The `details.possible_causes` value (nothing that can be read says which of the two it is),
+/// and the `details.kind` of the app errors.
+pub(crate) const POSSIBLE_CAUSES: [&str; 2] = ["other_space", "closed_but_kept"];
+const APP_KIND: &str = "window_off_screen_not_exposed";
 
 /// What to do, shared by every answer that names this cause. A window the app
 /// closed but keeps (or never showed) reads the same way, so it is named too.
-pub(crate) const GUIDANCE: &str = "Two causes fit what can be read, and macOS offers no public \
-     way to tell them apart (it cannot say which Space a window is on): most often the window is \
-     on another Space, which accessibility does not show until the user returns to it, for \
-     example while the user is working in a full-screen app; or the app has closed or hidden the \
-     window but keeps it. Do not retry in a tight loop, and do not conclude that the app is \
-     broken. Do not activate the app on your own to reach the window: on another Space that \
-     would switch the user away from what they are doing. Tell the user, and ask them to switch \
-     back to the Space with the window when they can (it becomes readable then), or do other work \
-     meanwhile. If the user says no window of the app is open on any Space, the app has no open \
-     window: ask the user to open one, or bring the app forward with their agreement (for \
-     example `launch` with `--activate`).";
+pub(crate) const GUIDANCE: &str = "Either the window is on another Space, which macOS does not \
+     expose through accessibility until the user returns to that Space (this happens while the \
+     user works in a full-screen app), or the app has closed or hidden the window but keeps it. \
+     macOS offers no public way to tell them apart. Do not retry in a tight loop, and do not \
+     conclude that the app is broken. Do not activate the app on your own to reach the window: \
+     on another Space that would switch the user away from what they are doing. Tell the user \
+     what you found: a window on another Space becomes readable when they return to it; if no \
+     window of the app is open on any Space, ask the user to open one, or bring the app forward \
+     with their agreement (for example `launch` with `--activate`).";
 
 /// One window of the app as the window server and accessibility read it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,14 +95,12 @@ pub(crate) fn app_reason(app: &str, pid: i32, numbers: &[i64]) -> Option<Windowl
     Some(WindowlessReason {
         message: format!(
             "Application '{app}' is running, but its window cannot be read now: the window \
-             exists off screen and is not exposed through accessibility, probably because it \
-             is on another Space (for example, the user is working in a full-screen app), or because \
-             the app closed it but keeps it."
+             exists off screen and is not exposed through accessibility."
         ),
         suggestion: GUIDANCE.to_owned(),
         details: serde_json::json!({
             "kind": APP_KIND,
-            "likely_cause": LIKELY_CAUSE,
+            "possible_causes": POSSIBLE_CAUSES,
             "pid": pid,
             "window_ids": window_ids(numbers),
         }),
@@ -114,10 +112,8 @@ pub(crate) fn app_reason(app: &str, pid: i32, numbers: &[i64]) -> Option<Windowl
 pub(crate) fn launch_suggestion(numbers: &[i64]) -> Option<String> {
     (!numbers.is_empty()).then(|| {
         format!(
-            "The app is running, but its window cannot be read now: the window ({}) exists off \
-             screen and is not exposed through accessibility, probably because it is on another \
-             Space (for example, the user is working in a full-screen app), or because the app \
-             closed it but keeps it. Do not repeat the launch. {GUIDANCE}",
+            "The app is running, but its window ({}) cannot be read now: it exists off screen \
+             and is not exposed through accessibility. Do not repeat the launch. {GUIDANCE}",
             window_ids(numbers).join(", ")
         )
     })
@@ -131,14 +127,13 @@ pub(crate) fn window_error(id: &str) -> AdapterError {
         ErrorCode::ActionNotSupported,
         format!(
             "Window '{id}' exists but cannot be read now: it is off screen and not exposed \
-             through accessibility, probably because it is on another Space (for example, the \
-             user is working in a full-screen app), or because the app closed it but keeps it"
+             through accessibility"
         ),
     )
     .with_details(serde_json::json!({
         "kind": "window_without_accessibility_element",
         "window_id": id,
-        "likely_cause": LIKELY_CAUSE,
+        "possible_causes": POSSIBLE_CAUSES,
     }))
     .with_suggestion(GUIDANCE)
 }
