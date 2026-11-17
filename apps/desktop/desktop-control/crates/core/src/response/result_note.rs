@@ -4,20 +4,24 @@
 //! when it writes the response; a command that runs sets or clears it first,
 //! so a note never outlives the command that left it.
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
-thread_local! {
-    static NOTE: RefCell<Option<String>> = const { RefCell::new(None) };
-}
+// Process-wide rather than per thread, so a command that runs on another
+// thread than the one writing the response still leaves its note.
+static NOTE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Replaces the pending note (`None` clears it).
 pub(crate) fn set(note: Option<String>) {
-    NOTE.with(|pending| *pending.borrow_mut() = note);
+    *NOTE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = note;
 }
 
 /// Takes the pending note, leaving none.
 pub fn take() -> Option<String> {
-    NOTE.with(|pending| pending.borrow_mut().take())
+    NOTE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 #[cfg(test)]
