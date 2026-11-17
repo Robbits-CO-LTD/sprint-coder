@@ -569,6 +569,21 @@ pub(crate) fn annotate(
     annotate_for(result, outcome, false)
 }
 
+/// What a launch that asked the running instance for a window says of the front: `outcome`,
+/// except for an app that was itself in front when it was asked (`own_front`) and then moved
+/// its focus to the window it showed, with no window of its own to give the focus back to
+/// (`Left(Window, NoTarget)`). That took nothing from anyone, so nothing is said of it. A take
+/// from an app the user moved to during the wait is judged and said as any other.
+pub(crate) fn asked_outcome(
+    outcome: Option<FrontOutcome>,
+    own_front: bool,
+) -> Option<FrontOutcome> {
+    match outcome {
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget)) if own_front => None,
+        other => other,
+    }
+}
+
 /// `annotate`, where `asked` marks a launch that asked the running instance for a window
 /// (`launch_reopen`): its result gets the sentence too, handed off or not, and an error also
 /// `details.front`, as a launch not confirmed does.
@@ -669,17 +684,18 @@ impl FrontGuard {
         &self,
         result: Result<LaunchResult, AdapterError>,
     ) -> Result<LaunchResult, AdapterError> {
-        self.finish_for(result, false)
+        self.finish_for(result, None)
     }
 
-    /// `finish`, where `asked` marks a launch that asked the running instance for a window: it
-    /// is read a little longer and says what happened to the front, as a hand-off does.
+    /// `finish`, where `asked` marks a launch that asked the running instance for a window (with
+    /// whether that app was itself in front when asked): it is read a little longer and says
+    /// what happened to the front, as a hand-off does (`asked_outcome`).
     pub(crate) fn finish_for(
         &self,
         result: Result<LaunchResult, AdapterError>,
-        asked: bool,
+        asked: Option<bool>,
     ) -> Result<LaunchResult, AdapterError> {
-        if asked || is_handoff(&result) {
+        if asked.is_some() || is_handoff(&result) {
             // The hand-off may have been judged without one pause (its window was already
             // there at the first look): the front is read at least once here, so a take that
             // came with that window is seen and the time to settle starts from it.
@@ -700,7 +716,10 @@ impl FrontGuard {
             |target| behind_now(target, &candidates, deadline),
             |target| restore(target, deadline),
         );
-        annotate_for(result, outcome, asked)
+        match asked {
+            Some(own_front) => annotate_for(result, asked_outcome(outcome, own_front), true),
+            None => annotate_for(result, outcome, false),
+        }
     }
 }
 
@@ -725,14 +744,16 @@ pub(crate) fn app_in_front(pid: i32, instance: &str, deadline: Deadline) -> Opti
     Some(token == instance)
 }
 
-/// `finish` for a launch that asked the running instance for a window (`launch_reopen`).
+/// `finish` for a launch that asked the running instance for a window (`launch_reopen`);
+/// `own_front` says whether that app was itself in front when it was asked.
 #[cfg(target_os = "macos")]
 pub(crate) fn finish_asked(
     guard: Option<&FrontGuard>,
     result: Result<LaunchResult, AdapterError>,
+    own_front: bool,
 ) -> Result<LaunchResult, AdapterError> {
     match guard {
-        Some(guard) => guard.finish_for(result, true),
+        Some(guard) => guard.finish_for(result, Some(own_front)),
         None => result,
     }
 }

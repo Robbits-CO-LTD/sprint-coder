@@ -417,6 +417,49 @@ fn a_move_of_the_front_that_is_not_a_candidates_take_is_left_alone() {
 }
 
 #[test]
+fn an_asked_app_in_front_is_watched_and_its_own_window_is_not_called_a_take() {
+    // The asked app (Chrome here) was itself in front, without a window, when it was asked. The
+    // user moved to Discord during the wait (input); Chrome then showed its window and took the
+    // front with it: Discord, still right behind, gets the front back.
+    let asked_in_front = || FrontSeen {
+        app: Some(chrome()),
+        ..Default::default()
+    };
+    let mut run = Run::new(asked_in_front());
+    run.look(200, front(DISCORD), Input::At(ms(run.t0, 190)));
+    assert!(run.restores().is_empty());
+    run.look(400, chrome_on(102, true), Input::At(ms(run.t0, 190)));
+    assert_eq!(run.restores(), ["app 2"]);
+    let outcome = run.finish(800, Input::At(ms(run.t0, 190)));
+    assert_eq!(outcome, Some(FrontOutcome::Restored(TakeKind::App)));
+    assert_eq!(asked_outcome(outcome, true), outcome);
+
+    // The user stayed: the app showed its window while in front, with no window of its own to
+    // give the focus back to. Nothing was taken from anyone, and nothing is said.
+    let mut run = Run::new(asked_in_front());
+    run.look(300, chrome_on(102, true), Input::None);
+    assert!(run.restores().is_empty());
+    let own_window = run.finish(700, Input::None);
+    assert_eq!(
+        own_window,
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
+    );
+    assert_eq!(asked_outcome(own_window, true), None);
+
+    // An app that was not in front when asked: the same outcome is said, as is every other.
+    assert_eq!(asked_outcome(own_window, false), own_window);
+    for outcome in [
+        Some(FrontOutcome::Restored(TakeKind::Window)),
+        Some(FrontOutcome::Left(TakeKind::App, LeftWhy::NoTarget)),
+        Some(FrontOutcome::Left(TakeKind::App, LeftWhy::Input)),
+        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::Input)),
+        None,
+    ] {
+        assert_eq!(asked_outcome(outcome, true), outcome);
+    }
+}
+
+#[test]
 fn a_take_with_nothing_to_give_back_says_so() {
     // The app before could not be proven (no instance token).
     let mut run = Run::new(FrontSeen {
