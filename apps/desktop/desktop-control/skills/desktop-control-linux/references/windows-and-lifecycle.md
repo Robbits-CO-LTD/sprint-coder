@@ -45,7 +45,7 @@ sprint-coder-desktop-control launch gnome-text-editor --arg=/tmp/note.txt
   `ACTION_NOT_SUPPORTED`.
 - The app is spawned with null stdio in its own process group, so a caller that
   reads through a pipe sees end of file at exit. Every spawn adds
-  `AGENT_DESKTOP_LAUNCHED=1` to the child's environment; `close-app` reads it to
+  a launch marker variable to the child's environment; `close-app` reads it to
   tell an app you started from a session service.
 - An absolute `.desktop` path launches that exact file inside the trusted XDG
   data directories. Desktop ids use XDG directory precedence.

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::AppError;
 use crate::session::{
     ArtifactsMode, GcOptions, SessionTraceMode, StartSessionOptions, end_session, gc,
@@ -89,22 +90,14 @@ pub fn execute(action: SessionAction) -> Result<Value, AppError> {
     }
 }
 
-/// The line a caller pastes into their own shell, so the shell that matters
-/// is the one running the command rather than the one this was built for.
-/// Written as a runtime branch, not a compile-time one: core is built and
-/// tested on every supported platform, and a conditionally-compiled arm is
-/// only ever type-checked on the lane that selects it.
+/// The global option a caller passes to later commands to act in the session.
 pub(super) fn activation_export(session_id: &str) -> String {
-    if cfg!(windows) {
-        format!("$env:AGENT_DESKTOP_SESSION = '{session_id}'")
-    } else {
-        format!("export AGENT_DESKTOP_SESSION={session_id}")
-    }
+    format!("--session {session_id}")
 }
 
 pub(super) fn activation(session_id: &str) -> Value {
     json!({
-        "environment": "AGENT_DESKTOP_SESSION",
+        "option": "--session",
         "value": session_id,
     })
 }

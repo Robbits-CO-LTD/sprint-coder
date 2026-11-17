@@ -12,7 +12,7 @@ REF IDs
   Refs go stale when the UI changes: STALE_REF and AMBIGUOUS_TARGET mean
   snapshot again and pick a fresh ref. A ref action never guesses between
   candidates. `session start` returns an ID but does not activate later
-  processes: pass it with --session or AGENT_DESKTOP_SESSION.
+  processes: pass it with --session.
   On Windows, quote every ref in PowerShell ('@s8f3k2p9:e1'): a bare @token
   is its splatting operator and the argument disappears.
 
@@ -30,11 +30,3 @@ KEY COMBOS
   as themselves.
   Modifiers: cmd, ctrl, alt, shift. Use cmd+c on macOS and ctrl+c on Windows,
   where cmd and meta map to the Windows key.
-
-ENVIRONMENT
-  AGENT_DESKTOP_SESSION      Session ID fallback when --session is not passed
-  AGENT_DESKTOP_AGENT_ID     Subagent ID fallback when --agent-id is not passed
-                             (1-64 letters, digits, hyphen or underscore)
-  AGENT_DESKTOP_HOME         Relocates the state root (absolute path; default
-                             a hidden folder in the home directory); `status`
-                             reports it as state_root

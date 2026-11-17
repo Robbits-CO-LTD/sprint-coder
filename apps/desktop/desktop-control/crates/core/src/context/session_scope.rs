@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #[derive(Debug)]
 pub(super) struct SessionScope {
     pub(super) id: String,
@@ -22,7 +23,7 @@ impl SessionScope {
                 crate::ErrorCode::InvalidArgs,
                 format!("Session '{}' has ended", self.id),
             )
-            .with_suggestion("Unset AGENT_DESKTOP_SESSION and omit --session, then run the command or start a new session")
+            .with_suggestion("Omit --session and stop passing the ended session id, then run the command or start a new session")
             .with_details(serde_json::json!({ "kind": "session_ended", "session_id": self.id }))
             .with_disposition(crate::DeliverySemantics::not_delivered())
             .into());

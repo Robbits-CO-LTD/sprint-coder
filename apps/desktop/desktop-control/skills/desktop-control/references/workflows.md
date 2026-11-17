@@ -184,12 +184,10 @@ Batch saves process starts. It is not a transaction. Entries after a failure run
 This example uses `jq` to read the session id returned by `session start`.
 
 ```bash
-session_start=$(sprint-coder-desktop-control session start --name "invoice-bot")
-AGENT_DESKTOP_SESSION=$(printf '%s\n' "$session_start" | jq -er '.data.session_id')
-export AGENT_DESKTOP_SESSION
-sprint-coder-desktop-control status
-sprint-coder-desktop-control trace show --limit 50
-sprint-coder-desktop-control session end "$AGENT_DESKTOP_SESSION"
+session_id=$(sprint-coder-desktop-control session start --name "invoice-bot" | jq -er '.data.session_id')
+sprint-coder-desktop-control --session "$session_id" status
+sprint-coder-desktop-control --session "$session_id" trace show --limit 50
+sprint-coder-desktop-control session end "$session_id"
 ```
 
 `status` confirms `session_id` and `tracing`. Use one session per run. Concurrent agents set the same variable and use qualified refs from their own snapshots.

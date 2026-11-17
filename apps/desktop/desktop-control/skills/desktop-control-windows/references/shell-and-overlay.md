@@ -82,11 +82,10 @@ shape when none are, and a top-level `ClearAllButton`.
 presentation-only cursor in a click-through, non-activating window.
 
 ```powershell
-$env:AGENT_DESKTOP_HOME = "$env:TEMP\ad-scratch"
 $start = sprint-coder-desktop-control session start --cursor | ConvertFrom-Json
-$env:AGENT_DESKTOP_SESSION = $start.data.session_id
-sprint-coder-desktop-control cursor-overlay enable --label "Opening menu" --accent "#FF3B7B"
-sprint-coder-desktop-control cursor-overlay disable
+$session = $start.data.session_id
+sprint-coder-desktop-control --session $session cursor-overlay enable --label "Opening menu" --accent "#FF3B7B"
+sprint-coder-desktop-control --session $session cursor-overlay disable
 ```
 
 - **Start the session before you snapshot.** The overlay needs a session, and a

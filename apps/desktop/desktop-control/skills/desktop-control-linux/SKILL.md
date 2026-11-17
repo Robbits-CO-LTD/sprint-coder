@@ -119,8 +119,7 @@ Observation and semantic actions need no helper tool.
   refuse. Notifications need the GNOME notification service; tray snapshots also
   need a StatusNotifierWatcher.
 - **The state root must be private.** A group-writable or world-accessible
-  `AGENT_DESKTOP_HOME` or default state root (a hidden folder in the home
-  directory) makes `snapshot` fail with
+  state root (by default a hidden folder in the home directory) makes `snapshot` fail with
   `INTERNAL`; run `chmod 700` on it or let the tool create it.
 
 ## Wait for a window

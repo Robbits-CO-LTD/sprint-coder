@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::AppError;
 use std::path::{Path, PathBuf};
 
@@ -61,56 +62,47 @@ fn validate_env_root(
 ) -> Result<(), AppError> {
     if path.as_os_str().is_empty() {
         return Err(AppError::invalid_input_with_suggestion(
-            "AGENT_DESKTOP_HOME must not be empty",
-            "Unset the variable or set it to an absolute directory path.",
+            "The state root variable must not be empty",
+            "Unset it or set it to an absolute directory path.",
         ));
     }
     if !path.is_absolute() {
         return Err(AppError::invalid_input_with_suggestion(
             format!(
-                "AGENT_DESKTOP_HOME must be an absolute path, got '{}'",
+                "The state root must be an absolute path, got '{}'",
                 path.display()
             ),
-            "Set AGENT_DESKTOP_HOME to an absolute directory path.",
+            "Set the state root to an absolute directory path.",
         ));
     }
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
                 return Err(AppError::invalid_input_with_suggestion(
-                    format!(
-                        "AGENT_DESKTOP_HOME must not be a symlink: '{}'",
-                        path.display()
-                    ),
-                    "Point AGENT_DESKTOP_HOME at a real directory, not a symlink.",
+                    format!("The state root must not be a symlink: '{}'", path.display()),
+                    "Point the state root at a real directory, not a symlink.",
                 ));
             }
             if !meta.is_dir() {
                 return Err(AppError::invalid_input_with_suggestion(
-                    format!(
-                        "AGENT_DESKTOP_HOME must be a directory: '{}'",
-                        path.display()
-                    ),
-                    "Remove the file at this path or choose a different AGENT_DESKTOP_HOME.",
+                    format!("The state root must be a directory: '{}'", path.display()),
+                    "Remove the file at this path or choose a different state root.",
                 ));
             }
             if !owned_by_current_user(&meta) {
                 return Err(AppError::invalid_input_with_suggestion(
                     format!(
-                        "AGENT_DESKTOP_HOME is owned by a different user: '{}'",
+                        "The state root is owned by a different user: '{}'",
                         path.display()
                     ),
-                    "Choose a directory you own for AGENT_DESKTOP_HOME.",
+                    "Choose a directory you own for the state root.",
                 ));
             }
             Ok(())
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(AppError::invalid_input_with_suggestion(
-            format!(
-                "Cannot access AGENT_DESKTOP_HOME '{}': {err}",
-                path.display()
-            ),
+            format!("Cannot access the state root '{}': {err}", path.display()),
             "Check permissions on the parent directory or choose a different path.",
         )),
     }

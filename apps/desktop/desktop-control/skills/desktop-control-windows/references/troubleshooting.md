@@ -113,8 +113,8 @@ Fix: activate the app so it resumes, then list again.
 "code": "INTERNAL",
 "message": "private file parent is owned by a foreign principal, not this
 process's token user, token owner, or an owner-eligible token group; if a
-different principal owns this path intentionally, relocate the state root with
-AGENT_DESKTOP_HOME instead of reusing it"
+different principal owns this path intentionally, relocate the state root
+instead of reusing it"
 ```
 
 Cause: a process with a different token owner created the state root
@@ -123,8 +123,8 @@ always an elevated (Run as administrator) shell that reuses a directory a
 non-elevated session created, or the reverse. The ownership check protects
 refmaps and trace segments from a pre-planted path.
 
-Fix: run from one elevation level, or set `AGENT_DESKTOP_HOME` to a fresh
-absolute directory for the elevated session. Do not take ownership of the
+Fix: run from one elevation level, or give the elevated session a fresh
+absolute state root directory. Do not take ownership of the
 existing directory or open its ACL to work around the error, because that
 defeats the check.
 

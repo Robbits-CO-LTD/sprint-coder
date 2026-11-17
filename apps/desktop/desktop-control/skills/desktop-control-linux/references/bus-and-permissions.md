@@ -97,7 +97,7 @@ launcher away from the live socket.
 ## State root
 
 The state root (a hidden folder in the home directory by default, or
-`AGENT_DESKTOP_HOME`; `status` reports it as `state_root`) must be private to
+the relocated one; `status` reports it as `state_root`) must be private to
 the user. A root the tool creates has mode 0700. A root that is group-writable or open to
 other users makes the commands that write there (`snapshot` for one) fail with
 `INTERNAL` and the message "private file parent is accessible by group or other

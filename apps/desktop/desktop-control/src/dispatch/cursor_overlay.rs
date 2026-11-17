@@ -17,7 +17,7 @@ pub(crate) fn dispatch(
     let session_id = context.session_id().ok_or_else(|| {
         AppError::invalid_input_with_suggestion(
             "Cursor overlay settings require an active session",
-            "Run `session start`, then pass its id with --session or AGENT_DESKTOP_SESSION.",
+            "Run `session start`, then pass its id with --session.",
         )
     })?;
     let (action, control) = match args.action {
@@ -91,7 +91,7 @@ fn retire(
     let agent_id = context.agent_id().ok_or_else(|| {
         AppError::invalid_input_with_suggestion(
             "Retiring a cursor requires the agent whose cursor it is",
-            "Pass --agent-id or AGENT_DESKTOP_AGENT_ID.",
+            "Pass --agent-id.",
         )
     })?;
     tear_down(

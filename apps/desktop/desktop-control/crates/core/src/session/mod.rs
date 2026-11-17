@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 mod gc;
 pub(crate) mod interaction_lease;
 mod liveness;
@@ -72,8 +73,8 @@ pub fn resolve_active_session(
     if let Some(id) = env {
         if id.is_empty() {
             return Err(AppError::invalid_input_with_suggestion(
-                "AGENT_DESKTOP_SESSION must not be empty",
-                "Unset the variable or set it to a valid session id.",
+                "The inherited session id must not be empty",
+                "Pass a valid session id with --session.",
             ));
         }
         validate_session_id(id)?;

@@ -56,7 +56,7 @@ The FFI exposes three validation layers:
    | `AdRefEntry` | `AD_REF_ENTRY_SIZE` | `ad_ref_entry_size()` |
    | `AdWaitArgs` | `AD_WAIT_ARGS_SIZE` | `ad_wait_args_size()` |
 
-3. **C11 static asserts** in the header (`#ifndef AGENT_DESKTOP_ABI_ASSERTS`)
+3. **C11 static asserts** in the header (on unless the header's ABI assert switch is defined)
    catch mismatches at C compile time.
 
 Compare your binding's `sizeof` equivalent against the getter at load time, before

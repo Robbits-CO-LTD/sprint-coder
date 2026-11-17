@@ -171,15 +171,16 @@ Keys are the command's own field names, so a positional argument is named after 
 
 ## Sessions and traces
 
-A session is an on-disk container under `<state root>/sessions/<id>/` with a manifest, snapshot refmaps and, when tracing is on, a `trace/` directory. The state root is a hidden folder in the home directory by default. `AGENT_DESKTOP_HOME` relocates it. It must be an absolute path, or the command fails with `INVALID_ARGS`. `status` reports it as `state_root`.
+A session is an on-disk container under `<state root>/sessions/<id>/` with a manifest, snapshot refmaps and, when tracing is on, a `trace/` directory. The state root is a hidden folder in the home directory by default. An environment variable the CLI reads can relocate it (Sprint Coder sets it for every run). A relocated state root must be an absolute path, or the command fails with `INVALID_ARGS`. `status` reports it as `state_root`.
 
 ```bash
-export AGENT_DESKTOP_SESSION="$(sprint-coder-desktop-control session start --name "invoice-bot" | jq -r '.data.session_id')"
-sprint-coder-desktop-control session end "$AGENT_DESKTOP_SESSION"
+session_id="$(sprint-coder-desktop-control session start --name "invoice-bot" | jq -r '.data.session_id')"
+sprint-coder-desktop-control --session "$session_id" snapshot -i
+sprint-coder-desktop-control session end "$session_id"
 ```
 
-- `session start` creates the session and prints `{ session_id, name, trace, created_at }`. `--name` must be 1 to 128 bytes with no control characters, or `session start` returns `INVALID_ARGS`. `session start` does not activate later processes. Pass the id with global `--session <id>` or `AGENT_DESKTOP_SESSION`. `--session` wins over the variable. With neither, commands use the global namespace.
-- A session owns its trace and its latest-snapshot namespace. Lookup never searches another session. A session-owned ref still requires the same `--session` or `AGENT_DESKTOP_SESSION` scope, even though a qualified ref embeds its snapshot id.
+- `session start` creates the session and prints `{ session_id, name, trace, created_at }`. `--name` must be 1 to 128 bytes with no control characters, or `session start` returns `INVALID_ARGS`. `session start` does not activate later processes. Pass the id with global `--session <id>`. A session id can also be inherited through an environment variable the CLI reads; `--session` wins over it. With neither, commands use the global namespace.
+- A session owns its trace and its latest-snapshot namespace. Lookup never searches another session. A session-owned ref still requires the same session scope (`--session`, or the inherited session id), even though a qualified ref embeds its snapshot id.
 - Tracing needs a manifest with `trace: on` (the default). `--no-trace`, or a bare `--session <id>` without a manifest, gives a namespace with no trace files. `--trace <path>` overrides to one file. `--trace-strict` fails on trace setup errors. `version` and `skills` write no trace events when run from the command line.
 - `--screenshots` records pre and post PNGs and refmap copies. They are unredacted and sensitive. They need tracing on.
 - Several agents may share one session id. Each should use qualified refs from its own snapshot.
@@ -210,7 +211,7 @@ On macOS and Windows, after `type` or `set-value` lands, the overlay draws the a
 
 Multi-agent cursors (macOS and Windows): start with `session start --cursor --multi-agent`, then pass the returned session id to every subagent.
 
-- Desktop UI actions then require an agent id: global `--agent-id <id>` or `AGENT_DESKTOP_AGENT_ID`. The flag wins. Observations, clipboard commands and session administration do not need one.
+- Desktop UI actions then require an agent id: global `--agent-id <id>`, or an agent id inherited through an environment variable the CLI reads. The flag wins. Observations, clipboard commands and session administration do not need one.
 - An id has 1 to 64 letters, digits, `-` or `_`. It is scoped by session. Each distinct id gets its own cursor, and a reused id reuses its cursor.
 - A headless action moves its cursor before it takes the interaction lease, so several agents' cursors travel at the same time. The actions still take turns, and commands that draw the same cursor take turns from its travel to its click effect.
 - `--agent-id <id> cursor-overlay enable` saves a style for that agent. Do not add `--multi-agent` to it.

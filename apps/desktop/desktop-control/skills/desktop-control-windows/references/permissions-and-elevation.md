@@ -83,7 +83,7 @@ case-insensitive `.exe` name: `csrss.exe`, `wininit.exe`, `winlogon.exe`,
 Interactive work holds an exclusive, token-derived lock file, so two concurrent
 sprint-coder-desktop-control processes cannot interleave focus changes, clicks and typing on
 the same desktop. An inherited-handle mode
-(`AGENT_DESKTOP_INTERACTION_LEASE_HANDLE`) lets a parent pass its lease to a
+(an environment variable the CLI reads) lets a parent pass its lease to a
 child after re-verifying identity and exclusivity. If acquisition fails, wait
 for the other process to finish. Do not bypass the lease.
 
