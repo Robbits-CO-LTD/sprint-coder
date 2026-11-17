@@ -151,6 +151,7 @@ pub(crate) fn launch_app_impl(
                 with_other_space_suggestion(
                     result,
                     may_explain_missing_window(options.timeout_ms, already_running),
+                    None,
                     deadline,
                 )
             })
@@ -209,7 +210,12 @@ fn attach_without_window(
         },
     )?;
     let has_window = window.is_some();
-    let mut result = with_other_space_suggestion(result_from_app(app, window), true, deadline);
+    let mut result = with_other_space_suggestion(
+        result_from_app(app, window),
+        true,
+        reopen::asked_prefix(done),
+        deadline,
+    );
     if result.suggestion.is_none() {
         result.suggestion = reopen::reopen_suggestion(done, has_window).map(str::to_owned);
     }
@@ -1099,11 +1105,13 @@ pub(crate) fn may_explain_missing_window(timeout_ms: u64, already_running: bool)
 
 /// A launch that ends without a window, while the app has a window that is probably on another
 /// Space (the user is in a full-screen app, say), says so instead of saying nothing. Read once,
-/// after the wait, and only when the result has no window and no other guidance.
+/// after the wait, and only when the result has no window and no other guidance. `asked` is said
+/// first when the launch asked the running app for a window.
 #[cfg(target_os = "macos")]
 fn with_other_space_suggestion(
     mut result: LaunchResult,
     may_explain: bool,
+    asked: Option<&str>,
     deadline: Deadline,
 ) -> LaunchResult {
     if !may_explain || result.window.is_some() || result.suggestion.is_some() {
@@ -1116,7 +1124,7 @@ fn with_other_space_suggestion(
         return result;
     };
     result.suggestion = crate::system::window::other_space::read_for_pid(pid, until)
-        .and_then(|numbers| crate::system::window::other_space::launch_suggestion(&numbers));
+        .and_then(|numbers| crate::system::window::other_space::launch_suggestion(&numbers, asked));
     result
 }
 

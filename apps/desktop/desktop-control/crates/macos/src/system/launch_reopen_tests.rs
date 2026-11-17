@@ -163,6 +163,21 @@ fn a_refused_open_is_returned_and_nothing_is_waited_for() {
 }
 
 #[test]
+fn the_other_space_answer_of_a_launch_says_first_that_the_app_was_asked() {
+    use crate::system::window::other_space::{ASKED_NO_WINDOW, ASKED_NOT_WAITED};
+    assert_eq!(
+        asked_prefix(Reopen::Sent { waited: true }),
+        Some(ASKED_NO_WINDOW)
+    );
+    assert_eq!(
+        asked_prefix(Reopen::Sent { waited: false }),
+        Some(ASKED_NOT_WAITED)
+    );
+    assert_eq!(asked_prefix(Reopen::NotSent { minimized: true }), None);
+    assert_eq!(asked_prefix(Reopen::NotSent { minimized: false }), None);
+}
+
+#[test]
 fn each_outcome_says_what_was_done() {
     let sent = Reopen::Sent { waited: true };
     let not_waited = Reopen::Sent { waited: false };

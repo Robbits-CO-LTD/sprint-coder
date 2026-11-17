@@ -22,17 +22,49 @@ const MIN_WINDOW_POINTS: f64 = 100.0;
 pub(crate) const POSSIBLE_CAUSES: [&str; 2] = ["other_space", "closed_but_kept"];
 const APP_KIND: &str = "window_off_screen_not_exposed";
 
-/// What to do, shared by every answer that names this cause. A window the app
-/// closed but keeps (or never showed) reads the same way, so it is named too.
-pub(crate) const GUIDANCE: &str = "Either the window is on another Space, which macOS does not \
-     expose through accessibility until the user returns to that Space (this happens while the \
-     user works in a full-screen app), or the app has closed or hidden the window but keeps it. \
-     macOS offers no public way to tell them apart. Do not retry in a tight loop, and do not \
-     conclude that the app is broken. Do not activate the app on your own to reach the window: \
-     on another Space that would switch the user away from what they are doing. Tell the user \
-     what you found: a window on another Space becomes readable when they return to it; if no \
-     window of the app is open on any Space, ask the user to open one, or bring the app forward \
-     with their agreement (for example `launch` with `--activate`).";
+/// The two causes and what not to do, shared by every answer that names this cause.
+macro_rules! causes {
+    () => {
+        "Either the window is on another Space, which macOS does not expose through \
+         accessibility until the user returns to that Space (this happens while the user works \
+         in a full-screen app), or the app has closed or hidden the window but keeps it. macOS \
+         offers no public way to tell them apart. Do not retry in a tight loop, and do not \
+         conclude that the app is broken. Do not activate the app on your own to reach the \
+         window: on another Space that would switch the user away from what they are doing. "
+    };
+}
+
+/// What to tell the user, the last part of every answer that names this cause.
+macro_rules! tell_the_user {
+    () => {
+        "Tell the user what you found: a window on another Space becomes readable when they \
+         return to it; if no window of the app is open on any Space, ask the user to open one, \
+         or bring the app forward with their agreement (for example `launch` with `--activate`)."
+    };
+}
+
+/// What to do before any `launch` (`snapshot --app`, `list-windows --app`, `--window-id`). A
+/// window the app closed but keeps (or never showed) reads the same way, so it is named too, and
+/// `launch` asks such an app to show it again (`launch_reopen`).
+pub(crate) const GUIDANCE: &str = concat!(
+    causes!(),
+    "If `launch` has not been run for this app yet, run it once with the app's name: for an app \
+     that only closed its window, it asks the app to show one without bringing it to the front; \
+     for a window on another Space, it changes nothing. ",
+    tell_the_user!()
+);
+
+/// What to do after a `launch`, which already asked the app for a window when it could.
+pub(crate) const LAUNCH_GUIDANCE: &str = concat!(causes!(), tell_the_user!());
+
+/// Said first in a `launch` result that asked the app for a window and saw none.
+pub(crate) const ASKED_NO_WINDOW: &str = "This launch asked the app to open a window without \
+     bringing it to the front, and none appeared.";
+
+/// Said first in a `launch --timeout 0` result that asked the app for a window and did not wait.
+pub(crate) const ASKED_NOT_WAITED: &str = "This launch asked the app to open a window without \
+     bringing it to the front, and did not wait for one (the timeout is 0); none was there at \
+     its one look.";
 
 /// One window of the app as the window server and accessibility read it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -108,12 +140,15 @@ pub(crate) fn app_reason(app: &str, pid: i32, numbers: &[i64]) -> Option<Windowl
 }
 
 /// The suggestion of a `launch` whose app runs but whose window is probably on
-/// another Space; `None` when no window is.
-pub(crate) fn launch_suggestion(numbers: &[i64]) -> Option<String> {
+/// another Space; `None` when no window is. `asked` is said first when the launch asked the app
+/// for a window (`ASKED_NO_WINDOW`, `ASKED_NOT_WAITED`).
+pub(crate) fn launch_suggestion(numbers: &[i64], asked: Option<&str>) -> Option<String> {
     (!numbers.is_empty()).then(|| {
         format!(
-            "The app is running, but its window ({}) cannot be read now: it exists off screen \
-             and is not exposed through accessibility. Do not repeat the launch. {GUIDANCE}",
+            "{}The app is running, but its window ({}) cannot be read now: it exists off screen \
+             and is not exposed through accessibility. Do not repeat the launch. \
+             {LAUNCH_GUIDANCE}",
+            asked.map(|asked| format!("{asked} ")).unwrap_or_default(),
             window_ids(numbers).join(", ")
         )
     })

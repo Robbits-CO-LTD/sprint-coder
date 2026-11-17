@@ -161,6 +161,16 @@ pub(crate) fn reopen_suggestion(reopen: Reopen, has_window: bool) -> Option<&'st
     }
 }
 
+/// What the other-Space answer of a launch says first: that the app was asked for a window.
+pub(crate) fn asked_prefix(reopen: Reopen) -> Option<&'static str> {
+    use crate::system::window::other_space::{ASKED_NO_WINDOW, ASKED_NOT_WAITED};
+    match reopen {
+        Reopen::Sent { waited: true } => Some(ASKED_NO_WINDOW),
+        Reopen::Sent { waited: false } => Some(ASKED_NOT_WAITED),
+        Reopen::NotSent { .. } => None,
+    }
+}
+
 /// The reason a running regular app `app` (process `pid`) lists no window at all.
 pub(crate) fn no_window_reason(app: &str, pid: i32) -> WindowlessReason {
     WindowlessReason {
