@@ -10,7 +10,8 @@ import { readDesktopControlCommand } from './desktop-control';
  * the command's stored output and timeline, makes the picture small enough to travel (never larger
  * than the capture, at most `SCREENSHOT_MAX_EDGE` on its long edge, PNG when it fits, JPEG
  * otherwise), and stores and shows only what the picture is: its format, sizes, scale factor,
- * byte length and digest. The picture itself is held in memory for the tool result only
+ * byte length and digest. The printed output is kept nowhere else (not in the command's session
+ * either), and the picture itself is held in memory for the tool result only
  * (`takeScreenshotPicture`) and goes to the Turn's model only where Main decides it may.
  */
 export const SCREENSHOT_MAX_EDGE = 1568;
@@ -185,9 +186,10 @@ export async function fitScreenshotPicture(
 
 /**
  * What a screenshot run's printed output becomes: its stored and shown stdout (the executable's
- * own envelope with the picture replaced by what it is), and the picture fit to travel. Output
- * that holds no picture (an error, for one) is kept as it is, as other runs keep theirs; output the
- * runner cut short, or that cannot be read as a picture, becomes an error that names `snapshot`.
+ * envelope with the picture replaced by what it is), and the picture fit to travel. The
+ * executable's own error (`ok: false`) is kept without any `data`; output the runner cut short
+ * becomes the too-large error; anything else that is not a picture becomes the unreadable error,
+ * so no other shape of printed output reaches the store. Both errors name `snapshot`.
  */
 export async function prepareScreenshotOutput(
   printed: string,
@@ -199,22 +201,20 @@ export async function prepareScreenshotOutput(
   try {
     envelope = JSON.parse(printed);
   } catch {
+    return { stdout: UNREADABLE };
+  }
+  if (!isRecord(envelope)) return { stdout: UNREADABLE };
+  // The executable's own error is what the AI needs to read; it is kept, without any `data`.
+  if (envelope['ok'] === false) {
+    const { data: _data, ...error } = envelope;
+    const kept = JSON.stringify(error);
     return {
-      stdout:
-        Buffer.byteLength(printed, 'utf8') <= SCREENSHOT_MAX_TEXT_BYTES ? printed : UNREADABLE,
+      stdout: Buffer.byteLength(kept, 'utf8') <= SCREENSHOT_MAX_TEXT_BYTES ? kept : UNREADABLE,
     };
   }
-  const data = isRecord(envelope) ? envelope['data'] : undefined;
-  if (
-    !isRecord(envelope) ||
-    envelope['ok'] !== true ||
-    !isRecord(data) ||
-    typeof data['data'] !== 'string'
-  )
-    return {
-      stdout:
-        Buffer.byteLength(printed, 'utf8') <= SCREENSHOT_MAX_TEXT_BYTES ? printed : UNREADABLE,
-    };
+  const data = envelope['data'];
+  if (envelope['ok'] !== true || !isRecord(data) || typeof data['data'] !== 'string')
+    return { stdout: UNREADABLE };
   const source = Buffer.from(data['data'], 'base64');
   let fitted: Awaited<ReturnType<typeof fitScreenshotPicture>>;
   try {
@@ -224,18 +224,27 @@ export async function prepareScreenshotOutput(
   }
   if (fitted === null) return { stdout: TOO_LARGE };
   const scaleFactor =
-    typeof data['scale_factor'] === 'number' && data['scale_factor'] > 0 ? data['scale_factor'] : 1;
+    typeof data['scale_factor'] === 'number' &&
+    Number.isFinite(data['scale_factor']) &&
+    data['scale_factor'] > 0 &&
+    data['scale_factor'] <= 16
+      ? data['scale_factor']
+      : 1;
   const sha256 = createHash('sha256').update(fitted.bytes).digest('hex');
   const base64 = fitted.bytes.toString('base64');
-  const { data: _picture, ...rest } = data;
+  // Only these fields are copied, each bounded, so nothing else the executable printed (a second
+  // copy of the picture, for one) reaches the store beside it.
+  const version = envelope['version'];
+  const sourceFormat = data['format'];
   const stdout = JSON.stringify({
-    ...envelope,
+    ...(typeof version === 'string' && version.length <= 16 ? { version } : {}),
+    ok: true,
+    command: 'screenshot',
     data: {
-      ...rest,
       format: fitted.mimeType === 'image/png' ? 'png' : 'jpg',
       width: fitted.width,
       height: fitted.height,
-      source_format: typeof data['format'] === 'string' ? data['format'] : 'png',
+      source_format: sourceFormat === 'png' || sourceFormat === 'jpg' ? sourceFormat : 'png',
       source_width: fitted.sourceWidth,
       source_height: fitted.sourceHeight,
       scale_factor: scaleFactor,

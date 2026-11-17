@@ -122,6 +122,27 @@ describe('fitting the picture', () => {
     expect(output.stdout).not.toContain('"data":"');
   });
 
+  it('copies only bounded known fields beside the picture', async () => {
+    const png = await flatPng(20, 10);
+    const printedText = JSON.stringify({
+      version: '2.6',
+      ok: true,
+      command: 'screenshot',
+      extra: 'QUFB'.repeat(100),
+      data: {
+        data: png.toString('base64'),
+        format: 'x'.repeat(500),
+        scale_factor: 1e9,
+        copy: 'QUFB',
+      },
+    });
+    const output = await prepareScreenshotOutput(printedText, false);
+    const envelope = JSON.parse(output.stdout) as Record<string, unknown>;
+    expect(Object.keys(envelope)).toEqual(['version', 'ok', 'command', 'data']);
+    expect(output.stdout).not.toContain('QUFB');
+    expect(dataOf(output.stdout)).toMatchObject({ source_format: 'png', scale_factor: 1 });
+  });
+
   it('brings a Retina capture down to the long-edge bound, keeping its shape', async () => {
     const png = await flatPng(3352, 2006);
     const output = await prepareScreenshotOutput(printedFor(png), false);
@@ -189,6 +210,27 @@ describe('fitting the picture', () => {
       error: { code: 'PERM_DENIED', message: 'Screen Recording is not granted' },
     });
     expect(await prepareScreenshotOutput(refused, false)).toEqual({ stdout: refused });
+    // Without any `data` it carried.
+    const refusedWithData = JSON.stringify({
+      ok: false,
+      command: 'screenshot',
+      error: { code: 'X', message: 'm' },
+      data: { data: 'QUFB' },
+    });
+    expect(JSON.parse((await prepareScreenshotOutput(refusedWithData, false)).stdout)).toEqual({
+      ok: false,
+      command: 'screenshot',
+      error: { code: 'X', message: 'm' },
+    });
+    // Any other shape, however small, is never stored as printed.
+    for (const other of [
+      'not json',
+      JSON.stringify({ ok: true, command: 'screenshot', data: { pixels: 'QUFB' } }),
+      JSON.stringify(['QUFB']),
+    ])
+      expect((await prepareScreenshotOutput(other, false)).stdout).toContain(
+        'SCREENSHOT_UNREADABLE',
+      );
   });
 
   it('keeps the worst picture of a Retina window within the runtime tool_result bound', async () => {
@@ -354,6 +396,7 @@ async function setUp(printed: string, withSessions: boolean) {
   const stored: CommandOutputChunk[] = [];
   const completed: Array<{ outputBytes: number; truncated: boolean; state: string }> = [];
   const published: unknown[] = [];
+  let storeFails = false;
   const boundary = {
     persistence: {
       readTurnWorkspaceSet: () => ({
@@ -385,6 +428,7 @@ async function setUp(printed: string, withSessions: boolean) {
         return { command: {} as never, event: { type: 'command.started' } as never };
       },
       appendCommandOutputBatch: ({ chunks }: { chunks: CommandOutputChunk[] }) => {
+        if (storeFails) throw new Error('store failed');
         stored.push(...chunks);
         return chunks.map((chunk) => ({ type: 'command.output', text: chunk.text }) as never);
       },
@@ -461,7 +505,10 @@ async function setUp(printed: string, withSessions: boolean) {
         ...(background === undefined ? {} : { background }),
       },
     });
-  return { dispatch, stored, completed, published, sessions };
+  const failStore = () => {
+    storeFails = true;
+  };
+  return { dispatch, stored, completed, published, sessions, failStore };
 }
 
 describe('a screenshot run through exec_command', () => {
@@ -502,6 +549,28 @@ describe('a screenshot run through exec_command', () => {
     },
     60_000,
   );
+
+  it('leaves nothing of the printed picture in the session store', async () => {
+    const png = await flatPng(600, 400);
+    const harness = await setUp(printedFor(png), true);
+    await harness.dispatch(['screenshot', '--window-id', 'w-1']);
+    const kept = (
+      harness.sessions as unknown as { sessions: Map<string, { chunks: CommandOutputChunk[] }> }
+    ).sessions;
+    expect(kept.size).toBeGreaterThan(0);
+    for (const session of kept.values()) expect(session.chunks).toEqual([]);
+    await harness.sessions?.dispose();
+  });
+
+  it('ends the record as failed when storing the screenshot fails', async () => {
+    const harness = await setUp(printedFor(await flatPng(20, 10)), true);
+    harness.failStore();
+    await expect(harness.dispatch(['screenshot', '--window-id', 'w-1'])).rejects.toThrow(
+      'store failed',
+    );
+    expect(harness.completed.at(-1)).toMatchObject({ state: 'failed', outputBytes: 0 });
+    await harness.sessions?.dispose();
+  });
 
   it('refuses a screenshot in the background before any card', async () => {
     const harness = await setUp('', true);

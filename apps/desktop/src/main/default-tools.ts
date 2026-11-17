@@ -760,6 +760,30 @@ export function registerCommandRunnerTool(
       // is gets stored and shown (`finishScreenshot`), and the picture goes with the tool result.
       const screenshotRun = desktopControlRoots.has(spec) && isDesktopControlScreenshot(spec.argv);
       const printed: { stdout: string[]; stderr: string[] } = { stdout: [], stderr: [] };
+      const dropPrinted = (): void => {
+        printed.stdout = [];
+        printed.stderr = [];
+      };
+      // Ends a command record still open as failed (a run that threw before its record ended).
+      const failOpenRecord = (): void => {
+        const current = command.persistence.getCommand(commandId);
+        if (
+          current.state !== 'prepared' &&
+          current.state !== 'starting' &&
+          current.state !== 'running'
+        )
+          return;
+        const persisted = command.persistence.completeCommand({
+          commandId,
+          state: 'failed',
+          exitCode: null,
+          signal: null,
+          outputBytes: screenshotRun ? 0 : current.outputBytes,
+          truncated: !screenshotRun && current.state === 'running',
+          finishedAt: new Date().toISOString(),
+        });
+        command.publish(persisted.event);
+      };
       // Only a call prepared as the shipped desktop control and allowed on its own card ("allow
       // once", or "allow for the Task" kept for exactly this command), or allowed by the Task's
       // Full access preset (the ApprovalCoordinator's `access_preset_full`, the owner's decision of
@@ -933,10 +957,10 @@ export function registerCommandRunnerTool(
       // tool result carries the picture beside it (`holdScreenshotPicture`), for Main to give the
       // Turn's model where it may. The result says the model has no picture until Main adds it.
       const finishScreenshot = async (result: CommandResult): Promise<Record<string, unknown>> => {
-        const output = await prepareScreenshotOutput(printed.stdout.join(''), result.truncated);
+        const stdoutText = printed.stdout.join('');
         const stderr = clipScreenshotStderr(printed.stderr.join(''));
-        printed.stdout = [];
-        printed.stderr = [];
+        dropPrinted();
+        const output = await prepareScreenshotOutput(stdoutText, result.truncated);
         const chunks = (
           [
             { stream: 'stdout', text: output.stdout },
@@ -1009,8 +1033,10 @@ export function registerCommandRunnerTool(
         try {
           // A run of the desktop-control executable is stopped when the Task is archived
           // (`terminateTaskDesktopControl`), whether or not it runs in the Task's session.
+          // A screenshot's printed output (the whole picture) is held here only, never kept in
+          // the session for `poll_command`.
           const sessionHooks = desktopControlRoots.has(spec)
-            ? { ...hooks, desktopControl: true }
+            ? { ...hooks, desktopControl: true, ...(screenshotRun ? { keepOutput: false } : {}) }
             : hooks;
           started = await sessions.start(
             spec,
@@ -1032,6 +1058,7 @@ export function registerCommandRunnerTool(
           );
         } catch (caught) {
           const error = notRun ?? caught;
+          dropPrinted();
           const current = command.persistence.getCommand(commandId);
           if (
             current.state === 'prepared' ||
@@ -1134,8 +1161,17 @@ export function registerCommandRunnerTool(
           observeBackground();
           return sessions.poll(started.sessionId, owner);
         }
-        if (screenshotRun && !overran && completed.result !== null)
-          return finishScreenshot(completed.result);
+        if (screenshotRun && !overran && completed.result !== null) {
+          try {
+            return await finishScreenshot(completed.result);
+          } catch (error) {
+            dropPrinted();
+            failOpenRecord();
+            throw error;
+          }
+        }
+        // Whatever else ended the run, nothing of a screenshot's printed output is kept.
+        if (screenshotRun) dropPrinted();
         const persisted =
           completed.result === null
             ? command.persistence.completeCommand({
@@ -1191,6 +1227,7 @@ export function registerCommandRunnerTool(
           truncated: commandToolTruncated(result.truncated, toolOutput.truncated),
         };
       } catch (error) {
+        dropPrinted();
         const current = command.persistence.getCommand(commandId);
         if (
           current.state === 'prepared' ||
