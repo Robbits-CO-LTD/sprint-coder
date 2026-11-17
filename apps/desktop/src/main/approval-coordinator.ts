@@ -1423,8 +1423,9 @@ function desktopAppGrantEnvironmentAllows(spec: ExecutionSpec): boolean {
 }
 
 /**
- * Whether this desktop-control call takes the foreground, the cursor or the keyboard, or may close
- * an app (see `desktopControlArgvMode`), judged on the argv sealed into its ExecutionSpec. Such a
+ * Whether this desktop-control call takes the foreground, the cursor or the keyboard, or, on
+ * Windows, may close an app (see `desktopControlArgvMode`; on macOS `close-app` only asks the app
+ * to quit), judged on the argv sealed into its ExecutionSpec, under `platform`'s rules. Such a
  * run is never covered by a Task grant: outside the Full preset it is decided on its own card
  * every time.
  */

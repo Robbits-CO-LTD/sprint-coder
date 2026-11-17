@@ -524,7 +524,9 @@ describe('prompt context compiler', () => {
     );
     expect(text).toContain('確認の窓を前に出して閉じずに待つことがあり');
     expect(text).toContain('details.pending_dialog が true なら');
-    expect(text).toContain('close-app を繰り返さず、確かめる画面に自分で答えず');
+    expect(text).toContain(
+      'close-app が TIMEOUT の時は、pending_dialog の有無によらず、失敗として取り返そうとせず、close-app を繰り返さず、確かめる画面に自分で答えず',
+    );
     expect(windows.content).not.toContain('close-app');
     // Nothing of Windows.
     for (const windowsOnly of [
