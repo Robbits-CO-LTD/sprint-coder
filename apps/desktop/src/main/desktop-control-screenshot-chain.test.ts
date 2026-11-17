@@ -351,7 +351,10 @@ async function setUp(
     const picture = codexManagedPictureItem(managed);
     return {
       picture,
-      response: codexDynamicToolResponseFromManaged(managed, picture !== undefined),
+      response: codexDynamicToolResponseFromManaged(
+        managed,
+        picture !== undefined ? 'given' : 'not_given',
+      ),
     };
   };
   /** A call as the Codex runtime's request reaches Main's own handler, without the runtime host. */
