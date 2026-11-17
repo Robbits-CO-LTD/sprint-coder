@@ -417,46 +417,62 @@ fn a_move_of_the_front_that_is_not_a_candidates_take_is_left_alone() {
 }
 
 #[test]
-fn an_asked_app_in_front_is_watched_and_its_own_window_is_not_called_a_take() {
-    // The asked app (Chrome here) was itself in front, without a window, when it was asked. The
-    // user moved to Discord during the wait (input); Chrome then showed its window and took the
-    // front with it: Discord, still right behind, gets the front back.
-    let asked_in_front = || FrontSeen {
-        app: Some(chrome()),
-        ..Default::default()
+fn an_asked_app_in_front_is_watched_and_its_own_window_is_not_a_take() {
+    // The asked app (Chrome here) was itself in front, without a window, when it was asked.
+    let asked_in_front = || {
+        let mut run = Run::new(FrontSeen {
+            app: Some(chrome()),
+            ..Default::default()
+        });
+        run.watch.asked_in_front();
+        run
     };
-    let mut run = Run::new(asked_in_front());
+
+    // The user stayed: the app showed its window while in front, with no window of its own to
+    // give the focus back to. Nothing was taken from anyone, and nothing is said.
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::None);
+    assert!(run.restores().is_empty());
+    assert_eq!(run.finish(700, Input::None), None);
+
+    // The user moved to Discord during the wait (input); Chrome then showed its window and took
+    // the front with it: Discord, still right behind, gets the front back.
+    let mut run = asked_in_front();
     run.look(200, front(DISCORD), Input::At(ms(run.t0, 190)));
     assert!(run.restores().is_empty());
     run.look(400, chrome_on(102, true), Input::At(ms(run.t0, 190)));
     assert_eq!(run.restores(), ["app 2"]);
-    let outcome = run.finish(800, Input::At(ms(run.t0, 190)));
-    assert_eq!(outcome, Some(FrontOutcome::Restored(TakeKind::App)));
-    assert_eq!(asked_outcome(outcome, true), outcome);
-
-    // The user stayed: the app showed its window while in front, with no window of its own to
-    // give the focus back to. Nothing was taken from anyone, and nothing is said.
-    let mut run = Run::new(asked_in_front());
-    run.look(300, chrome_on(102, true), Input::None);
-    assert!(run.restores().is_empty());
-    let own_window = run.finish(700, Input::None);
     assert_eq!(
-        own_window,
+        run.finish(800, Input::At(ms(run.t0, 190))),
+        Some(FrontOutcome::Restored(TakeKind::App))
+    );
+
+    // The window came first, in front; the watch went on. The user then moved to Discord, and
+    // Chrome took the front again within the grace of its window: given back the same way.
+    let mut run = asked_in_front();
+    run.look(300, chrome_on(102, true), Input::None);
+    run.look(380, front(DISCORD), Input::At(ms(run.t0, 370)));
+    run.look(460, chrome_on(102, false), Input::At(ms(run.t0, 370)));
+    assert_eq!(run.restores(), ["app 2"]);
+    assert_eq!(
+        run.finish(800, Input::At(ms(run.t0, 370))),
+        Some(FrontOutcome::Restored(TakeKind::App))
+    );
+
+    // Without that mark (a launch passed on to an instance in front), the same first look is
+    // a take with nothing to give back, and the watch stops there, as before.
+    let mut run = Run::new(FrontSeen {
+        app: Some(chrome()),
+        ..Default::default()
+    });
+    run.look(300, chrome_on(102, true), Input::None);
+    run.look(380, front(DISCORD), Input::At(ms(run.t0, 370)));
+    run.look(460, chrome_on(102, false), Input::At(ms(run.t0, 370)));
+    assert!(run.restores().is_empty());
+    assert_eq!(
+        run.finish(800, Input::At(ms(run.t0, 370))),
         Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::NoTarget))
     );
-    assert_eq!(asked_outcome(own_window, true), None);
-
-    // An app that was not in front when asked: the same outcome is said, as is every other.
-    assert_eq!(asked_outcome(own_window, false), own_window);
-    for outcome in [
-        Some(FrontOutcome::Restored(TakeKind::Window)),
-        Some(FrontOutcome::Left(TakeKind::App, LeftWhy::NoTarget)),
-        Some(FrontOutcome::Left(TakeKind::App, LeftWhy::Input)),
-        Some(FrontOutcome::Left(TakeKind::Window, LeftWhy::Input)),
-        None,
-    ] {
-        assert_eq!(asked_outcome(outcome, true), outcome);
-    }
 }
 
 #[test]

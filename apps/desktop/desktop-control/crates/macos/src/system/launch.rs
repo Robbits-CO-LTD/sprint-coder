@@ -222,11 +222,16 @@ fn attach_without_window(
         others: Vec::new(),
     };
     // An app already in front (its last window closed while it stayed active) takes nothing
-    // from anyone when it shows its window, so nothing is said of that (`asked_outcome`). The
-    // front is watched all the same: the user may move to another app during the wait, and the
-    // asked app may then take the front from that one.
-    let own_front = super::launch_front::app_in_front(pid, instance, deadline) == Some(true);
+    // from anyone when it shows its window, so that is not counted as a take
+    // (`asked_in_front`). The front is watched all the same, before and after that window: the
+    // user may move to another app during the wait, and the asked app may then take the front
+    // from that one.
     let front = super::launch_front::FrontGuard::begin(Some(&handoff), false, deadline);
+    if super::launch_front::app_in_front(pid, instance, deadline) == Some(true) {
+        if let Some(front) = front.as_ref() {
+            front.asked_in_front();
+        }
+    }
     let pause = |wait: Duration| super::launch_front::pause(front.as_ref(), wait);
     let reopen_options = reopen::reopen_options(options);
     let outcome = (|| {
@@ -263,7 +268,7 @@ fn attach_without_window(
         );
         Ok(result)
     })();
-    let mut result = super::launch_front::finish_asked(front.as_ref(), outcome, own_front)?;
+    let mut result = super::launch_front::finish_asked(front.as_ref(), outcome)?;
     // The front may have been given back after the window was read: read where it is now (a
     // front that cannot be read leaves what was read).
     if front.is_some() {
