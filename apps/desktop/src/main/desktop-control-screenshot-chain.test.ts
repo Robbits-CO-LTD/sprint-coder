@@ -338,15 +338,21 @@ async function setUp(
     turnId: start['turnId'],
     operationId: start['operationId'],
   };
+  // The runtime host's answer that it took the start, naming what Main sent. An answer that
+  // does not match makes the client cancel the Turn and, once the stop is not confirmed (about
+  // 5 s on Windows, 9 s elsewhere), drop every later tool result: so the answer must match, and
+  // the client must have reported no failure.
+  const ids = (items: unknown): string[] => ((items ?? []) as { id: string }[]).map(({ id }) => id);
   child.emit('message', {
     ...envelope,
     seq: 1,
     type: 'started',
-    acceptedContextFragmentIds: [],
-    acceptedProjectItemIds: [],
-    acceptedProjectSnapshotDigest: null,
+    acceptedContextFragmentIds: ids(start['contextFragments']),
+    acceptedProjectItemIds: ids(start['projectItems']),
+    acceptedProjectSnapshotDigest: start['projectSnapshotDigest'] ?? null,
     acceptedPayloadDigest: start['payloadDigest'],
   });
+  expect(trace.filter((line) => line.includes('client failure'))).toEqual([]);
 
   /** The Codex runtime's call of `sprint_exec_command`, as its tool_request reaches Main. */
   const call = async (argv: string[]) => {
@@ -529,9 +535,7 @@ describe('a primary Codex CLI Turn’s screenshot, through Main’s real handler
   ] as const)(
     'gives only the sentence when the CLI’s model list %s and no catalog is built',
     async (_name, probe, waitsOut) => {
-      // Real timers: the wait for the model list is the real `SCREENSHOT_CATALOG_TIMEOUT_MS`, so
-      // the test does not depend on which other timers a platform's path holds meanwhile (with
-      // faked timers this never answered on Windows).
+      // Real timers: the wait for the model list is the real `SCREENSHOT_CATALOG_TIMEOUT_MS`.
       let asked = false;
       const { call, client, sessions, refreshModelCatalog } = await setUp(true, false, {
         catalogBuilt: false,
