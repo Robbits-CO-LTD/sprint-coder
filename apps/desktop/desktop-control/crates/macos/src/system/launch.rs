@@ -221,7 +221,11 @@ fn attach_without_window(
         same_app_ran: true,
         others: Vec::new(),
     };
-    let front = super::launch_front::FrontGuard::begin(Some(&handoff), false, deadline);
+    // An app already in front (its last window closed while it stayed active) takes nothing
+    // from anyone when it shows its window: there is nothing to give back, so no watch.
+    let front = (super::launch_front::app_in_front(pid, instance, deadline) != Some(true))
+        .then(|| super::launch_front::FrontGuard::begin(Some(&handoff), false, deadline))
+        .flatten();
     let pause = |wait: Duration| super::launch_front::pause(front.as_ref(), wait);
     let reopen_options = reopen::reopen_options(options);
     let outcome = (|| {
@@ -247,13 +251,11 @@ fn attach_without_window(
                 .map_err(after_launch);
         }
         let window = settled_window(pid, instance, &reopen_options, deadline, &pause)
-            .map_err(after_launch)?;
+            .map_err(|error| reopen::after_request(after_launch(error)))?;
         let has_window = window.is_some();
         let mut result = result_from_app(app, window);
         result.suggestion = reopen::suggestion(
-            reopen::Reopen::Sent {
-                waited: options.timeout_ms != 0,
-            },
+            reopen::Reopen::Sent,
             has_window,
             || other_space_numbers(pid, deadline),
             chromium(&result),

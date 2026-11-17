@@ -570,7 +570,8 @@ pub(crate) fn annotate(
 }
 
 /// `annotate`, where `asked` marks a launch that asked the running instance for a window
-/// (`launch_reopen`): its successful result gets the sentence too, handed off or not.
+/// (`launch_reopen`): its result gets the sentence too, handed off or not, and an error also
+/// `details.front`, as a launch not confirmed does.
 pub(crate) fn annotate_for(
     result: Result<LaunchResult, AdapterError>,
     outcome: Option<FrontOutcome>,
@@ -586,9 +587,13 @@ pub(crate) fn annotate_for(
             Ok(result)
         }
         Ok(result) => Ok(result),
-        Err(mut error) if is_unconfirmed(&error) => {
+        Err(mut error) if asked || is_unconfirmed(&error) => {
             error.suggestion = Some(with_note(error.suggestion.take(), note));
-            if let Some(details) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
+            // An error after a request may have no details yet (a launch not confirmed has).
+            let details = error
+                .details
+                .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+            if let Some(details) = details.as_object_mut() {
                 details.insert("front".into(), front_details(outcome));
             }
             Err(error)
@@ -706,6 +711,18 @@ pub(crate) fn pause(guard: Option<&FrontGuard>, wait: Duration) {
         Some(guard) => guard.pause(wait),
         None => std::thread::sleep(wait),
     }
+}
+
+/// Whether the app `pid` with the instance token `instance` is the front app now, or `None`
+/// when that cannot be read.
+#[cfg(target_os = "macos")]
+pub(crate) fn app_in_front(pid: i32, instance: &str, deadline: Deadline) -> Option<bool> {
+    let front = front_pid(deadline)?;
+    if front != pid {
+        return Some(false);
+    }
+    let token = crate::system::process::process_identity::token_for_pid(pid).ok()??;
+    Some(token == instance)
 }
 
 /// `finish` for a launch that asked the running instance for a window (`launch_reopen`).

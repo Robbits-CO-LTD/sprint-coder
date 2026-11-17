@@ -4,7 +4,7 @@ use crate::system::launch::{HandoffCandidate, WindowSeen};
 use crate::system::launch_front::{
     FrontOutcome, LeftWhy, OrderedWindow, TakeKind, Target, annotate_for, front_note, just_behind,
 };
-use crate::system::window::other_space::{ASKED_NO_WINDOW, ASKED_NOT_WAITED, LAUNCH_GUIDANCE};
+use crate::system::window::other_space::{ASKED_NO_WINDOW, LAUNCH_GUIDANCE};
 use agent_desktop_core::{
     ErrorCode, ProcessId, commands::launch::CHROMIUM_CDP_HINT, system::launch_result::LaunchResult,
 };
@@ -93,6 +93,66 @@ fn only_a_plain_attach_of_a_shown_regular_app_without_a_minimized_window_is_aske
             "{options:?}"
         );
     }
+}
+
+#[test]
+fn a_zero_timeout_never_asks_since_it_could_not_watch_the_front() {
+    let zero = LaunchOptions {
+        timeout_ms: 0,
+        ..attach()
+    };
+    let read = Cell::new(false);
+    assert_eq!(
+        may_reopen(
+            &zero,
+            false,
+            true,
+            || {
+                read.set(true);
+                Some(false)
+            },
+            || Minimized::None
+        ),
+        Err(NotSent::ZeroTimeout)
+    );
+    assert!(!read.get());
+    // An app without a Dock icon still gets nothing.
+    assert_eq!(
+        allowed(&zero, false, Some(false), Minimized::None),
+        Err(NotSent::NotAsked)
+    );
+}
+
+#[test]
+fn an_error_after_the_request_says_so_first_and_keeps_its_code() {
+    let error = after_request(
+        AdapterError::new(ErrorCode::AmbiguousTarget, "two windows").with_suggestion("Pick one."),
+    );
+    assert_eq!(error.code, ErrorCode::AmbiguousTarget);
+    assert_eq!(error.message, "two windows");
+    assert_eq!(
+        error.suggestion.as_deref(),
+        Some(format!("{ASKED_BEFORE_ERROR} Pick one.").as_str())
+    );
+    let bare = after_request(AdapterError::new(ErrorCode::AppUnresponsive, "changed"));
+    assert_eq!(bare.suggestion.as_deref(), Some(ASKED_BEFORE_ERROR));
+    // What happened to the front is added as for a launch not confirmed.
+    let outcome = FrontOutcome::Restored(TakeKind::App);
+    let noted = annotate_for(Err(bare), Some(outcome), true).unwrap_err();
+    assert_eq!(noted.code, ErrorCode::AppUnresponsive);
+    assert_eq!(
+        noted.suggestion.as_deref(),
+        Some(format!("{ASKED_BEFORE_ERROR} {}", front_note(outcome)).as_str())
+    );
+    assert!(noted.details.as_ref().unwrap().get("front").is_some());
+    // A launch that did not ask leaves another error as it is.
+    let other = annotate_for(
+        Err(AdapterError::new(ErrorCode::AppUnresponsive, "x")),
+        Some(outcome),
+        false,
+    )
+    .unwrap_err();
+    assert!(other.suggestion.is_none());
 }
 
 #[test]
@@ -266,18 +326,16 @@ fn a_request_result_says_what_happened_to_the_front_in_the_hand_off_words() {
 
 #[test]
 fn each_outcome_picks_its_text_other_space_first_and_keeps_the_chromium_hint() {
-    let sent = Reopen::Sent { waited: true };
-    let not_waited = Reopen::Sent { waited: false };
+    let sent = Reopen::Sent;
     let no_space = || None;
     let pick = |reopen, has_window| suggestion(reopen, has_window, no_space, false);
     assert_eq!(pick(sent, true).as_deref(), Some(REOPENED_WINDOW));
-    assert_eq!(pick(not_waited, true).as_deref(), Some(REOPENED_WINDOW));
     assert_eq!(pick(sent, false).as_deref(), Some(REOPENED_NO_WINDOW));
-    assert_eq!(
-        pick(not_waited, false).as_deref(),
-        Some(REOPENED_NOT_WAITED)
-    );
     let not_sent = |why| Reopen::NotSent(why);
+    assert_eq!(
+        pick(not_sent(NotSent::ZeroTimeout), false).as_deref(),
+        Some(ZERO_TIMEOUT_NOT_REOPENED)
+    );
     assert_eq!(
         pick(not_sent(NotSent::Minimized), false).as_deref(),
         Some(MINIMIZED_NOT_REOPENED)
@@ -301,8 +359,8 @@ fn each_outcome_picks_its_text_other_space_first_and_keeps_the_chromium_hint() {
     )));
     assert!(other.ends_with(LAUNCH_GUIDANCE));
     assert!(!other.contains("run it once"));
-    let zero = suggestion(not_waited, false, space, false).unwrap();
-    assert!(zero.starts_with(ASKED_NOT_WAITED));
+    let zero = suggestion(not_sent(NotSent::ZeroTimeout), false, space, false).unwrap();
+    assert!(zero.starts_with("The app is running, but its window (w-7)"));
     let hidden = suggestion(not_sent(NotSent::Minimized), false, space, false).unwrap();
     assert!(hidden.starts_with("The app is running, but its window (w-7)"));
     let read = Cell::new(false);
@@ -351,7 +409,10 @@ fn the_texts_say_what_is_known_and_never_to_wait_or_loop() {
     assert!(REOPENED_NO_WINDOW.contains("no window appeared"));
     assert!(REOPENED_NO_WINDOW.contains("do not retry it in a loop"));
     assert!(REOPENED_NO_WINDOW.contains("With the user's agreement, `launch` with `--activate`"));
-    assert!(REOPENED_NOT_WAITED.contains("did not wait"));
+    assert!(
+        ZERO_TIMEOUT_NOT_REOPENED.contains("did not ask it to open one because the timeout is 0")
+    );
+    assert!(ZERO_TIMEOUT_NOT_REOPENED.contains("without `--timeout 0`"));
     assert!(MINIMIZED_NOT_REOPENED.contains("Do not restore it on your own"));
     assert!(HIDDEN_NOT_REOPENED.contains("hidden (as with Cmd+H)"));
     assert!(HIDDEN_NOT_REOPENED.contains("Do not unhide it on your own"));
@@ -363,7 +424,8 @@ fn the_texts_say_what_is_known_and_never_to_wait_or_loop() {
     for text in [
         REOPENED_WINDOW,
         REOPENED_NO_WINDOW,
-        REOPENED_NOT_WAITED,
+        ZERO_TIMEOUT_NOT_REOPENED,
+        ASKED_BEFORE_ERROR,
         MINIMIZED_NOT_REOPENED,
         HIDDEN_NOT_REOPENED,
         NOT_REOPENED,

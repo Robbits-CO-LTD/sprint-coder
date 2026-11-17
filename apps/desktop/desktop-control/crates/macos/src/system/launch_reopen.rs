@@ -34,16 +34,16 @@ pub(crate) enum NotSent {
     Minimized,
     /// Whether it is hidden, its windows, or whether one is minimized could not be read.
     Unknown,
+    /// The launch was told not to wait (`--timeout 0`), so it could not watch the front.
+    ZeroTimeout,
 }
 
 /// What a launch did for a running app that had no window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reopen {
     NotSent(NotSent),
-    /// The app was asked once; `waited` is false for a zero timeout, which does not wait.
-    Sent {
-        waited: bool,
-    },
+    /// The app was asked once.
+    Sent,
 }
 
 /// The suggestion of a launch whose running app showed a window after it was asked to.
@@ -62,11 +62,16 @@ pub(crate) const REOPENED_NO_WINDOW: &str = "The app is running, and this launch
      the user's agreement, `launch` with `--activate` brings the app to the front, which may \
      make it open a window.";
 
-/// The suggestion of a launch with a zero timeout whose running app was asked for a window.
-pub(crate) const REOPENED_NOT_WAITED: &str = "The app was running without a window, and this \
-     launch asked it to open one (without bringing it to the front), but did not wait for it \
-     because the timeout is 0. Run `list-windows` for the app once to see whether a window \
-     appeared; do not repeat the launch. If none appeared, tell the user.";
+/// The suggestion of a launch with a zero timeout of a running app without a window.
+pub(crate) const ZERO_TIMEOUT_NOT_REOPENED: &str = "The app is running but shows no window, and \
+     this launch did not ask it to open one because the timeout is 0: without waiting it could \
+     not watch whether the app brings itself to the front in answer. Run `launch` again once \
+     with the same app name and without `--timeout 0`.";
+
+/// Said first in the suggestion of an error that came after the app was asked for a window.
+pub(crate) const ASKED_BEFORE_ERROR: &str = "This launch had already asked the running app to \
+     open a window (without bringing it to the front) when this failed. Do not repeat the \
+     launch: run `list-windows` for the app first.";
 
 /// The suggestion of a launch whose running app has only a minimized window.
 pub(crate) const MINIMIZED_NOT_REOPENED: &str = "The app is running and shows no window, but it \
@@ -153,6 +158,10 @@ pub(crate) fn may_reopen(
     {
         return Err(NotSent::NotAsked);
     }
+    // Without a wait, a front the app takes in answer could not be seen, let alone given back.
+    if options.timeout_ms == 0 {
+        return Err(NotSent::ZeroTimeout);
+    }
     match hidden() {
         Some(false) => {}
         Some(true) => return Err(NotSent::Hidden),
@@ -188,6 +197,16 @@ pub(crate) fn shown_numbers(windows: Option<Vec<super::launch::WindowSeen>>) -> 
             .map(|window| window.number)
             .collect(),
     )
+}
+
+/// The error `error` that came after the app was asked for a window, saying so first; its code
+/// and everything else stay.
+pub(crate) fn after_request(mut error: AdapterError) -> AdapterError {
+    error.suggestion = Some(match error.suggestion.take() {
+        Some(suggestion) => format!("{ASKED_BEFORE_ERROR} {suggestion}"),
+        None => ASKED_BEFORE_ERROR.to_owned(),
+    });
+    error
 }
 
 /// What the open of the request returned.
@@ -239,10 +258,10 @@ pub(crate) fn opened(
 /// and no other explanation (the other-Space one is chosen before this, in `suggestion`).
 pub(crate) fn reopen_suggestion(reopen: Reopen, has_window: bool) -> Option<&'static str> {
     match (reopen, has_window) {
-        (Reopen::Sent { .. }, true) => Some(REOPENED_WINDOW),
+        (Reopen::Sent, true) => Some(REOPENED_WINDOW),
         (Reopen::NotSent(_), true) => None,
-        (Reopen::Sent { waited: true }, false) => Some(REOPENED_NO_WINDOW),
-        (Reopen::Sent { waited: false }, false) => Some(REOPENED_NOT_WAITED),
+        (Reopen::Sent, false) => Some(REOPENED_NO_WINDOW),
+        (Reopen::NotSent(NotSent::ZeroTimeout), false) => Some(ZERO_TIMEOUT_NOT_REOPENED),
         (Reopen::NotSent(NotSent::Minimized), false) => Some(MINIMIZED_NOT_REOPENED),
         (Reopen::NotSent(NotSent::Hidden), false) => Some(HIDDEN_NOT_REOPENED),
         (Reopen::NotSent(NotSent::Unknown), false) => Some(NOT_REOPENED),
@@ -252,10 +271,8 @@ pub(crate) fn reopen_suggestion(reopen: Reopen, has_window: bool) -> Option<&'st
 
 /// What the other-Space answer of a launch says first: that the app was asked for a window.
 pub(crate) fn asked_prefix(reopen: Reopen) -> Option<&'static str> {
-    use crate::system::window::other_space::{ASKED_NO_WINDOW, ASKED_NOT_WAITED};
     match reopen {
-        Reopen::Sent { waited: true } => Some(ASKED_NO_WINDOW),
-        Reopen::Sent { waited: false } => Some(ASKED_NOT_WAITED),
+        Reopen::Sent => Some(crate::system::window::other_space::ASKED_NO_WINDOW),
         Reopen::NotSent(_) => None,
     }
 }
