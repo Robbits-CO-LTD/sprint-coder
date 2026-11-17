@@ -120,11 +120,15 @@ pub fn execute(
 /// The window the cursor is drawn at the height of for a pointer gesture at
 /// `resolved`: the element's own window (a sheet or popover of the window the
 /// ref was captured in) or that captured window, or none for a coordinate.
+/// None also where the adapter does not opt in, as before.
 pub(crate) fn cursor_window(
     resolved: &ResolvedPoint,
     adapter: &dyn PlatformAdapter,
     context: &CommandContext,
 ) -> Option<String> {
+    if !adapter.names_pointer_gesture_window() {
+        return None;
+    }
     let top_level = resolved
         .source_entry
         .as_ref()

@@ -302,6 +302,14 @@ pub trait ObservationOps: Send + Sync {
         Err(AdapterError::not_supported("get_insertion_caret"))
     }
 
+    /// Whether a ref `hover` or `drag` names a window for the agent's cursor
+    /// (the element's own window, or the one the ref was captured in), as a
+    /// ref action does. Off by default: those instructions then name no
+    /// window, as they always have.
+    fn names_pointer_gesture_window(&self) -> bool {
+        false
+    }
+
     /// The window the agent's cursor is drawn at the height of for an action
     /// on `handle`, in place of `top_level` (the window the ref was captured
     /// in), when the element itself lives in a separate window attached to

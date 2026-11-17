@@ -196,6 +196,10 @@ impl ObservationOps for MacOSAdapter {
         ))
     }
 
+    fn names_pointer_gesture_window(&self) -> bool {
+        true
+    }
+
     fn element_cursor_window(
         &self,
         handle: &NativeHandle,
