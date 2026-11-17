@@ -259,8 +259,10 @@ const BATCH_OPTIONS = '--stop-on-error --timeout-ms=';
  * on its own, more strictly than the executable reads it: an option not listed, one given twice, a
  * value that starts with `-`, `--` or a shared option makes it `null`.
  */
-function runTargets(argv: readonly string[]): Target[] | null {
-  const mode = desktopControlArgvMode(argv);
+function runTargets(argv: readonly string[], platform: NodeJS.Platform): Target[] | null {
+  // `close-app` is `background` on macOS (it only asks the app to quit), and still never covered:
+  // it is in neither list below.
+  const mode = desktopControlArgvMode(argv, platform);
   if (mode !== 'read' && mode !== 'background') return null;
   const read = readDesktopControlCommand(argv);
   if (read === null || read.help || read.command === undefined) return null;
@@ -481,7 +483,7 @@ export function desktopAppGrantOffer(
   lookup: DesktopAppGrantLookup = {},
 ): DesktopAppGrantKey | null {
   try {
-    const targets = runTargets(argv);
+    const targets = runTargets(argv, lookup.platform ?? process.platform);
     if (targets === null) return null;
     const owner = recordedOwner(targets, desktopControlOwnerReader(lookup));
     return owner === null || !grantable(owner, lookup) ? null : keyOf(owner);
@@ -501,7 +503,7 @@ export function desktopAppGrantCovering(
 ): DesktopAppGrantKey | null {
   try {
     if (granted.length === 0) return null;
-    const targets = runTargets(argv);
+    const targets = runTargets(argv, lookup.platform ?? process.platform);
     if (targets === null) return null;
     const owner = recordedOwner(targets, desktopControlOwnerReader(lookup));
     if (owner === null) return null;

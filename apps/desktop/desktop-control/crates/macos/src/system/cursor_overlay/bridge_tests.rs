@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use agent_desktop_core::CursorOverlayConfig;
 
@@ -62,4 +63,12 @@ fn both_caret_phases_draw_only_the_caret_and_leave_the_pointer_alone() {
     for phase in [CursorPhase::Travel, CursorPhase::Drag, CursorPhase::Effect] {
         assert!(!is_caret(&instruction(phase, false)), "{phase:?}");
     }
+}
+
+#[test]
+fn a_window_record_answer_reads_as_on_off_or_unknown() {
+    assert_eq!(listed_from(1), Listed::On);
+    assert_eq!(listed_from(0), Listed::Off);
+    assert_eq!(listed_from(-1), Listed::Unknown);
+    assert_eq!(listed_from(7), Listed::Unknown);
 }

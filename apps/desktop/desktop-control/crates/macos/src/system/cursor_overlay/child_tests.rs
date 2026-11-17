@@ -443,3 +443,44 @@ fn travel_after_a_successful_drag_animates_from_the_drag_destination() {
         Some(&new_destination)
     );
 }
+
+#[test]
+fn a_shown_cursor_named_to_a_window_reads_that_window_at_the_quick_interval() {
+    let mut state = OverlayState {
+        anchor: Anchor::Window(42),
+        ..OverlayState::default()
+    };
+    assert_eq!(quick_check_window(&state, QUICK_CHECK_EVERY), Some(42));
+    assert_eq!(
+        quick_check_window(&state, QUICK_CHECK_EVERY - Duration::from_millis(1)),
+        None,
+        "not before the interval"
+    );
+    state.resting = true;
+    assert_eq!(
+        quick_check_window(&state, Duration::from_secs(5)),
+        None,
+        "a resting cursor reads nothing"
+    );
+    for anchor in [Anchor::Free, Anchor::Unreadable] {
+        let state = OverlayState {
+            anchor,
+            ..OverlayState::default()
+        };
+        assert_eq!(quick_check_window(&state, Duration::from_secs(5)), None);
+    }
+    assert!(
+        QUICK_CHECK_EVERY <= Duration::from_millis(250) && QUICK_CHECK_EVERY < RESTACK_EVERY,
+        "the quick check hides the cursor well before the restack would"
+    );
+}
+
+#[test]
+fn only_a_window_read_as_off_the_screen_sends_the_cursor_to_the_restack() {
+    assert!(quick_check_hides(bridge::Listed::Off));
+    assert!(!quick_check_hides(bridge::Listed::On));
+    assert!(
+        !quick_check_hides(bridge::Listed::Unknown),
+        "a failed read is left to the regular restack"
+    );
+}

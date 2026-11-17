@@ -77,9 +77,10 @@ impl Placement {
 /// using, another window of the same app included, and is never left above
 /// one once the user brings it to the front.
 ///
-/// The cost: the named window's own sheets and popovers are separate windows
-/// in front of it, so the overlay is hidden under them. Keeping it off the
-/// user's windows comes first.
+/// The named window's attached sheets and popovers are separate windows, but
+/// the window server keeps a window and its attached windows together, so
+/// the overlay ordered directly above the named window is above them too
+/// (measured on macOS 27, 2026-11-17), and nothing more is needed for them.
 pub(super) fn resolve(windows: &[ListedWindow], named: bool, number: u32) -> Placement {
     if !named {
         return Placement::FREE;

@@ -432,6 +432,49 @@ void sc_cursor_overlay_restack(void) {
     }
 }
 
+/// Whether the overlay is placed directly above its named window now. A named
+/// window always resolves to above it or held off the screen.
+bool sc_cursor_overlay_placed_above(void) {
+    return ADAnchored() && !ADPlacementHidden();
+}
+
+/// Whether window `number` is on the screen, from that one window's record:
+/// 1 on the screen, 0 not (no such window, or minimized, hidden or on another
+/// Space), -1 when the record could not be read.
+int8_t sc_cursor_overlay_window_listed(uint32_t number) {
+    @autoreleasepool {
+        if (number == 0) {
+            return 0;
+        }
+        // The array holds the window number itself as each value (no
+        // callbacks), pointer-wide so it reads the same either way it is read.
+        const void *requested[1] = {(const void *)(uintptr_t)number};
+        CFArrayRef numbers = CFArrayCreate(NULL, requested, 1, NULL);
+        if (numbers == NULL) {
+            return -1;
+        }
+        CFArrayRef described = CGWindowListCreateDescriptionFromArray(numbers);
+        CFRelease(numbers);
+        if (described == NULL) {
+            return -1;
+        }
+        NSArray *records = CFBridgingRelease(described);
+        for (id record in records) {
+            if (![record isKindOfClass:NSDictionary.class]) {
+                continue;
+            }
+            id listedNumber = record[(__bridge NSString *)kCGWindowNumber];
+            if (![listedNumber isKindOfClass:NSNumber.class] ||
+                [listedNumber unsignedIntValue] != number) {
+                continue;
+            }
+            id onScreen = record[(__bridge NSString *)kCGWindowIsOnscreen];
+            return [onScreen isKindOfClass:NSNumber.class] && [onScreen boolValue] ? 1 : 0;
+        }
+        return 0;
+    }
+}
+
 static void ADHighlightTarget(const AgentDesktopCursorRenderConfig *config, double mainHeight) {
     const double *target = config->target;
     ADHighlightShow(NSMakeRect(target[0] - ADHighlightPad,
