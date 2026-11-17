@@ -359,8 +359,20 @@ fn each_outcome_picks_its_text_other_space_first_and_keeps_the_chromium_hint() {
     )));
     assert!(other.ends_with(LAUNCH_GUIDANCE));
     assert!(!other.contains("run it once"));
-    let zero = suggestion(not_sent(NotSent::ZeroTimeout), false, space, false).unwrap();
-    assert!(zero.starts_with("The app is running, but its window (w-7)"));
+    // A launch that did not wait did not ask: it says to launch once with a wait, not the
+    // other-Space answer (which ends with "do not repeat the launch"), and reads no window.
+    let read_for_zero = Cell::new(false);
+    let zero = suggestion(
+        not_sent(NotSent::ZeroTimeout),
+        false,
+        || {
+            read_for_zero.set(true);
+            Some(vec![7])
+        },
+        false,
+    );
+    assert_eq!(zero.as_deref(), Some(ZERO_TIMEOUT_NOT_REOPENED));
+    assert!(!read_for_zero.get());
     let hidden = suggestion(not_sent(NotSent::Minimized), false, space, false).unwrap();
     assert!(hidden.starts_with("The app is running, but its window (w-7)"));
     let read = Cell::new(false);

@@ -280,7 +280,9 @@ pub(crate) fn asked_prefix(reopen: Reopen) -> Option<&'static str> {
 /// The suggestion of an attach to a running app without a usable window, from what was done
 /// (`reopen`) and whether a window came: without one, the other-Space explanation when the app
 /// has such windows (`other_space`, read only then: the numbers, `None` when not read), with the
-/// asked sentence first; otherwise the text for what was done. For a Chromium app, core's hint
+/// asked sentence first; otherwise the text for what was done. A launch that did not ask because
+/// it does not wait (`--timeout 0`) says only that: its next step is one launch that waits, and
+/// the other-Space answer ends with "do not repeat the launch". For a Chromium app, core's hint
 /// (which core adds only to a result without a suggestion) is appended to any such text.
 pub(crate) fn suggestion(
     reopen: Reopen,
@@ -288,7 +290,8 @@ pub(crate) fn suggestion(
     other_space: impl FnOnce() -> Option<Vec<i64>>,
     chromium: bool,
 ) -> Option<String> {
-    let text = (!has_window)
+    let explains_window = !has_window && reopen != Reopen::NotSent(NotSent::ZeroTimeout);
+    let text = explains_window
         .then(other_space)
         .flatten()
         .and_then(|numbers| {
