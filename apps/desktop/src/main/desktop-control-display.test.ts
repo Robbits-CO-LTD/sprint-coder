@@ -434,6 +434,15 @@ describe('desktop-control approval description', () => {
       allowTaskGrant: false,
     });
     expect(describeArgv(['close-app', 'charmap']).notes).toContain('開いているアプリを閉じます。');
+    // A screenshot's card says where the picture goes.
+    expect(describeArgv(['screenshot', '--window-id', 'w-5903576'])).toMatchObject({
+      kind: 'read',
+      title: '画面を撮ります',
+      notes: [
+        '撮った画像は、この Task の AI（接続先のサービス）に送ります。画像を受け取れない接続には、画像の大きさなどだけを送ります。',
+      ],
+    });
+    expect(describeArgv(['snapshot', '--window-id', 'w-5903576']).notes).toEqual([]);
     expect(describeArgv(['press', 'ctrl+c', '--app', 'charmap'])).toMatchObject({
       title: 'キーを押します',
       text: 'ctrl+c',

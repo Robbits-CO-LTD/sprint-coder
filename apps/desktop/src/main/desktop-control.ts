@@ -1520,6 +1520,12 @@ function batchRefusal(
       return refusal(`batch の中の ${command} は使えない`);
     if (COMMAND_OPTIONS[command] === undefined || WITH_SUBCOMMANDS.has(command))
       return refusal(`batch の中の ${command} を判定できない`);
+    // Main makes a screenshot's picture fit for the model only from a run of its own
+    // (`desktop-control-screenshot.ts`); inside a batch it would reach the model as cut text.
+    if (command === 'screenshot')
+      return refusal(
+        'batch の中の screenshot は使えない。screenshot は batch に入れず、それだけで実行する',
+      );
     const fields = (args ?? {}) as Record<string, unknown>;
     const platform = lookup.platform ?? process.platform;
     if (platform === 'darwin' && MAC_HELPER_COMMANDS.has(command)) {

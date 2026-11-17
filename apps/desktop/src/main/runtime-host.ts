@@ -27,6 +27,7 @@ import {
   type RuntimeSkillInput,
   type RuntimeTeamMcpOption,
   type RuntimeWorkspaceSet,
+  runtimeToolResultFits,
   runtimeWorkspaceSetFromLegacyPath,
 } from '../runtime-host/protocol';
 import {
@@ -792,12 +793,20 @@ export class RuntimeHostClient {
       void this.onToolRequest(raw.taskId, raw.turnId, raw.request, controller.signal)
         .then((output) => {
           if (this.active.get(raw.turnId) !== active) return;
+          // The runtime drops a larger result unread, and the call would wait for its whole
+          // deadline; it is told the result was too large instead.
+          const fits = runtimeToolResultFits(output);
           this.post({
             ...this.base(raw.taskId, raw.turnId, raw.operationId, raw.seq + 1),
             type: 'tool_result',
             callId: raw.request.callId,
-            success: true,
-            output,
+            success: fits,
+            output: fits
+              ? output
+              : {
+                  code: 'TOOL_RESULT_TOO_LARGE',
+                  message: 'The tool result was too large to return.',
+                },
           });
         })
         .catch((error: unknown) => {

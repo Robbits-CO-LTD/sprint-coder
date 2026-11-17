@@ -390,6 +390,7 @@ function renderDesktopControl(command: string, macos: boolean): string[] {
     '- 見る（snapshot）→ 操作する → もう一度見て確かめる、を繰り返す。ref はその snapshot の中だけで有効。',
     '- 結果の disposition.delivery: delivered_verified は届いて結果も確かめ済み。delivered_unverified は届いたが結果を自動では確かめていないだけで、失敗ではない（止まらずに画面を読み直して確かめる。Worker への指示でも失敗や成否不明として扱わせない）。not_delivered は何も送っていない。delivery_uncertain・unknown は届いたか分からない。届いた・分からない操作は、確かめる前に繰り返さない（2 回届く）。',
     '- 結果を確かめる時は -i なしの snapshot を使う（文字や状態も出る）。-i は操作できる部品を探す時だけ。',
+    '- screenshot は、撮った画像を見られる形で結果に添え、画像の大きさ（width・height）、元の大きさ（source_width・source_height）、scale_factor、points_per_pixel（画像の 1 px が何ポイントか）を返す。接続が画像を受け取れない時は画像を添えず、結果の picture にそう書く。保存先は指定できず、batch の中では使えない（screenshot だけで実行する）。部品の ref は snapshot で取る。',
     '- 操作は裏だけで行い、利用者のマウス・キーボード・前面の窓を使わない。文字は set-value、選択は select、メニューは expand か click で入れる。前面を使う操作（--headed、focus-window、restore、maximize、press、type、focus など）は利用者がはっきり頼んだ時だけ使う。裏の操作が失敗しても前面の操作で取り返さず、できなかったと報告する。最小化した窓は操作できない（restore は前面を使う）。',
     ...(macos
       ? [

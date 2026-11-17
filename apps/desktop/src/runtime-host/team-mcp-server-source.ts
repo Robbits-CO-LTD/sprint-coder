@@ -594,12 +594,24 @@ function contentForResult(result) {
   return [
     {
       type: 'text',
-      text: JSON.stringify({
-        path: result.path,
-        mimeType: result.mimeType,
-        byteLength: result.byteLength,
-        sha256: result.sha256,
-      }),
+      text: JSON.stringify(
+        Object.assign(
+          {
+            path: result.path,
+            mimeType: result.mimeType,
+            byteLength: result.byteLength,
+            sha256: result.sha256,
+          },
+          typeof result.picture === 'string'
+            ? {
+                picture: result.picture,
+                exitCode: result.exitCode,
+                stdout: result.stdout,
+                stderr: result.stderr,
+              }
+            : {},
+        ),
+      ),
     },
     { type: 'image', mimeType: match[1], data: match[2] },
   ];

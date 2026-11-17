@@ -251,6 +251,10 @@ const LAUNCH_FRONT_NOTE = '起動した窓が前面に出ます。';
 const MAC_URL_LAUNCH_NOTE =
   'ブラウザーが動いていなければ、起動した窓は今使っている窓の後ろに開きます。すでに動いているブラウザーには、新しい窓で開くよう頼みます。その時ブラウザーが自分で前に出たら、直前に使っていたアプリや窓を前面に戻します。新しい窓が一瞬だけ手前に見え、その間に打った文字が新しい窓に入ることがあります。キーボードやマウスを使っていた時などは、戻さないことがあります。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
+// A screenshot's picture goes to the Task's model where its connection takes pictures
+// (`desktop-control-screenshot.ts`); elsewhere only what the picture is.
+const SCREENSHOT_NOTE =
+  '撮った画像は、この Task の AI（接続先のサービス）に送ります。画像を受け取れない接続には、画像の大きさなどだけを送ります。';
 // Minimizing hands the front to another window, so it is never covered by an app-wide grant.
 const MINIMIZE_NOTE = '窓を最小化します。最小化すると、次の窓が手前に来ます。';
 // `select <ref>` without a value chooses the part the ref names itself, not an option inside it.
@@ -627,6 +631,7 @@ function describe(
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
+  if (commands.includes('screenshot')) notes.unshift(SCREENSHOT_NOTE);
   if (commands.includes('minimize')) notes.unshift(MINIMIZE_NOTE);
   if (menuItems) notes.unshift(MENU_NOTE);
   if (mode === 'foreground') {

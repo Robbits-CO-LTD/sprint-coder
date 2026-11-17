@@ -1259,6 +1259,50 @@ describe('Codex runtime probe', () => {
     });
   });
 
+  it('returns a desktop-control screenshot as its metadata text and an inline image', () => {
+    const stdout = JSON.stringify({
+      version: '2.6',
+      ok: true,
+      command: 'screenshot',
+      data: { format: 'jpg', width: 1568, height: 938, scale_factor: 2, points_per_pixel: 1.0689 },
+    });
+    const response = codexDynamicToolResponseFromManaged({
+      success: true,
+      output: {
+        executionId: 'e-1',
+        exitCode: 0,
+        stdout,
+        stderr: '',
+        truncated: false,
+        picture: '撮った画像をこの結果に添えた。',
+        mimeType: 'image/jpeg',
+        byteLength: 3,
+        sha256: 'b'.repeat(64),
+        dataUrl: 'data:image/jpeg;base64,QUFB',
+      },
+    });
+    expect(response).toEqual({
+      success: true,
+      contentItems: [
+        {
+          type: 'inputText',
+          text: JSON.stringify({
+            mimeType: 'image/jpeg',
+            byteLength: 3,
+            sha256: 'b'.repeat(64),
+            picture: '撮った画像をこの結果に添えた。',
+            exitCode: 0,
+            stdout,
+            stderr: '',
+          }),
+        },
+        { type: 'inputImage', imageUrl: 'data:image/jpeg;base64,QUFB' },
+      ],
+    });
+    // The base64 travels only as the image, never inside the text.
+    expect(JSON.stringify(response.contentItems[0])).not.toContain('QUFB');
+  });
+
   it('never enables native Web search for a Team turn', () => {
     const base = {
       command: 'node',

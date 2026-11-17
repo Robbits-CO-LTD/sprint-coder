@@ -619,7 +619,7 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
       'success' in value &&
       typeof value.success === 'boolean' &&
       'output' in value &&
-      isBoundedJson(value.output, 1024 * 1024)
+      isBoundedJson(value.output, RUNTIME_TOOL_RESULT_MAX_BYTES)
     );
   if (value.type === 'prepare_images') return isRuntimeImagePreparation(value);
   return (
@@ -1108,6 +1108,17 @@ function isBoundedCallId(value: unknown): value is string {
     value.length <= 128 &&
     /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value)
   );
+}
+
+/**
+ * The most JSON a managed tool's result (`tool_result.output`) may be. The runtime drops a larger
+ * envelope unread, so Main never sends one (`runtimeToolResultFits`).
+ */
+export const RUNTIME_TOOL_RESULT_MAX_BYTES = 1024 * 1024;
+
+/** Whether a managed tool's result fits the `tool_result` envelope. */
+export function runtimeToolResultFits(output: unknown): boolean {
+  return isBoundedJson(output, RUNTIME_TOOL_RESULT_MAX_BYTES);
 }
 
 function isBoundedJson(value: unknown, maxBytes: number): boolean {

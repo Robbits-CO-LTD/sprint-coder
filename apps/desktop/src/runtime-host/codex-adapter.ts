@@ -1288,6 +1288,15 @@ export function codexDynamicToolResponseFromManaged(response: unknown): CodexDyn
             mimeType: output['mimeType'],
             byteLength: output['byteLength'],
             sha256: output['sha256'],
+            // A desktop-control screenshot: what the picture is and what the run printed beside it.
+            ...(typeof output['picture'] === 'string'
+              ? {
+                  picture: output['picture'],
+                  exitCode: output['exitCode'],
+                  stdout: output['stdout'],
+                  stderr: output['stderr'],
+                }
+              : {}),
           }).slice(0, 16_384),
         },
         { type: 'inputImage', imageUrl: dataUrl },

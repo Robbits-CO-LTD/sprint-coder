@@ -593,6 +593,12 @@ import type {
   RuntimePreparedImageAttachments,
   RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
+import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
+import {
+  isScreenshotToolResult,
+  screenshotToolResultFor,
+  turnModelTakesPictures,
+} from './desktop-control-screenshot';
 
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
@@ -4720,7 +4726,32 @@ export class IpcRouter {
         toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
         accepted: false,
       } satisfies ProviderImageBridgeDispatchResult);
-    return this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
+    const result = await this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
+    // A desktop-control screenshot's picture goes to the Turn's own model as an image (the CLI
+    // adapters hand a `dataUrl` over as one), only when that model takes images, and only within
+    // what the runtime protocol carries. Every other result is as it was.
+    return screenshotToolResultFor(
+      result,
+      isScreenshotToolResult(result) && this.screenshotPictureAccepted(taskId, turnId),
+      RUNTIME_TOOL_RESULT_MAX_BYTES - 64 * 1024,
+    );
+  }
+
+  /**
+   * Whether the model of this primary CLI Turn takes images, from the model catalog
+   * (`multimodalInput`), for the model the Turn asked for or the one it resolved to. A Team
+   * Worker's Turn, or a model whose answer is unknown, gets no picture.
+   */
+  private screenshotPictureAccepted(taskId: string, turnId: string): boolean {
+    if (this.managedWorkerTurn.has(turnId)) return false;
+    try {
+      return turnModelTakesPictures(
+        this.persistence.getTurnModelIdentity(taskId, turnId),
+        (connectionId, modelId) => this.modelCatalog.find(connectionId, modelId),
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**

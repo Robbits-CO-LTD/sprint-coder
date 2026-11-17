@@ -834,7 +834,14 @@ describe('desktop-control arguments outside the command sandbox', () => {
     [['batch', '[{"command":"mcp"}]'], 'mcp は使えない'],
     [['batch', '[{"command":"clipboard-get","args":{}}]'], 'clipboard-get は使えない'],
     [['batch', '[{"command":"launch","args":{"app":"cmd.exe"}}]'], 'cmd.exe は起動できない'],
-    [['batch', '[{"command":"screenshot","args":{"path":"C:\\\\x.png"}}]'], 'path は使えない'],
+    [
+      ['batch', '[{"command":"screenshot","args":{"path":"C:\\\\x.png"}}]'],
+      'batch の中の screenshot は使えない',
+    ],
+    [
+      ['batch', '[{"command":"screenshot","args":{"window_id":"w-1"}}]'],
+      'screenshot は batch に入れず、それだけで実行する',
+    ],
     [['batch', '[{"command":"snapshot","args":{"trace":"C:\\\\x.jsonl"}}]'], 'trace は使えない'],
     [['batch', '[{"command":"type","args":{"ref_id":"@s1:e2","stdin":true}}]'], 'stdin は使えない'],
     [['batch', '[{"command":"batch","args":{}}]'], 'batch の中の batch'],
@@ -862,6 +869,28 @@ describe('desktop-control arguments outside the command sandbox', () => {
     const refusal = refused(argv);
     expect(refusal).toMatch(/^デスクトップ操作の実行を拒否した: .+。$/u);
     expect(refusal).toContain(reason);
+  });
+});
+
+describe('a screenshot inside a batch', () => {
+  it.each(['darwin', 'win32'] as const)('is refused on %s before any card', (platform) => {
+    const refusal = desktopControlArgvRefusal(
+      [
+        'batch',
+        '[{"command":"snapshot","args":{}},{"command":"screenshot","args":{"app":"Calculator"}}]',
+      ],
+      ['/work/repo'],
+      { platform, realpath: (path: string) => path },
+    );
+    expect(refusal).toBe(
+      'デスクトップ操作の実行を拒否した: batch の中の screenshot は使えない。screenshot は batch に入れず、それだけで実行する。',
+    );
+    expect(
+      desktopControlArgvRefusal(['screenshot', '--window-id', 'w-1'], ['/work/repo'], {
+        platform,
+        realpath: (path: string) => path,
+      }),
+    ).toBeNull();
   });
 });
 
