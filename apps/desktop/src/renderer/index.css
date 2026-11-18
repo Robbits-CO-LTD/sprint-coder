@@ -6903,6 +6903,48 @@ button.composer-permission-chip[aria-expanded='true'] {
   line-height: 1.5;
   color: var(--text-secondary);
 }
+.settings-skill-guide,
+.settings-cli-skills {
+  font-size: 12.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.settings-skill-guide p,
+.settings-skill-guide dl,
+.settings-cli-skills ul {
+  margin: 0 0 8px;
+}
+.settings-skill-guide dl {
+  display: grid;
+  grid-template-columns: fit-content(36%) minmax(0, 1fr);
+  gap: 4px 12px;
+}
+.settings-skill-guide dt {
+  font-weight: 600;
+}
+.settings-skill-guide dd {
+  margin: 0;
+}
+.settings-skill-guide summary,
+.settings-cli-skills summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.settings-skill-guide details[open] > summary,
+.settings-cli-skills[open] > summary {
+  margin-bottom: 8px;
+}
+.settings-cli-skills ul {
+  list-style: none;
+  padding: 0;
+}
+.settings-cli-skills li + li {
+  margin-top: 6px;
+}
+.settings-cli-skills small {
+  display: block;
+  color: var(--text-secondary);
+}
 .settings-skill-heading-actions {
   display: flex;
   flex: none;
@@ -6940,6 +6982,9 @@ button.composer-permission-chip[aria-expanded='true'] {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+.settings-builtin-skill > span:last-child {
+  white-space: nowrap;
 }
 .settings-builtin-skill small,
 .settings-skill-row small {

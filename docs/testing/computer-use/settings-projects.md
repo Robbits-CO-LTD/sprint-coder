@@ -120,7 +120,7 @@
 
 - 前提: 外部.claude/.agents/.codex配下にe2e-writerがある隔離Skill home。
 - 操作: 設定のSkillsを開く。
-- 合格条件: 内蔵SkillとSkill Creator作成Skillを管理する説明。外部e2e-writer、候補選択、import-skillは出ない。
+- 合格条件: 設定画面には内蔵・作成済みSkillの説明と、対応するCLI用Skillの一覧がある。使い方には「/」、接続別の候補、読み込み先と自動選択が示される。CLI用Skillを一覧からインストールする操作はない。
 - 証拠・制約: Skills一覧画面。
 
 <a id="settings-dialog-09"></a>

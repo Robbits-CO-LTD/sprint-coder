@@ -412,6 +412,7 @@ let runtimeStatusUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let taskSelectionGeneration = 0;
+let skillCatalogRequest = 0;
 // Advances only when the selected Task actually changes. A same-Task re-select (the Turn seq-gap
 // resync) must not look like a switch to an in-flight Team operation, but A -> B -> A still does.
 let taskSwitchGeneration = 0;
@@ -1590,6 +1591,7 @@ export const useAppStore = create<AppState>((set, get) => {
           // Composer back to the legacy chip for no reason.
           set({ modelPicker: { taskId, enabled: get().modelPicker.enabled, selection: saved } });
         await get().loadRuntime();
+        void get().loadSkills();
         await get().refreshDraftAttachments(taskId);
       } catch (err) {
         // Task-safe: only undoes this write, and only while the store still holds it. A rejection
@@ -1618,6 +1620,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         await window.sprintCoder.settings.setRuntime(kind, taskId ?? undefined);
         await get().loadRuntime();
+        void get().loadSkills();
         await refreshModelPicker(get);
         if (taskId !== null) await get().refreshDraftAttachments(taskId);
       } catch (err) {
@@ -1786,7 +1789,7 @@ export const useAppStore = create<AppState>((set, get) => {
       // one Task's file under another's name (issue #39).
       if (get().selectedTaskId !== taskId) {
         clearFileEdits();
-        set({ liveEditTaskId: null });
+        set({ liveEditTaskId: null, skillCatalog: [], skillCatalogRevision: null });
       }
       set({ selectedTaskId: taskId, loadingMessages: true, error: null });
       if (currentUnsubscribe) {
@@ -2760,7 +2763,10 @@ export const useAppStore = create<AppState>((set, get) => {
     async loadSkills() {
       if (!window.sprintCoder || typeof window.sprintCoder.skills?.list !== 'function') return;
       try {
-        const catalog = await window.sprintCoder.skills.list();
+        const request = ++skillCatalogRequest;
+        const taskId = get().selectedTaskId;
+        const catalog = await window.sprintCoder.skills.list(taskId ?? undefined);
+        if (get().selectedTaskId !== taskId || request !== skillCatalogRequest) return;
         if (get().skillCatalogRevision === catalog.revision) return;
         set({ skillCatalog: catalog.items, skillCatalogRevision: catalog.revision });
       } catch {

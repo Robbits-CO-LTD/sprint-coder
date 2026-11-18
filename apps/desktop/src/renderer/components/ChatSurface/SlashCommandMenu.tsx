@@ -3,7 +3,13 @@ import { virtualWindow } from './skill-picker';
 
 export type SlashMenuItem = Readonly<{
   key: string;
-  group: 'コマンド' | 'Chat Skills' | 'Team Skills' | 'Built-in Skills';
+  group:
+    | 'コマンド'
+    | 'Chat Skills'
+    | 'Team Skills'
+    | 'Built-in Skills'
+    | 'Codex Skills'
+    | 'Claude Code Skills';
   command: string;
   label: string;
   description: string;

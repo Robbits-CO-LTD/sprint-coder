@@ -886,6 +886,108 @@ export class SkillStore {
     return entries;
   }
 
+  /** User and workspace discovery stay outside the CLI's ambient configuration.
+   * Only files in a user-selected, digest-checked package enter the Turn. */
+  async nativeCandidates(
+    source: SkillProvider,
+    roots: readonly string[],
+  ): Promise<SkillCandidate[]> {
+    const found = new Map<string, SkillCandidate>();
+    for (const root of new Set(roots)) {
+      // Do not follow a workspace's .claude/.agents directory outside the selected tree.
+      // The workspace itself may have a canonical alias (e.g. /tmp on macOS).
+      // Its skill directory and configuration directory must be real directories.
+      const directory = await lstat(root).catch(() => null);
+      const config = await lstat(dirname(root)).catch(() => null);
+      if (!directory?.isDirectory() || !config?.isDirectory()) continue;
+      const base = await realpath(dirname(dirname(root))).catch(() => null);
+      if (!base) continue;
+      const canonical = join(base, basename(dirname(root)), basename(root));
+      const entries = await this.scanSources(
+        source === 'claude' ? { claudePath: canonical } : { agentsPath: canonical },
+      ).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT' || error.code === 'EACCES' || error.code === 'EPERM') return [];
+        throw error;
+      });
+      for (const entry of entries) {
+        if (entry.sourceRoot === canonical && entry.valid && !found.has(entry.skillId))
+          found.set(entry.skillId, entry);
+      }
+    }
+    return [...found.values()];
+  }
+
+  async readNative(
+    candidate: SkillCandidate,
+    expectedDigest?: string,
+  ): Promise<ResolvedSkillPackage> {
+    if (!issuedCandidates.has(candidate) || !candidate.valid)
+      throw new SkillStoreError('INVALID_SKILL', 'Invalid native Skill candidate');
+    const snapshot = await readSnapshot(candidate);
+    if (expectedDigest !== undefined && expectedDigest !== snapshot.digest)
+      throw new SkillStoreError('SOURCE_CHANGED', 'Native Skill changed after selection');
+    const file = snapshot.files.find((item) => item.path === 'SKILL.md')!;
+    const content = file.bytes.toString('utf8');
+    if (
+      content.length > 40_000 ||
+      snapshot.files.some((item) => containsCredential(item.bytes.toString('utf8')))
+    )
+      throw new SkillStoreError('INVALID_SKILL', 'Native Skill is not eligible for dispatch');
+    const runtime = candidate.provider === 'claude' ? 'claude' : 'codex';
+    const support = snapshot.compatibility.runtimeSupport[runtime];
+    if (
+      runtime === 'codex' &&
+      (!SKILL_ID.test(snapshot.name) || !isWindowsSafePathSegment(snapshot.name))
+    )
+      throw new SkillStoreError('INVALID_SKILL', 'Codex Skill name is not a CLI identifier');
+    const runtimeName = runtime === 'codex' ? snapshot.name : candidate.skillId;
+    const packagePath = this.revisionPath(candidate.provider, runtimeName, snapshot.digest);
+    if (expectedDigest !== undefined) {
+      if (support === 'blocked')
+        throw new SkillStoreError('INVALID_SKILL', 'Incompatible native Skill');
+      const parent = dirname(packagePath);
+      await ensurePrivateDirectory(parent);
+      if (!(await pathExists(packagePath))) {
+        const staging = join(parent, `.staging-${randomUUID()}`);
+        try {
+          await writePackageFiles(staging, snapshot.files);
+          try {
+            await rename(staging, packagePath);
+          } catch (error) {
+            if (!(await pathExists(packagePath))) throw error;
+          }
+          await syncDirectory(parent);
+        } finally {
+          await rm(staging, { recursive: true, force: true });
+        }
+      }
+    }
+    return {
+      source: candidate.provider,
+      skillId: candidate.skillId,
+      kind: 'chat',
+      digest: snapshot.digest,
+      name: snapshot.name,
+      description: snapshot.description,
+      enabled: support !== 'blocked',
+      activationPolicy: 'manual',
+      removable: false,
+      exportable: false,
+      packagePath,
+      content,
+      compatibility: {
+        ...snapshot.compatibility,
+        runtimeSupport: {
+          codex: 'blocked',
+          claude: 'blocked',
+          provider: 'blocked',
+          grok: 'blocked',
+          [runtime]: support,
+        },
+      },
+    };
+  }
+
   async resolveSelectable(
     source: SkillSource,
     skillId: string,
@@ -1044,6 +1146,19 @@ async function materializeSkill(
   files: { path: string; bytes: Buffer }[],
   manifest: SkillManifest,
 ): Promise<void> {
+  await writePackageFiles(staging, [
+    ...files,
+    {
+      path: 'manifest.json',
+      bytes: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
+    },
+  ]);
+}
+
+async function writePackageFiles(
+  staging: string,
+  files: readonly { path: string; bytes: Buffer }[],
+): Promise<void> {
   const aclPaths: { path: string; kind: 'directory' | 'file' }[] = [];
   await mkdir(staging, { recursive: true, mode: 0o700 });
   aclPaths.push({ path: staging, kind: 'directory' });
@@ -1054,13 +1169,6 @@ async function materializeSkill(
     await writeExclusive(target, file.bytes, false);
     aclPaths.push({ path: target, kind: 'file' });
   }
-  const manifestPath = join(staging, 'manifest.json');
-  await writeExclusive(
-    manifestPath,
-    Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
-    false,
-  );
-  aclPaths.push({ path: manifestPath, kind: 'file' });
   if (process.platform === 'win32') await secureWindowsPaths(aclPaths);
   await syncDirectoryTree(staging);
 }

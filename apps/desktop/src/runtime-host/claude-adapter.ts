@@ -7,13 +7,14 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   mkdtempSync,
   statSync,
   writeFileSync,
   type Dirent,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, parse, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, parse, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
@@ -38,6 +39,7 @@ import type {
   RuntimeTeamMcpOption,
   RuntimeWorkspaceSet,
 } from './protocol';
+import { createPortableSkillFile } from '../main/skill-compatibility';
 import { expandSkillArguments } from './skill-arguments';
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import {
@@ -304,10 +306,16 @@ export class ClaudeRuntimeAdapter {
         }
       }
     };
-    const nativeSkills = skills.filter(
-      ({ profile, runtimeSupport, selected }) =>
-        selected !== false && profile === 'claude-native' && runtimeSupport === 'full',
-    );
+    const nativeSkills = skills.filter(({ profile, runtimeSupport, selected, path }) => {
+      if (selected === false) return false;
+      if (profile === 'claude-native' && runtimeSupport === 'full') return true;
+      // The protocol validates revisions/<source>/<name>/<digest>. External Claude
+      // Skills also need their package directory when they use only standard metadata.
+      return (
+        basename(dirname(dirname(path))) === 'claude' &&
+        (runtimeSupport === 'full' || runtimeSupport === 'portable')
+      );
+    });
     if (nativeSkills.length > 0) {
       skillPluginDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-skills-'));
       nativeSkillInvocation = materializeClaudeSkillPlugin(skillPluginDirectory, nativeSkills);
@@ -712,11 +720,18 @@ export function materializeClaudeSkillPlugin(
         errorOnExist: true,
         force: false,
       });
-      if (skill.arguments !== undefined) {
+      if (skill.runtimeSupport === 'portable' || skill.arguments !== undefined) {
         const skillPath = join(destination, 'SKILL.md');
+        const content = readFileSync(skillPath);
+        if (skill.runtimeSupport === 'portable') {
+          rmSync(join(destination, 'agents', 'openai.yaml'), { force: true });
+        }
+        const text = (
+          skill.runtimeSupport === 'portable' ? createPortableSkillFile(content) : content
+        ).toString('utf8');
         writeFileSync(
           skillPath,
-          expandSkillArguments(readFileSync(skillPath, 'utf8'), skill.arguments),
+          skill.arguments === undefined ? text : expandSkillArguments(text, skill.arguments),
           { mode: 0o600 },
         );
       }

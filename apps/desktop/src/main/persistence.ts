@@ -5430,6 +5430,7 @@ export interface PersistenceClient {
     provider: (
       selections: readonly TurnSkillSelection[],
       includeBuiltinTeamSkill: boolean,
+      skills: readonly PersistedTurnSkill[],
     ) => string,
   ): void;
   setAutoSkillProvider?(
@@ -7082,7 +7083,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private readonly contextLedger: ContextLedger;
   private nativeMutationAuthorityDisabled = false;
   private skillCatalogContextProvider:
-    | ((selections: readonly TurnSkillSelection[], includeBuiltinTeamSkill: boolean) => string)
+    | ((
+        selections: readonly TurnSkillSelection[],
+        includeBuiltinTeamSkill: boolean,
+        skills: readonly PersistedTurnSkill[],
+      ) => string)
     | null = null;
   private autoSkillProvider:
     ((runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[]) | null =
@@ -7140,6 +7145,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     provider: (
       selections: readonly TurnSkillSelection[],
       includeBuiltinTeamSkill: boolean,
+      skills: readonly PersistedTurnSkill[],
     ) => string,
   ): void {
     this.skillCatalogContextProvider = provider;
@@ -21483,6 +21489,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const skillCatalogContent = this.skillCatalogContextProvider?.(
       parsedSkills.map(({ selection }) => selection),
       shouldSealBuiltinTeamSkill,
+      parsedSkills,
     );
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),

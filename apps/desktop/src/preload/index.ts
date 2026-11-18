@@ -97,6 +97,7 @@ import {
   assistantPreferencesSetResultSchema,
   skillActivationPolicyInputSchema,
   skillCatalogSchema,
+  skillCatalogRequestSchema,
   skillCatalogItemSchema,
   skillDraftSchema,
   skillDraftCreateInputSchema,
@@ -1032,7 +1033,13 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetDefaultTeamPolicy, teamPolicySchema, z.undefined(), policy),
   },
   skills: {
-    list: () => invoke(IPC_CHANNELS.skillsList, emptyPayloadSchema, skillCatalogSchema, {}),
+    list: (taskId?: string) =>
+      invoke(
+        IPC_CHANNELS.skillsList,
+        skillCatalogRequestSchema,
+        skillCatalogSchema,
+        taskId === undefined ? {} : { taskId },
+      ),
     getDraftSelection: (taskId) =>
       invoke(IPC_CHANNELS.skillsGetDraftSelection, taskIdPayloadSchema, turnSkillSelectionsSchema, {
         taskId,

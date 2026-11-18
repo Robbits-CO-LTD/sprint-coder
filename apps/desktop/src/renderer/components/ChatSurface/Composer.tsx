@@ -441,9 +441,13 @@ export function Composer({ taskId }: { taskId: string }) {
           group:
             skill.ref.source === 'builtin'
               ? ('Built-in Skills' as const)
-              : skill.kind === 'team'
-                ? ('Team Skills' as const)
-                : ('Chat Skills' as const),
+              : skill.ref.source === 'agents'
+                ? ('Codex Skills' as const)
+                : skill.ref.source === 'claude'
+                  ? ('Claude Code Skills' as const)
+                  : skill.kind === 'team'
+                    ? ('Team Skills' as const)
+                    : ('Chat Skills' as const),
           command: `/${skill.ref.skillId}`,
           label: skill.name,
           description: skill.description,

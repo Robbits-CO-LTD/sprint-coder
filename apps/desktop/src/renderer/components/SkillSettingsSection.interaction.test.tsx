@@ -34,7 +34,9 @@ it.each([false, true])(
     document.body.append(container);
     const root = createRoot(container);
     const toggle = async (index: number, open: boolean) => {
-      const details = container.querySelectorAll('details')[index];
+      const details = container.querySelectorAll<HTMLDetailsElement>('.settings-skill-draft-files')[
+        index
+      ];
       if (!details) throw new Error('Draft details missing');
       await act(async () => {
         details.open = open;

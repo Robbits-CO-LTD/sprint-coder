@@ -4293,6 +4293,7 @@ export const skillCatalogItemSchema = z
     exportable: z.boolean(),
   })
   .strict();
+export const skillCatalogRequestSchema = z.object({ taskId: idSchema.optional() }).strict();
 export const skillCatalogSchema = z
   .object({
     revision: z.string().min(1).max(128),
@@ -4984,7 +4985,7 @@ export interface SprintCoderApi {
     setDefaultTeamPolicy(policy: TeamPolicy): Promise<void>;
   };
   skills: {
-    list(): Promise<SkillCatalog>;
+    list(taskId?: string): Promise<SkillCatalog>;
     getDraftSelection(taskId: string): Promise<TurnSkillSelection[]>;
     setDraftSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
     listDrafts(): Promise<SkillDraft[]>;
