@@ -1797,6 +1797,152 @@ if (runsWithElectronAbi)
       }
     });
 
+    it('waits for missing input and continues a reported next step exactly once', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Goal input');
+      let turn = persistence.startGoalTurn(task.id, '検証コードを確認する').started;
+      const finish = (turnId: string, body: string, report: object) => {
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turnId, stage);
+        persistence.appendDelta(
+          task.id,
+          turnId,
+          'answer-' + turnId,
+          body + '\n\n```sprint-goal\n' + JSON.stringify({ ...report, turnId }) + '\n```',
+        );
+        return persistence.completeTurnAndFinishGoal(task.id, turnId, 'completed');
+      };
+      const waiting = finish(turn.turnId, 'コードを教えてください。', {
+        status: 'waiting',
+        summary: '検証コードは何ですか？',
+      });
+      expect(waiting.task?.goalState?.status).toBe('waiting');
+      expect(waiting.event).toMatchObject({ message: { content: 'コードを教えてください。' } });
+      expect(persistence.continueGoalAfterTurn(task.id, turn.turnId)).toBeNull();
+      turn = persistence.startTurn(task.id, '314');
+      expect(persistence.getTask(task.id).goalState?.status).toBe('active');
+      const report = { status: 'continue', summary: 'コードを受領した', next: '桁数を確認する' };
+      finish(turn.turnId, '照合中です。', report);
+      const next = persistence.continueGoalAfterTurn(task.id, turn.turnId);
+      expect(next?.started.turnId).toBeTruthy();
+      expect(persistence.continueGoalAfterTurn(task.id, turn.turnId)).toBeNull();
+      expect(
+        persistence
+          .prepareContext(task.id, next!.started.turnId)
+          .fragments.some((f) => f.content.includes(report.next)),
+      ).toBe(true);
+      finish(next!.started.turnId, '確認できました。', {
+        status: 'achieved',
+        summary: '314は3桁で一致',
+      });
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      try {
+        expect(reopened.getTask(task.id).goalState).toMatchObject({
+          status: 'completed',
+          report: { summary: '314は3桁で一致' },
+        });
+        expect(reopened.getActiveTurnId(task.id)).toBeNull();
+      } finally {
+        reopened.close();
+      }
+    });
+
+    it.each(['model', 'workspace'] as const)(
+      'does not continue a Goal on a changed %s',
+      (change) => {
+        const { persistence, path } = createPersistence();
+        try {
+          const task = persistence.createTask('scope change');
+          const { started } = persistence.startGoalTurn(task.id, 'stay in scope');
+          for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+            persistence.changeStage(task.id, started.turnId, stage);
+          persistence.appendDelta(
+            task.id,
+            started.turnId,
+            'reply',
+            'First step.\n```sprint-goal\n' +
+              JSON.stringify({
+                turnId: started.turnId,
+                status: 'continue',
+                summary: 'first result',
+                next: 'second step',
+              }) +
+              '\n```',
+          );
+          persistence.completeTurnAndFinishGoal(task.id, started.turnId, 'completed');
+          if (change === 'model')
+            persistence.setTaskModelSelection(task.id, {
+              connectionId: 'builtin:codex-cli',
+              requestedProvider: 'openai',
+              requestedModel: 'different-model',
+            });
+          else persistence.setWorkspace(task.id, dirname(path));
+          expect(persistence.continueGoalAfterTurn(task.id, started.turnId)).toBeNull();
+          expect(persistence.getTask(task.id).goalState?.status).toBe('paused');
+          expect(persistence.getActiveTurnId(task.id)).toBeNull();
+        } finally {
+          persistence.close();
+        }
+      },
+    );
+
+    it('gives queued user input priority and never replays the old Goal continuation', () => {
+      const { persistence } = createPersistence();
+      try {
+        const task = persistence.createTask('queued before continuation');
+        const { started } = persistence.startGoalTurn(task.id, 'two steps');
+        persistence.queueInput(task.id, 'unrelated user request', 'queued-user');
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, started.turnId, stage);
+        const result = {
+          turnId: started.turnId,
+          status: 'continue',
+          summary: 'first step done',
+          next: 'second step',
+        };
+        persistence.appendDelta(
+          task.id,
+          started.turnId,
+          'reply',
+          'Step one.\n```sprint-goal\n' + JSON.stringify(result) + '\n```',
+        );
+        persistence.completeTurnAndFinishGoal(task.id, started.turnId, 'completed');
+        expect(persistence.continueGoalAfterTurn(task.id, started.turnId)).toBeNull();
+        const queued = persistence.startNextQueued(task.id);
+        expect(queued?.started.text).toBe('unrelated user request');
+        const canceled = persistence.cancelTurnAndFinishGoal(task.id, queued!.started.turnId);
+        expect(canceled.task).toBeNull();
+        expect(persistence.continueGoalAfterTurn(task.id, started.turnId)).toBeNull();
+        expect(persistence.getTask(task.id).goalState?.status).toBe('paused');
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it('a successful answer without a scoped outcome never completes or auto-restarts a Goal', () => {
+      const { persistence } = createPersistence();
+      try {
+        const task = persistence.createTask('missing evidence');
+        const { started } = persistence.startGoalTurn(task.id, 'get a code');
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, started.turnId, stage);
+        persistence.appendDelta(task.id, started.turnId, 'reply', '確認コードを教えてください。');
+        const done = persistence.completeTurnAndFinishGoal(task.id, started.turnId, 'completed');
+        expect(done.task?.goalState).toMatchObject({
+          status: 'blocked',
+          report: { status: 'blocked' },
+        });
+        expect(done.event).toMatchObject({
+          state: 'completed',
+          message: { content: '確認コードを教えてください。' },
+        });
+        expect(persistence.continueGoalAfterTurn(task.id, started.turnId)).toBeNull();
+      } finally {
+        persistence.close();
+      }
+    });
+
     it('binds Goal lifecycle controls to its Turn and records terminal usage', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('goal lifecycle');
@@ -1832,6 +1978,18 @@ if (runsWithElectronAbi)
       });
       for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
         persistence.changeStage(task.id, resumed.started.turnId, stage);
+      persistence.appendDelta(
+        task.id,
+        resumed.started.turnId,
+        'goal-final',
+        '確認済み\n\n```sprint-goal\n' +
+          JSON.stringify({
+            turnId: resumed.started.turnId,
+            status: 'achieved',
+            summary: 'UIの期待値と一致した',
+          }) +
+          '\n```',
+      );
       const completed = persistence.completeTurnAndFinishGoal(
         task.id,
         resumed.started.turnId,
@@ -11992,6 +12150,7 @@ if (runsWithElectronAbi)
         { version: 105 },
         { version: 106 },
         { version: 107 },
+        { version: 108 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],

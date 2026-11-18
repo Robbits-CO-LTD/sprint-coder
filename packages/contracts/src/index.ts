@@ -130,13 +130,24 @@ export const toolCatalogSnapshotSchema = z
 export type ToolCatalogEntry = z.infer<typeof toolCatalogEntrySchema>;
 export type ToolCatalogSnapshot = z.infer<typeof toolCatalogSnapshotSchema>;
 
-export const goalStatusSchema = z.enum(['active', 'paused', 'completed', 'blocked']);
+export const goalStatusSchema = z.enum(['active', 'paused', 'waiting', 'completed', 'blocked']);
+const goalReportText = z.string().trim().min(1).max(1200);
+export const goalReportSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('achieved'), summary: goalReportText }).strict(),
+  z.object({ status: z.literal('waiting'), summary: goalReportText }).strict(),
+  z.object({ status: z.literal('blocked'), summary: goalReportText }).strict(),
+  z
+    .object({ status: z.literal('continue'), summary: goalReportText, next: goalReportText })
+    .strict(),
+]);
+export type GoalReport = z.infer<typeof goalReportSchema>;
 export const goalSummarySchema = z
   .object({
     // Legacy Task Goals used taskTextSchema (100k). Keep them readable while goalStartInputSchema
     // enforces Codex's 4k limit for every newly started or edited Goal.
     objective: taskTextSchema,
     status: goalStatusSchema,
+    report: goalReportSchema.optional(),
     tokenBudget: z.number().int().positive().nullable(),
     tokensUsed: z.number().int().nonnegative(),
     timeUsedSeconds: z.number().int().nonnegative(),

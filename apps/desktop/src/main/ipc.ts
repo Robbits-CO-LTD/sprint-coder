@@ -5190,8 +5190,26 @@ export class IpcRouter {
     // the next queued Turn: that Turn would edit underneath a process this one left running. The
     // queue stays as it is and the user restarts it — by stopping the command and retrying, or by
     // sending the next message themselves.
-    if (settled.refusal !== 'active_command')
-      this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
+    if (settled.refusal !== 'active_command') {
+      const queued = this.persistence.startNextQueued(taskId);
+      if (queued !== null) this.dispatchQueueTransition(queued);
+      else if (
+        settled.state === 'completed' &&
+        settled.completion.task?.goalState?.report?.status === 'continue'
+      ) {
+        // A refused start leaves the already committed Goal paused and manually resumable.
+        let next;
+        try {
+          next = this.persistence.continueGoalAfterTurn(taskId, turnId);
+        } catch {
+          secureLogger.warn('Goal continuation could not start; Goal remains paused', {
+            taskId,
+            turnId,
+          });
+        }
+        if (next) this.dispatchStarted(next.started);
+      }
+    }
     if (settled.state === 'completed' && pendingTaskTitle !== undefined)
       void this.generateAndApplyTaskTitle(pendingTaskTitle);
   }

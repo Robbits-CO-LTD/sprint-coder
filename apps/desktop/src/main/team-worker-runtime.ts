@@ -1165,6 +1165,8 @@ export function reserveTeamWorkerContext(context: PreparedContext): PreparedCont
  * previous Turn's withdrawn calls (the Leader's to retry or drop, issue #1303). */
 function isLeaderOnlyFragment(fragment: { id: string }): boolean {
   return (
+    fragment.id.startsWith('goal-outcome:') ||
+    fragment.id.startsWith('goal-progress:') ||
     isAssistantPreferencesFragment(fragment) ||
     isTeamUsageOfferFragment(fragment) ||
     isWithdrawnApprovalsFragment(fragment)

@@ -2292,6 +2292,23 @@ body.is-resizing-sidebar iframe {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.goal-report {
+  max-height: 8rem;
+  overflow: auto;
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.goal-report summary {
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.goal-progress[data-status='waiting'] .goal-progress-dot {
+  background: var(--text-secondary);
+  box-shadow: none;
+}
 .goal-progress-actions {
   display: flex;
   gap: 2px;

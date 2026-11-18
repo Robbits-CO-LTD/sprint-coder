@@ -153,8 +153,14 @@
 
 - 前提: 新規Task、Mock。
 - 操作: 「/」→下矢印でGoal→Enter。Goal本文を入れEnter。「/tea」で候補を絞りEscape。「/team」をTabで実行。
-- 合格条件: 初期候補はnew、下でgoal。Goal選択後入力空・フォーカス維持、専用placeholderとarmed表示。Goal開始でarmedが消え本文付き完了region、別Goal入力なし。/teaはTeamのみ、Escape後文字列保持。/team実行でTeamが開き入力空。
+- 合格条件: 初期候補はnew、下でgoal。Goal選択後入力空・フォーカス維持、専用placeholderとarmed表示。Goal開始でarmedが消え本文付きのGoal状態が表示される。Mockには達成根拠がないため完了にしない。別Goal入力なし。/teaはTeamのみ、Escape後文字列保持。/team実行でTeamが開き入力空。
 - 証拠・制約: 各候補・Goal結果・Team画面。
+
+## Goalの完了判定と自動継続
+
+- 確認コードをまだ渡さず、そのコードを答えるGoalを開始する。AIの質問後は「入力待ち」で、同じプロファイルの再起動後も新しいターンが始まらないことを確認する。
+- 同じタスクでコードを返信し、回答・「Goal: 完了」・展開した達成根拠の3点を照合する。
+- 別タスクで2つの短い確認を別々のターンで行うGoalを開始する。追加入力なしで2番目のターンが始まり、両方が済んで完了することを確認する。
 
 <a id="composer-slash-commands-02"></a>
 
