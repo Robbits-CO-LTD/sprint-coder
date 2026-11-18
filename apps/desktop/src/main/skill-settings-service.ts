@@ -6,6 +6,7 @@ import {
   type SkillActivationPolicy,
   type SkillCatalog,
   type SkillCatalogItem,
+  type SkillCompatibilityReport,
   type SkillDraft,
   type SkillDraftCreateInput,
   type SkillRef,
@@ -44,6 +45,8 @@ export class SkillSettingsService {
   constructor(
     private readonly input: {
       homePath: string;
+      codexHome?: string | undefined;
+      claudeHome?: string | undefined;
       now?: () => number;
     },
   ) {}
@@ -67,8 +70,43 @@ export class SkillSettingsService {
     return (await this.getStore()).exportCreated(skillId, digest, destinationParent, format);
   }
 
-  async listCatalog(): Promise<SkillCatalog> {
-    const items = (await (await this.getStore()).listSelectable()).map((item) => ({
+  private nativeRoots(runtime: 'codex' | 'claude', workspaceRoots: readonly string[]): string[] {
+    const home = this.input.homePath;
+    return runtime === 'claude'
+      ? [
+          ...workspaceRoots.map((root) => join(root, '.claude', 'skills')),
+          join(this.input.claudeHome ?? join(home, '.claude'), 'skills'),
+        ]
+      : [
+          ...workspaceRoots.flatMap((root) => [
+            join(root, '.agents', 'skills'),
+            join(root, '.codex', 'skills'),
+          ]),
+          join(home, '.agents', 'skills'),
+          join(this.input.codexHome ?? join(home, '.codex'), 'skills'),
+        ];
+  }
+
+  async listCatalog(
+    runtime?: 'codex' | 'claude' | 'grok' | 'provider',
+    workspaceRoots: readonly string[] = [],
+  ): Promise<SkillCatalog> {
+    const store = await this.getStore();
+    const selectable = await store.listSelectable();
+    if (runtime === 'codex' || runtime === 'claude') {
+      for (const candidate of await store.nativeCandidates(
+        runtime === 'claude' ? 'claude' : 'agents',
+        this.nativeRoots(runtime, workspaceRoots),
+      )) {
+        try {
+          selectable.push(await store.readNative(candidate));
+        } catch (error) {
+          if (!(error instanceof SkillStoreError) && !(error instanceof Error && 'code' in error))
+            throw error;
+        }
+      }
+    }
+    const items = selectable.map((item) => ({
       ref: {
         skillId: item.skillId,
         source: item.source,
@@ -165,6 +203,12 @@ export class SkillSettingsService {
   contextCatalogForTurn(
     selections: readonly TurnSkillSelection[],
     includeBuiltinTeamSkill: boolean,
+    skills: readonly {
+      selection: TurnSkillSelection;
+      name: string;
+      description: string;
+      compatibility?: SkillCompatibilityReport | undefined;
+    }[] = [],
   ): string {
     if (this.contextCatalogEntries.length === 0)
       throw new SkillSettingsError('NOT_FOUND', 'SkillカタログをTurn開始前に取得できません');
@@ -181,7 +225,28 @@ export class SkillSettingsService {
         });
     }
     try {
-      return buildSkillCatalogContext(this.contextCatalogEntries, effectiveSelections);
+      const nativeEntries: SkillCatalogSnapshotEntry[] = skills.flatMap((skill) => {
+        const { source, skillId, digest } = skill.selection.ref;
+        if ((source !== 'agents' && source !== 'claude') || !skill.compatibility) return [];
+        return [
+          {
+            source,
+            skillId,
+            digest,
+            kind: skill.selection.kind,
+            name: skill.name,
+            description: skill.description,
+            enabled: true,
+            activationPolicy: 'manual',
+            availability: 'available',
+            compatibility: skill.compatibility,
+          },
+        ];
+      });
+      return buildSkillCatalogContext(
+        [...this.contextCatalogEntries, ...nativeEntries],
+        effectiveSelections,
+      );
     } catch (error) {
       if (error instanceof SkillCatalogContextError)
         throw new SkillSettingsError(
@@ -270,12 +335,33 @@ export class SkillSettingsService {
     selections: readonly TurnSkillSelection[],
     defaultArguments?: string,
     runtime: 'codex' | 'claude' | 'grok' | 'provider' = 'provider',
+    workspaceRoots: readonly string[] = [],
   ): Promise<ResolvedTurnSkill[]> {
     const resolved = await Promise.all(
       selections.map(async (selection) => {
-        const item: ResolvedSkillPackage = await (
-          await this.getStore()
-        ).resolveSelectable(selection.ref.source, selection.ref.skillId, selection.ref.digest);
+        const store = await this.getStore();
+        const { source, skillId, digest } = selection.ref;
+        let item: ResolvedSkillPackage;
+        if (source === 'claude' || source === 'agents') {
+          if (
+            (runtime !== 'codex' && runtime !== 'claude') ||
+            source !== (runtime === 'claude' ? 'claude' : 'agents')
+          )
+            throw new SkillSettingsError(
+              'INVALID_SKILL',
+              '選択したモデルのCLIではこのSkillを使用できません',
+            );
+          const candidates = await store.nativeCandidates(
+            source,
+            this.nativeRoots(runtime, workspaceRoots),
+          );
+          const candidate = candidates.find((entry) => entry.skillId === skillId);
+          if (!candidate)
+            throw new SkillSettingsError('SOURCE_CHANGED', '選択したCLI Skillが見つかりません');
+          item = await store.readNative(candidate, digest);
+        } else {
+          item = await store.resolveSelectable(source, skillId, digest);
+        }
         if (item.kind !== selection.kind)
           throw new SkillSettingsError('SOURCE_CHANGED', 'Skillの種類が変更されました');
         if (runtime === 'grok' && item.compatibility.runtimeSupport.grok === 'blocked')

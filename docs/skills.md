@@ -1,9 +1,13 @@
 # Sprint Coder Skills
 
-Sprint Coderは内蔵SkillとSkill Creatorで作成したSkillだけを管理し、内容のdigestをTurnごとに
-固定して実行します。Claude Code／Codexの外部Skillを検出・読み込みする機能はありません。
-`~/.claude/skills`、`~/.agents/skills`、`~/.codex/skills` は走査しません。
-以前取り込んだファイルと履歴は保持しますが、外部由来Skillの実行・設定変更はできません。
+タスクでモデルを選び、入力欄に `/` を入力すると、その送信で使うSkillを選べます。Sprint Coderの内蔵・作成済みSkillとCLI用Skillを同時に選択できます。CLI用Skillは手動選択したものだけを、そのターン用のリビジョンに固定して渡します。
+
+| 選択したモデルの接続 | 探索するCLI用Skill                                                                                                                                               |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code          | プロジェクトの各フォルダーの `.claude/skills`、次にユーザーの `~/.claude/skills`（`CLAUDE_CONFIG_DIR` 指定時はその配下）                                         |
+| Codex CLI            | プロジェクトの各フォルダーの `.agents/skills` と `.codex/skills`、次にユーザーの `~/.agents/skills` と `~/.codex/skills`（後者は `CODEX_HOME` 指定時はその配下） |
+
+各ディレクトリの `<Skill ID>/SKILL.md` を読みます。同じCLI内で同じIDが複数ある場合は表の探索順で最初の候補を使います。選択後に内容が変わった場合は選び直してください。CLIを切り替えると利用可能なSkillも変わります。設定画面ではSprint Coderが管理するSkillを編集できます。
 
 ## 互換レベル
 

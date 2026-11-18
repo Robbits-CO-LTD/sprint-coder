@@ -136,7 +136,10 @@ export function SkillSettingsSection({
       <div className="settings-section-heading">
         <div>
           <h3 id="settings-skills-title">Skills</h3>
-          <p>Sprint Coder内蔵Skillと、Skill Creatorで作成したSkillを管理します。</p>
+          <p>
+            Sprint Coder内蔵Skillと作成済みSkillを管理します。Claude
+            Code・CodexのSkillは、対応モデルを選んだタスクの「/」から追加できます。
+          </p>
         </div>
         <div className="settings-skill-heading-actions">
           {onCreateWithAi && (

@@ -1,6 +1,7 @@
-import { lstat, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { materializeClaudeSkillPlugin } from '../runtime-host/claude-adapter';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SkillSettingsService } from './skill-settings-service';
 
@@ -172,5 +173,106 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
         ],
       }),
     ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+  });
+});
+
+describe('native CLI Skills', () => {
+  it('discovers matching user and project packages alongside Sprint Coder Skills, and pins the chosen revision', async () => {
+    const root = await home();
+    const workspace = join(root, 'project');
+    const service = new SkillSettingsService({ homePath: root });
+    const add = async (base: string, config: string, id: string, marker: string) => {
+      const dir = join(base, config, 'skills', id);
+      await mkdir(join(dir, 'references'), { recursive: true });
+      await writeFile(
+        join(dir, 'SKILL.md'),
+        `---\nname: ${id}\ndescription: test\n---\n${marker}\n`,
+      );
+      await writeFile(join(dir, 'references', 'sample.txt'), marker);
+      return dir;
+    };
+    const draft = await service.createDraft({
+      kind: 'chat',
+      skillId: 'shared',
+      files: [
+        {
+          path: 'SKILL.md',
+          content: '---\nname: shared\ndescription: shared test\n---\nUse together.\n',
+        },
+      ],
+    });
+    const shared = await service.installDraft(draft.id, draft.digest);
+    await add(root, '.agents', 'agents-home', 'USER');
+    await add(root, '.codex', 'native-test', 'HOME');
+    const projectDir = await add(workspace, '.agents', 'native-test', 'PROJECT');
+    await add(root, '.claude', 'claude-home', 'CLAUDE');
+    const codex = await service.listCatalog('codex', [workspace]);
+    const claude = await service.listCatalog('claude', [workspace]);
+    expect(codex.items.map((i) => i.ref.skillId)).toEqual(
+      expect.arrayContaining(['shared', 'native-test', 'agents-home']),
+    );
+    expect(codex.items.some((i) => i.ref.source === 'claude')).toBe(false);
+    expect(claude.items.map((i) => i.ref.skillId)).toEqual(
+      expect.arrayContaining(['shared', 'claude-home']),
+    );
+    expect(claude.items.some((i) => i.ref.source === 'agents')).toBe(false);
+    const nativeClaude = claude.items.find((i) => i.ref.source === 'claude')!;
+    const claudePicks = await service.resolveSelections(
+      [
+        { kind: 'chat', ref: shared.ref },
+        { kind: 'chat', ref: nativeClaude.ref },
+      ],
+      undefined,
+      'claude',
+      [workspace],
+    );
+    const plugin = join(root, 'test-plugin');
+    const commands = materializeClaudeSkillPlugin(
+      plugin,
+      claudePicks.map((skill) => ({
+        name: skill.selection.ref.skillId,
+        path: skill.packagePath,
+        selected: true,
+      })),
+    );
+    expect(commands.split(' ')).toEqual([
+      '/sprint-coder-selected:selected-1-shared',
+      '/sprint-coder-selected:selected-2-claude-home',
+    ]);
+    expect(
+      await readFile(
+        join(plugin, 'skills', 'selected-2-claude-home', 'references', 'sample.txt'),
+        'utf8',
+      ),
+    ).toBe('CLAUDE');
+    const ref = codex.items.find((i) => i.ref.skillId === 'native-test')!.ref;
+    const picks = [
+      { kind: 'chat' as const, ref: shared.ref },
+      { kind: 'chat' as const, ref },
+    ];
+    const resolved = await service.resolveSelections(picks, undefined, 'codex', [workspace]);
+    expect(resolved[1]?.content).toContain('PROJECT');
+    expect(basename(dirname(dirname(dirname(resolved[1]!.packagePath))))).toBe('revisions');
+    expect(await readFile(join(resolved[1]!.packagePath, 'references', 'sample.txt'), 'utf8')).toBe(
+      'PROJECT',
+    );
+    const catalog = JSON.parse(service.contextCatalogForTurn(picks, false, resolved));
+    expect(catalog.items).toContainEqual(
+      expect.objectContaining({ id: 'native-test', source: 'agents', selected: true }),
+    );
+    expect(catalog.items.some((i: { id: string }) => i.id === 'agents-home')).toBe(false);
+    await expect(
+      service.resolveSelections(picks, undefined, 'claude', [workspace]),
+    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+    await expect(
+      service.resolveSelections(picks, undefined, 'provider', [workspace]),
+    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+    await writeFile(join(projectDir, 'references', 'sample.txt'), 'CHANGED');
+    await expect(
+      service.resolveSelections(picks, undefined, 'codex', [workspace]),
+    ).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
+    expect(await readFile(join(resolved[1]!.packagePath, 'references', 'sample.txt'), 'utf8')).toBe(
+      'PROJECT',
+    );
   });
 });

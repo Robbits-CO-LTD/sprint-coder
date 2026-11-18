@@ -160,6 +160,7 @@ import {
   teamBlueprintSchema,
   skillActivationPolicyInputSchema,
   skillCatalogSchema,
+  skillCatalogRequestSchema,
   skillCatalogItemSchema,
   skillDraftSchema,
   skillDraftCreateInputSchema,
@@ -1375,9 +1376,16 @@ export class IpcRouter {
     );
     this.skillSettings = new SkillSettingsService({
       homePath: process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home'),
+      ...(process.env['SPRINT_CODER_SKILL_HOME']
+        ? {}
+        : {
+            codexHome: process.env['CODEX_HOME'],
+            claudeHome: process.env['CLAUDE_CONFIG_DIR'],
+          }),
     });
-    this.persistence.setSkillCatalogContextProvider?.((selections, includeBuiltinTeamSkill) =>
-      this.skillSettings.contextCatalogForTurn(selections, includeBuiltinTeamSkill),
+    this.persistence.setSkillCatalogContextProvider?.(
+      (selections, includeBuiltinTeamSkill, skills) =>
+        this.skillSettings.contextCatalogForTurn(selections, includeBuiltinTeamSkill, skills),
     );
     this.persistence.setAutoSkillProvider?.((runtime) =>
       this.skillSettings.pinnedAutoCandidates(runtime),
@@ -2520,10 +2528,17 @@ export class IpcRouter {
           this.persistence.setDefaultTeamPolicy(input),
         ).value,
     );
-    this.handle(IPC_CHANNELS.skillsList, emptyPayloadSchema, skillCatalogSchema, () =>
-      this.skillSettings
-        .listCatalog()
-        .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    this.handle(
+      IPC_CHANNELS.skillsList,
+      skillCatalogRequestSchema,
+      skillCatalogSchema,
+      ({ taskId }) =>
+        this.skillSettings
+          .listCatalog(
+            taskId === undefined ? undefined : this.skillRuntimeForTask(taskId),
+            taskId === undefined ? [] : this.skillWorkspaceRoots(taskId),
+          )
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
       IPC_CHANNELS.skillsGetDraftSelection,
@@ -3393,7 +3408,14 @@ export class IpcRouter {
       goalRunResultSchema,
       async (input, event, envelope) => {
         const skills = await this.skillSettings
-          .resolveSelections(input.skills)
+          .resolveSelections(
+            input.skills,
+            undefined,
+            this.skillRuntimeForTask(input.taskId),
+            input.skills.some((s) => s.ref.source === 'agents' || s.ref.source === 'claude')
+              ? this.skillWorkspaceRoots(input.taskId)
+              : [],
+          )
           .catch((error) => Promise.reject(skillSettingsPublicError(error)));
         await this.refreshTeamOfferWorkspace(input.taskId);
         let started: StartedTurn | undefined;
@@ -5663,27 +5685,34 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
-    if (
-      isRetiredManagedLocal(
-        started.modelSelection.connectionId,
-        started.modelSelection.requestedProvider,
-      )
-    ) {
+    const external =
+      builtinRuntimeForModelSelection(started.modelSelection) === null &&
+      started.modelSelection.connectionId !== null;
+    const sealedRuntime = external ? 'provider' : started.runtimeKind;
+    // A queued request can outlive the model selection under which its Skills were chosen.
+    // Fail this Turn before egress and advance the queue normally.
+    const wrongSkillRuntime = started.skills.some(
+      ({ selection }) =>
+        (selection.ref.source === 'claude' && sealedRuntime !== 'claude') ||
+        (selection.ref.source === 'agents' && sealedRuntime !== 'codex'),
+    );
+    const refusal = isRetiredManagedLocal(
+      started.modelSelection.connectionId,
+      started.modelSelection.requestedProvider,
+    )
+      ? new RetiredManagedLocalError().message
+      : wrongSkillRuntime
+        ? '選択したCLI Skillは現在のモデルで使えません。Skillを外すか、対応するモデルを選んでください。'
+        : null;
+    if (refusal !== null) {
       await this.mailbox.run(taskId, () => {
         if (
           this.canceledRuntimeTurns.has(started.turnId) ||
           this.persistence.getActiveTurnId(taskId) !== started.turnId
         )
           return;
-        this.turnRuntimes.set(started.turnId, 'provider');
-        this.publish(
-          this.persistence.appendDelta(
-            taskId,
-            started.turnId,
-            randomUUID(),
-            new RetiredManagedLocalError().message,
-          ),
-        );
+        this.turnRuntimes.set(started.turnId, sealedRuntime);
+        this.publish(this.persistence.appendDelta(taskId, started.turnId, randomUUID(), refusal));
         this.finishAndAdvance(taskId, started.turnId, 'failed');
       });
       return;
@@ -5725,10 +5754,7 @@ export class IpcRouter {
     )
       return;
     if (this.turnStreamingResources.begin(taskId, started.turnId) === undefined) return;
-    const externalConnectionId =
-      builtinRuntimeForModelSelection(started.modelSelection) === null
-        ? started.modelSelection.connectionId
-        : null;
+    const externalConnectionId = external ? started.modelSelection.connectionId : null;
     const autoSkills = started.autoSkills;
     if (externalConnectionId !== null) {
       this.turnRuntimes.set(started.turnId, 'provider');
@@ -5882,7 +5908,10 @@ export class IpcRouter {
     const runtimeSkills = [...started.skills, ...autoSkills].map((skill) => {
       const compatibility = skill.compatibility ?? portableSkillCompatibility();
       return {
-        name: skill.selection.ref.skillId,
+        name:
+          kind === 'codex' && skill.selection.ref.source === 'agents'
+            ? skill.name
+            : skill.selection.ref.skillId,
         path: skill.packagePath,
         activationPolicy: skill.activationPolicy ?? 'manual',
         profile: compatibility.profile,
@@ -6109,26 +6138,36 @@ export class IpcRouter {
     }
   }
 
+  private skillRuntimeForTask(taskId: string): 'codex' | 'claude' | 'grok' | 'provider' {
+    const taskSelection = this.persistence.getTaskModelSelection(taskId);
+    const builtin = taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+    const runtimeKind = builtin?.runtimeKind ?? this.persistence.getRuntime();
+    return taskSelection !== null && builtin === null
+      ? 'provider'
+      : runtimeKind === 'mock'
+        ? 'provider'
+        : runtimeKind;
+  }
+
+  private skillWorkspaceRoots(taskId: string): string[] {
+    return this.persistence.getEffectiveWorkspaceSet(taskId)?.roots.map((root) => root.path) ?? [];
+  }
+
   private resolveTurnSkills(
     taskId: string,
     text: string,
     selections: readonly TurnSkillSelection[],
   ): Promise<PersistedTurnSkill[]> {
-    const taskSelection = this.persistence.getTaskModelSelection(taskId);
-    const builtin = taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
-    const runtimeKind = builtin?.runtimeKind ?? this.persistence.getRuntime();
-    const skillRuntime =
-      taskSelection !== null && builtin === null
-        ? 'provider'
-        : runtimeKind === 'mock'
-          ? 'provider'
-          : runtimeKind;
+    const skillRuntime = this.skillRuntimeForTask(taskId);
     return this.skillSettings.resolveSelections(
-      runtimeKind === 'codex'
-        ? bindBuiltinImagegenSkillForTurn(text, runtimeKind, selections)
+      skillRuntime === 'codex'
+        ? bindBuiltinImagegenSkillForTurn(text, skillRuntime, selections)
         : [...selections],
       text,
       skillRuntime,
+      selections.some((s) => s.ref.source === 'agents' || s.ref.source === 'claude')
+        ? this.skillWorkspaceRoots(taskId)
+        : [],
     );
   }
 
