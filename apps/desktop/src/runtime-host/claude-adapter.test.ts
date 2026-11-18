@@ -1,3 +1,4 @@
+import { SkillSettingsService } from '../main/skill-settings-service';
 import type * as OwnedCliProcess from './owned-cli-process';
 import type * as ChildProcessModule from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -608,6 +609,105 @@ describe('Claude Turn temporary folders', () => {
     vi.stubEnv('CLAUDE_CONFIG_DIR', join(root, 'no-claude-config'));
     return { temporary, outside, skill };
   }
+
+  it('passes a selected external Claude package with portable metadata and its resources to the CLI', async () => {
+    const { temporary } = await fixture();
+    const home = join(temporary, 'user');
+    const source = join(home, '.claude', 'skills', 'local-review');
+    await mkdir(join(source, 'references'), { recursive: true });
+    await writeFile(
+      join(source, 'SKILL.md'),
+      '---\nname: local-review\ndescription: Review\n---\nRead references/guide.txt',
+    );
+    await writeFile(join(source, 'references', 'guide.txt'), 'packaged guide');
+    const service = new SkillSettingsService({ homePath: home });
+    const item = (await service.listCatalog('claude')).items.find(
+      (i) => i.ref.source === 'claude',
+    )!;
+    const draft = await service.createDraft({
+      kind: 'chat',
+      skillId: 'sc-shared',
+      files: [
+        {
+          path: 'SKILL.md',
+          content: '---\nname: sc-shared\ndescription: Shared\n---\nSPRINT-CODER-MARKER',
+        },
+      ],
+    });
+    const shared = await service.installDraft(draft.id, draft.digest);
+    const skills = await service.resolveSelections(
+      [
+        { kind: 'chat', ref: shared.ref },
+        { kind: 'chat', ref: item.ref },
+      ],
+      undefined,
+      'claude',
+    );
+    const adapter = new ClaudeRuntimeAdapter(2_000);
+    adapter.setCliResolution({
+      source: 'explicit',
+      executable: 'fixture',
+      version: 'test',
+      compatibility: 'verified',
+      capabilities: [],
+    });
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null,
+      pid: undefined,
+    });
+    processMock.spawn.mockReturnValueOnce(child);
+    const exited = vi.fn();
+    adapter.start(
+      'portable-package',
+      'review',
+      skills.map((s) => ({
+        id: s.selection.ref.skillId,
+        source: 'skill',
+        trust: 'user',
+        authority: 'user',
+        content: s.content,
+      })),
+      vi.fn(),
+      null,
+      'auto',
+      vi.fn(),
+      vi.fn(),
+      exited,
+      undefined,
+      undefined,
+      'read-only',
+      skills.map((s) => ({
+        name: s.selection.ref.skillId,
+        path: s.packagePath,
+        profile: s.compatibility.profile,
+        runtimeSupport: s.compatibility.runtimeSupport.claude,
+        selected: true,
+      })),
+    );
+    try {
+      const prompt = String(child.stdin.read());
+      expect(prompt).toContain('SPRINT-CODER-MARKER');
+      expect(prompt).toContain('/sprint-coder-selected:selected-1-local-review');
+      const argv = processMock.spawn.mock.lastCall?.[1] as string[];
+      expect(argv).toContain('--plugin-dir');
+      const directory = argv[argv.indexOf('--plugin-dir') + 1]!;
+      expect(
+        await readFile(
+          join(directory, 'skills', 'selected-1-local-review', 'references', 'guide.txt'),
+          'utf8',
+        ),
+      ).toBe('packaged guide');
+      expect(argv[argv.indexOf('--settings') + 1]).toContain('"disableSkillShellExecution":true');
+    } finally {
+      child.exitCode = 1;
+      child.emit('close', 1);
+      await vi.waitFor(() => expect(exited).toHaveBeenCalledOnce());
+    }
+  });
 
   /**
    * A Team Turn without a Workspace and with one selected native Skill, so it owns a cwd, an MCP

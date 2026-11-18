@@ -1,7 +1,6 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { materializeClaudeSkillPlugin } from '../runtime-host/claude-adapter';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SkillSettingsService } from './skill-settings-service';
 
@@ -226,24 +225,9 @@ describe('native CLI Skills', () => {
       'claude',
       [workspace],
     );
-    const plugin = join(root, 'test-plugin');
-    const commands = materializeClaudeSkillPlugin(
-      plugin,
-      claudePicks.map((skill) => ({
-        name: skill.selection.ref.skillId,
-        path: skill.packagePath,
-        selected: true,
-      })),
-    );
-    expect(commands.split(' ')).toEqual([
-      '/sprint-coder-selected:selected-1-shared',
-      '/sprint-coder-selected:selected-2-claude-home',
-    ]);
+    expect(claudePicks.map((s) => s.selection.ref.source)).toEqual(['created', 'claude']);
     expect(
-      await readFile(
-        join(plugin, 'skills', 'selected-2-claude-home', 'references', 'sample.txt'),
-        'utf8',
-      ),
+      await readFile(join(claudePicks[1]!.packagePath, 'references', 'sample.txt'), 'utf8'),
     ).toBe('CLAUDE');
     const ref = codex.items.find((i) => i.ref.skillId === 'native-test')!.ref;
     const picks = [
