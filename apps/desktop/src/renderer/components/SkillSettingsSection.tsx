@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SkillCatalogItem, SkillDraft } from '@sprint-coder/contracts';
+import { useAppStore } from '../store/appStore';
 
 export function SkillSettingsSection({
   active,
@@ -45,7 +46,8 @@ export function SkillSettingsSection({
   }, [active, loading, loadFailed]);
   async function reload() {
     loaded.current = false;
-    await refresh();
+    const state = useAppStore.getState();
+    await Promise.all([refresh(), state.selectedTaskId === null ? undefined : state.loadSkills()]);
   }
   async function toggleCreated(item: SkillCatalogItem) {
     try {
@@ -125,6 +127,10 @@ export function SkillSettingsSection({
     }
   }
 
+  const taskCatalog = useAppStore((state) => state.skillCatalog);
+  const cliSkills = taskCatalog.filter(
+    ({ ref }) => ref.source === 'claude' || ref.source === 'agents',
+  );
   const builtins = catalog.filter(({ ref }) => ref.source === 'builtin');
   const created = catalog.filter(({ ref }) => ref.source === 'created');
   return (
@@ -136,10 +142,7 @@ export function SkillSettingsSection({
       <div className="settings-section-heading">
         <div>
           <h3 id="settings-skills-title">Skills</h3>
-          <p>
-            Sprint Coder内蔵Skillと作成済みSkillを管理します。Claude
-            Code・CodexのSkillは、対応モデルを選んだタスクの「/」から追加できます。
-          </p>
+          <p>Skillは、AIに繰り返し使わせたい手順をまとめたものです。</p>
         </div>
         <div className="settings-skill-heading-actions">
           {onCreateWithAi && (
@@ -161,11 +164,64 @@ export function SkillSettingsSection({
           </button>
         </div>
       </div>
+      <div className="settings-skill-guide">
+        <p>
+          タスクの入力欄に <kbd>/</kbd> を入力すると、その送信で使うSkillを選べます。
+        </p>
+        <dl>
+          <dt>Claude Codeで接続</dt>
+          <dd>Sprint Coder用とClaude Code用のSkillを一緒に使えます。</dd>
+          <dt>Codex CLIで接続</dt>
+          <dd>Sprint Coder用とCodex用のSkillを一緒に使えます。</dd>
+        </dl>
+        <details>
+          <summary>Skillの読み込み先と自動選択</summary>
+          <p>
+            CLI用Skillは、プロジェクトの各フォルダー、ユーザーのホームの順に探します。同じIDがある場合は、先に見つかったものが候補になります。
+          </p>
+          <dl>
+            <dt>Claude Code</dt>
+            <dd>
+              <code>.claude/skills</code> 配下を読みます。ホーム側は <code>CLAUDE_CONFIG_DIR</code>{' '}
+              で変更できます。
+            </dd>
+            <dt>Codex CLI</dt>
+            <dd>
+              <code>.agents/skills</code>、<code>.codex/skills</code> の順に読みます。ホーム側の{' '}
+              <code>.codex</code> は <code>CODEX_HOME</code> で変更できます。
+            </dd>
+          </dl>
+          <p>
+            各Skillの手順は <code>〈Skill ID〉/SKILL.md</code>{' '}
+            に置きます。モデルの接続先を変えるとCLI用の候補も切り替わります。選んだ内容は送信時に固定されます。
+          </p>
+          <p>
+            「AIでSkillを作成」では、下書きの内容を確認してからインストールします。作成済みSkillの「自動選択」をONにすると、AIが必要なときに使えます。CLI用Skillは送信ごとに手動で選びます。
+          </p>
+        </details>
+      </div>
+      {cliSkills.length > 0 && (
+        <details className="settings-cli-skills">
+          <summary>このタスクのCLI用Skill（{cliSkills.length}件）</summary>
+          <ul>
+            {cliSkills.map(({ ref, name, description, enabled }) => (
+              <li key={`${ref.source}:${ref.skillId}`}>
+                <strong>/{ref.skillId}</strong>
+                {name !== ref.skillId && <> · {name}</>}
+                <small>
+                  {ref.source === 'claude' ? 'Claude Code' : 'Codex CLI'}
+                  {enabled ? '' : ' · 使用不可'} · {description}
+                </small>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       {builtins.map((item) => (
         <div key={item.ref.skillId} className="settings-builtin-skill">
           <span>
             <strong>{item.name}</strong>
-            <small>組み込みSkill</small>
+            <small>組み込みSkill · {item.description}</small>
           </span>
           <span>常時有効</span>
         </div>
@@ -182,6 +238,7 @@ export function SkillSettingsSection({
                     作成済み · {item.kind === 'team' ? 'Team Skill' : 'Chat Skill'} ·{' '}
                     {item.enabled ? '有効' : '無効'}
                   </small>
+                  <small>{item.description}</small>
                 </span>
                 <button
                   type="button"
