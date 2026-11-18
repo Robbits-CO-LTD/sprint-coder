@@ -82,7 +82,10 @@ Task
 ```
 
 - **Task**はタイトル、goal、draft、workspace、pin／archive、会話履歴の単位である。
-- **Goal**はTaskに紐づく持続的な目的で、`active` / `paused` / `completed` / `blocked`を持つ。開始・pause・resume・clearはMainで永続化し、token使用量と時間を追跡する。Goal本文はContext Compilerが`goal` sourceのuser context fragmentとしてTurnへ渡す。
+- **Goal**はTaskに紐づく持続的な目的で、`active` / `waiting` / `paused` / `completed` / `blocked`を持つ。開始・pause・resume・clearはMainで永続化し、token使用量と時間を追跡する。Goal本文はContext Compilerが`goal` sourceのuser context fragmentとしてTurnへ渡す。
+  - AIがそのターンの最終回答に達成の具体的な根拠を添え、Turnの既存の完了条件も通ったときにGoalを完了とする。根拠はGoalカードから確認できる。進捗報告を読めない場合はブロックして手動で再開できる。
+  - 質問があるときは「入力待ち」にして止まる。同じタスクへの次の通常送信でGoalを再開する。進捗と次の作業があるときは、同じ接続・モデル・Workspaceで次のターンを自動開始する。キュー済みのユーザー入力を優先し、中断やアプリ再起動をまたいで自動起動しない。
+  - 同じ進捗と次の作業が連続した場合、または1回の開始・再開から自動継続が12回に達した後も作業が残る場合は、自動実行を止めて理由を表示する。明示的な再開で継続できる。
 - **Project**は複数Taskから共有できる作業単位である。instruction、references、memories、folderとeffective workspace rootsを持ち、Turn開始時にcontext manifest／sealを作成する。参照元・digest・provenanceを保持し、外部文字列をシステム命令として扱わない。
 - **Turn**の表示状態とRuntimeのstageは分離する。UIはMainから届くsnapshot／eventをprojectionし、RendererだけでTurnを完了扱いにしない。
 

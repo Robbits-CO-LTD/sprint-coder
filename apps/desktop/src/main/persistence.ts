@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3';
+import { goalTurnGuidance, parseGoalConclusion, goalDecision } from './goal-outcome';
+import { goalReportSchema, type GoalReport } from '@sprint-coder/contracts';
 import { secureLogger } from './secure-logger';
 import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
 import { graphMissionRecordSchema } from './graph-mission-record';
@@ -557,6 +559,9 @@ type TaskRow = {
   archived: number;
   goal: string | null;
   goal_status: 'active' | 'paused' | 'completed' | 'blocked' | null;
+  goal_turn_id: string | null;
+  goal_report_json: string | null;
+  goal_auto_turns: number;
   goal_token_budget: number | null;
   goal_tokens_used: number;
   goal_time_used_seconds: number;
@@ -4750,6 +4755,14 @@ const migrations = [
     checksum: 'commands-v107-desktop-action-display',
     sql: `ALTER TABLE command_runs ADD COLUMN desktop_action_json TEXT;`,
   },
+  {
+    version: 108,
+    checksum: 'task-goal-bound-outcomes-v108',
+    sql: `ALTER TABLE tasks ADD COLUMN goal_turn_id TEXT;
+          ALTER TABLE tasks ADD COLUMN goal_report_json TEXT;
+          ALTER TABLE tasks ADD COLUMN goal_auto_turns INTEGER NOT NULL DEFAULT 0;
+          UPDATE tasks SET goal_status='paused' WHERE goal_status='active';`,
+  },
 ];
 
 /**
@@ -5871,6 +5884,7 @@ export interface PersistenceClient {
     skills?: readonly PersistedTurnSkill[],
     includeBuiltinTeamSkill?: boolean,
   ): StartedGoalTurn;
+  continueGoalAfterTurn(taskId: string, previousTurnId: string): StartedGoalTurn | null;
   resumeGoalTurn(
     taskId: string,
     skills?: readonly PersistedTurnSkill[],
@@ -14404,7 +14418,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const result = this.db
         .prepare(
           `UPDATE tasks
-              SET goal = ?, goal_status = 'paused', goal_token_budget = NULL,
+              SET goal = ?, goal_status = 'paused', goal_turn_id=NULL, goal_report_json=NULL, goal_auto_turns=0, goal_token_budget = NULL,
                   goal_tokens_used = 0, goal_time_used_seconds = 0,
                   goal_started_at = ?, goal_updated_at = ?,
                   context_epoch = context_epoch + ?, updated_at = ?
@@ -14436,7 +14450,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const result = this.db
         .prepare(
           `UPDATE tasks
-              SET goal = ?, goal_status = 'active', goal_token_budget = ?,
+              SET goal = ?, goal_status = 'active', goal_turn_id=NULL, goal_report_json=NULL, goal_auto_turns=0, goal_token_budget = ?,
                   goal_tokens_used = ?, goal_time_used_seconds = ?,
                   goal_started_at = ?, goal_updated_at = ?,
                   context_epoch = context_epoch + ?, updated_at = ?
@@ -14473,7 +14487,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const result = this.db
         .prepare(
           `UPDATE tasks
-              SET goal = NULL, goal_status = NULL, goal_token_budget = NULL,
+              SET goal = NULL, goal_status = NULL, goal_turn_id=NULL, goal_report_json=NULL, goal_auto_turns=0, goal_token_budget = NULL,
                   goal_tokens_used = 0, goal_time_used_seconds = 0,
                   goal_started_at = NULL, goal_updated_at = NULL,
                   context_epoch = context_epoch + ?, updated_at = ?
@@ -14502,6 +14516,44 @@ export class SqlitePersistenceClient implements PersistenceClient {
         objective,
         skills,
         includeBuiltinTeamSkill,
+      );
+      return { task: this.getTask(taskId), started };
+    })();
+  }
+
+  continueGoalAfterTurn(taskId: string, previousTurnId: string): StartedGoalTurn | null {
+    return this.db.transaction(() => {
+      const task = this.getTaskRow(taskId);
+      if (
+        task.goal_status !== 'paused' ||
+        task.goal_turn_id !== previousTurnId ||
+        readGoalReport(task)?.status !== 'continue' ||
+        this.getActiveTurnId(taskId) !== null ||
+        task.archived ||
+        this.listQueued(taskId).length !== 0
+      )
+        return null;
+      const previous = this.getTurn(taskId, previousTurnId);
+      const selection = this.getImageAttachmentAcceptanceSelection(taskId);
+      if (
+        previous.state !== 'completed' ||
+        selection.runtimeKind !== previous.runtime_kind ||
+        selection.modelSelection.connectionId !== previous.connection_id ||
+        selection.modelSelection.requestedProvider !== previous.requested_provider ||
+        selection.modelSelection.requestedModel !== previous.requested_model ||
+        this.getEffectiveWorkspaceSet(taskId).digest !==
+          this.readTurnWorkspaceSetForTask(taskId, previousTurnId)?.digest
+      )
+        return null;
+      this.assertTaskNotMutationQuarantined(taskId);
+      this.db
+        .prepare(
+          "UPDATE tasks SET goal_status='active',goal_turn_id=NULL,goal_updated_at=?,goal_auto_turns=goal_auto_turns+1 WHERE id=?",
+        )
+        .run(new Date().toISOString(), taskId);
+      const started = this.startTurnInTransaction(
+        taskId,
+        'Goalの自動継続：同じ目標の範囲で残作業を続けてください。',
       );
       return { task: this.getTask(taskId), started };
     })();
@@ -14577,15 +14629,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     observation: TurnSealedObservation | null,
   ): { event: TurnEvent; task: TaskSummary | null } {
     return this.db.transaction(() => {
-      const event = this.completeTurnInTransaction(
+      const current = this.getTaskRow(taskId);
+      const ownsGoal =
+        current.goal !== null &&
+        current.goal_status === 'active' &&
+        current.goal_turn_id === turnId;
+      const { event, goalReport } = this.completeTurnInTransaction(
         taskId,
         turnId,
         state,
         finalText,
         observation ?? undefined,
+        ownsGoal,
       );
-      const current = this.getTaskRow(taskId);
-      if (current.goal === null || current.goal_status !== 'active') return { event, task: null };
+      if (!ownsGoal) return { event, task: null };
       const now = new Date();
       const activeSeconds =
         current.goal_updated_at === null
@@ -14594,19 +14651,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
               0,
               Math.floor((now.getTime() - new Date(current.goal_updated_at).getTime()) / 1000),
             );
+      const report =
+        state === 'completed'
+          ? goalDecision(goalReport, readGoalReport(current), current.goal_auto_turns)
+          : null;
       const goalStatus =
-        state === 'completed' ? 'completed' : state === 'failed' ? 'blocked' : 'paused';
+        report?.status === 'achieved'
+          ? 'completed'
+          : state === 'failed' || report?.status === 'blocked'
+            ? 'blocked'
+            : 'paused';
       const usage = this.getTurnProviderUsage(taskId, turnId);
       const turnTokens = (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
       this.db
         .prepare(
           `UPDATE tasks
-              SET goal_status = ?, goal_tokens_used = ?, goal_time_used_seconds = ?,
+              SET goal_status = ?, goal_report_json = ?, goal_tokens_used = ?, goal_time_used_seconds = ?,
                   goal_updated_at = ?, updated_at = ?
             WHERE id = ?`,
         )
         .run(
           goalStatus,
+          report === null ? null : JSON.stringify(report),
           current.goal_tokens_used + turnTokens,
           current.goal_time_used_seconds + activeSeconds,
           now.toISOString(),
@@ -14646,7 +14712,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const result = this.db
         .prepare(
           `UPDATE tasks
-              SET goal_status = ?, goal_time_used_seconds = ?, goal_updated_at = ?, updated_at = ?
+              SET goal_status = ?, goal_turn_id=NULL, goal_report_json=NULL, goal_auto_turns=0, goal_time_used_seconds = ?, goal_updated_at = ?, updated_at = ?
             WHERE id = ?`,
         )
         .run(
@@ -19894,25 +19960,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): TurnEvent {
-    // As in `completeTurnAndFinishGoal`: the observation outlives the transaction it justifies.
-    const observation = state === 'completed' ? this.openSealedObservation(taskId, turnId) : null;
-    try {
-      return this.db.transaction(() =>
-        this.completeTurnInTransaction(taskId, turnId, state, finalText, observation ?? undefined),
-      )();
-    } finally {
-      observation?.close();
-    }
+    return this.completeTurnAndFinishGoal(taskId, turnId, state, finalText).event;
   }
 
   cancelTurn(taskId: string, turnId: string): TurnEvent | null {
-    return this.db.transaction(() => {
-      const turn = this.getTurn(taskId, turnId);
-      if (isTerminal(turn.state)) return null;
-      transitionTurn(turn.state, 'canceling');
-      this.updateTurn(turnId, 'canceling');
-      return this.completeTurnInTransaction(taskId, turnId, 'canceled');
-    })();
+    return this.cancelTurnAndFinishGoal(taskId, turnId).event;
   }
 
   snapshot(taskId: string): TurnSnapshot {
@@ -20782,7 +20834,43 @@ export class SqlitePersistenceClient implements PersistenceClient {
             messageId: null,
           };
     const preferencesFragment = this.assistantPreferencesFragment(taskId);
+    const goalTask = this.getTaskRow(taskId);
+    const guidance =
+      goalTask.goal_status === 'active' && goalTask.goal_turn_id === turnId
+        ? goalTurnGuidance(turnId)
+        : null;
+    const previousReport = guidance === null ? null : readGoalReport(goalTask);
+    const previousContent =
+      previousReport?.status === 'continue' ? JSON.stringify(previousReport) : null;
     const settingsFragments = [
+      ...(guidance === null
+        ? []
+        : [
+            {
+              id: `goal-outcome:${turnId}`,
+              taskId,
+              source: 'system' as const,
+              trust: 'system' as const,
+              tokenEstimate: estimateTokens(guidance),
+              content: guidance,
+              createdAt: new Date().toISOString(),
+              messageId: null,
+            },
+          ]),
+      ...(previousContent === null
+        ? []
+        : [
+            {
+              id: `goal-progress:${turnId}`,
+              taskId,
+              source: 'background' as const,
+              trust: 'assistant' as const,
+              tokenEstimate: estimateTokens(previousContent),
+              content: previousContent,
+              createdAt: new Date().toISOString(),
+              messageId: null,
+            },
+          ]),
       ...(prePromptFragment === null ? [] : [prePromptFragment]),
       ...(preferencesFragment === null ? [] : [preferencesFragment]),
     ];
@@ -21424,6 +21512,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
     attachmentIds: readonly string[] = [],
     attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn {
+    // A reply may already be queued when the question Turn reports that it needs input.
+    const task = this.getTaskRow(taskId);
+    if (task.goal_status === 'paused' && readGoalReport(task)?.status === 'waiting')
+      this.transitionGoal(taskId, 'active');
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
@@ -21535,6 +21627,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
         now,
         now,
       );
+    this.db
+      .prepare(
+        `UPDATE tasks SET goal_turn_id=CASE WHEN goal_status='active' THEN ? ELSE NULL END
+         WHERE id=? AND ((goal_status='active' AND goal_turn_id IS NULL) OR
+                         (goal_status='paused' AND goal_turn_id IS NOT NULL))`,
+      )
+      .run(turnId, taskId);
     const insertSkill = this.db.prepare(
       `INSERT INTO turn_skill_bindings(
          turn_id, ordinal, source, skill_id, digest, kind,
@@ -22062,7 +22161,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
     observation?: TurnSealedObservation,
-  ): TurnEvent {
+    goalTurn = false,
+  ): { event: TurnEvent; goalReport: GoalReport | null } {
     const turn = this.getTurn(taskId, turnId);
     if (state === 'completed') {
       // One gate, one transaction. Observing the post-images in a transaction of their own and then
@@ -22099,8 +22199,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ? undefined
         : (this.db.prepare('SELECT * FROM messages WHERE id = ?').get(turn.assistant_message_id) as
             MessageRow | undefined);
+    const conclusion =
+      goalTurn && state === 'completed' && row ? parseGoalConclusion(row.content, turnId) : null;
+    if (row && conclusion) {
+      this.db.prepare('UPDATE messages SET content=? WHERE id=?').run(conclusion.text, row.id);
+      row.content = conclusion.text;
+    }
     const diff = this.getDisplayTurnDiff(taskId, turnId);
-    return this.appendEvent(
+    const event = this.appendEvent(
       row === undefined
         ? { type: 'turn.completed', taskId, turnId, state, diff: [...diff] }
         : {
@@ -22112,6 +22218,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             diff: [...diff],
           },
     );
+    return { event, goalReport: conclusion?.report ?? null };
   }
 
   private requeueUnacknowledgedBackgroundInTransaction(taskId: string, turnId: string): void {
@@ -23231,7 +23338,13 @@ function parseQueuedPayload(payloadJson: string): {
   };
 }
 
+function readGoalReport(row: TaskRow): GoalReport | null {
+  if (!row.goal_report_json) return null;
+  return goalReportSchema.parse(JSON.parse(row.goal_report_json));
+}
+
 function toTask(row: TaskRow, hasConversation: boolean): TaskSummary {
+  const report = readGoalReport(row);
   return taskSummarySchema.parse({
     id: row.id,
     projectId: row.project_id,
@@ -23247,7 +23360,11 @@ function toTask(row: TaskRow, hasConversation: boolean): TaskSummary {
         ? null
         : {
             objective: row.goal,
-            status: row.goal_status,
+            status:
+              report?.status === 'waiting' && row.goal_status === 'paused'
+                ? 'waiting'
+                : row.goal_status,
+            ...(report === null ? {} : { report }),
             tokenBudget: row.goal_token_budget,
             tokensUsed: row.goal_tokens_used,
             timeUsedSeconds: row.goal_time_used_seconds,

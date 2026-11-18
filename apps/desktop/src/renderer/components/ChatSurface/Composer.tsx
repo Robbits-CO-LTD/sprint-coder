@@ -1114,9 +1114,11 @@ function GoalProgress({
       ? '実行中'
       : goal.status === 'paused'
         ? '一時停止中'
-        : goal.status === 'completed'
-          ? '完了'
-          : 'ブロック中';
+        : goal.status === 'waiting'
+          ? '入力待ち'
+          : goal.status === 'completed'
+            ? '完了'
+            : 'ブロック中';
 
   return (
     <section
@@ -1144,9 +1146,23 @@ function GoalProgress({
           )}
         </div>
         <p title={goal.objective}>{goal.objective}</p>
+        {goal.report && (
+          <details className="goal-report">
+            <summary>
+              {goal.report.status === 'achieved'
+                ? '達成根拠'
+                : goal.report.status === 'waiting'
+                  ? '返答が必要な内容'
+                  : '進捗・理由'}
+            </summary>
+            <div>{goal.report.summary}</div>
+            {goal.report.status === 'continue' && <div>次の作業：{goal.report.next}</div>}
+          </details>
+        )}
+        {goal.status === 'waiting' && <small>このタスクに返信するとGoalを再開します。</small>}
       </div>
       <div className="goal-progress-actions">
-        {goal.status === 'active' ? (
+        {(goal.status === 'active' || goal.status === 'waiting') && (
           <button
             type="button"
             onClick={onPause}
@@ -1156,7 +1172,8 @@ function GoalProgress({
           >
             <Pause size={14} />
           </button>
-        ) : (
+        )}
+        {goal.status !== 'active' && (
           <button
             type="button"
             onClick={onResume}
