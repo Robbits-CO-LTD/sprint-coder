@@ -775,10 +775,7 @@ import {
   providerFirstEventTimeoutMs,
 } from './provider-stream-deadline';
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
-import {
-  PROVIDER_EMPTY_RESPONSE_MESSAGE,
-  PROVIDER_OUTPUT_LIMIT_MESSAGE,
-} from './provider-output-limit';
+import { providerFailureMessage } from './provider-output-limit';
 import {
   buildProviderFailureDiagnostic,
   providerCauseFromDeadline,
@@ -8228,10 +8225,11 @@ export class IpcRouter {
             workspaceToolsBound: workspaceToolSnapshot !== undefined,
             toolCalling: selectedModel?.toolCalling.value,
             errorCategory: roundError.category,
+            providerCode: roundError.providerCode,
             toolCallCount: roundToolCalls.length,
             outputLength: roundOutput.join('').length,
           });
-          if (canRetryWithoutWorkspaceTools && roundError.providerCode !== 'output_token_limit') {
+          if (canRetryWithoutWorkspaceTools) {
             roundTools = Object.freeze([]);
             const guidanceIndex = messages.findIndex(
               ({ role, content }) => role === 'system' && content === workspaceGuidance,
@@ -8251,11 +8249,7 @@ export class IpcRouter {
           if (cause === null) throw new Error('Provider execution was canceled');
           throw new ProviderTurnFailureError(
             cause,
-            roundError.providerCode === 'output_token_limit'
-              ? PROVIDER_OUTPUT_LIMIT_MESSAGE
-              : roundError.providerCode === 'empty_response'
-                ? PROVIDER_EMPTY_RESPONSE_MESSAGE
-                : undefined,
+            providerFailureMessage(roundError.providerCode),
           );
         }
         if (!roundCompleted)
@@ -8817,7 +8811,10 @@ export class IpcRouter {
     if (text.length < state.consumed) return;
     state.safe += state.redactor.write(text.slice(state.consumed));
     state.consumed = text.length;
-    if (options.complete) this.fileEditByKey.delete(key);
+    if (options.complete) {
+      state.safe += state.redactor.end();
+      this.fileEditByKey.delete(key);
+    }
     const safeText = state.safe.slice(-262_144);
     // The tail is what the user is watching; an early frame of a large file is not worth the IPC.
     // The cap matches the schema's.
@@ -9671,6 +9668,7 @@ export function shouldRetryProviderWithoutTools(input: {
   workspaceToolsBound: boolean;
   toolCalling: boolean | null | undefined;
   errorCategory: NormalizedProviderError['category'];
+  providerCode: string | null;
   toolCallCount: number;
   outputLength: number;
 }): boolean {
@@ -9679,6 +9677,7 @@ export function shouldRetryProviderWithoutTools(input: {
     input.workspaceToolsBound &&
     input.toolCalling == null &&
     input.errorCategory === 'invalid_request' &&
+    providerFailureMessage(input.providerCode) === undefined &&
     input.toolCallCount === 0 &&
     input.outputLength === 0
   );

@@ -53,6 +53,8 @@ export function summarizeRuntimeChanges(
     for (const change of record.changes) {
       const key = `${change.rootId}\u0000${change.path}`;
       if (!latestByPath.has(key)) order.push(key);
+      // A later edit still belongs to the file creation for this Turn's net line count.
+      if (change.kind === 'update' && latestByPath.get(key)?.kind === 'add') continue;
       latestByPath.set(key, change);
     }
   }

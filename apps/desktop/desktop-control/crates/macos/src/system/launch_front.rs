@@ -637,6 +637,27 @@ pub(crate) fn annotate_for(
     }
 }
 
+/// A native toolbar can have a group between its editable field and the toolbar.
+fn toolbar_text_field<N>(
+    field: N,
+    role: impl Fn(&N) -> Option<String>,
+    parent: impl Fn(&N) -> Option<N>,
+) -> bool {
+    if !matches!(role(&field).as_deref(), Some("AXTextField" | "AXComboBox")) {
+        return false;
+    }
+    let mut node = field;
+    for _ in 0..8 {
+        let Some(next) = parent(&node) else { break };
+        match role(&next).as_deref() {
+            Some("AXToolbar") => return true,
+            Some("AXWebArea" | "AXWindow" | "AXApplication") | None => break,
+            _ => node = next,
+        }
+    }
+    false
+}
+
 /// The front's watch over a launch, with the reads and operations of this Mac.
 #[cfg(target_os = "macos")]
 pub(crate) struct FrontGuard {
@@ -662,6 +683,46 @@ impl FrontGuard {
             started,
             deadline,
         })
+    }
+
+    /// Restoring the window cannot recover keys already sent to the new one. Read
+    /// only roles, never the user's text, before asking the browser to open a URL.
+    pub(crate) fn check_browser_toolbar_input(&self) -> Result<(), AdapterError> {
+        use crate::tree::{element_for_pid, surface_read};
+        let watch = self.watch.borrow();
+        let Some(app) = watch
+            .last_app
+            .as_ref()
+            .filter(|app| watch.is_candidate(app))
+        else {
+            return Ok(());
+        };
+        let until = instant(budget(self.deadline));
+        let Ok(Some(field)) =
+            surface_read::element(&element_for_pid(app.pid), "AXFocusedUIElement", until)
+        else {
+            return Ok(());
+        };
+        if toolbar_text_field(
+            field,
+            |node| surface_read::string(node, "AXRole", until).ok().flatten(),
+            |node| {
+                surface_read::element(node, "AXParent", until)
+                    .ok()
+                    .flatten()
+            },
+        ) {
+            tracing::debug!(
+                "launch front: background URL deferred before opening; browser toolbar input has focus"
+            );
+            return Err(AdapterError::new(
+                agent_desktop_core::ErrorCode::ActionFailed,
+                "The foreground browser has keyboard focus in its toolbar input; the URL was not opened",
+            ).with_details(serde_json::json!({
+                "kind": "browser_toolbar_input_focused", "physical_delivery_started": false,
+            })).with_suggestion("Leave the user's input in place. Wait until they leave the address field or switch apps before trying to open the URL again."));
+        }
+        Ok(())
     }
 
     fn look(&self) {

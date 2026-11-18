@@ -1,7 +1,22 @@
-import { providerCompletionEvent } from './provider-output-limit';
+import {
+  providerCompletionEvent,
+  GEMINI_PROMPT_BLOCKED_MESSAGE,
+  GEMINI_RESPONSE_FILTERED_MESSAGE,
+} from './provider-output-limit';
 import type { CanonicalProviderEvent, NormalizedProviderUsage } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
 import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
+
+const FILTERED_FINISH_REASONS = new Set([
+  'SAFETY',
+  'RECITATION',
+  'BLOCKLIST',
+  'PROHIBITED_CONTENT',
+  'SPII',
+  'IMAGE_SAFETY',
+  'IMAGE_PROHIBITED_CONTENT',
+  'IMAGE_RECITATION',
+]);
 
 export async function* normalizeGeminiContentStream(
   body: ReadableStream<Uint8Array>,
@@ -40,6 +55,25 @@ export async function* normalizeGeminiContentStream(
         },
       };
       continue;
+    }
+
+    const blockReason = record(chunk.promptFeedback)?.blockReason;
+    if (
+      typeof blockReason === 'string' &&
+      blockReason !== '' &&
+      blockReason !== 'BLOCK_REASON_UNSPECIFIED'
+    ) {
+      yield {
+        type: 'error',
+        error: {
+          category: 'invalid_request',
+          message: GEMINI_PROMPT_BLOCKED_MESSAGE,
+          retryable: false,
+          retryAfterMs: null,
+          providerCode: 'gemini_prompt_blocked',
+        },
+      };
+      return;
     }
 
     if (typeof chunk.modelVersion === 'string')
@@ -109,7 +143,18 @@ export async function* normalizeGeminiContentStream(
       },
     };
     yield { type: 'usage', usage };
-    yield providerCompletionEvent(stopReason);
+    if (stopReason !== null && FILTERED_FINISH_REASONS.has(stopReason)) {
+      yield {
+        type: 'error',
+        error: {
+          category: 'invalid_request',
+          message: GEMINI_RESPONSE_FILTERED_MESSAGE,
+          retryable: false,
+          retryAfterMs: null,
+          providerCode: 'gemini_response_filtered',
+        },
+      };
+    } else yield providerCompletionEvent(stopReason);
   }
 }
 
