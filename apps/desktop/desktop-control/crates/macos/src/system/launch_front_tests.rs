@@ -894,3 +894,20 @@ fn right_behind_the_taker_is_read_from_the_window_order() {
         &candidates
     ));
 }
+
+#[test]
+fn only_a_text_input_in_browser_chrome_defers_the_background_url() {
+    let is_input = |roles: &[&str]| {
+        toolbar_text_field(
+            0usize,
+            |i| roles.get(*i).map(|s| s.to_string()),
+            |i| Some(*i + 1),
+        )
+    };
+    assert!(is_input(&["AXTextField", "AXGroup", "AXToolbar"]));
+    assert!(is_input(&["AXComboBox", "AXToolbar"]));
+    assert!(!is_input(&["AXButton", "AXToolbar"]));
+    assert!(!is_input(&["AXTextField", "AXWebArea", "AXToolbar"]));
+    assert!(!is_input(&["AXTextField", "AXWindow"]));
+    assert!(!is_input(&["AXTextField"]));
+}

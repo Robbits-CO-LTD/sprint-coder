@@ -46,6 +46,8 @@ Read the core skill first (`sprint-coder-desktop-control skills get desktop`) fo
 
 **Notification Center.** The notification commands drive Notification Center through accessibility, with the rules in the core `commands-system` reference. When sprint-coder-desktop-control opens the center, it closes it afterwards and restores the previous app focus. Pass both `--expected-app` and `--expected-title` on a single dismiss or action, because the stack shifts. Use `wait --notification --app "App"` for banners that vanish before you list them.
 
+**Opening a URL.** If the target browser is in front and its address or search field has keyboard focus, a background `launch --url` can return `browser_toolbar_input_focused` before opening a window. Wait for the user to leave the field or switch apps.
+
 **Chromium and Electron.** sprint-coder-desktop-control switches on the web accessibility of a Chromium renderer automatically when it needs it. For a dense running app, use `snapshot --skeleton -i --compact`, then drill with `--root @ref`.
 
 **Identity.** `launch` accepts a display name (`"System Settings"`) or a bundle ID (`com.apple.systempreferences`). Other commands take the display name through `--app`, or the bundle ID or executable name (`ControlCenter`) when no running app has that display name. Window IDs such as `w-4521` stay valid for the life of the window. Find them with `list-windows`.
