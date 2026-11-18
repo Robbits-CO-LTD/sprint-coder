@@ -7591,10 +7591,17 @@ describe('Provider workspace tool capability fallback', () => {
       workspaceToolsBound: true,
       toolCalling: null,
       errorCategory: 'invalid_request' as const,
+      providerCode: null,
       toolCallCount: 0,
       outputLength: 0,
     };
     expect(shouldRetryProviderWithoutTools(base)).toBe(true);
+    for (const providerCode of [
+      'gemini_prompt_blocked',
+      'gemini_response_filtered',
+      'output_token_limit',
+    ])
+      expect(shouldRetryProviderWithoutTools({ ...base, providerCode })).toBe(false);
     expect(shouldRetryProviderWithoutTools({ ...base, ordinal: 2 })).toBe(false);
     expect(shouldRetryProviderWithoutTools({ ...base, toolCalling: true })).toBe(false);
     expect(shouldRetryProviderWithoutTools({ ...base, toolCallCount: 1 })).toBe(false);
@@ -9392,5 +9399,47 @@ describe('assistant reply preferences on the API provider path', () => {
       { role: 'system', content },
       { role: 'user', content: '実装して' },
     ]);
+  });
+});
+
+describe('completed file edit frames', () => {
+  it.each([
+    ['one', 'one'],
+    ['one\n', 'one\n'],
+    ['one\ntwo', 'one\ntwo'],
+    ['one\ntwo\n', 'one\ntwo\n'],
+    ['one\npassword=fixture-only', 'one\npassword=[REDACTED]'],
+  ])('delivers the redacted final post-image for %j', async (text, expected) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'sc-final-frame-')));
+    try {
+      const path = join(root, 'sample.txt');
+      await writeFile(path, text);
+      const send = vi.fn();
+      const router = Object.assign(
+        Object.create(IpcRouter.prototype) as {
+          recordFileChanges(
+            taskId: string,
+            turnId: string,
+            changes: { path: string; kind: 'add' }[],
+          ): void;
+        },
+        {
+          turnWorkspaceByTurn: new Map([
+            ['turn', { roots: [{ rootId: 'root', label: 'Workspace', path: root }] }],
+          ]),
+          baselinesByTurn: new Map(),
+          fileEditByKey: new Map(),
+          persistence: { recordFileChanges: () => null },
+          window: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } },
+        },
+      );
+      router.recordFileChanges('task', 'turn', [{ path, kind: 'add' }]);
+      expect(send).toHaveBeenCalledWith(
+        IPC_CHANNELS.fileEditEvent,
+        expect.objectContaining({ text: expected, complete: true }),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

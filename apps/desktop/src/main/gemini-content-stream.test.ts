@@ -3,6 +3,21 @@ import { normalizeGeminiContentStream } from './gemini-content-stream';
 
 describe('normalizeGeminiContentStream', () => {
   it.each([
+    [{ promptFeedback: { blockReason: 'SAFETY' } }, 'gemini_prompt_blocked'],
+    [{ candidates: [{ finishReason: 'SAFETY' }] }, 'gemini_response_filtered'],
+    [{ candidates: [{ finishReason: 'RECITATION' }] }, 'gemini_response_filtered'],
+  ] as const)('reports explicit Gemini filtering without retrying: %j', async (chunk, code) => {
+    const events = [];
+    for await (const event of normalizeGeminiContentStream(sse([chunk]), 'gemini-test'))
+      events.push(event);
+    expect(events.some((event) => event.type === 'completed')).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      error: { category: 'invalid_request', providerCode: code, retryable: false },
+    });
+  });
+
+  it.each([
     { candidates: [{ content: { parts: [{ text: 'partial' }] } }] },
     { candidates: [{ content: { parts: [{ functionCall: { name: 'lookup', args: {} } }] } }] },
     { usageMetadata: { promptTokenCount: 8 } },

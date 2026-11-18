@@ -9,6 +9,27 @@ describe('changedLineStats', () => {
 
 describe('summarizeRuntimeChanges', () => {
   const rooted = { rootId: 'root-a', rootLabel: 'test1' } as const;
+  it('counts the final contents of a file created and then updated in the same Turn', () => {
+    const file = { ...rooted, path: 'new.txt' };
+    const summary = summarizeRuntimeChanges(
+      'turn',
+      [{ changes: [{ ...file, kind: 'add' }] }, { changes: [{ ...file, kind: 'update' }] }],
+      [
+        {
+          ...file,
+          turnId: 'turn',
+          complete: true,
+          baseline: null,
+          text: 'one\ntwo\n',
+          source: 'disk',
+          changed: new Set(),
+          order: 1,
+        },
+      ],
+    );
+    expect(summary?.diff.entries.map((entry) => entry.kind)).toEqual(['add']);
+    expect(summary?.lineStats).toEqual({ added: 2, deleted: 0, incomplete: false });
+  });
 
   it('deduplicates Runtime reports and uses only matching completed Turn frames', () => {
     const summary = summarizeRuntimeChanges(

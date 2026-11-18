@@ -84,6 +84,13 @@ pub(crate) fn launch_app_impl(
     // nothing more and waits exactly as before.
     let front =
         super::launch_front::FrontGuard::begin(handoff.as_ref(), options.activate, deadline);
+    // Only the validated --url path supplies a bundle allowlist. An explicit --activate
+    // has no background guard and retains its normal foreground behavior.
+    if !options.bundle_ids.is_empty()
+        && let Some(front) = &front
+    {
+        front.check_browser_toolbar_input().map_err(before_launch)?;
+    }
     let pause = |wait: Duration| super::launch_front::pause(front.as_ref(), wait);
 
     let launched = match crate::system::launch_workspace::open(id, &path, options, deadline) {
