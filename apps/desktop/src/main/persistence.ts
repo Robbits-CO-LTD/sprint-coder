@@ -19543,10 +19543,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.assertTask(taskId);
       this.assertTaskNotMutationQuarantined(taskId);
       if (this.getActiveTurnId(taskId) !== null) throw new TurnActiveError();
-      const task = this.getTaskRow(taskId);
-      if (task.goal_status === 'paused' && readGoalReport(task)?.status === 'waiting') {
-        this.transitionGoal(taskId, 'active');
-      }
       return this.startTurnInTransaction(
         taskId,
         text,
@@ -19964,27 +19960,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): TurnEvent {
-    // As in `completeTurnAndFinishGoal`: the observation outlives the transaction it justifies.
-    const observation = state === 'completed' ? this.openSealedObservation(taskId, turnId) : null;
-    try {
-      return this.db.transaction(
-        () =>
-          this.completeTurnInTransaction(taskId, turnId, state, finalText, observation ?? undefined)
-            .event,
-      )();
-    } finally {
-      observation?.close();
-    }
+    return this.completeTurnAndFinishGoal(taskId, turnId, state, finalText).event;
   }
 
   cancelTurn(taskId: string, turnId: string): TurnEvent | null {
-    return this.db.transaction(() => {
-      const turn = this.getTurn(taskId, turnId);
-      if (isTerminal(turn.state)) return null;
-      transitionTurn(turn.state, 'canceling');
-      this.updateTurn(turnId, 'canceling');
-      return this.completeTurnInTransaction(taskId, turnId, 'canceled').event;
-    })();
+    return this.cancelTurnAndFinishGoal(taskId, turnId).event;
   }
 
   snapshot(taskId: string): TurnSnapshot {
@@ -21532,6 +21512,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
     attachmentIds: readonly string[] = [],
     attachmentCapability?: ImageAttachmentCapabilityValidator | undefined,
   ): StartedTurn {
+    // A reply may already be queued when the question Turn reports that it needs input.
+    const task = this.getTaskRow(taskId);
+    if (task.goal_status === 'paused' && readGoalReport(task)?.status === 'waiting')
+      this.transitionGoal(taskId, 'active');
     const now = new Date().toISOString();
     const turnId = randomUUID();
     const parsedSkills = validatePersistedTurnSkills(skills);
