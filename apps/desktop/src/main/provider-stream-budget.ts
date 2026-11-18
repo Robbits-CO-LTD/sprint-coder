@@ -145,13 +145,20 @@ export async function* readBoundedServerSentJson(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let pending = '';
+  let previousEndedWithCR = false;
   let completed = false;
   try {
     while (true) {
       budget.assertTime();
       const { done, value } = await reader.read();
       if (value !== undefined) budget.consumeRaw(value.byteLength);
-      pending = (pending + decoder.decode(value, { stream: !done })).replace(/\r\n/g, '\n');
+      const decoded = decoder.decode(value, { stream: !done });
+      if (decoded.length > 0) {
+        // Dispatch a CR immediately. Its optional LF may arrive in a later read.
+        const chunk = previousEndedWithCR && decoded.startsWith('\n') ? decoded.slice(1) : decoded;
+        previousEndedWithCR = decoded.endsWith('\r');
+        pending += chunk.replace(/\r\n?/g, '\n');
+      }
       let boundary = pending.indexOf('\n\n');
       if (boundary < 0 && Buffer.byteLength(pending, 'utf8') > PROVIDER_STREAM_LIMITS.eventBytes)
         throw new ProviderQuotaExceededError('event_bytes');
