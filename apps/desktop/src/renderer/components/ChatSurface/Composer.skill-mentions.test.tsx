@@ -276,3 +276,24 @@ it('keeps the source of a same-name Skill pinned before a catalog change', async
     },
   );
 });
+
+it('keeps the selected Skill and sends punctuation after its inline name', async () => {
+  await withComposer(
+    '',
+    [{ ...second, description: 'Run a review.' }],
+    [],
+    async ({ change, textarea, key, send, container }) => {
+      await change('&review', 7);
+      await change('$review.', 8);
+      expect(container.querySelector('.composer-skill-mention')?.textContent).toBe('$review');
+      expect(textarea.value).toBe('$review.');
+      await key('Enter');
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: '$review.',
+          skills: [{ kind: second.kind, ref: second.ref }],
+        }),
+      );
+    },
+  );
+});

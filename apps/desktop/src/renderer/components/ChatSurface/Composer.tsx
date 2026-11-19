@@ -355,8 +355,7 @@ export function Composer({ taskId }: { taskId: string }) {
   const canStopAndSend = typeof window.sprintCoder?.turns?.stopAndSend === 'function';
   const canCancel = typeof window.sprintCoder?.turns?.cancel === 'function';
   const token = slashTokenAtCursor(draft, composerCursor);
-  const slashMatch =
-    token && !mentions.some((m) => m.start === token.start && m.end === token.end) ? token : null;
+  const slashMatch = token && !mentions.some((m) => m.start === token.start) ? token : null;
   const skillOnly = slashMatch !== null && draft[slashMatch.start] === '$';
   const slashQuery = slashMatch?.query ?? null;
   const skillIndex = useMemo(

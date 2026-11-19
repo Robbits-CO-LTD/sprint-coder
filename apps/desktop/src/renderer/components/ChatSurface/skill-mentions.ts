@@ -37,11 +37,28 @@ export function skillMentions(
   for (const match of text.matchAll(
     /\$(?:(builtin|created|claude|agents):)?([a-zA-Z0-9][a-zA-Z0-9._-]*)/g,
   )) {
-    const selection = selections.find(
-      ({ ref }) => ref.skillId === match[2] && (!match[1] || ref.source === match[1]),
-    );
-    if (selection)
-      mentions.push({ start: match.index, end: match.index + match[0].length, selection });
+    const id = match[2]!;
+    let selection: TurnSkillSelection | undefined;
+    for (const candidate of selections) {
+      const { skillId, source } = candidate.ref;
+      if (match[1] && source !== match[1]) continue;
+      if (skillId === id) {
+        selection = candidate;
+        break;
+      }
+      // Dots, dashes and underscores can be part of the ID or following punctuation.
+      if (
+        (!selection || skillId.length > selection.ref.skillId.length) &&
+        id.startsWith(skillId) &&
+        /^[._-]+$/u.test(id.slice(skillId.length))
+      ) {
+        selection = candidate;
+      }
+    }
+    if (selection) {
+      const end = match.index + match[0].length - id.length + selection.ref.skillId.length;
+      mentions.push({ start: match.index, end, selection });
+    }
   }
   return mentions;
 }
