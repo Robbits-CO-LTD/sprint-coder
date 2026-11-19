@@ -166,8 +166,10 @@ export function SkillSettingsSection({
       </div>
       <div className="settings-skill-guide">
         <p>
-          タスクの入力欄に <kbd>$</kbd> または <kbd>/</kbd>{' '}
-          を入力してSkillを選びます。青字のSkill名の後ろで、続けて別のSkillも選べます。名前を入力欄から削除すると、その送信から外れます。
+          入力欄に <kbd>&amp;Skill名</kbd>（例 <kbd>&amp;review</kbd>
+          ）と入力すると、一致するSkillが青字に変わります。長い名前と先頭が共通なら、短い名前の後ろにスペースを入れて確定します。候補から選ぶには{' '}
+          <kbd>$</kbd> または <kbd>/</kbd>{' '}
+          を入力します。青字のSkill名の後ろで、続けて別のSkillも選べます。名前を入力欄から削除すると、その送信から外れます。
         </p>
         <dl>
           <dt>Claude Codeで接続</dt>

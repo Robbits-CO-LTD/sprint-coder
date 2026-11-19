@@ -153,7 +153,7 @@
 
 - 前提: 新規Task、内蔵Skills。
 - 操作: 設定Team→Skillsを巡回。閉じて/skill-creatorから選択し送信せず再起動。入力欄でSkill名を削除して解除。
-- 合格条件: Team既定depth4、concurrency50と調査設定あり。Skillsにskill-creator/sprint-coder-product、組込/常時有効が見える。選択すると入力欄に青字の `$skill-creator` が入り、メッセージは0件。続けて別のSkillを選ぶと両方が本文中に表示される。再起動後も保持され、一方を削除するともう一方だけが残る。
+- 合格条件: Team既定depth4、concurrency50と調査設定あり。Skillsにskill-creator/sprint-coder-product、組込/常時有効が見える。選択すると入力欄に青字の `$skill-creator` が入り、メッセージは0件。続けて空白と `&sprint-coder-product` を入力すると、候補をクリックせずに2件目も青字になる。再起動後も保持され、一方を削除するともう一方だけが残る。
 - 証拠・制約: 設定/選択/復元画面。
 
 <a id="model-and-access-settings-01"></a>

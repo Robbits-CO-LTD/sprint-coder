@@ -25,8 +25,8 @@ import {
   type SlashCommand,
   type SlashCommandId,
 } from './slash-commands';
-import { mentionText, presentSkillDraft, skillMentions } from './skill-mentions';
-import { buildSkillSearchIndex, filterSkillSearchIndex } from './skill-picker';
+import { mentionText, presentSkillDraft, skillMentions, typedSkillAlias } from './skill-mentions';
+import { buildSkillSearchIndex, filterSkillSearchIndex, skillUnavailable } from './skill-picker';
 import { useTaskBoundary } from '../TaskBoundary';
 // Shared with the preload bridge, which arms the clipboard read from the same predicate — the two
 // must agree on what an image paste is.
@@ -286,6 +286,7 @@ export function Composer({ taskId }: { taskId: string }) {
     () => presentSkillDraft(storedDraft, selectedSkills),
     [storedDraft, selectedSkills],
   );
+  const aliasCaretRef = useRef<number | null>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
   const [compositionDraft, setCompositionDraft] = useState<string | null>(null);
   const composing = compositionDraft !== null;
@@ -372,14 +373,7 @@ export function Composer({ taskId }: { taskId: string }) {
     () => (slashQuery === null ? [] : filterSkillSearchIndex(skillIndex, slashQuery)),
     [skillIndex, slashQuery],
   );
-  const { selectedSkillKeys, chatSkillCount, teamSkillCount } = useMemo(
-    () => ({
-      selectedSkillKeys: new Set(selectedSkills.map(({ ref }) => `${ref.source}:${ref.skillId}`)),
-      chatSkillCount: selectedSkills.filter(({ kind }) => kind === 'chat').length,
-      teamSkillCount: selectedSkills.filter(({ kind }) => kind === 'team').length,
-    }),
-    [selectedSkills],
-  );
+  const teamStarted = currentTeam?.workers.some(({ kind }) => kind === 'worker') ?? false;
   const skillRuntime = runtime.kind === 'mock' ? 'provider' : runtime.kind;
   const autoSkillCount = skillCatalog.filter(
     (item) =>
@@ -432,22 +426,7 @@ export function Composer({ taskId }: { taskId: string }) {
       })),
       ...slashSkills.map((skill) => {
         const skillKey = `${skill.ref.source}:${skill.ref.skillId}:${skill.ref.digest}`;
-        const unavailable = !skill.enabled
-          ? 'このSkillは無効です'
-          : skill.compatibility.runtimeSupport[skillRuntime] === 'blocked'
-            ? 'このRuntimeではPortable版への変換が必要です'
-            : selectedSkillKeys.has(`${skill.ref.source}:${skill.ref.skillId}`)
-              ? 'すでに選択されています'
-              : skill.kind === 'chat' && chatSkillCount >= 5
-                ? 'Chat Skillは最大5件です'
-                : skill.kind === 'team' && teamSkillCount >= 1
-                  ? 'Team Skillは最大1件です'
-                  : skill.kind === 'team' &&
-                      currentTeam !== null &&
-                      currentTeam !== undefined &&
-                      currentTeam.workers.some(({ kind }) => kind === 'worker')
-                    ? 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください'
-                    : undefined;
+        const unavailable = skillUnavailable(skill, skillRuntime, selectedSkills, teamStarted);
         return {
           key: `skill:${skillKey}`,
           group:
@@ -468,15 +447,13 @@ export function Composer({ taskId }: { taskId: string }) {
       }),
     ],
     [
-      chatSkillCount,
-      currentTeam,
-      selectedSkillKeys,
+      teamStarted,
+      selectedSkills,
       skillRuntime,
       skillOnly,
       slashCommands,
       slashSkills,
       slashUnavailable,
-      teamSkillCount,
     ],
   );
   const slashOpen = !composing && slashQuery !== null && draft !== slashDismissedDraft;
@@ -485,6 +462,10 @@ export function Composer({ taskId }: { taskId: string }) {
   useLayoutEffect(() => {
     const node = textareaRef.current;
     if (!node) return;
+    if (aliasCaretRef.current !== null) {
+      node.setSelectionRange(aliasCaretRef.current, aliasCaretRef.current);
+      aliasCaretRef.current = null;
+    }
     node.style.height = 'auto';
     node.style.height = `${Math.min(node.scrollHeight, 140)}px`;
     syncMirrorScroll(node);
@@ -772,7 +753,7 @@ export function Composer({ taskId }: { taskId: string }) {
     if (!slashMatch) return;
     const token = mentionText(
       skill.ref,
-      skillCatalog.map((item) => item.ref),
+      [...skillCatalog, ...selectedSkills].map((item) => item.ref),
     );
     const suffix = draft.slice(slashMatch.end);
     const separator = suffix.startsWith(' ') ? '' : ' ';
@@ -800,14 +781,32 @@ export function Composer({ taskId }: { taskId: string }) {
     if (skill) selectSkill(skill);
   }
 
-  function editSkillDraft(next: string, caret: number) {
-    if (selectedSkills.length) {
-      const present = new Set(skillMentions(next, selectedSkills).map((m) => m.selection));
-      if (present.size !== selectedSkills.length)
-        void setSkillSelection(
-          taskId,
-          selectedSkills.filter((skill) => present.has(skill)),
-        );
+  function editSkillDraft(next: string, caret: number, allowAlias = false) {
+    const existing = new Set(skillMentions(next, selectedSkills).map((m) => m.selection));
+    const retained = selectedSkills.filter((skill) => existing.has(skill));
+    const alias = allowAlias ? typedSkillAlias(next, caret, skillCatalog) : null;
+    if (alias && !skillUnavailable(alias.skill, skillRuntime, retained, teamStarted, true)) {
+      const { ref, kind } = alias.skill;
+      // A draft can still have a pinned, same-name Skill from an earlier catalog.
+      const spelling = mentionText(
+        ref,
+        retained.map((selection) => selection.ref),
+      );
+      next =
+        next.slice(0, alias.trigger) +
+        spelling +
+        next.slice(alias.trigger + 1 + ref.skillId.length);
+      caret += spelling.length - (1 + ref.skillId.length);
+      if (!retained.some((s) => s.ref.source === ref.source && s.ref.skillId === ref.skillId)) {
+        retained.push({ ref, kind });
+      }
+      aliasCaretRef.current = caret;
+    }
+    if (
+      retained.length !== selectedSkills.length ||
+      retained.some((skill, i) => skill !== selectedSkills[i])
+    ) {
+      void setSkillSelection(taskId, retained);
     }
     if (slashTokenAtCursor(next, caret)?.query !== slashQuery) setSlashSelection(0);
     setComposerCursor(caret);
@@ -999,7 +998,11 @@ export function Composer({ taskId }: { taskId: string }) {
                 onCompositionStart={(event) => setCompositionDraft(event.currentTarget.value)}
                 onCompositionEnd={(event) => {
                   setCompositionDraft(null);
-                  editSkillDraft(event.currentTarget.value, event.currentTarget.selectionStart);
+                  editSkillDraft(
+                    event.currentTarget.value,
+                    event.currentTarget.selectionStart,
+                    Boolean(event.data) && event.currentTarget.value !== presentedDraft,
+                  );
                 }}
                 onScroll={(event) => syncMirrorScroll(event.currentTarget)}
                 data-testid="composer-textarea"
@@ -1023,7 +1026,12 @@ export function Composer({ taskId }: { taskId: string }) {
                     setCompositionDraft(nextDraft);
                     setComposerCursor(nextCursor);
                   } else {
-                    editSkillDraft(nextDraft, nextCursor);
+                    editSkillDraft(
+                      nextDraft,
+                      nextCursor,
+                      e.nativeEvent instanceof InputEvent &&
+                        e.nativeEvent.inputType === 'insertText',
+                    );
                   }
                 }}
                 onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}

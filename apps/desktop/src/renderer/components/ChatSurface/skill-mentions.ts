@@ -1,4 +1,4 @@
-import type { SkillRef, TurnSkillSelection } from '@sprint-coder/contracts';
+import type { SkillCatalogItem, SkillRef, TurnSkillSelection } from '@sprint-coder/contracts';
 
 export type SkillMention = { start: number; end: number; selection: TurnSkillSelection };
 
@@ -7,6 +7,24 @@ export function mentionText(ref: SkillRef, refs: readonly SkillRef[]): string {
     (other) => other.skillId === ref.skillId && other.source !== ref.source,
   );
   return ambiguous ? `$${ref.source}:${ref.skillId}` : `$${ref.skillId}`;
+}
+
+/** Match only the alias at the edit position. A space completes a name shared with a longer ID. */
+export function typedSkillAlias(text: string, caret: number, catalog: readonly SkillCatalogItem[]) {
+  // IDs are at most 128 ASCII characters. Include the trigger, boundary and optional space.
+  const start = Math.max(0, caret - 131);
+  const match = /(?:^|\s)&([A-Za-z0-9][A-Za-z0-9._-]{0,127})(\s?)$/u.exec(text.slice(start, caret));
+  if (!match) return null;
+  const id = match[1]!;
+  const terminated = Boolean(match[2]);
+  const trigger = caret - id.length - (terminated ? 2 : 1);
+  if (trigger > 0 && !/\s/u.test(text[trigger - 1]!)) return null;
+  if (!terminated && /[A-Za-z0-9._-]/.test(text[caret] ?? '')) return null;
+  const exact = catalog.filter(({ ref }) => ref.skillId === id);
+  if (exact.length !== 1) return null;
+  if (!terminated && catalog.some(({ ref }) => ref.skillId !== id && ref.skillId.startsWith(id)))
+    return null;
+  return { skill: exact[0]!, trigger };
 }
 
 /** Text alone never activates a Skill: a mention needs its Task's pinned selection. */
