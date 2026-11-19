@@ -65,7 +65,7 @@ export type SlashTokenMatch = Readonly<{
 /**
  * Returns the slash token touching the caret.
  *
- * A slash opens the picker only at the beginning of the draft or immediately after whitespace.
+ * A slash or dollar sign opens the picker only at the beginning of the draft or immediately after whitespace.
  * The token ends at whitespace, so selecting an item can remove only `/query` without discarding
  * the rest of a multi-line message.
  */
@@ -73,7 +73,11 @@ export function slashTokenAtCursor(draft: string, cursor = draft.length): SlashT
   const safeCursor = Math.max(0, Math.min(cursor, draft.length));
   let start = safeCursor;
   while (start > 0 && !/\s/u.test(draft[start - 1] ?? '')) start -= 1;
-  if (draft[start] !== '/' || (start > 0 && !/\s/u.test(draft[start - 1] ?? ''))) return null;
+  if (
+    (draft[start] !== '/' && draft[start] !== '$') ||
+    (start > 0 && !/\s/u.test(draft[start - 1] ?? ''))
+  )
+    return null;
 
   let end = start;
   while (end < draft.length && !/\s/u.test(draft[end] ?? '')) end += 1;

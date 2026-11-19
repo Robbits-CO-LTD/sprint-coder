@@ -152,8 +152,8 @@
 旧ケース: `tests/e2e/settings-skills-blueprint.spec.ts` — navigates Team and Skills settings, then pins and restores skill-creator without sending
 
 - 前提: 新規Task、内蔵Skills。
-- 操作: 設定Team→Skillsを巡回。閉じて/skill-creatorから選択し送信せず再起動。chipを押して解除。
-- 合格条件: Team既定depth4、concurrency50と調査設定あり。Skillsにskill-creator/sprint-coder-product、組込/常時有効が見える。選択でComposer空、chipあり、メッセージ0件。再起動後chip保持、解除で消える。
+- 操作: 設定Team→Skillsを巡回。閉じて/skill-creatorから選択し送信せず再起動。入力欄でSkill名を削除して解除。
+- 合格条件: Team既定depth4、concurrency50と調査設定あり。Skillsにskill-creator/sprint-coder-product、組込/常時有効が見える。選択すると入力欄に青字の `$skill-creator` が入り、メッセージは0件。続けて別のSkillを選ぶと両方が本文中に表示される。再起動後も保持され、一方を削除するともう一方だけが残る。
 - 証拠・制約: 設定/選択/復元画面。
 
 <a id="model-and-access-settings-01"></a>

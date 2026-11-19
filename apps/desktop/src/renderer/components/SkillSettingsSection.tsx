@@ -166,7 +166,8 @@ export function SkillSettingsSection({
       </div>
       <div className="settings-skill-guide">
         <p>
-          タスクの入力欄に <kbd>/</kbd> を入力すると、その送信で使うSkillを選べます。
+          タスクの入力欄に <kbd>$</kbd> または <kbd>/</kbd>{' '}
+          を入力してSkillを選びます。青字のSkill名の後ろで、続けて別のSkillも選べます。名前を入力欄から削除すると、その送信から外れます。
         </p>
         <dl>
           <dt>Claude Codeで接続</dt>
