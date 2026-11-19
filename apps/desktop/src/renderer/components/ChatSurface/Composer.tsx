@@ -282,12 +282,16 @@ export function Composer({ taskId }: { taskId: string }) {
   const skillCatalogRevision = useAppStore((s) => s.skillCatalogRevision);
   const selectedSkills =
     useAppStore((s) => s.skillSelectionByTask[taskId]) ?? EMPTY_SKILL_SELECTION;
-  const { text: draft, mentions } = useMemo(
+  const { text: presentedDraft, mentions } = useMemo(
     () => presentSkillDraft(storedDraft, selectedSkills),
     [storedDraft, selectedSkills],
   );
   const mirrorRef = useRef<HTMLDivElement>(null);
-  const [composing, setComposing] = useState(false);
+  const [compositionDraft, setCompositionDraft] = useState<string | null>(null);
+  const composing = compositionDraft !== null;
+  const draft = compositionDraft ?? presentedDraft;
+  // An untouched legacy draft carries its selections separately and may contain a standalone command.
+  const sendText = storedDraft.trim() ? storedDraft : presentedDraft;
   const activatedSkills =
     useAppStore((s) => s.activatedSkillsByTask[taskId]) ?? EMPTY_ACTIVATED_SKILLS;
   const loadSkills = useAppStore((s) => s.loadSkills);
@@ -520,6 +524,7 @@ export function Composer({ taskId }: { taskId: string }) {
     canCancel,
     actionPending: sending || turnActionPending !== null,
     sendBlocked:
+      composing ||
       permissionChanging ||
       attachmentBlocked ||
       goalControlPending ||
@@ -568,7 +573,7 @@ export function Composer({ taskId }: { taskId: string }) {
   function handleSend() {
     if (goalStartPendingRef.current || attachmentDraftIsUnresolved(useAppStore.getState(), taskId))
       return;
-    const raw = draft;
+    const raw = sendText;
     if (!raw.trim() || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel')
       return;
     // Enter while the slash picker is open already runs `/team` through runSlashCommand. Keep the
@@ -669,7 +674,7 @@ export function Composer({ taskId }: { taskId: string }) {
 
   function handleInterrupt(): void {
     if (attachmentDraftIsUnresolved(useAppStore.getState(), taskId)) return;
-    const raw = draft;
+    const raw = sendText;
     if (!raw.trim() || actionPolicy.interrupt.disabled) return;
     const text = composerMessageText(raw, imageRequested);
     const restoreImageRequest = imageRequested;
@@ -810,7 +815,7 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return;
+    if (composing || e.nativeEvent.isComposing) return;
     const { selectionStart, selectionEnd } = e.currentTarget;
     if (
       selectionStart === selectionEnd &&
@@ -991,8 +996,11 @@ export function Composer({ taskId }: { taskId: string }) {
                     ? 'composer-input composer-input-highlighted'
                     : 'composer-input'
                 }
-                onCompositionStart={() => setComposing(true)}
-                onCompositionEnd={() => setComposing(false)}
+                onCompositionStart={(event) => setCompositionDraft(event.currentTarget.value)}
+                onCompositionEnd={(event) => {
+                  setCompositionDraft(null);
+                  editSkillDraft(event.currentTarget.value, event.currentTarget.selectionStart);
+                }}
                 onScroll={(event) => syncMirrorScroll(event.currentTarget)}
                 data-testid="composer-textarea"
                 rows={1}
@@ -1008,7 +1016,15 @@ export function Composer({ taskId }: { taskId: string }) {
                 onChange={(e) => {
                   const nextDraft = e.target.value;
                   const nextCursor = e.target.selectionStart;
-                  editSkillDraft(nextDraft, nextCursor);
+                  if (
+                    composing ||
+                    (e.nativeEvent instanceof InputEvent && e.nativeEvent.isComposing)
+                  ) {
+                    setCompositionDraft(nextDraft);
+                    setComposerCursor(nextCursor);
+                  } else {
+                    editSkillDraft(nextDraft, nextCursor);
+                  }
                 }}
                 onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}
                 onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}

@@ -35,7 +35,8 @@ export function presentSkillDraft(text: string, selections: readonly TurnSkillSe
   const missing = selections.filter((skill) => !present.has(skill));
   if (!missing.length) return { text, mentions };
   const refs = selections.map((skill) => skill.ref);
-  const prefix = missing.map((skill) => mentionText(skill.ref, refs)).join(' ') + ' ';
-  const visible = prefix + text;
+  const appended = missing.map((skill) => mentionText(skill.ref, refs)).join(' ');
+  const separator = text && !/\s$/u.test(text) ? ' ' : '';
+  const visible = text + separator + appended + ' ';
   return { text: visible, mentions: skillMentions(visible, selections) };
 }

@@ -35,19 +35,21 @@ it('restores old drafts and distinguishes same-name skills from different source
   const other = item('outline', 'agents');
   const selections = [first, other].map(({ ref, kind }) => ({ ref, kind }));
   const text = presentSkillDraft('本文', selections).text;
-  expect(text).toBe('$created:outline $agents:outline 本文');
+  expect(text).toBe('本文 $created:outline $agents:outline ');
   expect(presentSkillDraft(text, selections).mentions.map((m) => m.selection)).toEqual(selections);
   expect(mentionText(first.ref, [first.ref])).toBe('$outline');
   expect(presentSkillDraft('$review is literal', []).mentions).toHaveLength(0);
 });
-it.each([false, true])(
-  'selects multiple mentions at the caret and submits their bindings (remove first: %s)',
-  async (removeFirst) => {
+it.each(['both', 'remove', 'ime', 'legacy-team'])(
+  'submits the expected text and Skill bindings for %s',
+  async (scenario) => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
       window.setTimeout(callback, 0),
     );
     const taskId = 'inline-skills';
+    const teamDraft = '/team リポジトリを並列調査して';
+    const firstSelection = { kind: first.kind, ref: first.ref };
     const send = vi.fn().mockResolvedValue({ turnId: 'accepted' });
     const saveSkills = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window, 'sprintCoder', {
@@ -62,7 +64,8 @@ it.each([false, true])(
       {
         ...useAppStore.getInitialState(),
         selectedTaskId: taskId,
-        draftByTask: { [taskId]: '先に $out 本文' },
+        draftByTask: { [taskId]: scenario === 'legacy-team' ? teamDraft : '先に $out 本文' },
+        skillSelectionByTask: { [taskId]: scenario === 'legacy-team' ? [firstSelection] : [] },
         skillCatalog: [first, second],
         skillCatalogRevision: '1',
         permissionByTask: { [taskId]: { preset: 'ask', policyEpoch: 0 } },
@@ -95,6 +98,15 @@ it.each([false, true])(
           textarea.dispatchEvent(new Event('input', { bubbles: true }));
         });
       };
+      if (scenario === 'legacy-team') {
+        expect(textarea.value).toBe(teamDraft + ' $outline ');
+        await showCaret(textarea.value.length);
+        await key('Enter');
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ text: teamDraft, skills: [firstSelection] }),
+        );
+        return;
+      }
       await showCaret('先に $out'.length);
       expect(container.querySelector('[data-testid="slash-command-goal"]')).toBeNull();
       await key('Tab');
@@ -107,6 +119,22 @@ it.each([false, true])(
       ).toEqual(['$outline', '$review']);
       const picked = useAppStore.getState().skillSelectionByTask[taskId];
       expect(picked?.map((s) => s.ref)).toEqual([first.ref, second.ref]);
+      if (scenario === 'ime') {
+        const compose = (type: string) =>
+          act(async () => textarea.dispatchEvent(new CompositionEvent(type, { bubbles: true })));
+        await compose('compositionstart');
+        await change('先に $outlined 本文 $review ', '先に $outlined'.length);
+        expect(textarea.value).toBe('先に $outlined 本文 $review ');
+        expect(useAppStore.getState().skillSelectionByTask[taskId]).toEqual(picked);
+        await change('先に $outlineで 本文 $review ', '先に $outlineで'.length);
+        await compose('compositionend');
+        await key('Enter');
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ text: '先に $outlineで 本文 $review ', skills: picked }),
+        );
+        return;
+      }
+      const removeFirst = scenario === 'remove';
       if (removeFirst) {
         await showCaret('先に $outline'.length);
         await key('Backspace');
