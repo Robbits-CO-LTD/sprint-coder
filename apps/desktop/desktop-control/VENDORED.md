@@ -10,6 +10,8 @@ Sprint Coder のデスクトップ操作の実行ファイルは、このフォ�
 
 以後の変更は、この repo で行い、下の「変えたファイル」に書き足す。upstream の更新を取り込む時も、ここに版と commit を書く。
 
+macOS の URL 起動用ブラウザーの名前・bundle ID・系統は `src/dispatch/mac-url-browsers.json` を Electron と Rust がビルドに取り込む。配布後の外部ファイルは不要。埋め込みの操作ガイドと macOS の権限エラーには Sprint Coder で許可される操作と、権限を付与するアプリを明記した（#1362、#1357）。
+
 ## 入れたもの
 
 Windows と macOS arm64 用の CLI の build に要る部分。

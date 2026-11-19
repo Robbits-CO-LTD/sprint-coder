@@ -231,7 +231,7 @@ impl AdapterError {
             "Accessibility permission not granted",
         )
         .with_suggestion(
-            "Run sprint-coder-desktop-control permissions to see which permission is denied and how to grant it. On macOS, sprint-coder-desktop-control permissions --guide opens System Settings with a guide",
+            "Run sprint-coder-desktop-control permissions to see which permission is denied and how to grant it. On macOS, ask the user to enable the missing permission for Sprint Coder in System Settings > Privacy & Security",
         )
         .with_disposition(DeliverySemantics::not_delivered())
     }

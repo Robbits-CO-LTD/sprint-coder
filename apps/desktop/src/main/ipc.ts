@@ -400,6 +400,12 @@ type ProviderToolImageBinding = Readonly<{
   capability: ProviderImageAttachmentCapabilityBinding;
 }>;
 
+type CloudScreenshotBinding = Readonly<{
+  kind: 'cloud-screenshot';
+  requestUrl: string;
+  identity: string;
+}>;
+
 type ProviderToolImageState = Readonly<{
   binding: Omit<ProviderToolImageBinding, 'capability'>;
   connection: ProviderConnection;
@@ -599,6 +605,8 @@ import type {
 import { RUNTIME_TOOL_RESULT_MAX_BYTES } from '../runtime-host/protocol';
 import {
   isScreenshotToolResult,
+  matchesScreenshotPicture,
+  SCREENSHOT_PICTURE_ATTACHED,
   screenshotCallKey,
   type ScreenshotPicture,
   screenshotToolResultFor,
@@ -6459,6 +6467,86 @@ export class IpcRouter {
     );
   }
 
+  private cloudScreenshotBinding(
+    started: StartedTurn,
+    connection: ProviderConnection,
+    modelId: string,
+  ): CloudScreenshotBinding | null {
+    const taskId = started.event.taskId;
+    const current = this.persistence.getProviderConnection(connection.id);
+    const selection = this.persistence.getTaskModelSelection(taskId);
+    if (
+      connection.runtimeKind !== 'official_api' ||
+      !current.enabled ||
+      !current.secretReference ||
+      this.persistence.getTask(taskId).localOnly ||
+      current.verification.status !== 'verified' ||
+      !(
+        Date.parse(current.verification.verifiedAt ?? '') <= Date.now() &&
+        Date.now() < Date.parse(current.verification.expiresAt ?? '')
+      ) ||
+      digestCanonical(current) !== digestCanonical(connection) ||
+      !selection ||
+      selection.connectionId !== connection.id ||
+      selection.requestedModel !== modelId ||
+      selection.requestedProvider !== connection.providerId ||
+      digestCanonical(selection) !== digestCanonical(started.modelSelection)
+    )
+      return null;
+    const model = this.modelCatalog.find(connection.id, modelId);
+    if (
+      !model?.available ||
+      model.connectionId !== connection.id ||
+      model.providerId !== connection.providerId
+    )
+      return null;
+    if (model.imageInput?.value !== true || model.imageInput.source !== 'provider_api') return null;
+    const requestUrl = this.providerRegistry.resolve(current).cloudScreenshotUrl;
+    if (!requestUrl) return null;
+    const identity = digestCanonical({
+      turnId: started.turnId,
+      taskId,
+      current,
+      selection,
+      model,
+      requestUrl,
+      credential: this.providerSecrets.get(current.secretReference),
+    });
+    return { kind: 'cloud-screenshot', requestUrl, identity };
+  }
+
+  private async approveCloudScreenshot(
+    binding: CloudScreenshotBinding,
+    connection: ProviderConnection,
+    modelId: string,
+    picture: ScreenshotPicture,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const promptSignal = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
+    promptSignal.throwIfAborted();
+    if (this.window.isDestroyed()) return false;
+    const answer = await dialog.showMessageBox(this.window, {
+      type: 'question',
+      title: 'スクリーンショットの外部送信',
+      message: 'このスクリーンショットを次の接続先に1回送りますか？',
+      detail: [
+        `接続先: ${binding.requestUrl}`,
+        `Provider: ${connection.providerId}`,
+        `モデル: ${modelId}`,
+        `画像: ${picture.mimeType}（${picture.byteLength} バイト）`,
+        ...(connection.providerId === 'openrouter'
+          ? ['OpenRouter が選んだモデル提供元にも画像が渡ります。']
+          : []),
+      ].join('\n'),
+      buttons: ['送らない', 'この画像を送る'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      signal: promptSignal,
+    });
+    return !promptSignal.aborted && answer.response === 1;
+  }
+
   private async captureProviderToolImageBinding(
     started: StartedTurn,
     connection: ProviderConnection,
@@ -7924,7 +8012,8 @@ export class IpcRouter {
       runtime = this.providerRegistry.resolve(connection);
       const providerImageDispatch = this.prepareProviderTurnImageAttachments(started, connection);
       const toolImageBridge = new ToolImageBridge();
-      let pendingToolImageBinding: ProviderToolImageBinding | undefined;
+      let pendingToolImageBinding: ProviderToolImageBinding | CloudScreenshotBinding | undefined;
+      let pendingScreenshot = false;
       const messages = providerMessagesFromContext(
         context.fragments,
         userMessageId,
@@ -7997,6 +8086,7 @@ export class IpcRouter {
           ? pendingToolImageBinding
           : undefined;
         pendingToolImageBinding = undefined;
+        pendingScreenshot = false;
         if (toolImageDispatch.hasToolImage && toolImageBinding === undefined)
           throw new ProviderImageAttachmentError();
         const initialMessages = toolImageDispatch.hasToolImage
@@ -8081,15 +8171,28 @@ export class IpcRouter {
         let roundCompleted = false;
         let finalToolImageEndpoint: PreparedProviderEndpoint | null = null;
         if (toolImageBinding !== undefined) {
-          finalToolImageEndpoint = await this.revalidateProviderToolImageBinding(
-            started,
-            toolImageBinding,
-            controller.signal,
-          );
-          controller.signal.throwIfAborted();
-          if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
-          if (!this.providerToolImageFinalStateMatches(started, toolImageBinding, connection))
-            throw new ProviderImageAttachmentError();
+          if ('kind' in toolImageBinding) {
+            finalToolImageEndpoint = await this.providerEndpointPolicy.prepareRequestUrl(
+              toolImageBinding.requestUrl,
+            );
+            controller.signal.throwIfAborted();
+            if (
+              finalToolImageEndpoint.trust !== 'trusted-remote' ||
+              this.cloudScreenshotBinding(started, connection, modelId)?.identity !==
+                toolImageBinding.identity
+            )
+              throw new ProviderImageAttachmentError();
+          } else {
+            finalToolImageEndpoint = await this.revalidateProviderToolImageBinding(
+              started,
+              toolImageBinding,
+              controller.signal,
+            );
+            controller.signal.throwIfAborted();
+            if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
+            if (!this.providerToolImageFinalStateMatches(started, toolImageBinding, connection))
+              throw new ProviderImageAttachmentError();
+          }
           const finalPayloadBytes = Buffer.from(
             JSON.stringify({
               messages: toolImageDispatch.messages,
@@ -8339,7 +8442,7 @@ export class IpcRouter {
           let content: string;
           try {
             const imageBinding =
-              toolCall.name === 'view_image'
+              toolCall.name === 'view_image' && !pendingScreenshot
                 ? await this.captureProviderToolImageBinding(
                     started,
                     connection,
@@ -8347,7 +8450,8 @@ export class IpcRouter {
                     controller.signal,
                   )
                 : null;
-            const result = await this.dispatchManagedRuntimeTool(
+            let picture: ScreenshotPicture | undefined;
+            let result = await this.dispatchManagedRuntimeTool(
               taskId,
               started.turnId,
               {
@@ -8362,7 +8466,43 @@ export class IpcRouter {
                 : () => {
                     pendingToolImageBinding = imageBinding;
                   },
+              toolCall.name === 'exec_command'
+                ? (taken) => {
+                    picture = taken;
+                  }
+                : undefined,
             );
+            if (picture && !pendingToolImageBinding && matchesScreenshotPicture(result, picture)) {
+              const local = await this.captureProviderToolImageBinding(
+                started,
+                connection,
+                modelId,
+                controller.signal,
+              );
+              const cloud =
+                !local && !context.projectItems.some((item) => item.localOnly)
+                  ? this.cloudScreenshotBinding(started, connection, modelId)
+                  : null;
+              if (
+                local ||
+                (cloud &&
+                  (await this.approveCloudScreenshot(
+                    cloud,
+                    connection,
+                    modelId,
+                    picture,
+                    controller.signal,
+                  )))
+              ) {
+                controller.signal.throwIfAborted();
+                const destination = local ?? cloud!;
+                toolImageBridge.acceptScreenshot(toolCall.callId, picture);
+                pendingToolImageBinding = destination;
+                pendingScreenshot = true;
+                if (isScreenshotToolResult(result))
+                  result = { ...result, picture: SCREENSHOT_PICTURE_ATTACHED };
+              }
+            }
             if (toolCall.name === 'view_image') {
               if (!isProviderImageBridgeDispatchResult(result))
                 throw new Error('Provider image tool result escaped its private bridge');

@@ -3075,6 +3075,7 @@ export const providerModelSchema = z
     maxOutputTokens: catalogValueSchema(z.number().int().positive()),
     toolCalling: catalogValueSchema(z.boolean()),
     structuredOutput: catalogValueSchema(z.boolean()),
+    imageInput: catalogValueSchema(z.boolean()).optional(),
     multimodalInput: catalogValueSchema(z.boolean()),
     reasoning: catalogValueSchema(z.boolean()),
     gateway: z

@@ -415,7 +415,7 @@ function DesktopControlApprovalCard({
 
 /** What 「このアプリは Task 中許可」 allows, and what it leaves on its own card. */
 function desktopAppGrantNote(app: string): string {
-  return `この Task の間、「${app}」のすべての窓（前から開いていた窓も含む）で、読み取りと、裏での操作（押す・値を入れる・選ぶ・窓の移動や大きさの変更など）を確認なしで進めます。キー入力、窓を前に出す操作、アプリの起動と終了、画面全体を読む操作は、毎回確認します。読み取りには窓の画像を撮ることも含み、撮った画像はこの Task の AI（接続先のサービス）に送ります。`;
+  return `この Task の間、「${app}」のすべての窓（前から開いていた窓も含む）で、読み取りと、裏での操作（押す・値を入れる・選ぶ・窓の移動や大きさの変更など）を確認なしで進めます。キー入力、窓を前に出す操作、アプリの起動と終了、画面全体を読む操作は、毎回確認します。読み取りには窓の画像を撮ることも含み、撮った画像はこの Task の AI（接続先のサービス）に送ります。クラウドAPIには、画像を送るたびに接続先とモデルを表示し、承認を求めます。`;
 }
 
 function badgeFor(step: Pick<DesktopAction, 'mode' | 'kind'>) {

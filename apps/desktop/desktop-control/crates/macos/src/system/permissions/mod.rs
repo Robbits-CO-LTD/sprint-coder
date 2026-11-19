@@ -1,9 +1,9 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, PermissionReport, PermissionState};
 
-const ACCESSIBILITY_SUGGESTION: &str = "Run sprint-coder-desktop-control permissions --guide. It opens System Settings > Privacy & Security > Accessibility (Device Control and Data Access on macOS 27 and later) with a guide that shows which app to drag into the list: the app that launches sprint-coder-desktop-control, such as Terminal, iTerm, or Codex. If macOS lists the built binary separately, add that binary too.";
-const SCREEN_RECORDING_SUGGESTION: &str = "Run sprint-coder-desktop-control permissions --guide. It opens System Settings > Privacy & Security > Screen Recording with a guide that shows which app to drag into the list: the app that launches sprint-coder-desktop-control, such as Terminal, iTerm, or Codex. If macOS lists the built binary separately, add that binary too.";
-pub(crate) const AUTOMATION_SUGGESTION: &str = "Open System Settings > Privacy & Security > Automation and allow the app that launches sprint-coder-desktop-control, such as Terminal, iTerm, or Codex, to control System Events. If macOS lists the built binary separately, add that binary too.";
+const ACCESSIBILITY_SUGGESTION: &str = "Ask the user to enable Sprint Coder in System Settings > Privacy & Security > Accessibility (Device Control and Data Access on macOS 27 and later). If macOS lists the helper separately, enable it too.";
+const SCREEN_RECORDING_SUGGESTION: &str = "Ask the user to enable Sprint Coder in System Settings > Privacy & Security > Screen Recording. If macOS lists the helper separately, enable it too.";
+pub(crate) const AUTOMATION_SUGGESTION: &str = "Open System Settings > Privacy & Security > Automation and allow Sprint Coder, to control System Events. If macOS lists the built binary separately, add that binary too.";
 
 const NO_ERR: i32 = 0;
 const PROC_NOT_FOUND: i32 = -600;

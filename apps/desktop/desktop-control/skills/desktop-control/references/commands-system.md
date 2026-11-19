@@ -1,5 +1,7 @@
 # System Commands
 
+> **Sprint Coder:** The standalone CLI examples below that use `permissions --guide`, `--force`, `--stdin`, `clipboard-get`, `launch --arg`, `launch --env`, `launch --cdp`, `trace show` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it. Use a scoped accessibility `snapshot` to inspect a running app.
+
 App lifecycle, windows, notifications, clipboard, wait, batch, sessions, health. Run `sprint-coder-desktop-control <command> --help` for flags.
 
 ## launch

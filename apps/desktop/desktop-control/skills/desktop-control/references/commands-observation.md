@@ -1,5 +1,7 @@
 # Observation Commands
 
+> **Sprint Coder:** The standalone CLI examples below that use `launch --cdp`, `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval. Use a scoped accessibility `snapshot` to inspect a running app.
+
 Commands that read UI state and never change it. Run `sprint-coder-desktop-control <command> --help` for flags.
 
 ## snapshot

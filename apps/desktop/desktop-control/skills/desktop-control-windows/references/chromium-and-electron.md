@@ -1,5 +1,7 @@
 # Chromium and Electron Trees
 
+> **Sprint Coder:** The standalone CLI examples below that use `launch --cdp` are unavailable in a managed task. Sprint Coder refuses them before approval. Use a scoped accessibility `snapshot` to inspect a running app.
+
 Chromium-based apps (Electron or browser) are the most common source of a false
 "the tree is empty" conclusion on Windows. The tree is real. The renderer builds
 it after the first UIA client connects.

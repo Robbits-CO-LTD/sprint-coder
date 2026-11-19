@@ -25,8 +25,9 @@ export function parseGoalConclusion(
 ): { report: GoalReport; text: string } | null {
   const end = content.trimEnd();
   if (!end.endsWith('\n```')) return null;
-  const start = end.lastIndexOf(fence);
-  if (start < 0 || (start > 0 && end[start - 1] !== '\n')) return null;
+  const line = end.lastIndexOf('\n' + fence);
+  const start = line >= 0 ? line + 1 : 0;
+  if (!end.startsWith(fence, start)) return null;
   const block = end.slice(start + fence.length, -4);
   if (!/^\r?\n/.test(block) || block.length > 16_384) return null;
   try {

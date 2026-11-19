@@ -1,5 +1,7 @@
 # Menus, Shell, Tray and Notifications on Linux
 
+> **Sprint Coder:** The standalone CLI examples below that use `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval.
+
 Run inside the target desktop session. `sprint-coder-desktop-control status` lists snapshot
 capabilities, not proof that a popup is open or a tray watcher is running.
 Openbox is an X11 window manager without GNOME Shell. Mutter here means a GNOME

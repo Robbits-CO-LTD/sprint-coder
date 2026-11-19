@@ -16,6 +16,8 @@ description: >
 
 # desktop-control-windows
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force`, `clipboard-get`, `launch --arg`, `launch --env`, `launch --cdp`, `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it. Use a scoped accessibility `snapshot` to inspect a running app.
+
 This file covers only what differs on Windows. The observe-act loop, refs, JSON
 envelope, sessions and tracing are the same on every platform.
 

@@ -275,7 +275,7 @@ mod imp {
         {
             return AdapterError::new(ErrorCode::PermDenied, "Screen Recording permission denied")
                 .with_suggestion(
-                    "Run sprint-coder-desktop-control permissions --guide. It opens System Settings > Privacy & Security > Screen Recording with a guide that shows which app to add.",
+                    "Ask the user to enable Sprint Coder in System Settings > Privacy & Security > Screen Recording.",
                 )
                 .with_platform_detail(combined.trim());
         }

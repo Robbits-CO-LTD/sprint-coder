@@ -1,5 +1,7 @@
 # Display Servers and Input on Linux
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force` are unavailable in a managed task. Sprint Coder refuses them before approval.
+
 Observation and semantic ref actions use AT-SPI and behave the same on X11 and
 Wayland. Input, window control and capture differ.
 

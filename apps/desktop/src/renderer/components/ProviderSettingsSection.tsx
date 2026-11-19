@@ -1324,6 +1324,9 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
         <div>
           <h3 id="settings-providers-title">プロバイダー接続</h3>
           <p>{SECTION_DESCRIPTION}</p>
+          <p>
+            デスクトップ操作の画像は、画像対応のクラウドAPIへ送る前に、1枚ごとに送信先とモデルを確認できます。
+          </p>
         </div>
         <div className="settings-heading-actions">
           <button

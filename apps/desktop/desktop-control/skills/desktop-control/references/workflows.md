@@ -1,5 +1,7 @@
 # Common Workflows
 
+> **Sprint Coder:** The standalone CLI examples below that use `clipboard-get`, `launch --cdp`, `trace show` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it. Use a scoped accessibility `snapshot` to inspect a running app.
+
 Patterns for multi-step desktop automation. Every ref comes from the latest snapshot output.
 
 ## First-Time Setup
@@ -11,7 +13,7 @@ sprint-coder-desktop-control status
 sprint-coder-desktop-control permissions
 ```
 
-- On macOS, the terminal needs Accessibility permission, and Screen Recording for screenshots. If `permissions` reports `denied`, run `sprint-coder-desktop-control permissions --guide`. It opens System Settings at the missing permission with a panel that shows the user which app to drag into the list.
+- On macOS, ask the user to enable Accessibility for Sprint Coder in System Settings > Privacy & Security, and Screen Recording for screenshots. Check the result with `permissions`.
 - On Windows, there is no permission dialog for same-integrity targets. Input into an elevated target needs an equally elevated terminal.
 - On Linux, there is no permission dialog. The session needs a running AT-SPI bus and `status` must report `accessibility` as `granted`. Run the tool in the same desktop session as the target app. If `status` reports it denied, read the bus section of the Linux skill.
 

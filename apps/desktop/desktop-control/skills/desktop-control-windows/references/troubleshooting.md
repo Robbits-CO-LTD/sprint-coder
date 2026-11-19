@@ -1,5 +1,7 @@
 # Troubleshooting
 
+> **Sprint Coder:** The standalone CLI examples below that use `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval.
+
 Symptom-to-cause map for the Windows adapter. Each entry names the observable
 symptom first.
 

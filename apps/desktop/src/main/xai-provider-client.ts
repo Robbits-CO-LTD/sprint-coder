@@ -13,6 +13,7 @@ import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const XAI_API_BASE_URL = 'https://api.x.ai/v1';
+const GENERATION_PATH = '/responses';
 const MODELS_SOURCE = 'https://docs.x.ai/developers/rest-api-reference/inference/models';
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
 const XAI_COST_TICKS_PER_USD = 10_000_000_000;
@@ -115,6 +116,7 @@ export class XAIProviderClient implements ProviderRuntime {
         maxOutputTokens: unknown,
         toolCalling: unknown,
         structuredOutput: unknown,
+        imageInput: providerValue(inputs.has('image')),
         multimodalInput: providerValue(inputs.has('image')),
         reasoning: unknown,
         pricing: {
@@ -125,6 +127,8 @@ export class XAIProviderClient implements ProviderRuntime {
       };
     });
   }
+
+  readonly cloudScreenshotUrl = `${XAI_API_BASE_URL}${GENERATION_PATH}`;
 
   async *execute(
     connection: ProviderConnection,
@@ -143,11 +147,16 @@ export class XAIProviderClient implements ProviderRuntime {
     this.executions.set(parsed.executionId, controller);
     try {
       controller.signal.throwIfAborted();
-      const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(xAIResponseRequest(parsed)),
-      });
+      const response = await this.authenticatedFetch(
+        connection,
+        GENERATION_PATH,
+        controller.signal,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(xAIResponseRequest(parsed)),
+        },
+      );
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
         if (response.status === 429)

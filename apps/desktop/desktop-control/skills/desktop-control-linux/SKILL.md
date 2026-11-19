@@ -17,6 +17,8 @@ description: >
 
 # desktop-control-linux
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force`, `clipboard-get`, `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it.
+
 This file covers only what differs on Linux. The observe-act loop, refs, JSON
 envelope, sessions and tracing are the same on every platform.
 

@@ -34,30 +34,23 @@ const FIREFOX_BROWSERS: &[&str] = &["firefox", "librewolf", "waterfox"];
 /// (`launch_url_mac_apps.json`), and the macOS adapter judges the one it opens by its id
 /// (`launch_url_bundle_ids`), so an id listed wrongly refuses that browser rather than passing
 /// another app.
-const MAC_URL_BROWSER_TABLE: &[(&str, &str, BrowserFamily)] = &[
-    (
-        "Google Chrome",
-        "com.google.Chrome",
-        BrowserFamily::Chromium,
-    ),
-    (
-        "Microsoft Edge",
-        "com.microsoft.edgemac",
-        BrowserFamily::Chromium,
-    ),
-    (
-        "Brave Browser",
-        "com.brave.Browser",
-        BrowserFamily::Chromium,
-    ),
-    ("Vivaldi", "com.vivaldi.Vivaldi", BrowserFamily::Chromium),
-    ("Opera", "com.operasoftware.Opera", BrowserFamily::Chromium),
-    ("Chromium", "org.chromium.Chromium", BrowserFamily::Chromium),
-    ("Firefox", "org.mozilla.firefox", BrowserFamily::Firefox),
-];
+static MAC_URL_BROWSER_TABLE: std::sync::LazyLock<Vec<MacBrowser<'static>>> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("mac-url-browsers.json"))
+            .unwrap_or_default()
+    });
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MacBrowser<'a> {
+    name: &'a str,
+    bundle_id: &'a str,
+    family: BrowserFamily,
+}
 
 /// How a browser is told to open a page in a new window of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum BrowserFamily {
     /// `--new-window <URL>` (Chromium's `switches::kNewWindow`).
     Chromium,
@@ -96,8 +89,10 @@ pub(crate) fn mac_browser_family(app: &str) -> Option<BrowserFamily> {
     let name = app.strip_suffix(".app").unwrap_or(app).to_ascii_lowercase();
     MAC_URL_BROWSER_TABLE
         .iter()
-        .find(|(file, id, _)| name == file.to_ascii_lowercase() || lower == id.to_ascii_lowercase())
-        .map(|(_, _, family)| *family)
+        .find(|browser| {
+            name.eq_ignore_ascii_case(browser.name) || lower.eq_ignore_ascii_case(browser.bundle_id)
+        })
+        .map(|browser| browser.family)
 }
 
 /// On macOS, the bundle ids the bundle a `--url` launch of `app` opens may have: those of the
@@ -118,8 +113,8 @@ pub(crate) fn mac_family_bundle_ids(app: &str) -> Vec<String> {
     };
     MAC_URL_BROWSER_TABLE
         .iter()
-        .filter(|(_, _, of)| *of == family)
-        .map(|(_, id, _)| (*id).to_owned())
+        .filter(|browser| browser.family == family)
+        .map(|browser| browser.bundle_id.to_owned())
         .collect()
 }
 
@@ -146,7 +141,7 @@ pub(crate) fn launch_url_args_on(
         let known: Vec<&str> = if macos {
             MAC_URL_BROWSER_TABLE
                 .iter()
-                .flat_map(|(file, id, _)| [*file, *id])
+                .flat_map(|browser| [browser.name, browser.bundle_id])
                 .collect()
         } else {
             CHROMIUM_BROWSERS

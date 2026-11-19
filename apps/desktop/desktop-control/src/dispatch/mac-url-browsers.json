@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Google Chrome",
+    "bundleId": "com.google.Chrome",
+    "family": "chromium"
+  },
+  {
+    "name": "Microsoft Edge",
+    "bundleId": "com.microsoft.edgemac",
+    "family": "chromium"
+  },
+  {
+    "name": "Brave Browser",
+    "bundleId": "com.brave.Browser",
+    "family": "chromium"
+  },
+  {
+    "name": "Vivaldi",
+    "bundleId": "com.vivaldi.Vivaldi",
+    "family": "chromium"
+  },
+  {
+    "name": "Opera",
+    "bundleId": "com.operasoftware.Opera",
+    "family": "chromium"
+  },
+  {
+    "name": "Chromium",
+    "bundleId": "org.chromium.Chromium",
+    "family": "chromium"
+  },
+  {
+    "name": "Firefox",
+    "bundleId": "org.mozilla.firefox",
+    "family": "firefox"
+  }
+]

@@ -14,6 +14,7 @@ import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-str
 
 const ANTHROPIC_API_BASE_URL = 'https://api.anthropic.com/v1';
 const ANTHROPIC_API_VERSION = '2023-06-01';
+const GENERATION_PATH = '/messages';
 const MODELS_SOURCE = 'https://platform.claude.com/docs/en/api/models/list';
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
 
@@ -115,10 +116,13 @@ export class AnthropicProviderClient implements ProviderRuntime {
       maxOutputTokens: providerValue(positiveInteger(model.max_tokens)),
       toolCalling: unknown,
       structuredOutput: capability(model.capabilities?.structured_outputs, observedAt),
+      imageInput: capability(model.capabilities?.image_input, observedAt),
       multimodalInput: capability(model.capabilities?.image_input, observedAt),
       reasoning: capability(model.capabilities?.thinking, observedAt),
     }));
   }
+
+  readonly cloudScreenshotUrl = `${ANTHROPIC_API_BASE_URL}${GENERATION_PATH}`;
 
   async *execute(
     connection: ProviderConnection,
@@ -137,16 +141,21 @@ export class AnthropicProviderClient implements ProviderRuntime {
     this.executions.set(parsed.executionId, controller);
     try {
       controller.signal.throwIfAborted();
-      const response = await this.authenticatedFetch(connection, '/messages', controller.signal, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'text/event-stream',
+      const response = await this.authenticatedFetch(
+        connection,
+        GENERATION_PATH,
+        controller.signal,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify(
+            anthropicMessageRequest(parsed, this.outputLimitFor(connection.id, parsed.modelId)),
+          ),
         },
-        body: JSON.stringify(
-          anthropicMessageRequest(parsed, this.outputLimitFor(connection.id, parsed.modelId)),
-        ),
-      });
+      );
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
         if (response.status === 429)

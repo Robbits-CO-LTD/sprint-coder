@@ -445,7 +445,7 @@ describe('desktop-control approval description', () => {
       kind: 'read',
       title: '画面を撮ります',
       notes: [
-        '撮った画像は、この Task の AI（接続先のサービス）に送ります。画像を受け取れない接続には、画像の大きさなどだけを送ります。',
+        '撮った画像は、この Task の AI（接続先のサービス）に送ります。クラウドAPIには、画像を送るたびに接続先とモデルを表示し、承認を求めます。画像を受け取れない接続には、画像の大きさなどだけを送ります。',
       ],
     });
     expect(describeArgv(['snapshot', '--window-id', 'w-5903576']).notes).toEqual([]);

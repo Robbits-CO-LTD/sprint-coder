@@ -1,3 +1,6 @@
+import { z } from 'zod';
+import macUrlBrowsers from '../../desktop-control/src/dispatch/mac-url-browsers.json';
+
 /**
  * `launch <browser> --url <URL>`: what Main lets a desktop-control run open in a browser, judged
  * before any card. Only an http or https URL, read with the URL standard (WHATWG, as `new URL`)
@@ -167,19 +170,16 @@ export type DesktopControlUrlBrowserFamily = 'chromium' | 'firefox';
  * its bundle id, so a renamed app does not pass for a browser (and an id listed wrongly refuses
  * that browser rather than passing another app).
  */
-export const DESKTOP_CONTROL_MAC_URL_BROWSERS: readonly {
-  name: string;
-  bundleId: string;
-  family: DesktopControlUrlBrowserFamily;
-}[] = [
-  { name: 'Google Chrome', bundleId: 'com.google.Chrome', family: 'chromium' },
-  { name: 'Microsoft Edge', bundleId: 'com.microsoft.edgemac', family: 'chromium' },
-  { name: 'Brave Browser', bundleId: 'com.brave.Browser', family: 'chromium' },
-  { name: 'Vivaldi', bundleId: 'com.vivaldi.Vivaldi', family: 'chromium' },
-  { name: 'Opera', bundleId: 'com.operasoftware.Opera', family: 'chromium' },
-  { name: 'Chromium', bundleId: 'org.chromium.Chromium', family: 'chromium' },
-  { name: 'Firefox', bundleId: 'org.mozilla.firefox', family: 'firefox' },
-];
+export const DESKTOP_CONTROL_MAC_URL_BROWSERS = z
+  .array(
+    z.object({
+      name: z.string().min(1),
+      bundleId: z.string().min(1),
+      family: z.enum(['chromium', 'firefox']),
+    }),
+  )
+  .readonly()
+  .parse(macUrlBrowsers);
 
 /**
  * The browser a macOS `launch` names, by a bundle's file name (with or without a lower-case `.app`,

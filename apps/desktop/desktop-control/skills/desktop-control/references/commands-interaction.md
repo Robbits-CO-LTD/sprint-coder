@@ -1,5 +1,7 @@
 # Interaction Commands
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force`, `--stdin`, `clipboard-get` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it.
+
 Commands that change UI state. Run `sprint-coder-desktop-control <command> --help` for flags.
 
 ## Headless and headed

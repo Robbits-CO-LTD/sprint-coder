@@ -213,12 +213,13 @@ fn every_mac_app_of_the_shared_table_is_judged_as_main_judges_it() {
 
 #[test]
 fn the_mac_table_names_each_browser_once_by_name_and_by_id() {
-    for (index, (file, id, _)) in MAC_URL_BROWSER_TABLE.iter().enumerate() {
+    for (index, browser) in MAC_URL_BROWSER_TABLE.iter().enumerate() {
+        let (file, id) = (browser.name, browser.bundle_id);
         assert!(!file.ends_with(".app") && !file.contains('/'), "{file}");
         assert!(id.contains('.') && !id.contains(' '), "{id}");
-        for (other_file, other_id, _) in &MAC_URL_BROWSER_TABLE[index + 1..] {
-            assert!(!file.eq_ignore_ascii_case(other_file), "{file}");
-            assert!(!id.eq_ignore_ascii_case(other_id), "{id}");
+        for other in &MAC_URL_BROWSER_TABLE[index + 1..] {
+            assert!(!file.eq_ignore_ascii_case(other.name), "{file}");
+            assert!(!id.eq_ignore_ascii_case(other.bundle_id), "{id}");
         }
     }
 }

@@ -254,7 +254,7 @@ const CLOSE_NOTE = '開いているアプリを閉じます。';
 // A screenshot's picture goes to the Task's model where its connection takes pictures
 // (`desktop-control-screenshot.ts`); elsewhere only what the picture is.
 const SCREENSHOT_NOTE =
-  '撮った画像は、この Task の AI（接続先のサービス）に送ります。画像を受け取れない接続には、画像の大きさなどだけを送ります。';
+  '撮った画像は、この Task の AI（接続先のサービス）に送ります。クラウドAPIには、画像を送るたびに接続先とモデルを表示し、承認を求めます。画像を受け取れない接続には、画像の大きさなどだけを送ります。';
 // macOS `close-app` without `--headed` only asks the app to quit (`MAC_COMMAND_MODES`). An app with
 // unsaved changes may bring its confirmation window forward (it may land on top of what the person
 // is looking at) and stay open; the run then ends with `TIMEOUT`. Never said to stay behind.
