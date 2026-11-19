@@ -13,6 +13,7 @@ import { normalizeOpenRouterResponsesStream } from './openrouter-responses-strea
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const OPENROUTER_API_BASE_URL = 'https://openrouter.ai/api/v1';
+const GENERATION_PATH = '/responses';
 const MODELS_SOURCE = 'https://openrouter.ai/docs/api/api-reference/models/get-models';
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
 
@@ -93,6 +94,7 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
         structuredOutput: providerValue(
           parameters.has('response_format') || parameters.has('structured_outputs'),
         ),
+        imageInput: providerValue(modalities.has('image')),
         multimodalInput: providerValue([...modalities].some((modality) => modality !== 'text')),
         reasoning: providerValue(parameters.has('reasoning')),
         gateway: {
@@ -111,6 +113,8 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
     });
   }
 
+  readonly cloudScreenshotUrl = `${OPENROUTER_API_BASE_URL}${GENERATION_PATH}`;
+
   async *execute(
     connection: ProviderConnection,
     request: ProviderExecutionRequest,
@@ -128,14 +132,19 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
     this.executions.set(parsed.executionId, controller);
     try {
       controller.signal.throwIfAborted();
-      const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-OpenRouter-Metadata': 'enabled',
+      const response = await this.authenticatedFetch(
+        connection,
+        GENERATION_PATH,
+        controller.signal,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-OpenRouter-Metadata': 'enabled',
+          },
+          body: JSON.stringify(responseRequest(parsed)),
         },
-        body: JSON.stringify(responseRequest(parsed)),
-      });
+      );
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
         if (response.status === 429)

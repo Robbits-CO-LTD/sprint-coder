@@ -15,24 +15,25 @@ description: >
 
 # Desktop control on macOS
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force`, `launch --cdp`, `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval. Use a scoped accessibility `snapshot` to inspect a running app.
+
 Read the core skill first (`sprint-coder-desktop-control skills get desktop`) for the observe, act, verify loop. This skill covers only what is different on macOS. When a command fails, find the symptom in [references/troubleshooting.md](references/troubleshooting.md).
 
 ## Requirements
 
 - macOS 13 or later, Intel or Apple Silicon.
-- Accessibility permission for the app that launches sprint-coder-desktop-control (Terminal, iTerm2, Warp, VS Code, Codex). macOS 27 and later name this list Device Control and Data Access. If System Settings lists the `sprint-coder-desktop-control` binary separately, grant it too.
+- Accessibility permission for Sprint Coder (the app launching the helper). macOS 27 and later name this list Device Control and Data Access. If System Settings lists the `sprint-coder-desktop-control` binary separately, grant it too.
 - Screen Recording permission, only for `screenshot` and for `session start --screenshots` artifacts.
 - Automation permission for System Events, only where a command reports it missing.
 
 ## First contact
 
 1. Run `sprint-coder-desktop-control permissions`.
-2. If a permission is denied, run `sprint-coder-desktop-control permissions --guide`. It opens the right System Settings page with a panel that shows the user which app to drag into the list. The user confirms with Touch ID or a password, and the panel moves to the next missing permission by itself. The command returns at once with `"guide": "started"`, `"already_running"` or `"not_needed"`. `sprint-coder-desktop-control permissions --request` shows the system prompts instead.
-3. If the guide cannot run, open System Settings > Privacy & Security > Accessibility (Device Control and Data Access on macOS 27 and later). Add the launching app and turn it on.
-4. Run `sprint-coder-desktop-control permissions` to confirm `granted`. The next sprint-coder-desktop-control call sees a new grant, so the launching app does not need a restart. Each command reads permissions in its own process, so a permission granted during a `batch` applies from the next CLI call, not to later items in that batch.
-5. Run `sprint-coder-desktop-control snapshot -i` to confirm. It reads the focused app. `snapshot --app Finder -i` returns `WINDOW_NOT_FOUND` when Finder has no open window.
+2. Ask the user to open System Settings > Privacy & Security and select the denied permission. For Accessibility (Device Control and Data Access on macOS 27 and later) or Screen Recording, enable Sprint Coder. For Automation, allow Sprint Coder to control System Events.
+3. Run `sprint-coder-desktop-control permissions` to confirm `granted`. The next sprint-coder-desktop-control call sees a new grant, so the launching app does not need a restart. Each command reads permissions in its own process, so a permission granted during a `batch` applies from the next CLI call, not to later items in that batch.
+4. Run `sprint-coder-desktop-control snapshot -i` to confirm. It reads the focused app. `snapshot --app Finder -i` returns `WINDOW_NOT_FOUND` when Finder has no open window.
 
-`permissions` does not prompt. `permissions --request` can prompt, including for Automation. `permissions --guide` does not prompt and covers Accessibility and Screen Recording only. Automation reports `unknown` when macOS would need to prompt.
+`permissions` reads the current grants. Automation reports `unknown` when macOS would need to prompt.
 
 ## What differs on macOS
 

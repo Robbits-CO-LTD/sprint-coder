@@ -13,6 +13,7 @@ import {
   type TurnSkillSelection,
 } from '@sprint-coder/contracts';
 import {
+  BUILTIN_SKILL_IDS,
   SkillStore,
   SkillStoreError,
   type ResolvedSkillPackage,
@@ -167,12 +168,7 @@ export class SkillSettingsService {
 
   markContextCatalogUnavailable(): void {
     this.autoCandidatesByRuntime = { codex: [], claude: [], grok: [], provider: [] };
-    this.contextCatalogEntries = [
-      'sprint-coder-team',
-      'sprint-coder-product',
-      'skill-creator',
-      'imagegen',
-    ].map((skillId) => ({
+    this.contextCatalogEntries = BUILTIN_SKILL_IDS.map((skillId) => ({
       source: 'builtin' as const,
       skillId,
       kind: null,

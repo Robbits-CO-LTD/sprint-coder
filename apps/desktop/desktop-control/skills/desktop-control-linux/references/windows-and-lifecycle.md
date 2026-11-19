@@ -1,5 +1,7 @@
 # Windows and Lifecycle on Linux
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force`, `launch --arg`, `launch --env` are unavailable in a managed task. Sprint Coder refuses them before approval.
+
 Window control uses EWMH client messages on the X11 display: an X11 session's
 display, or the Xwayland display of a Wayland session. `wmctrl` and `xdotool`
 are not used.

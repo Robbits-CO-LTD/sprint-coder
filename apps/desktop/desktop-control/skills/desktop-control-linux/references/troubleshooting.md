@@ -1,5 +1,7 @@
 # Linux Troubleshooting
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force`, `clipboard-get`, `launch --arg`, `launch --env`, `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it.
+
 Start with `sprint-coder-desktop-control status` and `sprint-coder-desktop-control list-apps`.
 
 ## Symptom to cause

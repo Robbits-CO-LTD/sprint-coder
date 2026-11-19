@@ -10,7 +10,6 @@ import {
 } from './desktop-control';
 import { desktopControlApprovalAction } from './desktop-control-display';
 import {
-  DESKTOP_CONTROL_MAC_URL_BROWSERS,
   DESKTOP_CONTROL_URL_BROWSERS,
   DESKTOP_CONTROL_URL_MAX,
   desktopControlLaunchUrl,
@@ -150,19 +149,6 @@ describe('launch --url: the browser', () => {
 });
 
 describe('launch --url: the browser on macOS', () => {
-  it('knows the same browsers, by name and bundle id, as the executable', () => {
-    const table = /MAC_URL_BROWSER_TABLE: &\[[^\]]*\] = &\[([\s\S]*?)\n\];/u.exec(
-      EXECUTABLE_BROWSERS,
-    );
-    expect(table).not.toBeNull();
-    const listed = [
-      ...table![1]!.matchAll(
-        /\(\s*"([^"]+)",\s*"([^"]+)",\s*BrowserFamily::(Chromium|Firefox),?\s*\)/gu,
-      ),
-    ].map(([, name, bundleId, family]) => ({ name, bundleId, family: family!.toLowerCase() }));
-    expect(listed).toEqual(DESKTOP_CONTROL_MAC_URL_BROWSERS);
-  });
-
   it('judges every app of the shared macOS table as the executable does, nothing trimmed', () => {
     const apps = JSON.parse(
       readFileSync(

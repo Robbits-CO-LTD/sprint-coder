@@ -47,6 +47,8 @@ export interface ProviderRuntime {
     modelId: string,
     signal: AbortSignal,
   ): Promise<ProviderImageInputCapabilitySnapshot | null>;
+  /** Exact cloud generation endpoint, paired with explicit image-input evidence from the catalog. */
+  readonly cloudScreenshotUrl?: string;
   dispose?(): Promise<void>;
 }
 

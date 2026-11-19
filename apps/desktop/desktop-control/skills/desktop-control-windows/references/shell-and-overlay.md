@@ -1,5 +1,7 @@
 # Shell surfaces, notifications and cursor overlay
 
+> **Sprint Coder:** The standalone CLI examples below that use `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval.
+
 Open this file to raise shell surfaces, read or drive notifications, use the cursor overlay, or handle hosted (UWP) window identity and menu detection.
 
 ## Shell Surfaces

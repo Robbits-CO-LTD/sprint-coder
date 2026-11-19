@@ -23,6 +23,18 @@ describe('Goal conclusion', () => {
       expect(parseGoalConclusion(text, id)).toBeNull();
     expect(goalDecision(null, null, 0).status).toBe('blocked');
   });
+  it('accepts a quoted opening fence inside the final JSON report', () => {
+    const quoted = {
+      ...progress,
+      summary: '確認: ```sprint-goal',
+      next: '説明に ```sprint-goal を加える',
+    };
+    for (const newline of ['\n', '\r\n']) {
+      const answer = reply(quoted).replaceAll('\n', newline);
+      expect(parseGoalConclusion(answer, id)).toEqual({ report: quoted, text: '回答' });
+      expect(parseGoalConclusion(answer, 'another-turn')).toBeNull();
+    }
+  });
   it('continues progress but stops a repeated step or an exhausted unattended run', () => {
     expect(goalDecision(progress, null, 0)).toEqual(progress);
     expect(goalDecision(progress, progress, 1).status).toBe('blocked');

@@ -1,5 +1,7 @@
 # Capture and Clipboard on Linux
 
+> **Sprint Coder:** The standalone CLI examples below that use `clipboard-get` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it.
+
 X11 needs no permission and no outside tool. Wayland asks a person once for
 `screenshot` and needs `wl-clipboard`. `sprint-coder-desktop-control permissions` shows the
 case: `screen_recording` is `not_required` on X11 and `unknown` on Wayland.

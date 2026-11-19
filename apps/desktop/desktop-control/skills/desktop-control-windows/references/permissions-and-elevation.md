@@ -1,5 +1,7 @@
 # Permissions and Elevation
 
+> **Sprint Coder:** The standalone CLI examples below that use `--force` are unavailable in a managed task. Sprint Coder refuses them before approval.
+
 Windows has no TCC-style permission grant for UI Automation. What controls
 access instead is **integrity level**: a Medium-integrity agent can observe and
 act on same-integrity applications, and the OS gates what crosses the boundary

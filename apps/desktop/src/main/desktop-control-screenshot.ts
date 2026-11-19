@@ -379,6 +379,10 @@ export function screenshotToolResultFor(
     : result;
 }
 
+export function matchesScreenshotPicture(result: unknown, picture: ScreenshotPicture): boolean {
+  return isScreenshotToolResult(result) && screenshotDigestOf(result) === picture.sha256;
+}
+
 function screenshotDigestOf(result: Record<string, unknown>): string | undefined {
   if (typeof result['stdout'] !== 'string') return undefined;
   try {

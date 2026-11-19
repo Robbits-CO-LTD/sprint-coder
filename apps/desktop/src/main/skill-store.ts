@@ -40,7 +40,7 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_DEPTH = 8;
 const SKILL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
-const BUILTIN_SKILL_IDS = new Set([
+export const BUILTIN_SKILL_IDS: readonly string[] = Object.freeze([
   'sprint-coder-team',
   'sprint-coder-product',
   'skill-creator',
@@ -289,7 +289,7 @@ export class SkillStore {
   }
 
   async installBuiltin(skillId: string, content: string, digest: string): Promise<void> {
-    if (!BUILTIN_SKILL_IDS.has(skillId) || !/^[a-f0-9]{64}$/.test(digest))
+    if (!BUILTIN_SKILL_IDS.includes(skillId) || !/^[a-f0-9]{64}$/.test(digest))
       throw new SkillStoreError('INVALID_SKILL', 'Builtin skill identity is invalid');
     const builtinRoot = join(this.rootPath, 'builtin');
     const destination = join(builtinRoot, skillId);
@@ -868,13 +868,7 @@ export class SkillStore {
         });
       }
     };
-    for (const skillId of [
-      'sprint-coder-team',
-      'sprint-coder-product',
-      'skill-creator',
-      'imagegen',
-    ] as const)
-      await capture('builtin', skillId, true);
+    for (const skillId of BUILTIN_SKILL_IDS) await capture('builtin', skillId, true);
     const createdRoot = join(this.rootPath, 'created');
     for (const skillId of (await readdir(createdRoot)).sort()) {
       if (!SKILL_ID.test(skillId) || skillId.startsWith('.')) continue;
@@ -1587,7 +1581,7 @@ function assertSkillIdForSource(source: SkillSource, skillId: string): void {
   if (!SKILL_ID.test(skillId) || !isWindowsSafePathSegment(skillId))
     throw new SkillStoreError('INVALID_SKILL', 'Skill id is invalid');
   if (source === 'builtin') {
-    if (!BUILTIN_SKILL_IDS.has(skillId))
+    if (!BUILTIN_SKILL_IDS.includes(skillId))
       throw new SkillStoreError('INVALID_SKILL', 'Builtin Skill id is invalid');
     return;
   }
