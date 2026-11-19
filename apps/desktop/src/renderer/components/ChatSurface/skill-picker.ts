@@ -1,4 +1,28 @@
-import type { SkillCatalogItem } from '@sprint-coder/contracts';
+import type { SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
+
+export function skillUnavailable(
+  skill: SkillCatalogItem,
+  runtime: keyof SkillCatalogItem['compatibility']['runtimeSupport'],
+  selections: readonly TurnSkillSelection[],
+  teamStarted: boolean,
+  reuseSelected = false,
+): string | undefined {
+  if (!skill.enabled) return 'このSkillは無効です';
+  if (skill.compatibility.runtimeSupport[runtime] === 'blocked')
+    return 'このRuntimeではPortable版への変換が必要です';
+  if (
+    selections.some(
+      ({ ref }) => ref.source === skill.ref.source && ref.skillId === skill.ref.skillId,
+    )
+  )
+    return reuseSelected ? undefined : 'すでに選択されています';
+  const count = selections.filter(({ kind }) => kind === skill.kind).length;
+  if (skill.kind === 'chat' && count >= 5) return 'Chat Skillは最大5件です';
+  if (skill.kind === 'team' && count >= 1) return 'Team Skillは最大1件です';
+  if (skill.kind === 'team' && teamStarted)
+    return 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください';
+  return undefined;
+}
 
 export type IndexedSkill = Readonly<{
   skill: SkillCatalogItem;

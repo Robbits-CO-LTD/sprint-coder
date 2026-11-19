@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent, RefObject } from 'react';
 import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
 import {
@@ -25,7 +25,8 @@ import {
   type SlashCommand,
   type SlashCommandId,
 } from './slash-commands';
-import { buildSkillSearchIndex, filterSkillSearchIndex } from './skill-picker';
+import { mentionText, presentSkillDraft, skillMentions, typedSkillAlias } from './skill-mentions';
+import { buildSkillSearchIndex, filterSkillSearchIndex, skillUnavailable } from './skill-picker';
 import { useTaskBoundary } from '../TaskBoundary';
 // Shared with the preload bridge, which arms the clipboard read from the same predicate — the two
 // must agree on what an image paste is.
@@ -235,7 +236,7 @@ export function ComposerActionButtons({
 }
 
 export function Composer({ taskId }: { taskId: string }) {
-  const draft = useAppStore((s) => s.draftByTask[taskId]) ?? '';
+  const storedDraft = useAppStore((s) => s.draftByTask[taskId]) ?? '';
   const setDraft = useAppStore((s) => s.setDraft);
   const startGoal = useAppStore((s) => s.startGoal);
   const restoreFailedGoalDraft = useAppStore((s) => s.restoreFailedGoalDraft);
@@ -281,6 +282,17 @@ export function Composer({ taskId }: { taskId: string }) {
   const skillCatalogRevision = useAppStore((s) => s.skillCatalogRevision);
   const selectedSkills =
     useAppStore((s) => s.skillSelectionByTask[taskId]) ?? EMPTY_SKILL_SELECTION;
+  const { text: presentedDraft, mentions } = useMemo(
+    () => presentSkillDraft(storedDraft, selectedSkills),
+    [storedDraft, selectedSkills],
+  );
+  const aliasCaretRef = useRef<number | null>(null);
+  const mirrorRef = useRef<HTMLDivElement>(null);
+  const [compositionDraft, setCompositionDraft] = useState<string | null>(null);
+  const composing = compositionDraft !== null;
+  const draft = compositionDraft ?? presentedDraft;
+  // An untouched legacy draft carries its selections separately and may contain a standalone command.
+  const sendText = storedDraft.trim() ? storedDraft : presentedDraft;
   const activatedSkills =
     useAppStore((s) => s.activatedSkillsByTask[taskId]) ?? EMPTY_ACTIVATED_SKILLS;
   const loadSkills = useAppStore((s) => s.loadSkills);
@@ -342,7 +354,9 @@ export function Composer({ taskId }: { taskId: string }) {
   const canQueue = typeof window.sprintCoder?.turns?.queue === 'function';
   const canStopAndSend = typeof window.sprintCoder?.turns?.stopAndSend === 'function';
   const canCancel = typeof window.sprintCoder?.turns?.cancel === 'function';
-  const slashMatch = slashTokenAtCursor(draft, composerCursor);
+  const token = slashTokenAtCursor(draft, composerCursor);
+  const slashMatch = token && !mentions.some((m) => m.start === token.start) ? token : null;
+  const skillOnly = slashMatch !== null && draft[slashMatch.start] === '$';
   const slashQuery = slashMatch?.query ?? null;
   const skillIndex = useMemo(
     () => buildSkillSearchIndex(skillCatalog),
@@ -351,23 +365,14 @@ export function Composer({ taskId }: { taskId: string }) {
     [skillCatalogRevision],
   );
   const slashCommands = useMemo(
-    () => (slashQuery === null ? [] : filterSlashCommands(SLASH_COMMANDS, slashQuery)),
-    [slashQuery],
+    () => (slashQuery === null || skillOnly ? [] : filterSlashCommands(SLASH_COMMANDS, slashQuery)),
+    [slashQuery, skillOnly],
   );
   const slashSkills = useMemo(
     () => (slashQuery === null ? [] : filterSkillSearchIndex(skillIndex, slashQuery)),
     [skillIndex, slashQuery],
   );
-  const { selectedSkillKeys, chatSkillCount, teamSkillCount } = useMemo(
-    () => ({
-      selectedSkillKeys: new Set(
-        selectedSkills.map(({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}`),
-      ),
-      chatSkillCount: selectedSkills.filter(({ kind }) => kind === 'chat').length,
-      teamSkillCount: selectedSkills.filter(({ kind }) => kind === 'team').length,
-    }),
-    [selectedSkills],
-  );
+  const teamStarted = currentTeam?.workers.some(({ kind }) => kind === 'worker') ?? false;
   const skillRuntime = runtime.kind === 'mock' ? 'provider' : runtime.kind;
   const autoSkillCount = skillCatalog.filter(
     (item) =>
@@ -420,22 +425,7 @@ export function Composer({ taskId }: { taskId: string }) {
       })),
       ...slashSkills.map((skill) => {
         const skillKey = `${skill.ref.source}:${skill.ref.skillId}:${skill.ref.digest}`;
-        const unavailable = !skill.enabled
-          ? 'このSkillは無効です'
-          : skill.compatibility.runtimeSupport[skillRuntime] === 'blocked'
-            ? 'このRuntimeではPortable版への変換が必要です'
-            : selectedSkillKeys.has(skillKey)
-              ? 'すでに選択されています'
-              : skill.kind === 'chat' && chatSkillCount >= 5
-                ? 'Chat Skillは最大5件です'
-                : skill.kind === 'team' && teamSkillCount >= 1
-                  ? 'Team Skillは最大1件です'
-                  : skill.kind === 'team' &&
-                      currentTeam !== null &&
-                      currentTeam !== undefined &&
-                      currentTeam.workers.some(({ kind }) => kind === 'worker')
-                    ? 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください'
-                    : undefined;
+        const unavailable = skillUnavailable(skill, skillRuntime, selectedSkills, teamStarted);
         return {
           key: `skill:${skillKey}`,
           group:
@@ -448,7 +438,7 @@ export function Composer({ taskId }: { taskId: string }) {
                   : skill.kind === 'team'
                     ? ('Team Skills' as const)
                     : ('Chat Skills' as const),
-          command: `/${skill.ref.skillId}`,
+          command: `${skillOnly ? '$' : '/'}${skill.ref.skillId}`,
           label: skill.name,
           description: skill.description,
           ...(unavailable === undefined ? {} : { unavailable }),
@@ -456,25 +446,36 @@ export function Composer({ taskId }: { taskId: string }) {
       }),
     ],
     [
-      chatSkillCount,
-      currentTeam,
-      selectedSkillKeys,
+      teamStarted,
+      selectedSkills,
       skillRuntime,
+      skillOnly,
       slashCommands,
       slashSkills,
       slashUnavailable,
-      teamSkillCount,
     ],
   );
-  const slashOpen = slashQuery !== null && draft !== slashDismissedDraft;
+  const slashOpen = !composing && slashQuery !== null && draft !== slashDismissedDraft;
   const activeSlashSelection = Math.min(slashSelection, Math.max(0, slashItems.length - 1));
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = textareaRef.current;
     if (!node) return;
+    if (aliasCaretRef.current !== null) {
+      node.setSelectionRange(aliasCaretRef.current, aliasCaretRef.current);
+      aliasCaretRef.current = null;
+    }
     node.style.height = 'auto';
     node.style.height = `${Math.min(node.scrollHeight, 140)}px`;
-  }, [draft]);
+    syncMirrorScroll(node);
+  }, [draft, composing]);
+
+  function syncMirrorScroll(node: HTMLTextAreaElement) {
+    if (mirrorRef.current) {
+      mirrorRef.current.scrollTop = node.scrollTop;
+      mirrorRef.current.scrollLeft = node.scrollLeft;
+    }
+  }
 
   useEffect(() => {
     void loadSkills();
@@ -503,6 +504,7 @@ export function Composer({ taskId }: { taskId: string }) {
     canCancel,
     actionPending: sending || turnActionPending !== null,
     sendBlocked:
+      composing ||
       permissionChanging ||
       attachmentBlocked ||
       goalControlPending ||
@@ -551,7 +553,7 @@ export function Composer({ taskId }: { taskId: string }) {
   function handleSend() {
     if (goalStartPendingRef.current || attachmentDraftIsUnresolved(useAppStore.getState(), taskId))
       return;
-    const raw = draft;
+    const raw = sendText;
     if (!raw.trim() || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel')
       return;
     // Enter while the slash picker is open already runs `/team` through runSlashCommand. Keep the
@@ -652,7 +654,7 @@ export function Composer({ taskId }: { taskId: string }) {
 
   function handleInterrupt(): void {
     if (attachmentDraftIsUnresolved(useAppStore.getState(), taskId)) return;
-    const raw = draft;
+    const raw = sendText;
     if (!raw.trim() || actionPolicy.interrupt.disabled) return;
     const text = composerMessageText(raw, imageRequested);
     const restoreImageRequest = imageRequested;
@@ -747,9 +749,23 @@ export function Composer({ taskId }: { taskId: string }) {
 
   function selectSkill(skill: SkillCatalogItem): void {
     const selection: TurnSkillSelection = { kind: skill.kind, ref: skill.ref };
-    removeActiveSlashToken();
-    setSlashDismissedDraft(null);
+    if (!slashMatch) return;
+    const token = mentionText(
+      skill.ref,
+      [...skillCatalog, ...selectedSkills].map((item) => item.ref),
+    );
+    const suffix = draft.slice(slashMatch.end);
+    const separator = suffix.startsWith(' ') ? '' : ' ';
+    const next = draft.slice(0, slashMatch.start) + token + separator + suffix;
+    const caret = slashMatch.start + token.length + 1;
     void setSkillSelection(taskId, [...selectedSkills, selection]);
+    setDraft(taskId, next);
+    setComposerCursor(caret);
+    setSlashDismissedDraft(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true });
+      textareaRef.current?.setSelectionRange(caret, caret);
+    });
   }
 
   function selectSlashItem(item: SlashMenuItem): void {
@@ -764,8 +780,60 @@ export function Composer({ taskId }: { taskId: string }) {
     if (skill) selectSkill(skill);
   }
 
+  function editSkillDraft(next: string, caret: number, allowAlias = false) {
+    const existing = new Set(skillMentions(next, selectedSkills).map((m) => m.selection));
+    const retained = selectedSkills.filter((skill) => existing.has(skill));
+    const alias = allowAlias ? typedSkillAlias(next, caret, skillCatalog) : null;
+    if (alias && !skillUnavailable(alias.skill, skillRuntime, retained, teamStarted, true)) {
+      const { ref, kind } = alias.skill;
+      // A draft can still have a pinned, same-name Skill from an earlier catalog.
+      const spelling = mentionText(
+        ref,
+        retained.map((selection) => selection.ref),
+      );
+      next =
+        next.slice(0, alias.trigger) +
+        spelling +
+        next.slice(alias.trigger + 1 + ref.skillId.length);
+      caret += spelling.length - (1 + ref.skillId.length);
+      if (!retained.some((s) => s.ref.source === ref.source && s.ref.skillId === ref.skillId)) {
+        retained.push({ ref, kind });
+      }
+      aliasCaretRef.current = caret;
+    }
+    if (
+      retained.length !== selectedSkills.length ||
+      retained.some((skill, i) => skill !== selectedSkills[i])
+    ) {
+      void setSkillSelection(taskId, retained);
+    }
+    if (slashTokenAtCursor(next, caret)?.query !== slashQuery) setSlashSelection(0);
+    setComposerCursor(caret);
+    setDraft(taskId, next);
+  }
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return;
+    if (composing || e.nativeEvent.isComposing) return;
+    const { selectionStart, selectionEnd } = e.currentTarget;
+    if (
+      selectionStart === selectionEnd &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      (e.key === 'Backspace' || e.key === 'Delete')
+    ) {
+      const mention = mentions.find((m) =>
+        e.key === 'Backspace' ? m.end === selectionStart : m.start === selectionStart,
+      );
+      if (mention) {
+        e.preventDefault();
+        editSkillDraft(draft.slice(0, mention.start) + draft.slice(mention.end), mention.start);
+        requestAnimationFrame(() =>
+          textareaRef.current?.setSelectionRange(mention.start, mention.start),
+        );
+        return;
+      }
+    }
     if (slashOpen) {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -836,39 +904,6 @@ export function Composer({ taskId }: { taskId: string }) {
                 onSelect={selectSlashItem}
               />
             )}
-            {selectedSkills.length > 0 && (
-              <div className="composer-skill-chips" aria-label="この送信で使用するSkill">
-                {selectedSkills.map((selection) => {
-                  const item = skillCatalog.find(
-                    ({ ref }) =>
-                      ref.source === selection.ref.source &&
-                      ref.skillId === selection.ref.skillId &&
-                      ref.digest === selection.ref.digest,
-                  );
-                  const key = `${selection.ref.source}:${selection.ref.skillId}:${selection.ref.digest}`;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      className={`composer-skill-chip ${selection.kind}`}
-                      title={`${item?.name ?? selection.ref.skillId}をこの送信から外す`}
-                      onClick={() =>
-                        void setSkillSelection(
-                          taskId,
-                          selectedSkills.filter(
-                            ({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}` !== key,
-                          ),
-                        )
-                      }
-                    >
-                      <span>{selection.kind === 'team' ? 'Team' : 'Skill'}</span>
-                      {item?.name ?? selection.ref.skillId}
-                      <X size={12} />
-                    </button>
-                  );
-                })}
-              </div>
-            )}
             {autoSkillCount > 0 && (
               <div className="composer-auto-skill-status" aria-label="AI自動選択候補">
                 Auto Skills {autoSkillCount}
@@ -935,42 +970,84 @@ export function Composer({ taskId }: { taskId: string }) {
                     ? '実行を停止しています'
                     : ''}
             </div>
-            <textarea
-              ref={textareaRef}
-              className="composer-input"
-              data-testid="composer-textarea"
-              rows={1}
-              placeholder={
-                goalRequested
-                  ? 'Goalを入力（Enterで開始 / Escでキャンセル）'
-                  : turnActive
-                    ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
-                    : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
-              }
-              value={draft}
-              disabled={sending}
-              onChange={(e) => {
-                const nextDraft = e.target.value;
-                const nextCursor = e.target.selectionStart;
-                if (slashTokenAtCursor(nextDraft, nextCursor)?.query !== slashQuery)
-                  setSlashSelection(0);
-                setComposerCursor(nextCursor);
-                setDraft(taskId, nextDraft);
-              }}
-              onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}
-              onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              aria-label="メッセージ入力"
-              aria-describedby={attachmentErrorId}
-              aria-autocomplete="list"
-              aria-controls={slashOpen ? 'composer-slash-commands' : undefined}
-              aria-activedescendant={
-                slashOpen && slashItems[activeSlashSelection]
-                  ? `slash-item-${slashItems[activeSlashSelection].key}`
-                  : undefined
-              }
-            />
+            <div className="composer-editor">
+              {mentions.length > 0 && !composing && (
+                <div
+                  ref={mirrorRef}
+                  className="composer-input composer-input-mirror"
+                  aria-hidden="true"
+                >
+                  {mentions.map((m, i) => (
+                    <Fragment key={m.start}>
+                      {draft.slice(i === 0 ? 0 : mentions[i - 1]!.end, m.start)}
+                      <span className="composer-skill-mention">{draft.slice(m.start, m.end)}</span>
+                    </Fragment>
+                  ))}
+                  {draft.slice(mentions[mentions.length - 1]!.end)}
+                  {'\u200b'}
+                </div>
+              )}
+              <textarea
+                ref={textareaRef}
+                className={
+                  mentions.length && !composing
+                    ? 'composer-input composer-input-highlighted'
+                    : 'composer-input'
+                }
+                onCompositionStart={(event) => setCompositionDraft(event.currentTarget.value)}
+                onCompositionEnd={(event) => {
+                  setCompositionDraft(null);
+                  editSkillDraft(
+                    event.currentTarget.value,
+                    event.currentTarget.selectionStart,
+                    Boolean(event.data) && event.currentTarget.value !== presentedDraft,
+                  );
+                }}
+                onScroll={(event) => syncMirrorScroll(event.currentTarget)}
+                data-testid="composer-textarea"
+                rows={1}
+                placeholder={
+                  goalRequested
+                    ? 'Goalを入力（Enterで開始 / Escでキャンセル）'
+                    : turnActive
+                      ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
+                      : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
+                }
+                value={draft}
+                disabled={sending}
+                onChange={(e) => {
+                  const nextDraft = e.target.value;
+                  const nextCursor = e.target.selectionStart;
+                  if (
+                    composing ||
+                    (e.nativeEvent instanceof InputEvent && e.nativeEvent.isComposing)
+                  ) {
+                    setCompositionDraft(nextDraft);
+                    setComposerCursor(nextCursor);
+                  } else {
+                    editSkillDraft(
+                      nextDraft,
+                      nextCursor,
+                      e.nativeEvent instanceof InputEvent &&
+                        e.nativeEvent.inputType === 'insertText',
+                    );
+                  }
+                }}
+                onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}
+                onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                aria-label="メッセージ入力"
+                aria-describedby={attachmentErrorId}
+                aria-autocomplete="list"
+                aria-controls={slashOpen ? 'composer-slash-commands' : undefined}
+                aria-activedescendant={
+                  slashOpen && slashItems[activeSlashSelection]
+                    ? `slash-item-${slashItems[activeSlashSelection].key}`
+                    : undefined
+                }
+              />
+            </div>
             <div className="composer-row">
               <PlusMenu
                 capabilityReason={
