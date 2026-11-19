@@ -17,7 +17,7 @@ description: >
 
 # desktop-control-linux
 
-> **Sprint Coder:** The standalone CLI examples below that use `--force`, `clipboard-get`, `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it.
+> **Sprint Coder:** The standalone CLI examples below that use `--force`, `clipboard-get`, `launch --arg`, `launch --env`, or `open-system-surface` are unavailable in a managed task. Sprint Coder refuses them before approval. Read a field with `get @ref --property value` when the app exposes it.
 
 This file covers only what differs on Linux. The observe-act loop, refs, JSON
 envelope, sessions and tracing are the same on every platform.
@@ -99,9 +99,9 @@ Observation and semantic actions need no helper tool.
   input, so there the twin has neither a ref nor a pointer path. A ref belongs
   to the window it was taken in, so two windows with the same title each
   resolve their own refs.
-- **Chromium and Qt apps need a launch flag or variable** to appear on the bus;
-  Electron apps need none, only `--no-sandbox` where `chrome-sandbox` is not
-  setuid. See `references/troubleshooting.md`.
+- **Chromium and Qt apps may need accessibility enabled** to appear on the bus.
+  Ask the user to start the app with the required accessibility settings.
+  See `references/troubleshooting.md`.
 - **Headed ref actions need a window that can take focus.** A window the
   window manager never activated ends `activation_not_granted`. See
   `references/windows-and-lifecycle.md`.
