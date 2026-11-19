@@ -328,9 +328,13 @@ mod imp {
         /// Reads the windows of the target's process, so `finish` can tell a
         /// window the action made it open (`foreground_return`). Call it just
         /// before the action is sent; nothing is read without a target.
-        pub(crate) fn watch_target(&mut self, target_pid: Option<u32>) {
+        pub(crate) fn watch_target(&mut self, target_pid: Option<u32>, is_click: bool) {
             self.watch = target_pid.and_then(|pid| {
-                crate::actions::foreground_return::ActionWatch::begin(pid, self.prior)
+                crate::actions::foreground_return::ActionWatch::begin(
+                    pid,
+                    self.prior,
+                    is_click && !self.locked,
+                )
             });
         }
 

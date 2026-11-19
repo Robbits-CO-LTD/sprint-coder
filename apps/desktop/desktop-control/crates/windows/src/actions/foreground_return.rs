@@ -15,8 +15,8 @@
 //! So the windows of the target's process are read before the action, and
 //! once more right after the hold's wait, while the lock still holds. When the
 //! target has no new top-level window (shown or still hidden, tool windows
-//! aside) and the foreground stayed where it was, nothing more is done and the
-//! action returns at once: an ordinary click pays only two window listings.
+//! aside) and the foreground stayed where it was, an ordinary locked click
+//! returns after only those two listings.
 //! Otherwise the foreground is held locked and watched, then watched unlocked,
 //! for the spans a launch passed to a running instance uses
 //! (`HANDOFF_FOREGROUND_HOLD`, `HANDOFF_FOREGROUND_WATCH`), and handed back
@@ -43,9 +43,9 @@
 //!   front (`window_replaced`, `details.foreground_window`), instead of a
 //!   refused hand-back.
 //!
-//! What this does not catch: a window the target creates only after that
-//! look (a browser that first loads a profile from disk), since the action
-//! does not wait for windows that may never come.
+//! An unlocked background click can return before a foreground profile picker
+//! opens its replacement. In that specific case, observe briefly without moving
+//! focus. A later change beyond the observation deadline is not reported.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 use std::time::Instant;
@@ -113,6 +113,30 @@ pub(crate) fn replaced_in_front(
     front_is_prior: bool,
 ) -> bool {
     prior_was_target && prior_gone && front_is_target && !front_is_prior
+}
+
+/// Follow an initially unchanged foreground window until it is replaced. Reading
+/// stops on input, a different application, or the caller's deadline. No focus
+/// change is requested. A new window can take the front before the old one hides.
+fn observe_replacement(
+    prior: isize,
+    mut read: impl FnMut() -> Option<(isize, bool, bool)>,
+    mut wait_next: impl FnMut() -> bool,
+) -> Option<isize> {
+    loop {
+        let (front, target, prior_gone) = read()?;
+        if front != 0 && front != prior {
+            if !target {
+                return None;
+            }
+            if prior_gone {
+                return Some(front);
+            }
+        }
+        if !wait_next() {
+            return None;
+        }
+    }
 }
 
 /// Whether the look right after the action calls for a watch: the target
@@ -220,8 +244,8 @@ impl WatchState {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::{
-        WatchState, Watched, counts_as_handed, grace_start, replaced_in_front, takes_as_raised,
-        watch_needed, within_grace_of_action,
+        WatchState, Watched, counts_as_handed, grace_start, observe_replacement, replaced_in_front,
+        takes_as_raised, watch_needed, within_grace_of_action,
     };
     use crate::actions::foreground_hold::window_belongs_to;
     use crate::system::launch::{
@@ -247,6 +271,7 @@ mod imp {
         /// Whether the window in front before the action was the target's
         /// own (the action went to the window the user had in front).
         prior_was_target: bool,
+        unlocked_click: bool,
         /// `GetTickCount` when the action began, for `user_input_since`.
         tick: u32,
         started: Instant,
@@ -258,7 +283,7 @@ mod imp {
     impl ActionWatch {
         /// Reads the target's windows; call it before the action is sent.
         /// `None` when they could not be listed: nothing is watched then.
-        pub(crate) fn begin(pid: u32, prior: HWND) -> Option<Self> {
+        pub(crate) fn begin(pid: u32, prior: HWND, unlocked_click: bool) -> Option<Self> {
             let tick = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
             let started = Instant::now();
             let before = target_windows(pid)?
@@ -268,6 +293,7 @@ mod imp {
             Some(Self {
                 pid,
                 prior,
+                unlocked_click,
                 prior_was_target: !prior.is_null() && window_belongs_to(prior, pid),
                 tick,
                 started,
@@ -320,7 +346,39 @@ mod imp {
                 && unsafe { IsIconic(self.prior) } == 0;
             if !watch_needed(created, target_took_front) || !restorable {
                 unlock();
-                return None;
+                if !self.unlocked_click
+                    || !self.prior_was_target
+                    || (!front.is_null() && front != self.prior && !target_took_front)
+                {
+                    return None;
+                }
+                let wait = deadline.capped(crate::system::launch::HANDOFF_APP_ACTIVATION_GRACE);
+                let replaced_by = observe_replacement(
+                    self.prior as isize,
+                    || {
+                        if wait.is_expired() || user_input_since(self.tick) {
+                            return None;
+                        }
+                        let front = unsafe { GetForegroundWindow() };
+                        let target = !front.is_null() && window_belongs_to(front, self.pid);
+                        Some((front as isize, target, self.prior_gone()))
+                    },
+                    || {
+                        let remaining = wait.remaining();
+                        if remaining.is_zero() {
+                            return false;
+                        }
+                        std::thread::sleep(remaining.min(Duration::from_millis(20)));
+                        true
+                    },
+                )?;
+                return Some(
+                    WatchState {
+                        replaced_by: Some(replaced_by),
+                        ..WatchState::default()
+                    }
+                    .watched(WatchAction::Wait),
+                );
             }
             let mut state = WatchState::default();
             let mut raised: Vec<isize> = Vec::new();
