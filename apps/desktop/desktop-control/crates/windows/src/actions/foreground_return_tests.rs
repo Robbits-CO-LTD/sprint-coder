@@ -323,3 +323,19 @@ fn the_watch_uses_the_launch_rules() {
         "the hand-back never goes through the adapter's focus_window"
     );
 }
+
+#[test]
+fn observes_a_delayed_replacement_only_while_the_same_app_owns_the_front() {
+    let observe = |samples: &[(isize, bool, bool)], waits: usize| {
+        let mut samples = samples.iter().copied();
+        let mut budget = 0..waits;
+        super::observe_replacement(7, || samples.next(), || budget.next().is_some())
+    };
+    let unchanged = (7, true, false);
+    let opening = (8, true, false);
+    let replaced = (8, true, true);
+    assert_eq!(observe(&[unchanged, opening, replaced], 2), Some(8));
+    assert_eq!(observe(&[unchanged, opening, replaced], 1), None);
+    assert_eq!(observe(&[unchanged, (9, false, false), replaced], 2), None);
+    assert_eq!(observe(&[unchanged, opening], 2), None);
+}

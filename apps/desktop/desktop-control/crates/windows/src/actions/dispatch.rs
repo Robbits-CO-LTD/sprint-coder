@@ -125,7 +125,7 @@ mod imp {
         };
         // Read just before the action, so a window it makes the target open,
         // and that takes the foreground, can be told and handed back (#1293).
-        hold.watch_target(target_pid);
+        hold.watch_target(target_pid, matches!(request.action, Action::Click));
         let (result, sent) = with_button_delivery(button_target, || {
             run_action(handle, element, request, lease, gate)
         });

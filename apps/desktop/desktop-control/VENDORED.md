@@ -12,6 +12,8 @@ Sprint Coder のデスクトップ操作の実行ファイルは、このフォ�
 
 macOS の URL 起動用ブラウザーの名前・bundle ID・系統は `src/dispatch/mac-url-browsers.json` を Electron と Rust がビルドに取り込む。配布後の外部ファイルは不要。埋め込みの操作ガイドと macOS の権限エラーには Sprint Coder で許可される操作と、権限を付与するアプリを明記した（#1362、#1357）。
 
+Windows の非同期クリックで前面ロックを取得できず、対象自身の前面窓がクリック直後にはまだ残っている場合は、短時間だけ置換を観測して新しい窓 ID を返す（#1293、`actions/dispatch.rs`・`foreground_hold.rs`・`foreground_return.rs`）。
+
 ## 入れたもの
 
 Windows と macOS arm64 用の CLI の build に要る部分。
