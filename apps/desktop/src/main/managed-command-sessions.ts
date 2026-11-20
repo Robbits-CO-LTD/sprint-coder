@@ -72,6 +72,7 @@ export class ManagedCommandSessions {
       | 'onStarted'
       | 'onChunk'
       | 'onBatch'
+      | 'privateScreenshotOutput'
       | 'desktopControlWorkspaceRoots'
       | 'desktopControlExpectedWindowOwner'
       | 'desktopControlSession'
@@ -129,6 +130,9 @@ export class ManagedCommandSessions {
     session.completion = runner
       .run(spec, {
         signal: session.controller.signal,
+        ...(hooks.privateScreenshotOutput && hooks.keepOutput === false
+          ? { privateScreenshotOutput: true as const }
+          : {}),
         ...(hooks.beforeSpawn === undefined ? {} : { beforeSpawn: hooks.beforeSpawn }),
         ...(hooks.desktopControlWorkspaceRoots === undefined
           ? {}

@@ -17,6 +17,7 @@ import {
   desktopControlMainOnlyOptionRefusal,
   desktopControlSessionArgvRefusal,
   isDesktopControlExecutable,
+  isDesktopControlScreenshot,
   readBatchEntries,
   readDesktopControlCommand,
   type DesktopControlSessionVariables,
@@ -36,7 +37,6 @@ import {
   SCREENSHOT_WAIT_MS,
   clipScreenshotStderr,
   holdScreenshotPicture,
-  isDesktopControlScreenshot,
   prepareScreenshotOutput,
   screenshotCallKey,
 } from './desktop-control-screenshot';
@@ -891,6 +891,7 @@ export function registerCommandRunnerTool(
           rememberDesktopControlWindows(_context.taskId, spec.argv, toolOutput.stdout);
       };
       const hooks = {
+        ...(screenshotRun ? { privateScreenshotOutput: true as const } : {}),
         ...(control.signal === undefined ? {} : { signal: control.signal }),
         ...(roots === undefined ? {} : { desktopControlWorkspaceRoots: roots }),
         // Set only by an app-wide Task grant, for the executable to check window ids against.

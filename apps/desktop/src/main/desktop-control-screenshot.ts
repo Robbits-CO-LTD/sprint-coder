@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
-import { readDesktopControlCommand } from './desktop-control';
 
 /**
  * A desktop-control `screenshot` run's picture, made fit for a model to look at.
@@ -49,12 +48,6 @@ export type ScreenshotOutput = Readonly<{
   stdout: string;
   picture?: ScreenshotPicture;
 }>;
-
-/** Whether this sealed argv runs `screenshot` itself (not its help). */
-export function isDesktopControlScreenshot(argv: readonly string[]): boolean {
-  const read = readDesktopControlCommand(argv);
-  return read !== null && !read.help && read.command === 'screenshot';
-}
 
 function failure(code: string, message: string): string {
   return JSON.stringify({ ok: false, command: 'screenshot', error: { code, message } });
