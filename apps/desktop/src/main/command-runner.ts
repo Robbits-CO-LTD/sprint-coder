@@ -30,6 +30,7 @@ import {
 import {
   desktopControlArgvIsInert,
   desktopControlArgvMode,
+  isDesktopControlScreenshot,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
   desktopControlOwnWindowOwner,
@@ -691,6 +692,11 @@ export function executionSpecContentDigest(spec: unknown): string | null {
     : null;
 }
 
+const DEFAULT_OUTPUT_LIMIT = 16 * 1024 * 1024;
+// The native capture accepts PNGs up to 64 MiB. Its private stdout carries base64
+// plus a JSON envelope before Main can fit the picture to the model's smaller limit.
+const SCREENSHOT_OUTPUT_LIMIT = 4 * Math.ceil((64 * 1024 * 1024) / 3) + 64 * 1024;
+
 type RunnerOptions = Readonly<{
   batchIntervalMs?: number;
   maxBatchBytes?: number;
@@ -703,6 +709,8 @@ type RunnerOptions = Readonly<{
 }>;
 
 export type RunOptions = Readonly<{
+  /** Main consumes the capture privately and publishes only its metadata. */
+  privateScreenshotOutput?: true;
   signal?: AbortSignal;
   /**
    * The Turn's Workspace roots. Given, a sandboxed runner starts this one command outside the
@@ -764,7 +772,7 @@ export class CommandRunner {
   private readonly batchIntervalMs: number;
   private readonly maxBatchBytes: number;
   private readonly maxBufferedBytes: number;
-  private readonly maxOutputBytes: number;
+  private readonly maxOutputBytes: number | undefined;
   private readonly cancelGraceMs: number;
   private readonly sandboxed: boolean;
   private readonly desktopControlActivity: DesktopControlActivity;
@@ -774,7 +782,7 @@ export class CommandRunner {
     this.batchIntervalMs = options.batchIntervalMs ?? 100;
     this.maxBatchBytes = options.maxBatchBytes ?? 64 * 1024;
     this.maxBufferedBytes = options.maxBufferedBytes ?? 1024 * 1024;
-    this.maxOutputBytes = options.maxOutputBytes ?? 16 * 1024 * 1024;
+    this.maxOutputBytes = options.maxOutputBytes;
     this.cancelGraceMs = options.cancelGraceMs ?? 1_500;
     this.sandboxed = options.sandboxed ?? false;
     this.desktopControlActivity = options.desktopControlActivity ?? desktopControlActivity;
@@ -783,7 +791,7 @@ export class CommandRunner {
       this.maxBatchBytes < 1 ||
       this.maxBatchBytes > 64 * 1024 ||
       this.maxBufferedBytes < this.maxBatchBytes ||
-      this.maxOutputBytes < 1 ||
+      (this.maxOutputBytes !== undefined && this.maxOutputBytes < 1) ||
       this.cancelGraceMs < 0
     )
       throw new Error('Invalid CommandRunner limits');
@@ -893,6 +901,11 @@ export class CommandRunner {
           executionImage.digest,
           options.desktopControlWorkspaceRoots,
         );
+      const maxOutputBytes =
+        this.maxOutputBytes ??
+        (desktopControl && options.privateScreenshotOutput && isDesktopControlScreenshot(spec.argv)
+          ? SCREENSHOT_OUTPUT_LIMIT
+          : DEFAULT_OUTPUT_LIMIT);
       const desktopControlRefusal = desktopControl
         ? (desktopControlArgvRefusal(spec.argv, options.desktopControlWorkspaceRoots ?? []) ??
           (options.desktopControlSession === undefined
@@ -1278,7 +1291,7 @@ export class CommandRunner {
         if (text.length === 0 || truncated) return;
         for (const part of splitUtf8(text, this.maxBatchBytes)) {
           const byteLength = Buffer.byteLength(part);
-          if (outputBytes + byteLength > this.maxOutputBytes) {
+          if (outputBytes + byteLength > maxOutputBytes) {
             truncated = true;
             break;
           }

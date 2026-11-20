@@ -1,3 +1,4 @@
+import { isDesktopControlScreenshot } from './desktop-control';
 // A desktop-control screenshot's picture, made fit for the Turn's model: never upscaled, at most
 // 1568 px on its long edge, PNG when it fits and JPEG otherwise, within what the runtime protocol
 // carries; stored and shown only as what it is; and given to the model only where it may be.
@@ -17,7 +18,6 @@ import {
   heldScreenshotPictureCount,
   holdScreenshotPicture,
   releaseScreenshotPicturesForTurn,
-  isDesktopControlScreenshot,
   isScreenshotToolResult,
   prepareScreenshotOutput,
   screenshotCallKey,
@@ -485,6 +485,7 @@ async function setUp(printed: string, withSessions: boolean) {
   } as unknown as CommandToolBoundary;
   const runner = new CommandRunner({ sandboxed: true });
   vi.spyOn(runner, 'run').mockImplementation(async (_spec, options: RunOptions = {}) => {
+    expect(options.privateScreenshotOutput === true).toBe(isDesktopControlScreenshot(_spec.argv));
     options.beforeSpawn?.();
     options.onStarted?.({
       executionId: 'execution',

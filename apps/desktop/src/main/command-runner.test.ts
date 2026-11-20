@@ -2121,6 +2121,42 @@ describe('desktop control outside the command sandbox', () => {
   });
   afterEach(() => desktopControlModule.configureDesktopControlStateRoot(null));
 
+  it('allows a verified private capture to reach image fitting above the ordinary output limit', async () => {
+    const root = await workspace();
+    const bytes = 16 * 1024 * 1024 + 1024;
+    // Use a known executable to emit the envelope-sized output, without access to a display.
+    const spec = await prepareTestExecutionSpec({
+      workspacePath: root,
+      executable: process.execPath,
+      argv: ['-e', `process.stdout.write(Buffer.alloc(${bytes}, 65))`],
+    });
+    const judge = vi.spyOn(desktopControlModule, 'runsOutsideCommandSandbox').mockReturnValue(true);
+    const argvCheck = vi
+      .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+      .mockReturnValue(null);
+    const screenshot = vi
+      .spyOn(desktopControlModule, 'isDesktopControlScreenshot')
+      .mockReturnValue(true);
+    try {
+      const options = {
+        desktopControlWorkspaceRoots: [root],
+        privateScreenshotOutput: true as const,
+      };
+      const runner = new CommandRunner({ sandboxed: true });
+      expect(await runner.run(spec, options)).toMatchObject({
+        outputBytes: bytes,
+        truncated: false,
+      });
+      expect(await new CommandRunner().run(spec, options)).toMatchObject({ truncated: true });
+      screenshot.mockReturnValue(false);
+      expect(await runner.run(spec, options)).toMatchObject({ truncated: true });
+    } finally {
+      screenshot.mockRestore();
+      argvCheck.mockRestore();
+      judge.mockRestore();
+    }
+  }, 60_000);
+
   it('starts a command outside the sandbox only when the desktop-control judgment says so', async () => {
     const root = await workspace();
     const prepare = () =>

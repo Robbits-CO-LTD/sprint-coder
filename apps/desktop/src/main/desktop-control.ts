@@ -2140,3 +2140,9 @@ function canonicalPath(path: string): string {
     return path;
   }
 }
+
+/** Whether this sealed argv runs `screenshot` itself (not its help). */
+export function isDesktopControlScreenshot(argv: readonly string[]): boolean {
+  const read = readDesktopControlCommand(argv);
+  return read !== null && !read.help && read.command === 'screenshot';
+}
