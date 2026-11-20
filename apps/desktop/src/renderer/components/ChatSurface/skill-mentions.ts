@@ -1,4 +1,11 @@
-import type { SkillCatalogItem, SkillRef, TurnSkillSelection } from '@sprint-coder/contracts';
+import {
+  skillSourceSchema,
+  type SkillCatalogItem,
+  type SkillRef,
+  type TurnSkillSelection,
+} from '@sprint-coder/contracts';
+
+const skillSources = new Set<string>(skillSourceSchema.options);
 
 export type SkillMention = { start: number; end: number; selection: TurnSkillSelection };
 
@@ -35,13 +42,15 @@ export function skillMentions(
   if (!selections.length) return [];
   const mentions: SkillMention[] = [];
   for (const match of text.matchAll(
-    /\$(?:(builtin|created|claude|agents):)?([a-zA-Z0-9][a-zA-Z0-9._-]*)/g,
+    /\$(?:([a-zA-Z0-9][a-zA-Z0-9._-]*):)?([a-zA-Z0-9][a-zA-Z0-9._-]*)/g,
   )) {
+    const qualifier = match[1];
+    if (qualifier !== undefined && !skillSources.has(qualifier)) continue;
     const id = match[2]!;
     let selection: TurnSkillSelection | undefined;
     for (const candidate of selections) {
       const { skillId, source } = candidate.ref;
-      if (match[1] && source !== match[1]) continue;
+      if (qualifier !== undefined && source !== qualifier) continue;
       if (skillId === id) {
         selection = candidate;
         break;

@@ -2,10 +2,14 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { expect, it, vi } from 'vitest';
-import type { SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
+import {
+  skillSourceSchema,
+  type SkillCatalogItem,
+  type TurnSkillSelection,
+} from '@sprint-coder/contracts';
 import { Composer } from './Composer';
 import { useAppStore } from '../../store/appStore';
-import { mentionText, presentSkillDraft } from './skill-mentions';
+import { mentionText, presentSkillDraft, skillMentions } from './skill-mentions';
 
 function item(id: string, source: SkillCatalogItem['ref']['source']): SkillCatalogItem {
   return {
@@ -39,6 +43,23 @@ it('restores old drafts and distinguishes same-name skills from different source
   expect(presentSkillDraft(text, selections).mentions.map((m) => m.selection)).toEqual(selections);
   expect(mentionText(first.ref, [first.ref])).toBe('$outline');
   expect(presentSkillDraft('$review is literal', []).mentions).toHaveLength(0);
+});
+it('reads qualified mentions from every contracted source and leaves unknown qualifiers literal', () => {
+  const selections = skillSourceSchema.options.map((source) => item('review', source));
+  const refs = selections.map(({ ref }) => ref);
+  for (const skill of selections) {
+    const token = mentionText(skill.ref, refs);
+    expect(skillMentions(token + '.', selections)).toEqual([
+      { start: 0, end: token.length, selection: skill },
+    ]);
+    expect(
+      skillMentions(
+        token,
+        selections.filter((other) => other !== skill),
+      ),
+    ).toEqual([]);
+  }
+  expect(skillMentions('$unknown:review', [...selections, item('unknown', 'created')])).toEqual([]);
 });
 const taskId = 'inline-skills';
 const teamDraft = '/team リポジトリを並列調査して';
