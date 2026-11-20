@@ -86,10 +86,9 @@ pub(crate) fn launch_app_impl(
         super::launch_front::FrontGuard::begin(handoff.as_ref(), options.activate, deadline);
     // Only the validated --url path supplies a bundle allowlist. An explicit --activate
     // has no background guard and retains its normal foreground behavior.
-    if !options.bundle_ids.is_empty()
-        && let Some(front) = &front
-    {
-        front.check_browser_toolbar_input().map_err(before_launch)?;
+    if !options.activate && !options.bundle_ids.is_empty() {
+        super::launch_front::check_browser_toolbar_input(id, &path, &options.bundle_ids, deadline)
+            .map_err(before_launch)?;
     }
     let pause = |wait: Duration| super::launch_front::pause(front.as_ref(), wait);
 

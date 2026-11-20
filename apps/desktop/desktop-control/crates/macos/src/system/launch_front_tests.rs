@@ -911,3 +911,29 @@ fn only_a_text_input_in_browser_chrome_defers_the_background_url() {
     assert!(!is_input(&["AXTextField", "AXWindow"]));
     assert!(!is_input(&["AXTextField"]));
 }
+
+#[test]
+fn a_second_copy_can_block_a_url_but_another_browser_of_the_same_family_cannot() {
+    let allowed = vec![
+        "com.google.Chrome".to_string(),
+        "org.chromium.Chromium".to_string(),
+    ];
+    let target = Some("com.google.Chrome");
+    assert!(same_url_browser_bundle(
+        target,
+        Some("com.GOOGLE.chrome"),
+        &allowed
+    ));
+    assert!(!same_url_browser_bundle(
+        target,
+        Some("org.chromium.Chromium"),
+        &allowed
+    ));
+    assert!(!same_url_browser_bundle(None, None, &allowed));
+    assert!(!same_url_browser_bundle(target, None, &allowed));
+    assert!(!same_url_browser_bundle(
+        Some("other.app"),
+        Some("other.app"),
+        &allowed
+    ));
+}

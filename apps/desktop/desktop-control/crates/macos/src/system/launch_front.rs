@@ -658,6 +658,72 @@ fn toolbar_text_field<N>(
     false
 }
 
+/// A URL can reach another installation of the same browser through its
+/// single-instance handoff. Protect typing there, without ever treating its
+/// windows as eligible targets for restoring foreground.
+fn same_url_browser_bundle(target: Option<&str>, front: Option<&str>, allowed: &[String]) -> bool {
+    let (Some(target), Some(front)) = (target, front) else {
+        return false;
+    };
+    target.eq_ignore_ascii_case(front) && allowed.iter().any(|id| target.eq_ignore_ascii_case(id))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn check_browser_toolbar_input(
+    id: &str,
+    target: &std::path::Path,
+    allowed: &[String],
+    deadline: Deadline,
+) -> Result<(), AdapterError> {
+    use super::{launch_location, launch_workspace};
+    use crate::tree::{element_for_pid, surface_read};
+    let Some(pid) = front_pid(deadline) else {
+        return Ok(());
+    };
+    let Ok(front_path) =
+        launch_workspace::resolved_path(id, Some(pid)).and_then(|p| launch_location::require(&p))
+    else {
+        return Ok(());
+    };
+    if front_path != target
+        && !same_url_browser_bundle(
+            launch_workspace::bundle_identifier(target).as_deref(),
+            launch_workspace::bundle_identifier(&front_path).as_deref(),
+            allowed,
+        )
+    {
+        return Ok(());
+    }
+    if crate::system::own_window::check_pid(Some(pid)).is_err() {
+        return Ok(());
+    }
+    let until = instant(budget(deadline));
+    let Ok(Some(field)) = surface_read::element(&element_for_pid(pid), "AXFocusedUIElement", until)
+    else {
+        return Ok(());
+    };
+    if toolbar_text_field(
+        field,
+        |node| surface_read::string(node, "AXRole", until).ok().flatten(),
+        |node| {
+            surface_read::element(node, "AXParent", until)
+                .ok()
+                .flatten()
+        },
+    ) {
+        tracing::debug!(
+            "launch front: background URL deferred before opening; browser toolbar input has focus"
+        );
+        return Err(AdapterError::new(
+            agent_desktop_core::ErrorCode::ActionFailed,
+            "The foreground browser has keyboard focus in its toolbar input; the URL was not opened",
+        ).with_details(serde_json::json!({
+            "kind": "browser_toolbar_input_focused", "physical_delivery_started": false,
+        })).with_suggestion("Leave the user's input in place. Wait until they leave the address field or switch apps before trying to open the URL again."));
+    }
+    Ok(())
+}
+
 /// The front's watch over a launch, with the reads and operations of this Mac.
 #[cfg(target_os = "macos")]
 pub(crate) struct FrontGuard {
@@ -683,46 +749,6 @@ impl FrontGuard {
             started,
             deadline,
         })
-    }
-
-    /// Restoring the window cannot recover keys already sent to the new one. Read
-    /// only roles, never the user's text, before asking the browser to open a URL.
-    pub(crate) fn check_browser_toolbar_input(&self) -> Result<(), AdapterError> {
-        use crate::tree::{element_for_pid, surface_read};
-        let watch = self.watch.borrow();
-        let Some(app) = watch
-            .last_app
-            .as_ref()
-            .filter(|app| watch.is_candidate(app))
-        else {
-            return Ok(());
-        };
-        let until = instant(budget(self.deadline));
-        let Ok(Some(field)) =
-            surface_read::element(&element_for_pid(app.pid), "AXFocusedUIElement", until)
-        else {
-            return Ok(());
-        };
-        if toolbar_text_field(
-            field,
-            |node| surface_read::string(node, "AXRole", until).ok().flatten(),
-            |node| {
-                surface_read::element(node, "AXParent", until)
-                    .ok()
-                    .flatten()
-            },
-        ) {
-            tracing::debug!(
-                "launch front: background URL deferred before opening; browser toolbar input has focus"
-            );
-            return Err(AdapterError::new(
-                agent_desktop_core::ErrorCode::ActionFailed,
-                "The foreground browser has keyboard focus in its toolbar input; the URL was not opened",
-            ).with_details(serde_json::json!({
-                "kind": "browser_toolbar_input_focused", "physical_delivery_started": false,
-            })).with_suggestion("Leave the user's input in place. Wait until they leave the address field or switch apps before trying to open the URL again."));
-        }
-        Ok(())
     }
 
     fn look(&self) {

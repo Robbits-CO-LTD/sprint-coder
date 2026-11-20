@@ -16,6 +16,8 @@ Windows の非同期クリックで前面ロックを取得できず、対象自
 
 macOS で別Spaceの窓が AXWindows に載らない場合に、対象アプリ自身が main/focused 属性で公開している窓を番号と所有者で照合する（#1336、`window_ax_state.rs`・`window_resolve.rs`・`tree/query`・`tree/resolve`）。画面の切り替えは行わない。
 
+macOS のバックグラウンドURL起動は、同じブラウザーの別の正規配置に引き渡される場合も、前面のアドレス欄への入力を保護する。前面に戻せる窓の条件は別に検証する（#1341、`launch.rs`・`launch_front.rs`）。
+
 ## 入れたもの
 
 Windows と macOS arm64 用の CLI の build に要る部分。
