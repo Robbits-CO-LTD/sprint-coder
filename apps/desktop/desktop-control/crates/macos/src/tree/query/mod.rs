@@ -188,9 +188,7 @@ fn resolve_window_surface(
             crate::tree::properties::element::element_for_pid(pid)
         }
         SnapshotSurface::Window => {
-            crate::system::window::window_resolve::window_element_for_info_with_deadline(
-                window, deadline,
-            )?
+            crate::system::window::window_resolve::snapshot_window_element(window, deadline)?
         }
         SnapshotSurface::Focused => crate::tree::surfaces::focused_surface_for_pid(pid, deadline)?
             .ok_or_else(|| AdapterError::element_not_found("No focused surface found"))?,

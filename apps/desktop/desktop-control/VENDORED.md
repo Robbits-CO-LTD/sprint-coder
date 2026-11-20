@@ -14,6 +14,8 @@ macOS の URL 起動用ブラウザーの名前・bundle ID・系統は `src/dis
 
 Windows の非同期クリックで前面ロックを取得できず、対象自身の前面窓がクリック直後にはまだ残っている場合は、短時間だけ置換を観測して新しい窓 ID を返す（#1293、`actions/dispatch.rs`・`foreground_hold.rs`・`foreground_return.rs`）。
 
+macOS で別Spaceの窓が AXWindows に載らない場合に、対象アプリ自身が main/focused 属性で公開している窓を番号と所有者で照合する（#1336、`window_ax_state.rs`・`window_resolve.rs`・`tree/query`・`tree/resolve`）。画面の切り替えは行わない。
+
 ## 入れたもの
 
 Windows と macOS arm64 用の CLI の build に要る部分。
