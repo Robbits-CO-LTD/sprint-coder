@@ -555,7 +555,7 @@ fn a_giving_back_that_cannot_be_done_says_why_and_stops() {
     for (answer, why) in [
         (Restored::Gone, LeftWhy::TargetGone),
         (Restored::Failed, LeftWhy::RestoreFailed),
-        (Restored::NotBack, LeftWhy::RestoreFailed),
+        (Restored::NotBack, LeftWhy::FocusNotConfirmed),
         (Restored::NoTime, LeftWhy::NoTime),
     ] {
         let mut run = Run::new(front(SPRINT_CODER));
@@ -570,6 +570,29 @@ fn a_giving_back_that_cannot_be_done_says_why_and_stops() {
             Some(FrontOutcome::Left(TakeKind::App, why))
         );
     }
+}
+
+#[test]
+fn recorded_handoff_distinguishes_restore_errors_from_unconfirmed_focus() {
+    fn result_after(answer: Restored) -> (String, serde_json::Value) {
+        let mut run = Run::new(front(SPRINT_CODER));
+        run.answer = answer;
+        run.look(60, chrome_on(102, true), Input::None);
+        let outcome = run.finish(400, Input::None);
+        let success = annotate(Ok(handed_off()), outcome).unwrap();
+        let error = annotate(Err(unconfirmed()), outcome).unwrap_err();
+        (
+            success.suggestion.unwrap(),
+            error.details.unwrap()["front"].clone(),
+        )
+    }
+    let (failed_note, failed) = result_after(Restored::Failed);
+    let (unconfirmed_note, unconfirmed) = result_after(Restored::NotBack);
+    assert_ne!(failed_note, unconfirmed_note);
+    assert_eq!(failed["left_because"], "restore_failed");
+    assert_eq!(unconfirmed["left_because"], "restore_failed");
+    assert_eq!(failed["restore_stage"], "operation");
+    assert_eq!(unconfirmed["restore_stage"], "verification");
 }
 
 #[test]
