@@ -35,7 +35,7 @@ pub(crate) fn window_element_for_info_with_deadline(
         let pid = crate::system::process::process_identity::to_pid_t(win.pid)?;
         return window_element_by_title(pid, &win.title, deadline);
     }
-    resolve_window_element_strict(win, deadline)
+    resolve_window_element_strict(win, deadline, false)
 }
 
 pub(crate) fn resolve_capture_window(
@@ -133,13 +133,93 @@ fn window_record_matches_source(
 fn resolve_window_element_strict(
     win: &WindowInfo,
     deadline: std::time::Instant,
+    for_observation: bool,
 ) -> Result<AXElement, AdapterError> {
-    crate::tree::locator_deadline::remaining(deadline)?;
-    let (window_number, record) = locate_verified_record_until(win, deadline)?;
-    crate::tree::locator_deadline::remaining(deadline)?;
-    let pid = crate::system::process::process_identity::to_pid_t(win.pid)?;
-    ax_window_element_for_number(pid, window_number, record.title.as_deref(), deadline)?
-        .ok_or_else(|| unreadable_window(&win.id, pid, &record, deadline))
+    let (number, record) = locate_verified_record_until(win, deadline)?;
+    let offscreen_read = for_observation && !record.visible;
+    let title = if offscreen_read {
+        None
+    } else {
+        record.title.as_deref()
+    };
+    if let Some(window) = ax_window_element_for_number(record.pid, number, title, deadline)? {
+        return Ok(window);
+    }
+    if offscreen_read
+        && let Some(window) = supplemental_window_for_number(record.pid, number, deadline)?
+    {
+        locate_verified_record_until(win, deadline)?;
+        return Ok(window);
+    }
+    Err(unreadable_window(&win.id, record.pid, &record, deadline))
+}
+
+/// A read may recover a window on another Space using its exact window number.
+/// Focus requests and window mutations retain their own resolution.
+pub(crate) fn snapshot_window_element(
+    win: &WindowInfo,
+    deadline: std::time::Instant,
+) -> Result<AXElement, AdapterError> {
+    if win.id.is_empty() || (win.is_process_owner() && win.title.is_empty()) {
+        return window_element_for_info_with_deadline(win, deadline);
+    }
+    resolve_window_element_strict(win, deadline, true)
+}
+
+/// These attributes describe the application's own focus, not system focus.
+/// Some applications return the same window for both. Without positive PID,
+/// role and window-number evidence the supplemental candidate is unusable.
+#[cfg(target_os = "macos")]
+pub(super) fn main_and_focused_windows(
+    pid: i32,
+    deadline: std::time::Instant,
+) -> Result<Vec<(i64, AXElement)>, AdapterError> {
+    let app = element_for_pid(pid);
+    let mut result = Vec::new();
+    for attr in ["AXMainWindow", "AXFocusedWindow"] {
+        crate::tree::locator_deadline::remaining(deadline)?;
+        let Some(window) = crate::tree::surface_read::element(&app, attr, deadline)? else {
+            continue;
+        };
+        if crate::tree::properties::ax_ipc::pid(&window, deadline) != Ok(pid)
+            || crate::tree::surface_read::string(&window, "AXRole", deadline)?.as_deref()
+                != Some("AXWindow")
+        {
+            continue;
+        }
+        if let Some(id) = ax_window_id_with_deadline(&window, deadline)?
+            && id > 0
+        {
+            if let Some((_, other)) = result.iter().find(|(number, _)| *number == id) {
+                if !crate::tree::same_element(other, &window) {
+                    return Err(AdapterError::ambiguous_target(format!(
+                        "Conflicting AX owners for window w-{id}"
+                    )));
+                }
+            } else {
+                result.push((id, window));
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn main_and_focused_windows(
+    _pid: i32,
+    _deadline: std::time::Instant,
+) -> Result<Vec<(i64, AXElement)>, AdapterError> {
+    Ok(Vec::new())
+}
+
+pub(crate) fn supplemental_window_for_number(
+    pid: i32,
+    expected: i64,
+    deadline: std::time::Instant,
+) -> Result<Option<AXElement>, AdapterError> {
+    Ok(main_and_focused_windows(pid, deadline)?
+        .into_iter()
+        .find_map(|(number, window)| (number == expected).then_some(window)))
 }
 
 /// A listed window that accessibility does not show: when it reads as probably

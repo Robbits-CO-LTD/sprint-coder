@@ -62,7 +62,17 @@ fn for_each_window(
     mut visit: impl FnMut(&crate::tree::AXElement, i64) -> Result<(), AdapterError>,
 ) -> Result<(), AdapterError> {
     let app = crate::tree::element_for_pid(pid);
-    for window in crate::tree::surface_read::elements(&app, "AXWindows", deadline)? {
+    let windows = crate::tree::surface_read::elements(&app, "AXWindows", deadline)?;
+    if windows.is_empty() {
+        // This is additive. A failed optional AX attribute does not invalidate
+        // the app's own empty listing, and never makes a CG-only window usable.
+        if let Ok(candidates) = super::window_resolve::main_and_focused_windows(pid, deadline) {
+            for (id, window) in candidates {
+                visit(&window, id)?;
+            }
+        }
+    }
+    for window in windows {
         match crate::system::window::window_resolve::ax_window_id_with_deadline(&window, deadline) {
             Ok(Some(id)) => visit(&window, id)?,
             Ok(None) => {}

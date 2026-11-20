@@ -202,6 +202,14 @@ fn window_by_number(
         return Err(error);
     }
     require_unique_window_number_match(match_count, source_window_number)?;
+    if found.is_none() {
+        let pid = crate::system::process::process_identity::to_pid_t(entry.process.pid)?;
+        found = crate::system::window::window_resolve::supplemental_window_for_number(
+            pid,
+            source_window_number,
+            deadline,
+        )?;
+    }
     found
         .map(Some)
         .ok_or_else(|| window_bridge_miss_error(entry))
