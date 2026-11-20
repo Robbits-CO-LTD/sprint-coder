@@ -122,6 +122,7 @@ pub(crate) enum LeftWhy {
     NoTarget,
     TargetGone,
     RestoreFailed,
+    FocusNotConfirmed,
     NoTime,
 }
 
@@ -449,7 +450,8 @@ impl FrontWatch {
                     }
                 }
             }
-            Restored::NotBack | Restored::Failed => self.leave(kind, LeftWhy::RestoreFailed),
+            Restored::Failed => self.leave(kind, LeftWhy::RestoreFailed),
+            Restored::NotBack => self.leave(kind, LeftWhy::FocusNotConfirmed),
             Restored::Gone => self.leave(kind, LeftWhy::TargetGone),
             Restored::NoTime => self.leave(kind, LeftWhy::NoTime),
         }
@@ -513,7 +515,7 @@ fn is_unconfirmed(error: &AdapterError) -> bool {
 /// The sentence the result adds for what happened to the front.
 pub(crate) fn front_note(outcome: FrontOutcome) -> &'static str {
     use FrontOutcome::{Left, Restored};
-    use LeftWhy::{Input, NoTarget, NoTime, RestoreFailed, TargetGone};
+    use LeftWhy::{FocusNotConfirmed, Input, NoTarget, NoTime, RestoreFailed, TargetGone};
     use TakeKind::{App, Window};
     match outcome {
         Restored(App) => {
@@ -544,9 +546,12 @@ pub(crate) fn front_note(outcome: FrontOutcome) -> &'static str {
              the user."
         }
         Left(_, RestoreFailed) => {
-            "The running instance brought its new window to the front, and bringing back what \
-             was in front before did not work: the new window is likely in front. Tell the \
-             user."
+            "The attempt to restore the previous focus failed before the final focus check. \
+             The new window may still be in front. Tell the user."
+        }
+        Left(_, FocusNotConfirmed) => {
+            "The focus request completed, but the subsequent check could not confirm the \
+             previous focus. The new window may still be in front. Tell the user."
         }
         Left(_, NoTime) => {
             "The running instance brought its new window to the front, and it was left there \
@@ -562,7 +567,7 @@ pub(crate) fn front_details(outcome: FrontOutcome) -> serde_json::Value {
         FrontOutcome::Restored(kind) => (kind, None),
         FrontOutcome::Left(kind, why) => (kind, Some(why)),
     };
-    serde_json::json!({
+    let mut details = serde_json::json!({
         "taken": match kind {
             TakeKind::App => "app",
             TakeKind::Window => "window",
@@ -572,10 +577,17 @@ pub(crate) fn front_details(outcome: FrontOutcome) -> serde_json::Value {
             LeftWhy::Input => "user_input",
             LeftWhy::NoTarget => "target_unknown",
             LeftWhy::TargetGone => "target_gone",
-            LeftWhy::RestoreFailed => "restore_failed",
+            LeftWhy::RestoreFailed | LeftWhy::FocusNotConfirmed => "restore_failed",
             LeftWhy::NoTime => "no_time",
         }),
-    })
+    });
+    // Keep left_because stable for consumers that already recognize restore_failed.
+    match left {
+        Some(LeftWhy::RestoreFailed) => details["restore_stage"] = "operation".into(),
+        Some(LeftWhy::FocusNotConfirmed) => details["restore_stage"] = "verification".into(),
+        _ => {}
+    }
+    details
 }
 
 fn with_note(suggestion: Option<String>, note: &str) -> String {
