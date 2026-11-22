@@ -45,7 +45,7 @@ export type AutoReviewerInput = Readonly<{
 export type AutoReviewerModel = (input: AutoReviewerInput) => Promise<unknown> | unknown;
 export type SelectedReviewModel = Readonly<{
   name: string;
-  generate: (facts: string) => Promise<string | null>;
+  generate: (facts: string, signal: AbortSignal) => Promise<string | null>;
 }>;
 
 export function autoReviewerInputDigest(input: {
@@ -117,7 +117,8 @@ export class AutoReviewer {
     return new AutoReviewer(options);
   }
 
-  async review(review: ReviewRequest): Promise<Readonly<ReviewerDecision>> {
+  async review(review: ReviewRequest, signal?: AbortSignal): Promise<Readonly<ReviewerDecision>> {
+    signal?.throwIfAborted();
     const binding = reviewBinding(review);
     const cached = this.decisions.get(review.reviewRequestId);
     if (cached !== undefined)
@@ -150,8 +151,9 @@ export class AutoReviewer {
         reason: 'high_risk',
       });
     } else {
-      decision = await this.invokeModel(review, input);
+      decision = await this.invokeModel(review, input, signal);
     }
+    signal?.throwIfAborted();
     Object.freeze(decision);
     this.decisions.set(review.reviewRequestId, Object.freeze({ binding, decision }));
     return decision;
@@ -160,8 +162,11 @@ export class AutoReviewer {
   private async invokeModel(
     review: ReviewRequest,
     input: AutoReviewerInput,
+    signal?: AbortSignal,
   ): Promise<Readonly<ReviewerDecision>> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = AbortSignal.timeout(this.timeoutMs);
+    const modelSignal = signal ? AbortSignal.any([deadline, signal]) : deadline;
+    let onAbort: (() => void) | undefined;
     let modelName = MODEL_NAME;
     try {
       // A model can narrow this envelope, never expand it. In particular, classifications alone
@@ -192,6 +197,7 @@ export class AutoReviewer {
               risk,
               tool,
             }),
+            modelSignal,
           )
           .then((raw) => {
             if (raw === null) throw new Error('Permission reviewer unavailable');
@@ -207,11 +213,13 @@ export class AutoReviewer {
       }
       const result = await Promise.race([
         Promise.resolve(response),
-        new Promise<symbol>((resolve) => {
-          timer = setTimeout(() => resolve(TIMEOUT), this.timeoutMs);
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(modelSignal.reason);
+          if (modelSignal.aborted) onAbort();
+          else modelSignal.addEventListener('abort', onAbort, { once: true });
         }),
       ]);
-      if (result === TIMEOUT) return this.boundDecision(review, { decision: 'timeout' }, modelName);
+      modelSignal.throwIfAborted();
       const parsed = parseModelDecision(result);
       if (parsed === null)
         return this.boundDecision(
@@ -233,9 +241,11 @@ export class AutoReviewer {
         modelName,
       );
     } catch {
+      signal?.throwIfAborted();
+      if (deadline.aborted) return this.boundDecision(review, { decision: 'timeout' }, modelName);
       return this.boundDecision(review, { decision: 'model_failure' }, modelName);
     } finally {
-      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort) modelSignal.removeEventListener('abort', onAbort);
     }
   }
 
@@ -261,8 +271,6 @@ export class AutoReviewer {
     };
   }
 }
-
-const TIMEOUT = Symbol('auto-reviewer-timeout');
 
 function buildInput(review: ReviewRequest): AutoReviewerInput {
   const resourceIdentityDigest =

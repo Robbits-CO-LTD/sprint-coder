@@ -42,6 +42,31 @@ const request: PermissionRequest = {
 const reviewBinding = { turnId: 'turn-1', callId: 'call-1' } as const;
 
 describe('AutoReviewer', () => {
+  it('aborts the selected model, discards a late reply, and never caches a canceled decision', async () => {
+    const stop = new AbortController();
+    let finish!: (value: string) => void;
+    const generate = vi.fn(
+      (_facts: string, _signal: AbortSignal): Promise<string> =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const reviewer = AutoReviewer.createProduction(() => ({ name: 'selected', generate }));
+    const call = {
+      reviewRequestId: 'canceled-read',
+      ...reviewBinding,
+      request,
+      tool: lowTool,
+      policyEpoch: 3,
+    };
+    const pending = reviewer.review(call, stop.signal);
+    stop.abort(new Error('Stopped'));
+    expect(generate.mock.calls[0]![1].aborted).toBe(true);
+    await expect(pending).rejects.toThrow('Stopped');
+    finish('ALLOW_ONCE');
+    generate.mockResolvedValueOnce('ASK');
+    await expect(reviewer.review(call)).resolves.toMatchObject({ decision: 'deny' });
+  });
   it.each([
     ['ALLOW_ONCE', 'allow_once'],
     ['ASK', 'deny'],

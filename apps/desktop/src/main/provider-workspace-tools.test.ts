@@ -171,6 +171,31 @@ describe('Provider workspace read tools', () => {
     });
   });
 
+  it('filters a listed child under both its requested directory alias and its resolved path', async () => {
+    const { root, tools, context } = await harness({
+      mayRead: (path) =>
+        !path.endsWith(join('alias', 'sub', 'hidden-by-alias')) &&
+        !path.endsWith(join('original', 'sub', 'hidden-by-target')),
+    });
+    const directory = join(root, 'original', 'sub');
+    await mkdir(directory, { recursive: true });
+    await symlink(
+      join(root, 'original'),
+      join(root, 'alias'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    for (const name of ['hidden-by-alias', 'hidden-by-target', 'visible'])
+      await writeFile(join(directory, name), '');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'list-through-alias',
+        providerName: 'list_workspace',
+        input: { path: 'alias/sub' },
+      }),
+    ).resolves.toMatchObject({ entries: [{ name: 'visible' }] });
+  });
+
   it('authorizes new calls with the current policy after a mid-Turn settings change (issue #885)', async () => {
     let epoch = 1;
     const authorizer = vi.fn(() => ({ decision: 'allow' as const, reason: 'test' }));

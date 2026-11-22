@@ -208,6 +208,7 @@ export class ApprovalCoordinator {
       evaluatePermission: (input: {
         capability: Capability;
         request: ToolAuthorizationRequest;
+        signal?: AbortSignal;
       }) =>
         | ToolAuthorizationDecision
         | 'allow'
@@ -292,7 +293,11 @@ export class ApprovalCoordinator {
 
     const evaluations: Array<{ capability: Capability; decision: ToolAuthorizationDecision }> = [];
     for (const capability of required) {
-      const evaluated = await this.options.evaluatePermission({ capability, request });
+      const evaluated = await this.options.evaluatePermission({
+        capability,
+        request,
+        ...(signal ? { signal } : {}),
+      });
       throwIfAborted(signal);
       evaluations.push({ capability, decision: normalizeAuthorization(evaluated) });
     }

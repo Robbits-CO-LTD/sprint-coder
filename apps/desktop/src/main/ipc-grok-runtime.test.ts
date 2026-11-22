@@ -35,6 +35,7 @@ vi.mock('electron', () => ({
 vi.mock('./provider-egress', async (importOriginal) => ({
   ...(await importOriginal<typeof ProviderEgressModule>()),
   authorizeGrokProviderEgress: vi.fn(() => ({ allowed: true })),
+  authorizeOfficialApiProviderEgress: vi.fn(() => ({ allowed: true })),
   dispatchAfterGrokProviderEgress: vi.fn((_input: unknown, dispatch: () => void) => {
     dispatch();
     return { allowed: true };
@@ -63,6 +64,13 @@ type RouterProbe = {
     kind: CliKind,
     model: string,
     purpose: 'title' | 'permission-review',
+    signal?: AbortSignal,
+  ): Promise<string | null>;
+  generateProviderText(
+    request: TitleRequest,
+    connectionId: string,
+    purpose: 'permission-review',
+    signal: AbortSignal,
   ): Promise<string | null>;
   routeCliTaskTitleEvent(
     kind: CliKind,
@@ -620,5 +628,74 @@ describe('Grok CLI Main routing', () => {
         modelId: 'grok-test',
       }),
     );
+  });
+
+  it('cancels just the review CLI execution when its tool call stops', async () => {
+    const { router, grok } = createHarness();
+    const stop = new AbortController();
+    const pending = router.generateCliText(
+      { ...started, taskId: 'task-grok' },
+      'grok',
+      'grok-test',
+      'permission-review',
+      stop.signal,
+    );
+    const [taskId, executionId] = grok.start.mock.calls[0]!;
+    stop.abort();
+    expect(grok.cancel).toHaveBeenCalledExactlyOnceWith(taskId, executionId);
+    router.routeCliTaskTitleEvent('grok', taskId, executionId, {
+      type: 'completed',
+      finalText: 'ALLOW_ONCE',
+    });
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it('aborts a running provider review and cancels its execution before the stream completes', async () => {
+    const { router, persistence } = createHarness();
+    const stop = new AbortController();
+    const connection = { id: 'connection', providerId: 'provider' };
+    const cancel = vi.fn(async (_id: string) => undefined);
+    let endStream!: () => void;
+    const waitForEnd = new Promise<void>((resolve) => {
+      endStream = resolve;
+    });
+    const execute = vi.fn(async function* (
+      _connection: unknown,
+      _request: { executionId: string },
+      _signal: AbortSignal,
+    ) {
+      await waitForEnd;
+      yield { type: 'output_delta', text: 'ALLOW_ONCE' };
+      yield { type: 'completed' };
+    });
+    Object.assign(persistence, { getProviderConnection: () => connection });
+    Object.assign(router, {
+      taskTitleProviderAborts: { track: () => () => undefined },
+      ensureProviderEndpointConsent: async () => connection,
+      providerVerification: { requireVerifiedForExecution: async () => connection },
+      providerEgressTrustForConnection: () => 'trusted-local',
+      providerRegistry: { resolve: () => ({ cancel, execute }) },
+    });
+    const pending = router.generateProviderText(
+      {
+        ...started,
+        taskId: 'task-grok',
+        modelSelection: {
+          connectionId: connection.id,
+          requestedProvider: connection.providerId,
+          requestedModel: 'model',
+        },
+      },
+      connection.id,
+      'permission-review',
+      stop.signal,
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    const [, { executionId }, transportSignal] = execute.mock.calls[0]!;
+    stop.abort();
+    expect(transportSignal.aborted).toBe(true);
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(executionId);
+    endStream();
+    await expect(pending).resolves.toBeNull();
   });
 });

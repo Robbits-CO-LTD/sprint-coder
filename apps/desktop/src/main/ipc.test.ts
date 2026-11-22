@@ -3505,6 +3505,50 @@ describe('Main image attachment dispatch boundary', () => {
     }
   });
 
+  it('does not commit a late review when Stop arrives before a model reply is recorded', async () => {
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace' })
+      .entries[0]!;
+    const router = Object.create(IpcRouter.prototype) as {
+      evaluateToolPermission(
+        request: ToolAuthorizationRequest,
+        capability: string,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+    };
+    const stop = new AbortController();
+    const commitEvaluation = vi.fn();
+    const review = vi.fn(async (_request: unknown, signal: AbortSignal) => {
+      expect(signal).toBe(stop.signal);
+      stop.abort(new Error('Stopped before commit'));
+      return { decision: 'allow_once' };
+    });
+    Object.assign(router, {
+      managedWorkerCall: new Map(),
+      autoReviewer: { review },
+      permissionBroker: {
+        getPolicy: () => ({ preset: 'auto', policyEpoch: 1 }),
+        previewExecutionSpec: () => ({ decision: 'approval_required', policyEpoch: 1 }),
+        commitEvaluation,
+      },
+    });
+    await expect(
+      router.evaluateToolPermission(
+        {
+          context: { taskId: 'task', turnId: 'turn', workspaceId: 'workspace', policyEpoch: 1 },
+          callId: 'call',
+          entry,
+          input: {},
+        },
+        'shell.execute',
+        stop.signal,
+      ),
+    ).rejects.toThrow('Stopped before commit');
+    expect(review).toHaveBeenCalledOnce();
+    expect(commitEvaluation).not.toHaveBeenCalled();
+  });
+
   it('consults no Auto reviewer for a desktop-control run that touches no other app', async () => {
     const registry = new ToolRegistry();
     registry.register(

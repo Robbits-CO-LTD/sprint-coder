@@ -1207,11 +1207,17 @@ export class IpcRouter {
     if (connectionId === null || selection.requestedModel === null) return null;
     return {
       name: `${selection.requestedProvider}/${selection.requestedModel}`.slice(0, 200),
-      generate: (text) => {
+      generate: (text, signal) => {
         const input = { taskId, text, modelSelection: selection };
         return builtin === null
-          ? this.generateProviderText(input, connectionId, 'permission-review')
-          : this.generateCliText(input, builtin.runtimeKind, builtin.model, 'permission-review');
+          ? this.generateProviderText(input, connectionId, 'permission-review', signal)
+          : this.generateCliText(
+              input,
+              builtin.runtimeKind,
+              builtin.model,
+              'permission-review',
+              signal,
+            );
       },
     };
   });
@@ -1737,8 +1743,8 @@ export class IpcRouter {
           turnId,
           this.managedWorkerTurn.values(),
         ),
-      evaluatePermission: ({ capability, request }) =>
-        this.evaluateToolPermission(request, capability),
+      evaluatePermission: ({ capability, request, signal }) =>
+        this.evaluateToolPermission(request, capability, signal),
       revalidateTaskGrant: ({ capability, request }) =>
         this.revalidateApprovedTaskGrant(request, capability),
       accessPresetFor: (taskId) => this.persistence.getPermissionPolicy(taskId).preset,
@@ -5128,7 +5134,7 @@ export class IpcRouter {
             callId: brokerCallId,
             providerName: request.toolName,
             input: request.arguments,
-            signal,
+            signal: callSignal,
             ...(worker === undefined ? {} : { resultOrderScope: worker }),
           },
           (result) =>
@@ -5138,13 +5144,13 @@ export class IpcRouter {
               result,
             }),
         )) as Awaited<ReturnType<ToolImageBridge['stageToolResult']>>;
-        signal.throwIfAborted();
+        callSignal.throwIfAborted();
         providerImageBridge!.commitStaged();
         if (accepted.accepted) publishProviderImageBinding?.();
         return Object.freeze({ kind: 'provider_image_tool', ...accepted });
       } catch (error) {
         providerImageBridge!.rollbackStaged();
-        if (signal.aborted) {
+        if (callSignal.aborted) {
           throw error;
         }
         const rejected = providerImageBridge!.invalidToolResult(request.callId, request.toolName);
@@ -5450,7 +5456,12 @@ export class IpcRouter {
     }
   }
 
-  private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
+  private async evaluateToolPermission(
+    request: ToolAuthorizationRequest,
+    capability: Capability,
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
     const teamResult =
@@ -5589,16 +5600,21 @@ export class IpcRouter {
       !isInertDesktopControlCall(request);
     const reviewRequestId = randomUUID();
     if (evaluation.decision === 'approval_required' && autoPreset) {
-      reviewerDecision = await this.autoReviewer.review({
-        reviewRequestId,
-        turnId: request.context.turnId,
-        callId: request.callId,
-        request: evaluationInput.request,
-        tool: toolFacts,
-        policyEpoch: evaluation.policyEpoch,
-      });
+      reviewerDecision = await this.autoReviewer.review(
+        {
+          reviewRequestId,
+          turnId: request.context.turnId,
+          callId: request.callId,
+          request: evaluationInput.request,
+          tool: toolFacts,
+          policyEpoch: evaluation.policyEpoch,
+        },
+        signal,
+      );
+      signal?.throwIfAborted();
       evaluation = evaluate(reviewerDecision);
     }
+    signal?.throwIfAborted();
     const committedEvent = this.permissionBroker.commitEvaluation(
       {
         ...evaluationInput,
@@ -7770,8 +7786,10 @@ export class IpcRouter {
     kind: 'codex' | 'claude' | 'grok',
     model: string,
     purpose: AuxiliaryPurpose,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     if (this.disposed) return null;
+    signal?.throwIfAborted();
     const executionId = randomUUID();
     const prompt = purpose === 'title' ? TASK_TITLE_PROMPT : AUTO_REVIEW_PROMPT;
     const context = createTaskTitleContext(request.taskId, request.text);
@@ -7816,22 +7834,29 @@ export class IpcRouter {
     }
 
     return await new Promise<string | null>((resolve) => {
-      const timer = setTimeout(() => {
+      signal?.throwIfAborted();
+      const cancel = () => {
         const job = this.cliTaskTitleJobs.get(executionId);
         if (job === undefined) return;
         this.cliTaskTitleJobs.delete(executionId);
+        clearTimeout(job.timer);
         job.resolve(null);
         void this.taskTitleRuntimeFor(kind)
           .cancel(request.taskId, executionId)
           .catch(() => undefined);
-      }, MODEL_TASK_TITLE_TIMEOUT_MS);
+      };
+      const timer = setTimeout(cancel, MODEL_TASK_TITLE_TIMEOUT_MS);
+      signal?.addEventListener('abort', cancel, { once: true });
       this.cliTaskTitleJobs.set(executionId, {
         taskId: request.taskId,
         purpose,
         kind,
         output: '',
         timer,
-        resolve,
+        resolve: (output) => {
+          signal?.removeEventListener('abort', cancel);
+          resolve(output);
+        },
       });
       this.taskTitleRuntimeFor(kind).start(
         request.taskId,
@@ -7854,22 +7879,30 @@ export class IpcRouter {
     request: AuxiliaryModelRequest,
     connectionId: string,
     purpose: AuxiliaryPurpose,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     if (this.disposed) return null;
+    signal?.throwIfAborted();
     const controller = new AbortController();
+    const onAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
     const releaseController = this.taskTitleProviderAborts.track(controller);
     const timer = setTimeout(() => controller.abort(), MODEL_TASK_TITLE_TIMEOUT_MS);
     const executionId = randomUUID();
     let modelLease: ProviderModelLease | undefined;
+    let cancelExecution: (() => void) | undefined;
+    let cancellation: Promise<unknown> | undefined;
     try {
       await this.ensureProviderEndpointConsent(
         this.persistence.getProviderConnection(connectionId),
         purpose === 'title',
       );
+      controller.signal.throwIfAborted();
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
         controller.signal,
       );
+      controller.signal.throwIfAborted();
       const modelId = request.modelSelection.requestedModel;
       if (modelId === null || connection.providerId !== request.modelSelection.requestedProvider)
         return null;
@@ -7903,12 +7936,18 @@ export class IpcRouter {
 
       const runtime = this.providerRegistry.resolve(connection);
       modelLease = await acquireProviderModelLease(runtime, connection, modelId, controller.signal);
+      controller.signal.throwIfAborted();
+      cancelExecution = () => {
+        cancellation = runtime.cancel(executionId).catch(() => undefined);
+      };
+      controller.signal.addEventListener('abort', cancelExecution, { once: true });
       let output = '';
       for await (const event of runtime.execute(
         connection,
         { executionId, connectionId, modelId, messages },
         controller.signal,
       )) {
+        controller.signal.throwIfAborted();
         if (event.type === 'output_delta') {
           if (purpose === 'permission-review' && output.length + event.text.length > 8_192) {
             controller.abort();
@@ -7923,16 +7962,11 @@ export class IpcRouter {
       return null;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       releaseController();
+      if (cancelExecution) controller.signal.removeEventListener('abort', cancelExecution);
+      await cancellation;
       await modelLease?.release();
-      if (controller.signal.aborted) {
-        try {
-          const connection = this.persistence.getProviderConnection(connectionId);
-          await this.providerRegistry.resolve(connection).cancel(executionId);
-        } catch {
-          // The fallback title remains; cancellation is best-effort during timeout/teardown.
-        }
-      }
     }
   }
 

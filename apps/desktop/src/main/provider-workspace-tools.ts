@@ -1721,8 +1721,14 @@ async function listWorkspace(
   if (input.guard.targetIdentity?.kind !== 'directory')
     throw new WorkspaceToolRejection('NOT_A_DIRECTORY', 'list_workspace target is not a directory');
   await revalidatePathGuard(input.guard);
+  const requestedDirectory = resolve(input.guard.workspacePath, input.guard.originalTargetPath);
   const entries = (await readdir(input.guard.resolvedPath, { withFileTypes: true }))
-    .filter((entry) => !mayRead || mayRead(join(input.guard.resolvedPath, entry.name)))
+    .filter(
+      (entry) =>
+        !mayRead ||
+        (mayRead(join(input.guard.resolvedPath, entry.name)) &&
+          mayRead(join(requestedDirectory, entry.name))),
+    )
     .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)))
     .slice(0, MAX_LIST_ENTRIES + 1);
   await revalidatePathGuard(input.guard);
