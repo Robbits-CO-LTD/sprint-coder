@@ -108,6 +108,7 @@ it.each([false, true])(
     });
     const policyCleanups = new Map([['task-1', { epoch: 3, confirm: vi.fn() }]]);
     const disposeGraphSources = vi.fn();
+    const disposeExternalAcp = vi.fn(async () => undefined);
     const fullAccessConfirmation = new FullAccessConfirmation();
     let confirmationSignal: AbortSignal | undefined;
     const pendingConfirmation = fullAccessConfirmation.confirm((signal) => {
@@ -127,6 +128,7 @@ it.each([false, true])(
       fullAccessConfirmation,
       closeAllPorts: vi.fn(),
       graphSourceMonitor: { dispose: disposeGraphSources },
+      externalAcpRuntimes: [{ dispose: disposeExternalAcp }, { dispose: disposeExternalAcp }],
     };
     for (const key of [
       'providerAbortByTurn',
@@ -176,6 +178,7 @@ it.each([false, true])(
     expect(dispose).toHaveBeenCalledTimes(10);
     expect(disposeApprovals).toHaveBeenCalledTimes(1);
     expect(disposeGraphSources).toHaveBeenCalledTimes(1);
+    expect(disposeExternalAcp).toHaveBeenCalledTimes(2);
     expect(policyCleanups.size).toBe(0);
   },
 );

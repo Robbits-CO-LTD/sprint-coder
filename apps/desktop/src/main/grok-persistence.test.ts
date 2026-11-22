@@ -203,6 +203,13 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1') {
       const legacy = new Database(path);
       const before = snapshot(legacy);
       const connections = legacy.prepare('SELECT * FROM provider_connections ORDER BY id').all();
+      const legacyBuiltinCount = (
+        legacy
+          .prepare(
+            "SELECT count(*) AS count FROM provider_connections WHERE runtime_kind = 'builtin_cli'",
+          )
+          .get() as { count: number }
+      ).count;
       legacy.close();
       const migrated = new SqlitePersistenceClient(path);
       expect(migrated.getProviderConnection('builtin:grok-cli')).toMatchObject({
@@ -227,9 +234,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1') {
         FROM provider_connections WHERE runtime_kind = 'builtin_cli' ORDER BY id`,
         )
         .all();
-      expect(builtinPolicies).toHaveLength(3);
       expect(builtinPolicies).toEqual(
-        Array.from({ length: 3 }, () => ({
+        Array.from({ length: legacyBuiltinCount + 1 }, () => ({
           verification_status: 'not_required',
           rate_limit_mode: 'bypass',
           max_concurrent_requests: null,
