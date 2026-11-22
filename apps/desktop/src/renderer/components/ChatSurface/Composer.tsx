@@ -8,6 +8,7 @@ import {
 } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
 import { ContextBar, PermissionChip } from './ContextBar';
+import { ChatContinuation } from './ChatContinuation';
 import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Square, Target, Trash, X } from '../icons';
 import { ComposerMenu } from './ComposerMenu';
 import { ModelPickerV2 } from '../ModelPickerV2';
@@ -494,6 +495,14 @@ export function Composer({ taskId }: { taskId: string }) {
     wasSendingRef.current = sending;
   }, [sending]);
 
+  const sendBlocked =
+    composing ||
+    permissionChanging ||
+    attachmentBlocked ||
+    goalControlPending ||
+    projectSwitching ||
+    attachmentPolicy.sendBlocked ||
+    (turnActive && goalRequested);
   const actionPolicy = composerActionPolicy({
     turnStatus: turn?.status === 'canceling' ? 'canceling' : turnActive ? 'running' : 'idle',
     hasDraft: draft.trim().length > 0,
@@ -501,14 +510,7 @@ export function Composer({ taskId }: { taskId: string }) {
     canStopAndSend,
     canCancel,
     actionPending: sending || turnActionPending !== null,
-    sendBlocked:
-      composing ||
-      permissionChanging ||
-      attachmentBlocked ||
-      goalControlPending ||
-      projectSwitching ||
-      attachmentPolicy.sendBlocked ||
-      (turnActive && goalRequested),
+    sendBlocked,
   });
 
   function updateImageRequested(next: boolean): void {
@@ -598,20 +600,26 @@ export function Composer({ taskId }: { taskId: string }) {
     const text = composerMessageText(raw, imageRequested);
     updateImageRequested(false);
     if (!turnActive) {
-      const request = ++turnStartRequestRef.current;
-      setTurnStartError(null);
-      setTurnActionError(null);
-      void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments)).then(
-        (message) => {
-          if (turnStartRequestRef.current === request && message !== null)
-            setTurnStartError({ taskId, message });
-        },
-      );
+      startMessage(text, undefined, directTurnAttachmentIds(draftAttachments));
       return;
     }
     if (actionPolicy.primary.kind === 'queue') {
       runTurnAction('queue', () => queueMessage(taskId, text, selectedSkills));
     }
+  }
+
+  function startMessage(
+    text: string,
+    skills?: readonly TurnSkillSelection[],
+    attachmentIds?: readonly string[],
+  ) {
+    const request = ++turnStartRequestRef.current;
+    setTurnStartError(null);
+    setTurnActionError(null);
+    void startTurn(taskId, text, skills, attachmentIds).then((message) => {
+      if (turnStartRequestRef.current === request && message !== null)
+        setTurnStartError({ taskId, message });
+    });
   }
 
   function runTurnAction(
@@ -894,6 +902,17 @@ export function Composer({ taskId }: { taskId: string }) {
             </div>
           )}
           <div className="composer">
+            {!turnActive &&
+              !sending &&
+              !sendBlocked &&
+              !draft &&
+              !draftAttachments.length &&
+              !selectedSkills.length &&
+              !imageRequested &&
+              !goalRequested &&
+              turnActionPending === null && (
+                <ChatContinuation key={taskId} taskId={taskId} onResume={startMessage} />
+              )}
             {slashOpen && (
               <SlashCommandMenu
                 items={slashItems}

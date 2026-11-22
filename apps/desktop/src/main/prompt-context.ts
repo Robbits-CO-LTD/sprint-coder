@@ -7,6 +7,7 @@ import type { RuntimeContextFragment, RuntimeWorkspaceSet } from '../runtime-hos
 import { resolveDesktopControlCommand } from './desktop-control';
 import { digestCanonical } from './context-compiler';
 import { safeGitExecFileSync } from './safe-git';
+import { SKILL_REQUEST_GUIDANCE, WORKSPACE_REQUEST_GUIDANCE } from '../chat-continuation';
 
 export const PROMPT_CONTEXT_VERSION = 1;
 const MAX_WORKSPACE_RULE_BYTES = 24 * 1024;
@@ -327,6 +328,14 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
     lines.push('- 親にない能力やツールを子が持つものとして扱わない。');
   }
   lines.push('', '実行環境:', JSON.stringify(context.environment));
+  if (context.agent.role === 'primary' && context.tools.length > 0)
+    lines.push(`- ${SKILL_REQUEST_GUIDANCE}`);
+  if (
+    context.agent.role === 'primary' &&
+    context.environment.workspaceRoots.length === 0 &&
+    (context.tools.length > 0 || context.desktopControlNeedsProject)
+  )
+    lines.push(`- ${WORKSPACE_REQUEST_GUIDANCE}`);
   if (context.environment.workspaceRoots.length > 1)
     lines.push(
       '- 複数のWorkspaceフォルダがある。primary以外のフォルダを読む・書く・コマンドを実行するときは、ツールの rootId に workspaceRoots のそのフォルダの rootId を渡す（path はそのフォルダからの相対パス）。rootId を省いた相対パスは primary のフォルダとして扱う。どれか1つのフォルダの中を指す絶対パスは、rootId を省いてもそのフォルダとして扱う。',
@@ -365,7 +374,7 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
       '',
       'Sprint Coder のデスクトップ操作（このTurnでは使えない）:',
       '- この Task には Project（作業フォルダー）が選ばれていないので、デスクトップ操作（起動中のほかのアプリを見る・操作すること）の道具はこの Turn に渡されていない。デスクトップ操作は Project を選んだ Task でだけ使える。',
-      '- 利用者にほかのアプリを開く・操作するよう頼まれたら、道具が無いとだけ答えず、Project（作業フォルダー）を選んだ Task で、もう一度頼むよう案内する。使えるふりをせず、開いた・操作したなどの結果を作らない。',
+      '- 利用者にほかのアプリを開く・操作するよう頼まれたら、上の手順で作業フォルダーの選択をお願いする。使えるふりをせず、開いた・操作したなどの結果を作らない。',
     );
   return lines.join('\n');
 }
