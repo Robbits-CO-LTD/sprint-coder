@@ -6,7 +6,7 @@ import type { AccessPreset, CommandSandboxCapability } from '../types/sprint-cod
 
 export const ACCESS_PRESET_LABEL: Record<AccessPreset, string> = {
   ask: '確認する',
-  auto: '自動',
+  auto: '自動モード',
   full: 'フル',
 };
 

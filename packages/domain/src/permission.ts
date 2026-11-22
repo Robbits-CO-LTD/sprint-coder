@@ -321,13 +321,13 @@ const SAFE_AUTO_RULES: readonly PermissionRule[] = [
 ];
 
 /**
- * 「安全時は自動」で Workspace 内のファイルの作成・編集を自動許可した監査理由（issue #526）。
+ * 「自動モード」で Workspace 内のファイルの作成・編集を自動許可した監査理由（issue #526）。
  * Main はこれで、その許可がプリセットの限定許可ルールから来たことを見分ける。
  */
 export const AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON = 'preset_auto_safe_edit';
 
 /**
- * 「安全時は自動」だけが持つ、Workspace 内のファイルの作成・編集の自動許可（issue #526）。
+ * 「自動モード」だけが持つ、Workspace 内のファイルの作成・編集の自動許可（issue #526）。
  *
  * - `workspace.write` を要求するツールは Edit Saga の3つ（apply_patch / create_file /
  *   create_directory）だけなので、自動になるのはそれらによる Workspace 内のファイル変更だけ。

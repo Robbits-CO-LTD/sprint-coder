@@ -89,7 +89,7 @@ Team MVPからは高度なmessage branching、Task pin/archiveの高度化、Min
 
 - FR-COMP-01: ComposerからModel、Reasoning effort、Access modeを選択できる。
 - FR-COMP-02: 通常利用で設定が邪魔にならないよう、選択値は小さなsummary rowへ畳む。
-- FR-COMP-03: Access modeは「確認する」「安全時は自動」「フルアクセス」の3 presetを提供する。
+- FR-COMP-03: Access modeは「確認する」「自動モード」「フルアクセス」の3 presetを提供する。
 - FR-COMP-04: フルアクセス選択時は影響範囲を明記し、意図的な確認操作を一度要求する。
 - FR-COMP-05: Goalを設定でき、Task headerとComposerの双方から確認・編集できる。
 - FR-COMP-06: Team作成はComposerのTeam actionまたはTask headerから開始できる。
@@ -606,15 +606,15 @@ Safe rewind前にworkspace mutation lease、free-space check、restore rehearsal
 - `secret.use`
 - `provider.egress`
 
-Access presetはCapability policyのUI shortcutにすぎず、保存時は個別policyへ展開する。「安全時は自動」は判定理由をeventへ残し、不明な操作は確認へ倒す。
+Access presetはCapability policyのUI shortcutにすぎず、保存時は個別policyへ展開する。「自動モード」は判定理由をeventへ残し、不明な操作は確認へ倒す。
 
 Codex／Claude CLIは推論transportだけを担当し、内蔵File／Shell toolを常に無効化する。API、CLI、MockはすべてMainの`ManagedCodingHarness`が生成する同一`ToolCatalogSnapshot`を使い、Access presetはRuntime別flagではなくTool Brokerのcapability policyへだけ写像する。Workspace無しではworkspace-bound toolをcatalogへ載せない。
 
 | preset | 共通Harness動作 |
 | --- | --- |
 | 確認する | read/searchはpolicy評価し、edit・commandはdurable Approval CardでTurn内確認 |
-| 安全時は自動 | Workspace内のreadと、NativeSafeFs/Edit Sagaによるファイルの作成・編集（`workspace.write`）だけを自動許可。複数パスに触れる編集（まとめた`apply_patch`、renameの書込み先）は全パスがWorkspace分類のときだけで、保護分類パスを1つでも含めばimmutable denyで全体を拒否する。Workspace外への書込みはEdit Sagaでは受け付けない（PathGuardが拒否）。command実行（probe済みsandboxを含む）とnetworkは自動reviewerが判定する |
-| フルアクセス | 広い操作を許可し、Provider発行プロセス（`exec_command`と実行中コマンドへの`write_stdin`）もWorkspace分類パスのProvider開示（redact済み本文）も都度確認なしで実行する。同梱のデスクトップ操作（sandboxの外で動き、ほかのアプリの窓を読む・押す・入力する・アプリを起動する）も、前面・マウス・キーボードを使う操作を含めて確認なしで実行する（2026-11-15のオーナーの決定。それまではフルアクセスでも毎回Approval Cardを出していた。確認する・安全時は自動では従来どおりカードで確認する）。policyのdenyとデスクトップ操作の実行ファイル自身の拒否は維持。credential、app-private、signing/update key、provider egress denyは維持 |
+| 自動モード | Workspace内のreadと、NativeSafeFs/Edit Sagaによるファイルの作成・編集（`workspace.write`）だけを自動許可。複数パスに触れる編集（まとめた`apply_patch`、renameの書込み先）は全パスがWorkspace分類のときだけで、保護分類パスを1つでも含めばimmutable denyで全体を拒否する。Workspace外への書込みはEdit Sagaでは受け付けない（PathGuardが拒否）。command実行（probe済みsandboxを含む）とnetworkは自動reviewerが判定する |
+| フルアクセス | 広い操作を許可し、Provider発行プロセス（`exec_command`と実行中コマンドへの`write_stdin`）もWorkspace分類パスのProvider開示（redact済み本文）も都度確認なしで実行する。同梱のデスクトップ操作（sandboxの外で動き、ほかのアプリの窓を読む・押す・入力する・アプリを起動する）も、前面・マウス・キーボードを使う操作を含めて確認なしで実行する（2026-11-15のオーナーの決定。それまではフルアクセスでも毎回Approval Cardを出していた。確認する・自動モードでは従来どおりカードで確認する）。policyのdenyとデスクトップ操作の実行ファイル自身の拒否は維持。credential、app-private、signing/update key、provider egress denyは維持 |
 
 保護分類パス（credential、app-private、os-protected、signing/update key、unclassified）のProvider開示は、preset によらず承認要求ではなくimmutable denyで拒否する。開示resourceはpath classificationを持ち、`path-classification`にしかマッチしないimmutable denyを開示lane経由で迂回できないようにする。preset展開を変更したbuildは、DB openで「直前の展開と完全一致する保存済みルール」だけを新しい展開へ書き直しpresetを維持する（それ以外の不一致は従来どおりAskへ落とす）。
 

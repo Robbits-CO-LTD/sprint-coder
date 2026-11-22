@@ -487,7 +487,7 @@ describe('SetupWizard', () => {
     await press('setup-next');
     await press('setup-next');
     await press('setup-next');
-    expect(q('[data-testid="setup-access"]')?.textContent).toContain('はじめは「安全時は自動」');
+    expect(q('[data-testid="setup-access"]')?.textContent).toContain('はじめは「自動モード」');
     await act(async () => root.unmount());
     root = createRoot(container);
     localStorage.setItem('sprint-coder:last-access-preset', 'auto');
@@ -497,7 +497,7 @@ describe('SetupWizard', () => {
     await press('setup-next');
     await press('setup-next');
     expect(q('[data-testid="setup-access"]')?.textContent).toContain(
-      '今は「安全時は自動」を引き継ぐ',
+      '今は「自動モード」を引き継ぐ',
     );
   });
 

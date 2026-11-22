@@ -10026,7 +10026,7 @@ export function toolPermissionFacts(
 }
 
 /**
- * 「安全時は自動」の判定を監査に残すときの出どころ。自動レビューを経たものは `reviewer`、
+ * 「自動モード」の判定を監査に残すときの出どころ。自動レビューを経たものは `reviewer`、
  * プリセットの限定許可ルール（Workspace の読み取りと、issue #526 からの Workspace 内のファイルの
  * 作成・編集）で許可したものは `narrow_allow`、それ以外は `policy`。
  */

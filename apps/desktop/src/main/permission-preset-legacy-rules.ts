@@ -125,7 +125,7 @@ export function legacyExpandAccessPreset(preset: AccessPreset): LegacyExpandedAc
 }
 
 /*
- * ここから下は2つ目の凍結スナップショット（issue #526）。「安全時は自動」に Workspace 内の
+ * ここから下は2つ目の凍結スナップショット（issue #526）。「自動モード」に Workspace 内の
  * ファイルの作成・編集の自動許可を足す直前の `expandAccessPreset` を、commit e0fa25c の
  * `git show e0fa25c:packages/domain/src/permission.ts` から書き写したもの。この展開は
  * 3651e99（#489、Issue #487 の Provider 開示ルール追加）から e0fa25c まで変わっていない。

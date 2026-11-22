@@ -47,7 +47,7 @@ export function ContextBar({ taskId }: { taskId: string }) {
 
 const PRESET_LABEL: Record<AccessPreset, string> = {
   ask: '確認する',
-  auto: '安全時は自動',
+  auto: '自動モード',
   full: 'フルアクセス',
 };
 
