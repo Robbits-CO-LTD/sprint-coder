@@ -1,5 +1,12 @@
 import { ExternalAcpRuntime } from './external-acp-runtime';
 import { EXTERNAL_ACP_AGENTS, isExternalAcpConnection } from './external-acp-profile';
+import {
+  downloadGithubSkill,
+  githubSkillImportAllowed,
+  githubSkillRequest,
+  GithubSkillImportError,
+  type GithubSkillRequest,
+} from './github-skill-import';
 import { SKILL_REQUEST_GUIDANCE, WORKSPACE_REQUEST_GUIDANCE } from '../chat-continuation';
 import { projectFolderIdentity } from './project-folder-identity';
 import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
@@ -1125,6 +1132,7 @@ export class IpcRouter {
   >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
+  private readonly githubSkillImports = new Map<string, AbortController>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
   private readonly canceledRuntimeTurns = new Set<string>();
   /** What moves in each Task, as last sent to the window (`refreshTaskRunningWork`). */
@@ -4156,7 +4164,7 @@ export class IpcRouter {
         if (result.executed && started !== undefined) {
           if (attachmentCapability !== undefined)
             this.attachmentCapabilityByTurn.set(started.turnId, attachmentCapability);
-          this.dispatchStarted(started);
+          this.dispatchStarted(started, true);
         }
         return result.value;
       },
@@ -4528,11 +4536,13 @@ export class IpcRouter {
     turnId: string,
     outcome: Parameters<ApprovalCoordinator['turnEnded']>[2],
   ): void {
+    this.githubSkillImports.get(turnId)?.abort();
     this.approvalCoordinator.turnEnded(taskId, turnId, outcome);
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    for (const controller of this.githubSkillImports.values()) controller.abort();
     let streamingFailure: { cause: unknown } | undefined;
     try {
       this.turnStreamingResources.dispose();
@@ -5666,7 +5676,7 @@ export class IpcRouter {
     }
   }
 
-  private dispatchStarted(started: StartedTurn): void {
+  private dispatchStarted(started: StartedTurn, userChatInput = false): void {
     // Keeps the answer fresh for Turns that start without a user's action (a queued message, the
     // next Goal Turn), which read it from the cache while it lasts.
     void this.refreshTeamOfferWorkspace(started.event.taskId);
@@ -5681,7 +5691,7 @@ export class IpcRouter {
     this.rememberTaskTitleRequest(started);
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
-    void this.startSelectedRuntime(started);
+    void this.startSelectedRuntime(started, userChatInput);
   }
 
   private dispatchQueueTransition(transition: QueueTransition): void {
@@ -5698,7 +5708,7 @@ export class IpcRouter {
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
     this.publish(transition.queueEvent);
-    void this.startSelectedRuntime(transition.started);
+    void this.startSelectedRuntime(transition.started, true);
   }
 
   private finishQuarantinedRuntimeStart(started: StartedTurn): void {
@@ -5731,7 +5741,62 @@ export class IpcRouter {
     });
   }
 
-  private async startSelectedRuntime(started: StartedTurn): Promise<void> {
+  private async runGithubSkillImport(
+    started: StartedTurn,
+    request: GithubSkillRequest,
+    epoch: number,
+  ) {
+    const {
+      turnId,
+      event: { taskId },
+    } = started;
+    const controller = new AbortController();
+    this.githubSkillImports.set(turnId, controller);
+    const active = () =>
+      !this.disposed &&
+      !controller.signal.aborted &&
+      !this.canceledRuntimeTurns.has(turnId) &&
+      this.persistence.getActiveTurnId(taskId) === turnId;
+    const checkPermission = () => {
+      const policy = this.persistence.getPermissionPolicy(taskId);
+      if (
+        !active() ||
+        !githubSkillImportAllowed(policy, epoch, this.persistence.hasAcknowledgedFullAccessRisk())
+      )
+        throw new GithubSkillImportError(
+          'フルアクセスの権限を確認できないため、Skillを取り込みませんでした。',
+        );
+    };
+    for (const stage of ['understanding', 'planning', 'executing'] as const)
+      this.publish(this.persistence.changeStage(taskId, turnId, stage));
+    try {
+      checkPermission();
+      const { skillId, files, revision, dir } = await downloadGithubSkill(
+        request,
+        controller.signal,
+      );
+      checkPermission();
+      const result = await this.skillSettings.installGithubSkill(skillId, files, checkPermission);
+      if (!active()) return;
+      this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing'));
+      const status = result === 'installed' ? 'インストールしました' : '同じ内容で登録済みです';
+      const message = `Skill「${skillId}」をGitHubの原本と照合しました（${files.length}ファイル）。${status}。\n\n[取得元](https://github.com/${request.repo}/tree/${revision}/${dir.split('/').map(encodeURIComponent).join('/')})`;
+      this.publish(this.persistence.appendDelta(taskId, turnId, randomUUID(), message));
+      this.finishAndAdvance(taskId, turnId, 'completed', message);
+    } catch (error) {
+      if (!active()) return;
+      const message =
+        error instanceof GithubSkillImportError
+          ? error.message
+          : skillSettingsPublicError(error).message;
+      this.publish(this.persistence.appendDelta(taskId, turnId, randomUUID(), message));
+      this.finishAndAdvance(taskId, turnId, 'failed');
+    } finally {
+      this.githubSkillImports.delete(turnId);
+    }
+  }
+
+  private async startSelectedRuntime(started: StartedTurn, userChatInput: boolean): Promise<void> {
     const taskId = started.event.taskId;
     // A Turn event can be published before its asynchronous Runtime startup reaches this method.
     // Cancellation/replacement may have terminalized that Turn in the meantime; never start a
@@ -5813,6 +5878,18 @@ export class IpcRouter {
     )
       return;
     if (this.turnStreamingResources.begin(taskId, started.turnId) === undefined) return;
+    const importRequest = userChatInput ? githubSkillRequest(started.text) : null;
+    if (
+      importRequest &&
+      !this.attachmentCapabilityByTurn.has(started.turnId) &&
+      started.skills.length === 0
+    ) {
+      const policy = this.persistence.getPermissionPolicy(taskId);
+      if (policy.preset === 'full') {
+        await this.runGithubSkillImport(started, importRequest, policy.policyEpoch);
+        return;
+      }
+    }
     const externalConnectionId = external ? started.modelSelection.connectionId : null;
     const autoSkills = started.autoSkills;
     if (externalConnectionId !== null) {
@@ -7995,7 +8072,7 @@ export class IpcRouter {
       }
     }
     if (pending.transition.canceledEvent !== null) this.publish(pending.transition.canceledEvent);
-    this.dispatchStarted(pending.transition.started);
+    this.dispatchStarted(pending.transition.started, true);
     this.pendingStopAndSendByOperation.delete(operationKey);
   }
 

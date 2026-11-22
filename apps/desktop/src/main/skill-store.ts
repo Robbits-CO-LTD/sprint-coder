@@ -343,6 +343,7 @@ export class SkillStore {
   async installCreatedSkill(
     skillId: string,
     files: readonly CreatedSkillFile[],
+    beforeCommit?: () => void,
   ): Promise<SelectableSkill> {
     const validated = this.validateCreatedSkill(skillId, files);
 
@@ -381,7 +382,9 @@ export class SkillStore {
         teamBlueprintSchema.parse(JSON.parse(raw));
       }
       await syncDirectoryTree(staging);
+      beforeCommit?.();
       await this.ensureRevisionFromDirectory('created', skillId, validated.digest, staging);
+      beforeCommit?.();
       await rename(staging, destination);
       await syncDirectory(createdRoot);
       const installed = await this.readSelectableAt('created', skillId, true);
