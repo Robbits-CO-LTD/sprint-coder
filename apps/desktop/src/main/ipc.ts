@@ -5708,10 +5708,16 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
+    const retired = isRetiredManagedLocal(
+      started.modelSelection.connectionId,
+      started.modelSelection.requestedProvider,
+    );
+    // Retired selections can predate the current identity schema.
     const external =
+      !retired &&
       builtinRuntimeForModelSelection(started.modelSelection) === null &&
       started.modelSelection.connectionId !== null;
-    const sealedRuntime = external ? 'provider' : started.runtimeKind;
+    const sealedRuntime = retired || external ? 'provider' : started.runtimeKind;
     // A queued request can outlive the model selection under which its Skills were chosen.
     // Fail this Turn before egress and advance the queue normally.
     const wrongSkillRuntime = started.skills.some(
@@ -5719,10 +5725,7 @@ export class IpcRouter {
         (selection.ref.source === 'claude' && sealedRuntime !== 'claude') ||
         (selection.ref.source === 'agents' && sealedRuntime !== 'codex'),
     );
-    const refusal = isRetiredManagedLocal(
-      started.modelSelection.connectionId,
-      started.modelSelection.requestedProvider,
-    )
+    const refusal = retired
       ? new RetiredManagedLocalError().message
       : wrongSkillRuntime
         ? '選択したCLI Skillは現在のモデルで使えません。Skillを外すか、対応するモデルを選んでください。'
