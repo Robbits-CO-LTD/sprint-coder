@@ -1,5 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import { StringDecoder } from 'node:string_decoder';
+import { AcpClient, acpRecord } from './acp-client';
 import type { GrokProtocolFailureCode } from './protocol';
 
 /**
@@ -16,9 +16,11 @@ export class GrokProtocolFailure extends Error {
 }
 
 export function grokRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
+  try {
+    return acpRecord(value);
+  } catch {
     throw new Error('Invalid Grok protocol object');
-  return value as Record<string, unknown>;
+  }
 }
 
 export type GrokRpcCategory = 'authentication' | 'rate_limit' | 'billing' | 'other';
@@ -40,194 +42,21 @@ export class GrokRpcError extends Error {
   }
 }
 
-/** Bounded JSONL transport. Reverse requests never acquire host execution authority. */
-export class GrokAcpClient {
-  private nextId = 1;
-  private pending = new Map<
-    number,
-    {
-      resolve: (value: unknown) => void;
-      reject: (error: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
-      onResult: ((result: unknown, frame: number) => void) | undefined;
-    }
-  >();
-  private buffered = '';
-  private readonly decoder = new StringDecoder('utf8');
-  private bytes = 0;
-  private frames = 0;
-  private ended = false;
-
+export class GrokAcpClient extends AcpClient {
   constructor(
-    private readonly child: ChildProcessWithoutNullStreams,
-    private readonly notify: (method: string, params: unknown) => void,
-    private readonly failed: (error: Error) => void,
+    child: ChildProcessWithoutNullStreams,
+    notify: (method: string, params: unknown) => void,
+    failed: (error: Error) => void,
   ) {
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (this.ended) return;
-      try {
-        this.bytes += chunk.length;
-        if (this.bytes > 64 * 1024 * 1024)
-          throw new GrokProtocolFailure('output_quota_exceeded', 'Grok output quota exceeded');
-        this.buffered += this.decoder.write(chunk);
-        let index: number;
-        while ((index = this.buffered.indexOf('\n')) >= 0) {
-          const line = this.buffered.slice(0, index);
-          this.buffered = this.buffered.slice(index + 1);
-          if (Buffer.byteLength(line) > 1024 * 1024)
-            throw new GrokProtocolFailure('frame_too_large', 'Grok frame too large');
-          if (line.trim() === '') continue;
-          this.frames += 1;
-          let frame: unknown;
-          try {
-            frame = JSON.parse(line);
-          } catch {
-            throw new GrokProtocolFailure('json_parse_failed');
-          }
-          this.receive(frame);
-        }
-        if (Buffer.byteLength(this.buffered) > 1024 * 1024)
-          throw new GrokProtocolFailure('frame_too_large', 'Grok frame too large');
-      } catch (error) {
-        // Only a fixed code leaves here; a validation error's own text is dropped.
-        this.abort(
-          error instanceof GrokProtocolFailure ? error : new GrokProtocolFailure('rpc_invalid'),
-        );
-      }
+    super(child, notify, failed, {
+      failure: (code, message) => new GrokProtocolFailure(code, message.replace('ACP', 'Grok')),
+      isProtocolFailure: (error): error is GrokProtocolFailure =>
+        error instanceof GrokProtocolFailure,
+      response: (code, message, data) => {
+        const classified = classifyGrokRpcFailure(code, message, data);
+        return new GrokRpcError(code, classified.category, classified.httpStatus);
+      },
     });
-    child.stdin.on('error', () =>
-      this.abort(new GrokProtocolFailure('stdin_failed', 'Grok stdin failed')),
-    );
-    child.once('error', () =>
-      this.abort(new GrokProtocolFailure('process_error', 'Grok process failed')),
-    );
-    child.once('close', () =>
-      this.abort(new GrokProtocolFailure('process_exited', 'Grok process exited')),
-    );
-  }
-
-  /** Non-blank frames delimited so far, including one that then failed to parse. */
-  get receivedFrames(): number {
-    return this.frames;
-  }
-
-  /** Whether bytes after the last newline are still waiting for their terminator. */
-  get partialFrame(): boolean {
-    return this.buffered.slice(this.buffered.lastIndexOf('\n') + 1) !== '';
-  }
-
-  /**
-   * `onResult` sees a successful result with its frame sequence while that frame is parsed, before
-   * later frames of the same chunk and before the returned promise settles.
-   */
-  request(
-    method: string,
-    params: unknown,
-    timeoutMs = 30_000,
-    onResult?: (result: unknown, frame: number) => void,
-  ): Promise<unknown> {
-    if (this.ended)
-      return Promise.reject(
-        new GrokProtocolFailure('transport_closed', 'Grok transport is closed'),
-      );
-    if (this.pending.size >= 128)
-      return Promise.reject(new GrokProtocolFailure('too_many_requests', 'Too many Grok requests'));
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new GrokProtocolFailure('request_timeout', 'Grok request timed out'));
-      }, timeoutMs);
-      timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer, onResult });
-      this.write({ jsonrpc: '2.0', id, method, params });
-    });
-  }
-
-  notification(method: string, params: unknown): void {
-    if (!this.ended) this.write({ jsonrpc: '2.0', method, params });
-  }
-
-  close(): void {
-    if (this.ended) return;
-    this.ended = true;
-    for (const request of this.pending.values()) {
-      clearTimeout(request.timer);
-      request.reject(new GrokProtocolFailure('transport_closed', 'Grok transport closed'));
-    }
-    this.pending.clear();
-  }
-
-  private abort(error: Error): void {
-    if (this.ended) return;
-    this.close();
-    this.failed(error);
-  }
-
-  private write(value: unknown): void {
-    this.child.stdin.write(`${JSON.stringify(value)}\n`);
-  }
-
-  private receive(raw: unknown): void {
-    const message = grokRecord(raw);
-    if (message['jsonrpc'] !== '2.0') throw new Error('Invalid RPC version');
-    const method = message['method'];
-    if (typeof method === 'string') {
-      if ('id' in message) {
-        if (method === 'session/request_permission')
-          this.write({
-            jsonrpc: '2.0',
-            id: message['id'],
-            result: { outcome: { outcome: 'cancelled' } },
-          });
-        else
-          this.write({
-            jsonrpc: '2.0',
-            id: message['id'],
-            error: {
-              code: -32601,
-              message: 'Host operation unavailable; use Sprint Coder MCP tools.',
-            },
-          });
-        return;
-      }
-      try {
-        this.notify(method, message['params']);
-      } catch (error) {
-        // An adapter check keeps its own code; anything else the handler threw is only counted.
-        throw error instanceof GrokProtocolFailure
-          ? error
-          : new GrokProtocolFailure('notification_handler_failed');
-      }
-      return;
-    }
-    const id = message['id'];
-    // The CLI can interleave replies with its own string IDs during MCP turns. Our
-    // requests use numeric IDs; never coerce an unrelated reply into a pending request.
-    if (typeof id === 'string') {
-      if ('result' in message === 'error' in message) throw new Error('Invalid Grok response');
-      if ('error' in message) grokRecord(message['error']);
-      return;
-    }
-    if (typeof id !== 'number') throw new Error('Invalid response identity');
-    const pending = this.pending.get(id);
-    if (pending === undefined) return;
-    // Validate before detaching the waiter: abort must still reject it on a malformed reply.
-    const rpcError = 'error' in message ? grokRecord(message['error']) : null;
-    this.pending.delete(id);
-    clearTimeout(pending.timer);
-    if (rpcError !== null) {
-      const code = typeof rpcError['code'] === 'number' ? rpcError['code'] : -32603;
-      const classified = classifyGrokRpcFailure(code, rpcError['message'], rpcError['data']);
-      pending.reject(new GrokRpcError(code, classified.category, classified.httpStatus));
-    } else if ('result' in message) {
-      try {
-        pending.onResult?.(message['result'], this.frames);
-      } catch {
-        // Observation must never change how the reply settles.
-      }
-      pending.resolve(message['result']);
-    } else pending.reject(new GrokProtocolFailure('rpc_invalid', 'Missing Grok result'));
   }
 }
 

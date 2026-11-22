@@ -684,6 +684,7 @@ describe('the Workspace check before a Turn may be offered Team (issue #1241)', 
       window: { webContents: { once: vi.fn() } },
       persistence: {
         getTaskModelSelection: () => null,
+        getRuntime: () => 'codex',
         getOperationResult: () => ({ found: false }),
         getActiveTurnId: () => null,
         getTask: () => ({ goal: 'Finish the page' }),
@@ -705,7 +706,7 @@ describe('the Workspace check before a Turn may be offered Team (issue #1241)', 
     [IPC_CHANNELS.turnsQueue, { taskId: 'task-1', text: 'Write three pages' }],
     [IPC_CHANNELS.turnsStopAndSend, { taskId: 'task-1', text: 'Write three pages' }],
     [IPC_CHANNELS.goalsStart, { taskId: 'task-1', objective: 'Write three pages' }],
-    [IPC_CHANNELS.goalsResume, { taskId: 'task-1' }],
+    [IPC_CHANNELS.goalsResume, { taskId: 'task-1', skills: [] }],
   ] as const)('asks Git on %s before the Turn start transaction', async (channel, input) => {
     const { handlers, order, runMutation } = entryRouter();
     await handlers.get(channel)!(input, {}, { operationId: 'op-1', payload: input });

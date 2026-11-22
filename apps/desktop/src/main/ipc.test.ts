@@ -8944,10 +8944,12 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     const cancelTurn = vi.fn().mockResolvedValue(undefined);
     const terminateTurn = vi.fn().mockResolvedValue(undefined);
     const startNextQueued = vi.fn(() => null);
+    const quarantinedRuntimeTasks = new Set<string>();
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, {
       mailbox: { run: (_taskId: string, action: () => unknown) => Promise.resolve(action()) },
       canceledRuntimeTurns: new Set<string>(),
+      quarantinedRuntimeTasks,
       turnRuntimes: new Map<string, string>([['turn-466', 'claude']]),
       teamRequiredTurns: new Set<string>(),
       teamCoordinator: { get: () => undefined },
@@ -8994,6 +8996,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       handleRuntimeFailure,
       completeTurnAndFinishGoal,
       startNextQueued,
+      quarantinedRuntimeTasks,
     };
   }
 
@@ -9040,6 +9043,16 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
       expect.objectContaining({ state: 'idle', errorCode: null }),
     );
+  });
+
+  it('does not start the next queued turn while the preceding runtime has an unconfirmed stop', async () => {
+    const harness = createCompletionHarness([]);
+    harness.quarantinedRuntimeTasks.add('task-466');
+
+    await settleCompletedEvent(harness);
+
+    expect(harness.completeTurnAndFinishGoal).toHaveBeenCalled();
+    expect(harness.startNextQueued).not.toHaveBeenCalled();
   });
 
   it('completes a Turn whose background command edited nothing', async () => {

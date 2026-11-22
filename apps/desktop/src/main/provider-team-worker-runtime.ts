@@ -1,3 +1,4 @@
+import { isExternalAcpConnection } from './external-acp-profile';
 import { assertNotRetiredManagedLocal } from './retired-managed-local';
 import type {
   ExecutionResolution,
@@ -170,6 +171,8 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     const modelId = input.worker.modelSelection.requestedModel;
     if (connectionId === null || modelId === null)
       throw new Error('Provider Worker model selection is incomplete');
+    if (isExternalAcpConnection(connectionId))
+      throw new Error('この CLI 接続は通常チャット専用です。');
     const connection = await this.deps.verification.requireVerifiedForExecution(connectionId);
     input.signal?.throwIfAborted();
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)

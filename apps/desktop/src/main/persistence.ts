@@ -4763,6 +4763,22 @@ const migrations = [
           ALTER TABLE tasks ADD COLUMN goal_auto_turns INTEGER NOT NULL DEFAULT 0;
           UPDATE tasks SET goal_status='paused' WHERE goal_status='active';`,
   },
+  {
+    version: 109,
+    checksum: 'external-acp-chat-connections-v109',
+    sql: `
+      INSERT INTO provider_connections (
+        id, provider_id, runtime_kind, display_name, enabled, created_at, updated_at,
+        verification_status, rate_limit_mode, max_concurrent_requests
+      ) VALUES
+        ('builtin:opencode-cli', 'opencode', 'builtin_cli', 'OpenCode', 1,
+          strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+          'not_required', 'bypass', NULL),
+        ('builtin:antigravity-cli', 'antigravity', 'builtin_cli', 'Antigravity', 1,
+          strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+          'not_required', 'bypass', NULL);
+    `,
+  },
 ];
 
 /**

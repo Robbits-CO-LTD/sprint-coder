@@ -876,11 +876,27 @@ if (runsWithElectronAbi)
           enabled: true,
         }),
         expect.objectContaining({
+          id: 'builtin:antigravity-cli',
+          providerId: 'antigravity',
+          runtimeKind: 'builtin_cli',
+          displayName: 'Antigravity',
+          enabled: true,
+          secretReference: null,
+        }),
+        expect.objectContaining({
           id: 'builtin:codex-cli',
           providerId: 'openai',
           runtimeKind: 'builtin_cli',
           displayName: 'Codex CLI',
           enabled: true,
+        }),
+        expect.objectContaining({
+          id: 'builtin:opencode-cli',
+          providerId: 'opencode',
+          runtimeKind: 'builtin_cli',
+          displayName: 'OpenCode',
+          enabled: true,
+          secretReference: null,
         }),
         expect.objectContaining({
           id: 'builtin:grok-cli',
@@ -906,7 +922,9 @@ if (runsWithElectronAbi)
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.listProviderConnections().map(({ id }) => id)).toEqual([
         'builtin:claude-cli',
+        'builtin:antigravity-cli',
         'builtin:codex-cli',
+        'builtin:opencode-cli',
         'builtin:grok-cli',
       ]);
       expect(reopened.getProviderConnection('builtin:codex-cli').secretReference).toBe(
@@ -12178,6 +12196,7 @@ if (runsWithElectronAbi)
         { version: 106 },
         { version: 107 },
         { version: 108 },
+        { version: 109 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
