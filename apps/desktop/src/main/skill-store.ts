@@ -260,7 +260,7 @@ export class SkillStore {
       const content = file.bytes.toString('utf8');
       if (!Buffer.from(content, 'utf8').equals(file.bytes))
         throw new SkillStoreError('INVALID_SKILL', `Skill file must be UTF-8: ${file.path}`);
-      if (containsCredential(content))
+      if (containsSkillCredential(content))
         throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${file.path}`);
       totalBytes += file.bytes.byteLength;
       if (totalBytes > 700 * 1024)
@@ -367,7 +367,7 @@ export class SkillStore {
         totalBytes += bytes.byteLength;
         if (totalBytes > MAX_TOTAL_BYTES)
           throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
-        if (containsCredential(file.content))
+        if (containsSkillCredential(file.content))
           throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${path}`);
         const target = safeChild(staging, path);
         await ensurePrivateDirectory(dirname(target));
@@ -424,7 +424,7 @@ export class SkillStore {
       totalBytes += file.bytes.byteLength;
       if (totalBytes > MAX_TOTAL_BYTES)
         throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
-      if (containsCredential(file.content))
+      if (containsSkillCredential(file.content))
         throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${file.path}`);
     }
     const skillFile = canonical.find(({ path }) => path === 'SKILL.md');
@@ -927,7 +927,7 @@ export class SkillStore {
     const content = file.bytes.toString('utf8');
     if (
       content.length > 40_000 ||
-      snapshot.files.some((item) => containsCredential(item.bytes.toString('utf8')))
+      snapshot.files.some((item) => containsSkillCredential(item.bytes.toString('utf8')))
     )
       throw new SkillStoreError('INVALID_SKILL', 'Native Skill is not eligible for dispatch');
     const runtime = candidate.provider === 'claude' ? 'claude' : 'codex';
@@ -1333,7 +1333,7 @@ function normalizeDraftFilePath(path: string): string {
   return normalized;
 }
 
-function containsCredential(content: string): boolean {
+export function containsSkillCredential(content: string): boolean {
   return [
     /\bAuthorization\s*:\s*(?:Bearer|Basic)\s+\S+/iu,
     /\bCookie\s*:\s*[^\r\n]{8,}/iu,

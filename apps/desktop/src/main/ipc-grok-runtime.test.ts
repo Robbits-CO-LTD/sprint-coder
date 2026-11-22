@@ -53,7 +53,11 @@ type RouterProbe = {
   runtimeFor(kind: CliKind): RuntimeHostClient;
   startSelectedRuntime(started: StartedTurn): Promise<void>;
   handleRuntimeFailure(kind: CliKind, taskId: string, turnId: string, error: PublicError): void;
-  generateCliTaskTitle(request: TitleRequest, kind: CliKind, model: string): Promise<string | null>;
+  generateReadOnlyCliText(
+    request: TitleRequest,
+    kind: CliKind,
+    model: string,
+  ): Promise<string | null>;
   routeCliTaskTitleEvent(
     kind: CliKind,
     taskId: string,
@@ -541,7 +545,11 @@ describe('Grok CLI Main routing', () => {
       return true;
     });
     expect(
-      await router.generateCliTaskTitle({ ...started, taskId: 'task-grok' }, 'grok', 'grok-test'),
+      await router.generateReadOnlyCliText(
+        { ...started, taskId: 'task-grok' },
+        'grok',
+        'grok-test',
+      ),
     ).toBe('Grok title');
     expect(authorizeGrokProviderEgress).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: 'builtin:grok-cli' }),

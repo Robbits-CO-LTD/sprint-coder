@@ -51,13 +51,62 @@ describe('explicit GitHub Skill install', () => {
       expect(githubSkillRequest(prefix + ' ' + url)).toBeNull();
     expect(githubSkillRequest('実装系skillを入れて ' + url + '/tree/main')).toBeNull();
   });
+  it('resolves a follow-up only against the repository supplied by the user', () => {
+    expect(githubSkillRequest('他の実装系のskillを入れて', () => url)).toEqual({
+      ...request,
+      another: true,
+    });
+    expect(githubSkillRequest('このリポジトリから実装系skillを入れて', () => url)).toEqual(request);
+    expect(
+      githubSkillRequest(
+        '他の実装系のskillを入れて',
+        () => url + ' https://github.com/example/else',
+      ),
+    ).toBeNull();
+  });
+  it('reads descriptions before choosing and excludes an installed candidate from another request', async () => {
+    const text =
+      '---\nname: Workbench\ndescription: Implement and test components.\n---\nUse a working example.';
+    const data = Buffer.from(text);
+    const id = createHash('sha1')
+      .update('blob ' + data.length + '\0')
+      .update(data)
+      .digest('hex');
+    const tree = [
+      entry,
+      { ...entry, path: 'skills-archive/older/SKILL.md' },
+      { ...entry, path: 'skills/opaque-id/SKILL.md', sha: id, size: data.length },
+    ];
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce({ sha: revision })
+      .mockResolvedValueOnce({ truncated: false, tree })
+      .mockResolvedValueOnce({ encoding: 'base64', content: data.toString('base64') });
+    const review = vi
+      .fn()
+      .mockResolvedValue({ index: 1, reason: 'コンポーネントを実装・検証できるため。' });
+    const result = await downloadGithubSkill({ ...request, another: true }, signal, {
+      read,
+      review,
+      installed: ['frontend-design'],
+    });
+    expect(review).toHaveBeenCalledWith(
+      [{ name: 'Workbench', description: 'Implement and test components.' }],
+      '実装系',
+    );
+    expect(result.skillId).toBe('opaque-id');
+    expect(result.files[0]?.content).toBe(text);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
   it('keeps the original bytes at one immutable revision', async () => {
     const read = vi
       .fn()
       .mockResolvedValueOnce({ sha: revision })
       .mockResolvedValueOnce({ truncated: false, tree: [entry] })
       .mockResolvedValueOnce({ encoding: 'base64', content: bytes.toString('base64') });
-    const result = await downloadGithubSkill(request, signal, read);
+    const result = await downloadGithubSkill({ repo, selector: 'frontend-design' }, signal, {
+      read,
+    });
     expect(result.skillId).toBe('frontend-design');
     expect(Buffer.from(result.files[0]!.content)).toEqual(bytes);
     expect(read.mock.calls.map(([path]) => path)).toEqual([
@@ -77,7 +126,9 @@ describe('explicit GitHub Skill install', () => {
         .mockResolvedValueOnce({ sha: revision })
         .mockResolvedValueOnce({ truncated, tree: [{ ...entry, mode }] })
         .mockResolvedValueOnce({ encoding: 'base64', content: content.toString('base64') });
-      await expect(downloadGithubSkill(request, signal, read)).rejects.toThrow();
+      await expect(
+        downloadGithubSkill({ repo, selector: 'frontend-design' }, signal, { read }),
+      ).rejects.toThrow();
     }
   });
 });
