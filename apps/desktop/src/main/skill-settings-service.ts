@@ -254,6 +254,21 @@ export class SkillSettingsService {
     }
   }
 
+  async acceptsGithubSkillPackage(skillId: string, files: readonly CreatedSkillFile[]) {
+    const store = await this.getStore();
+    try {
+      const validated = store.validateCreatedSkill(skillId, files);
+      return validated.kind === 'chat' && !validated.compatibility.requiresConversion;
+    } catch (error) {
+      if (
+        error instanceof SkillStoreError &&
+        (error.code === 'INVALID_SKILL' || error.code === 'UNSAFE_SOURCE')
+      )
+        return false;
+      throw error;
+    }
+  }
+
   async installGithubSkill(
     skillId: string,
     files: readonly CreatedSkillFile[],

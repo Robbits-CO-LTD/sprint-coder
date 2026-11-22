@@ -4,7 +4,11 @@ import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { PermissionPolicyRecord } from './persistence';
-import { containsSkillCredential, type CreatedSkillFile } from './skill-store';
+import {
+  containsSkillCredential,
+  MAX_EXECUTABLE_SKILL_CHARACTERS,
+  type CreatedSkillFile,
+} from './skill-store';
 import { analyzeSkillPackage } from './skill-compatibility';
 
 const run = promisify(execFile);
@@ -57,6 +61,7 @@ export function githubSkillRequest(
 }
 
 export class GithubSkillImportError extends Error {}
+class UnsupportedPackageError extends GithubSkillImportError {}
 
 export function githubSkillImportAllowed(
   policy: Pick<PermissionPolicyRecord, 'preset' | 'policyEpoch' | 'revokedCapabilities'>,
@@ -89,8 +94,8 @@ type ApiRead = (path: string, signal: AbortSignal) => Promise<unknown>;
 
 const githubApi: ApiRead = async (path, signal) => {
   try {
-    // Fixed API host and argument vector. The CLI authenticates locally; neither credentials nor
-    // repository files are never passed on a subprocess command line.
+    // Fixed API host and argument vector. The CLI authenticates locally; credentials and repository files
+    // are never passed on a subprocess command line.
     const { stdout } = await run(
       process.platform === 'win32' ? 'gh.exe' : 'gh',
       ['api', '--hostname', 'github.com', path],
@@ -121,13 +126,14 @@ export type SkillReviewer = (
 function packageEntries(tree: TreeEntry[], dir: string) {
   return tree.filter((e) => e.path.startsWith(dir) && e.type !== 'tree');
 }
-function supported(entries: TreeEntry[]) {
+function supported(entries: TreeEntry[], dir: string) {
   return (
     entries.length > 0 &&
     entries.length <= 256 &&
     entries.every(
       (e) =>
         !e.path.includes('\\') &&
+        !/^(?:manifest|revision)\.json(?:\/|$)/iu.test(e.path.slice(dir.length)) &&
         e.type === 'blob' &&
         /^100(?:644|755)$/u.test(e.mode) &&
         e.size !== undefined &&
@@ -152,7 +158,7 @@ async function readOriginal(base: string, entry: TreeEntry, signal: AbortSignal,
     throw new GithubSkillImportError('取得したファイルがGitHubの原本と一致しません。');
   const content = bytes.toString('utf8');
   if (!Buffer.from(content, 'utf8').equals(bytes) || content.includes('\0'))
-    throw new GithubSkillImportError('バイナリファイルを含むSkillを原文のまま登録できません。');
+    throw new UnsupportedPackageError('バイナリファイルを含むSkillを原文のまま登録できません。');
   return content;
 }
 export async function downloadGithubSkill(
@@ -162,6 +168,7 @@ export async function downloadGithubSkill(
     read?: ApiRead;
     review?: SkillReviewer;
     progress?: (text: string) => void;
+    acceptsPackage?: (skillId: string, files: readonly CreatedSkillFile[]) => Promise<boolean>;
     installed?: readonly string[];
     checkPermission?: () => void;
   } = {},
@@ -194,9 +201,27 @@ export async function downloadGithubSkill(
     if (!canonical.has(id)) canonical.set(id, entry);
   }
   const materials = new Map<string, string>();
-  let chosen: TreeEntry | undefined;
-  let reason = '';
-  let compared = 0;
+  async function downloadPackage(chosen: TreeEntry, reason: string, compared: number) {
+    const dir = directory(chosen);
+    const selected = packageEntries(entries, dir);
+    if (!supported(selected, dir))
+      throw new UnsupportedPackageError(
+        'Skillに管理用の予約名・リンク・特殊ファイルがあるか、サイズの上限を超えています。',
+      );
+    const skillId = folderName(chosen);
+    progress?.('「' + skillId + '」の全ファイルを原本と照合します。');
+    const files: CreatedSkillFile[] = [];
+    for (const e of selected)
+      files.push({
+        path: e.path.slice(dir.length),
+        content: materials.get(e.sha) ?? (await readOriginal(base, e, signal, read)),
+      });
+    if (
+      files.some((f) => f.path === 'SKILL.md' && f.content.length > MAX_EXECUTABLE_SKILL_CHARACTERS)
+    )
+      throw new UnsupportedPackageError('SKILL.mdがSprint Coderで実行できる文字数を超えています。');
+    return { skillId, files, revision, dir, reason, compared };
+  }
   if (/^(?:実装|フロントエンド)/u.test(request.selector)) {
     if (!review) throw new GithubSkillImportError('候補の説明を比較するモデルを利用できません。');
     const available = [...canonical.values()];
@@ -223,15 +248,23 @@ export async function downloadGithubSkill(
           const dir = directory(entry);
           const files = packageEntries(entries, dir);
           if (
-            !supported(files) ||
+            !supported(files, dir) ||
             files.some((e) => e.path.slice(dir.length) === 'team/blueprint.json')
           )
             return;
-          const content = await readOriginal(base, entry, signal, read);
+          let content: string;
+          try {
+            content = await readOriginal(base, entry, signal, read);
+          } catch (error) {
+            if (error instanceof UnsupportedPackageError) return;
+            throw error;
+          }
           try {
             const parsed = analyzeSkillPackage(Buffer.from(content));
             if (
+              content.length > MAX_EXECUTABLE_SKILL_CHARACTERS ||
               parsed.compatibility.requiresConversion ||
+              containsSkillCredential(content) ||
               containsSkillCredential(parsed.name + '\n' + parsed.description)
             )
               return;
@@ -250,40 +283,40 @@ export async function downloadGithubSkill(
     }
     if (!candidates.length)
       throw new GithubSkillImportError('原文のまま取り込めるChat Skillが見つかりません。');
-    compared = candidates.length;
+    const compared = candidates.length;
     progress?.(compared + '件の名前と説明を、選択中のモデルで比較します。');
-    const decision = await review(
-      candidates.map((c) => c.metadata),
-      request.selector,
-    );
-    chosen = candidates[decision.index - 1]?.entry;
-    if (!chosen)
-      throw new GithubSkillImportError(
-        '依頼に合う候補を確認できなかったため、インストールしませんでした。',
+    while (candidates.length) {
+      const decision = await review(
+        candidates.map((c) => c.metadata),
+        request.selector,
       );
-    reason = decision.reason;
-  } else {
-    chosen = request.selector
-      ? canonical.get(request.selector.toLowerCase())
-      : canonical.size === 1
-        ? [...canonical.values()][0]
-        : undefined;
+      const chosen = candidates[decision.index - 1];
+      if (!chosen) break;
+      try {
+        const candidate = await downloadPackage(chosen.entry, decision.reason, compared);
+        if (
+          !options.acceptsPackage ||
+          (await options.acceptsPackage(candidate.skillId, candidate.files))
+        )
+          return candidate;
+      } catch (error) {
+        if (!(error instanceof UnsupportedPackageError)) throw error;
+      }
+      candidates.splice(decision.index - 1, 1);
+      progress?.(
+        '「' + folderName(chosen.entry) + '」は原文のまま登録できないため、候補から除きました。',
+      );
+    }
+    throw new GithubSkillImportError('依頼に合う登録可能な候補が見つかりませんでした。');
   }
+  const chosen = request.selector
+    ? canonical.get(request.selector.toLowerCase())
+    : canonical.size === 1
+      ? [...canonical.values()][0]
+      : undefined;
   if (!chosen)
     throw new GithubSkillImportError(
       '対象を特定できません。リポジトリのURLとSkill名を指定してください。',
     );
-  const dir = directory(chosen);
-  const selected = packageEntries(entries, dir);
-  if (!supported(selected))
-    throw new GithubSkillImportError(
-      'Skillにリンク・特殊ファイルがあるか、サイズの上限を超えています。',
-    );
-  const files: CreatedSkillFile[] = [];
-  for (const e of selected)
-    files.push({
-      path: e.path.slice(dir.length),
-      content: materials.get(e.sha) ?? (await readOriginal(base, e, signal, read)),
-    });
-  return { skillId: folderName(chosen), files, revision, dir, reason, compared };
+  return downloadPackage(chosen, '', 0);
 }

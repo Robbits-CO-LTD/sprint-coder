@@ -5832,6 +5832,7 @@ export class IpcRouter {
         controller.signal,
         {
           review: compare,
+          acceptsPackage: (id, files) => this.skillSettings.acceptsGithubSkillPackage(id, files),
           progress,
           checkPermission,
           installed: request.another

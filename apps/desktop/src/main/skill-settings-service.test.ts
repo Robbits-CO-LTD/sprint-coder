@@ -61,11 +61,27 @@ describe('GitHub Skill installation', () => {
           '---\r\nname: example\r\ndescription: example skill\r\n---\r\nUse the exact text.\r\n',
       },
       { path: 'LICENSE.txt', content: 'License\r\n' },
+      { path: 'references/manifest.json', content: '{"source":true}\n' },
     ];
     const check = () => {};
     await expect(service.installGithubSkill('example', files, check)).resolves.toBe('installed');
     const skillPath = join(root, '.sprintcoder', 'skills', 'created', 'example', 'SKILL.md');
     expect(await readFile(skillPath, 'utf8')).toBe(files[0]!.content);
+    const installed = (await service.listCatalog()).items.find(
+      (item) => item.ref.skillId === 'example',
+    )!;
+    const revisionRoot = join(
+      root,
+      '.sprintcoder',
+      'skills',
+      'revisions',
+      'created',
+      'example',
+      installed.ref.digest,
+    );
+    expect(await readFile(join(revisionRoot, 'references', 'manifest.json'), 'utf8')).toBe(
+      files[2]!.content,
+    );
     await expect(service.installGithubSkill('example', files, check)).resolves.toBe('existing');
     await expect(
       service.installGithubSkill(

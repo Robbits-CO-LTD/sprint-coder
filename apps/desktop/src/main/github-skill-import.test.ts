@@ -98,6 +98,43 @@ describe('explicit GitHub Skill install', () => {
     expect(result.files[0]?.content).toBe(text);
     expect(read).toHaveBeenCalledTimes(3);
   });
+  it('compares remaining candidates when a complete package fails validation, but stops on a corrupt blob', async () => {
+    const blob = Buffer.from('---\nname: builder\ndescription: Implement an app.\n---\nBuild it.');
+    const digest = createHash('sha1')
+      .update('blob ' + blob.length + '\0')
+      .update(blob)
+      .digest('hex');
+    const first = { ...entry, path: 'skills/builder-a/SKILL.md', sha: digest, size: blob.length };
+    const second = { ...first, path: 'skills/builder-b/SKILL.md' };
+    const extra = { ...entry, path: 'skills/builder-a/notes.md' };
+    const review = vi.fn().mockResolvedValue({ index: 1, reason: '実装に対応' });
+    const accept = vi.fn(async (id: string) => id === 'builder-b');
+    for (const corrupt of [false, true]) {
+      review.mockClear();
+      const read = async (path: string) => {
+        if (path.endsWith('/HEAD')) return { sha: revision };
+        if (path.includes('/trees/')) return { truncated: false, tree: [first, second, extra] };
+        const file = path.endsWith(digest) || corrupt ? blob : bytes;
+        return { encoding: 'base64', content: file.toString('base64') };
+      };
+      const download = downloadGithubSkill(request, signal, {
+        read,
+        review,
+        acceptsPackage: accept,
+      });
+      if (corrupt) {
+        await expect(download).rejects.toThrow('原本と一致しません');
+        expect(review).toHaveBeenCalledTimes(1);
+      } else {
+        expect((await download).skillId).toBe('builder-b');
+        expect(accept).toHaveBeenCalledWith('builder-a', [
+          { path: 'SKILL.md', content: blob.toString() },
+          { path: 'notes.md', content: bytes.toString() },
+        ]);
+        expect(review).toHaveBeenCalledTimes(2);
+      }
+    }
+  });
   it('keeps the original bytes at one immutable revision', async () => {
     const read = vi
       .fn()
@@ -114,6 +151,19 @@ describe('explicit GitHub Skill install', () => {
       'repos/example/skills/git/trees/' + revision + '?recursive=1',
       'repos/example/skills/git/blobs/' + sha,
     ]);
+  });
+  it('rejects a package with a root filename reserved for revision metadata before fetching blobs', async () => {
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce({ sha: revision })
+      .mockResolvedValueOnce({
+        truncated: false,
+        tree: [entry, { ...entry, path: 'skills/frontend-design/Revision.JSON' }],
+      });
+    await expect(
+      downloadGithubSkill({ repo, selector: 'frontend-design' }, signal, { read }),
+    ).rejects.toThrow('予約名');
+    expect(read).toHaveBeenCalledTimes(2);
   });
   it('rejects a partial tree, a symlink and a mismatched blob', async () => {
     for (const [truncated, mode, content] of [

@@ -36,6 +36,7 @@ import {
 } from './stable-file-snapshot';
 
 const MAX_FILES = 256;
+export const MAX_EXECUTABLE_SKILL_CHARACTERS = 40_000;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_DEPTH = 8;
@@ -795,7 +796,7 @@ export class SkillStore {
         'revision.json',
         '.disabled',
         '.auto-allowed',
-        ...(format === 'portable' ? ['openai.yaml'] : []),
+        ...(format === 'portable' ? ['agents/openai.yaml', 'openai.yaml'] : []),
       ]),
       secureDestination: false,
     });
@@ -926,7 +927,7 @@ export class SkillStore {
     const file = snapshot.files.find((item) => item.path === 'SKILL.md')!;
     const content = file.bytes.toString('utf8');
     if (
-      content.length > 40_000 ||
+      content.length > MAX_EXECUTABLE_SKILL_CHARACTERS ||
       snapshot.files.some((item) => containsSkillCredential(item.bytes.toString('utf8')))
     )
       throw new SkillStoreError('INVALID_SKILL', 'Native Skill is not eligible for dispatch');
@@ -1016,7 +1017,7 @@ export class SkillStore {
       this.currentPath(source, skillId),
     );
     let content = await readFile(join(packagePath, 'SKILL.md'), 'utf8');
-    if (content.length > 40_000)
+    if (content.length > MAX_EXECUTABLE_SKILL_CHARACTERS)
       throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is too large to execute');
     if (current.kind === 'team') {
       const blueprintText = await readFile(join(packagePath, 'team', 'blueprint.json'), 'utf8');
@@ -1294,8 +1295,12 @@ async function readCompatibilityFiles(
     if (depth > MAX_DEPTH)
       throw new SkillStoreError('INVALID_SKILL', 'Skill compatibility scan is too deep');
     for (const name of (await readdir(directory)).sort()) {
-      if (name.startsWith('.') || name === 'manifest.json' || name === 'revision.json') continue;
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      if (
+        name.startsWith('.') ||
+        (depth === 0 && (name === 'manifest.json' || name === 'revision.json'))
+      )
+        continue;
+      const relativePath = relativeDirectory === '' ? name : relativeDirectory + '/' + name;
       const absolutePath = safeChild(packagePath, relativePath);
       const item = await lstat(absolutePath);
       if (item.isSymbolicLink() || (!item.isDirectory() && !item.isFile()))
@@ -1632,8 +1637,12 @@ async function digestDirectory(root: string): Promise<string> {
     if (depth > MAX_DEPTH)
       throw new SkillStoreError('INVALID_SKILL', 'Skill directory nesting is too deep');
     for (const name of (await readdir(directory)).sort()) {
-      if (name === 'manifest.json' || name === 'revision.json' || name.startsWith('.')) continue;
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      if (
+        name.startsWith('.') ||
+        (depth === 0 && (name === 'manifest.json' || name === 'revision.json'))
+      )
+        continue;
+      const relativePath = relativeDirectory === '' ? name : relativeDirectory + '/' + name;
       const absolutePath = safeChild(root, relativePath);
       const item = await lstat(absolutePath);
       if (item.isSymbolicLink() || (!item.isDirectory() && !item.isFile()))
@@ -1681,8 +1690,8 @@ async function copySafeDirectory(
     )
       throw new SkillStoreError('UNSAFE_SOURCE', 'Skill directory changed identity');
     for (const name of (await readdir(sourceDirectory)).sort()) {
-      if (name.startsWith('.') || options.omit.has(name)) continue;
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      const relativePath = relativeDirectory === '' ? name : relativeDirectory + '/' + name;
+      if (name.startsWith('.') || options.omit.has(relativePath)) continue;
       const sourcePath = safeChild(sourceRoot, relativePath);
       const destinationPath = safeChild(destinationRoot, relativePath);
       const before = await lstat(sourcePath, { bigint: true });
