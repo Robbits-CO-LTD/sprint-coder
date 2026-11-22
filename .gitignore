@@ -22,6 +22,7 @@ test-results/
 playwright-report/
 .dev-data/
 .sprint-coder-team/tmp/
+.sprint-coder/settings.local.json
 .tmp-release-tools/
 
 # Python のキャッシュ（website/tools など）

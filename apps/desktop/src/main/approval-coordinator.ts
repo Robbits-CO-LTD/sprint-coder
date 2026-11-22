@@ -425,6 +425,8 @@ export class ApprovalCoordinator {
       decision: 'allow',
       reason: 'all_capabilities_allowed',
       beforeExecute: () => revalidators.every((revalidate) => revalidate()),
+      checkProjectSettings: () =>
+        evaluations.every(({ decision }) => decision.checkProjectSettings?.() !== false),
       ...(approvalDecision === undefined ? {} : { approvalDecision }),
       ...(userInputSelection === undefined ? {} : { userInputSelection }),
       ...(expectedWindowOwner === undefined

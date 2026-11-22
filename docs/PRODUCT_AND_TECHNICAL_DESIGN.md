@@ -649,7 +649,7 @@ denyは常にallowより強く、allowやauto reviewerはsandbox ceilingを変�
 
 現行製品でも権限取消し時にはpolicyEpochを更新し、旧epochのbackground activityをcancel扱いにしてcompletionをquarantineし、managed coding harnessへ変更を通知する。親の権限snapshotから子のceilingを生成してambientなgrantを継承させず、親の権限縮小時に子Workerの停止と未実行outboxの再評価まで連動させる一体の仕組みは将来の設計である。Domainの`spawnChild`は子のremembered grantを空にするが、現行製品のWorker生成経路からは呼ばれない。Teamが保存する`parentCapabilityCeiling`の深さ・人数と、個別ツール評価へ渡すceilingを同じ強制機構とみなさない。
 
-Auto reviewerは権限境界の代替ではなく、狭いapproval routingである。入力はimmutable ExecutionSpec、policy facts、deterministic risk featuresだけとし、conversation transcriptやtool outputを指示として渡さない。Runtime由来の理由はuntrusted quoteとして分離する。reviewerはno-tools/no-network、一request一decision、`allow once`だけを返せ、high-risk category、schema failure、timeout、model failureはdenyへ倒す。prompt template、model/version、input digest、decisionを監査する。
+新規タスクの初期権限は Auto。明示的な既定値、前回選択の引き継ぎ、既存タスクの権限を保持する。Auto では明示許可のない通常の Workspace 読み取りを、そのターンで選択した AI に審査させる。Main が確定した操作の種類、対象の分類、リスクだけを既存の Provider 送信ポリシーに従って渡す。会話、ファイル内容、パス、コマンドの引数は審査入力に含めない。審査用の呼び出しは Workspace やツールを持たず、許可は対象の 1 回だけに結び付く。危険な操作や判断保留は人に確認する。形式不正、タイムアウト、モデル失敗は実行を拒否する。モデル、テンプレートの版、入力のダイジェストと判定を監査に残す。
 
 Full Accessでもadministrator deny、credential/secret保護、audit、Renderer非特権、provider egress policy、app-private data、OS protected resource、署名・update keyへのwrite禁止は解除しない。曖昧なdangerous blocklistではなく、この不変条件をpolicy testで固定する。
 

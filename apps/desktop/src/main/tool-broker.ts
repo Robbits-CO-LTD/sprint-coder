@@ -16,6 +16,7 @@ export type BackgroundToolCompletionState = 'succeeded' | 'failed' | 'canceled';
 type MainToolExecutionControl = ToolExecutionControl &
   Readonly<{
     onBackgroundCompletion?: (completion: Promise<BackgroundToolCompletionState>) => void;
+    checkProjectSettings?: () => boolean;
   }>;
 type MainToolImplementation = Omit<ToolImplementation, 'execute'> &
   Readonly<{
@@ -67,6 +68,8 @@ export type ToolAuthorizationDecision = Readonly<{
   decision: 'allow' | 'deny' | 'approval_required';
   reason: string;
   beforeExecute?: () => boolean;
+  /** Idempotent check of mutable project rules after the approval card or resource queue. */
+  checkProjectSettings?: () => boolean;
   approvalDecision?: 'allow_once' | 'allow_task' | 'deny';
   userInputSelection?: number;
   /** See `ToolExecutionControl.desktopControlExpectedWindowOwner`. */
@@ -447,9 +450,20 @@ export class ToolBroker {
           this.getCurrentPolicyEpoch(request.taskId) !== bound.context.policyEpoch
         )
           throw new Error('Tool dispatch rejected while waiting for its resource claim');
+        if (authorization.checkProjectSettings?.() === false) {
+          await implementation.authorizationDenied?.(pinnedInput, bound.context);
+          transition('denied');
+          throw new ToolAuthorizationDeniedError({
+            decision: 'deny',
+            reason: 'project_settings_changed',
+          });
+        }
         transition('running');
         output = await implementation.execute(pinnedInput, bound.context, {
           callId: request.callId,
+          ...(authorization.checkProjectSettings === undefined
+            ? {}
+            : { checkProjectSettings: authorization.checkProjectSettings }),
           ...(request.signal === undefined ? {} : { signal: request.signal }),
           ...(authorization.approvalDecision === undefined
             ? {}

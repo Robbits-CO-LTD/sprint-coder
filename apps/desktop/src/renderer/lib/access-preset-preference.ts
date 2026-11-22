@@ -19,14 +19,15 @@ function storage(): Storage | null {
 
 export function readAccessPresetDefault(): AccessPresetDefault {
   const value = storage()?.getItem(DEFAULT_ACCESS_PRESET_KEY) ?? null;
-  return isAccessPreset(value) ? value : 'last';
+  if (value === 'last' || isAccessPreset(value)) return value;
+  // Earlier versions represented "last" by a missing default and a remembered selection.
+  return readLastAccessPreset() === null ? 'auto' : 'last';
 }
 
 export function writeAccessPresetDefault(value: AccessPresetDefault): void {
   const target = storage();
   if (target === null) return;
-  if (value === 'last') target.removeItem(DEFAULT_ACCESS_PRESET_KEY);
-  else target.setItem(DEFAULT_ACCESS_PRESET_KEY, value);
+  target.setItem(DEFAULT_ACCESS_PRESET_KEY, value);
 }
 
 /** The safety setting last chosen for a Task, if any: what `last` ("前回選択した設定") carries over. */
@@ -38,12 +39,13 @@ export function readLastAccessPreset(): AccessPreset | null {
 export function rememberAccessPreset(value: AccessPreset): void {
   const target = storage();
   if (target === null) return;
+  if (target.getItem(DEFAULT_ACCESS_PRESET_KEY) === null)
+    target.setItem(DEFAULT_ACCESS_PRESET_KEY, readAccessPresetDefault());
   target.setItem(LAST_ACCESS_PRESET_KEY, value);
 }
 
 export function accessPresetForNewTask(): AccessPreset {
   const configured = readAccessPresetDefault();
   if (configured !== 'last') return configured;
-  const previous = storage()?.getItem(LAST_ACCESS_PRESET_KEY) ?? null;
-  return isAccessPreset(previous) ? previous : 'ask';
+  return readLastAccessPreset() ?? 'auto';
 }

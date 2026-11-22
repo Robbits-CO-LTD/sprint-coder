@@ -145,7 +145,7 @@ it.each([false, true])(
     const sound = () =>
       container.querySelector<HTMLInputElement>('[data-testid="settings-sound-effects-enabled"]')!;
     await act(async () => root.render(<SettingsDialog open onClose={() => {}} />));
-    expect(select().value).toBe('last');
+    expect(select().value).toBe('auto');
     expect(sound().checked).toBe(false);
     await act(async () => root.render(<SettingsDialog open={false} onClose={() => {}} />));
     // Meanwhile, the Setup (which writes the same storage) changes both.

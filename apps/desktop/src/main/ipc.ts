@@ -318,6 +318,9 @@ import {
 import { MockRuntimeAdapter } from './runtime';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permission-broker';
+import { ProjectPermissionTrust, projectRuleReviewPages } from './project-permission-trust';
+import { projectCommandFacts } from './command-runner';
+import { managedStdinAuthorizationFacts } from './managed-command-stdin';
 import {
   ApprovalCoordinator,
   approvalFactsForTool,
@@ -630,7 +633,7 @@ import {
   type Capability,
   type ToolCatalogSnapshot,
 } from '@sprint-coder/domain';
-import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
+import { AUTO_REVIEW_PROMPT, AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
 import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lease';
 import {
   authorizeClaudeProviderEgress,
@@ -749,6 +752,7 @@ import {
   teamResultReadAuthorizationFacts,
   type ManagedTeamResultReadRequest,
   providerToolsFromSnapshot,
+  workspaceToolAuthorizationGuards,
   workspaceToolPermissionGuard,
 } from './provider-workspace-tools';
 import { type WorkspacePatchDeps } from './workspace-patch-tool';
@@ -938,8 +942,16 @@ type RuntimeDiagnosticContext = Readonly<{
 type TaskTitleRequest = Pick<StartedTurn, 'text' | 'runtimeKind' | 'model' | 'modelSelection'> & {
   taskId: string;
 };
+type AuxiliaryModelRequest = Pick<TaskTitleRequest, 'taskId' | 'text' | 'modelSelection'>;
+type AuxiliaryPurpose = 'title' | 'permission-review';
+type WorkerExecutionBinding = Readonly<{
+  executionId: string;
+  agentId: string;
+  modelSelection: ModelSelection;
+}>;
 type CliTaskTitleJob = {
   taskId: string;
+  purpose: AuxiliaryPurpose;
   kind: 'codex' | 'claude' | 'grok';
   output: string;
   timer: NodeJS.Timeout;
@@ -1078,7 +1090,7 @@ export class IpcRouter {
     Readonly<{
       taskId: string;
       parentTurnId: string;
-      executionBinding?: Readonly<{ executionId: string; agentId: string }>;
+      executionBinding?: WorkerExecutionBinding;
       /** The Team agent this Worker Turn runs as (Main's own binding, never the call's input). */
       workerId?: string;
       snapshot: ToolCatalogSnapshot;
@@ -1104,7 +1116,7 @@ export class IpcRouter {
     string,
     Readonly<{
       providerId: string;
-      executionBinding?: Readonly<{ executionId: string; agentId: string }>;
+      executionBinding?: WorkerExecutionBinding;
       workerId?: string;
       /** The Worker's own runtime Turn, which its Worker runtime knows the call by. */
       runtimeTurnId?: string;
@@ -1178,6 +1190,7 @@ export class IpcRouter {
   // generated-image-collector.ts for why).
   private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
+  private readonly projectPermissionTrust: ProjectPermissionTrust;
   private readonly policyCleanupsByTask = new Map<
     string,
     { epoch: number; confirm: () => Promise<void> }
@@ -1185,7 +1198,23 @@ export class IpcRouter {
   private readonly graphSourceMonitor: GraphSourceMonitor;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly managedCodingHarness: ManagedCodingHarness;
-  private readonly autoReviewer = AutoReviewer.createProduction();
+  private readonly autoReviewer = AutoReviewer.createProduction(({ request, turnId, callId }) => {
+    const { taskId } = request;
+    const selection = this.permissionReviewSelection(taskId, turnId, callId);
+    if (selection === null) return null;
+    const builtin = builtinRuntimeForModelSelection(selection);
+    const connectionId = selection.connectionId;
+    if (connectionId === null || selection.requestedModel === null) return null;
+    return {
+      name: `${selection.requestedProvider}/${selection.requestedModel}`.slice(0, 200),
+      generate: (text) => {
+        const input = { taskId, text, modelSelection: selection };
+        return builtin === null
+          ? this.generateProviderText(input, connectionId, 'permission-review')
+          : this.generateCliText(input, builtin.runtimeKind, builtin.model, 'permission-review');
+      },
+    };
+  });
   private readonly teamCoordinator: TeamCoordinator;
   // Team events go out as patches against the detail each subscriber already holds (issue #863).
   private readonly teamDetailStream = new TeamDetailStream(
@@ -1725,9 +1754,14 @@ export class IpcRouter {
       workerRequesterFor: (taskId, turnId, callId) =>
         this.approvalWorkerRequesterOf(taskId, turnId, callId),
     });
-    this.permissionBroker = new PermissionBroker(persistence, {
-      policyEpochChanged: (taskId, policyEpoch) => this.policyEpochChanged(taskId, policyEpoch),
-    });
+    this.projectPermissionTrust = new ProjectPermissionTrust(persistence);
+    this.permissionBroker = new PermissionBroker(
+      persistence,
+      {
+        policyEpochChanged: (taskId, policyEpoch) => this.policyEpochChanged(taskId, policyEpoch),
+      },
+      this.projectPermissionTrust,
+    );
     this.managedCodingHarness = new ManagedCodingHarness({
       workspaceFor: (taskId, turnId, callId) =>
         (callId === undefined
@@ -1750,6 +1784,8 @@ export class IpcRouter {
       providerFor: (turnId, callId) =>
         this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.providerId,
       readTeamResult: (request, read) => this.readManagedTeamResult(request, read),
+      workspaceReadFilter: (context, guard) =>
+        this.permissionBroker.workspaceReadFilter(context.taskId, context.turnId, guard),
       policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
       authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
       ...(this.graphs === null
@@ -3174,6 +3210,42 @@ export class IpcRouter {
       },
     );
     this.handleMutation(
+      IPC_CHANNELS.permissionsReviewProjectRules,
+      taskIdPayloadSchema,
+      z.string(),
+      ({ taskId }) => {
+        const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
+        return this.projectPermissionTrust.review(
+          workspace.roots.filter((root) => root.status === 'available').map((root) => root.path),
+          async (root, rules) => {
+            const pages = projectRuleReviewPages(rules);
+            for (const [index, page] of pages.entries()) {
+              const accepted = await this.fullAccessConfirmation.confirm(async (signal) => {
+                const result = await dialog.showMessageBox(this.window, {
+                  signal,
+                  type: 'question',
+                  title: 'プロジェクトの権限ルール',
+                  message: `${root} の権限ルールを確認してください（${index + 1}/${pages.length}）`,
+                  detail: `このフォルダーの以前のルールを次の内容で置き換えます。\n\n${page}`,
+                  buttons: [
+                    'キャンセル',
+                    index + 1 === pages.length ? 'この内容を適用' : '次のルールへ',
+                  ],
+                  defaultId: 0,
+                  cancelId: 0,
+                  noLink: true,
+                });
+                return result.response === 1;
+              });
+              if (!accepted) return false;
+            }
+            return true;
+          },
+          () => this.persistence.getEffectiveWorkspaceSet(taskId).digest === workspace.digest,
+        );
+      },
+    );
+    this.handleMutation(
       IPC_CHANNELS.permissionsSet,
       permissionSetInputSchema,
       permissionSettingsSchema,
@@ -3310,7 +3382,13 @@ export class IpcRouter {
           envelope,
           _input.projectId === undefined ? 'tasks' : `project:${_input.projectId}`,
           IPC_CHANNELS.tasksCreate,
-          () => this.persistence.createTask(_input.title, _input.localOnly, _input.projectId),
+          () =>
+            this.persistence.createTask(
+              _input.title,
+              _input.localOnly,
+              _input.projectId,
+              _input.initialAccessPreset ?? 'auto',
+            ),
         ).value,
     );
     this.handle(
@@ -4682,7 +4760,9 @@ export class IpcRouter {
   ): void {
     this.handle(channel, inputSchema, outputSchema, async (input, event, envelope) => {
       const taskId = envelope.taskId ?? '__global__';
-      const permissionChange = channel === IPC_CHANNELS.permissionsSet;
+      const permissionChange =
+        channel === IPC_CHANNELS.permissionsSet ||
+        channel === IPC_CHANNELS.permissionsReviewProjectRules;
       const submitsWork = [
         IPC_CHANNELS.turnsStart,
         IPC_CHANNELS.turnsQueue,
@@ -5387,6 +5467,10 @@ export class IpcRouter {
         ? undefined
         : ('sealed-team-isolation' as const);
     const { facts, pathGuard } = toolPermissionFacts(request, capability, workspaceAuthority);
+    const projectCommand =
+      capability === 'shell.execute' ? projectCommandFacts(request.input) : undefined;
+    const stdin =
+      capability === 'shell.execute' ? managedStdinAuthorizationFacts(request.input) : undefined;
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     // Provider-issued process authority covers both starting a command and feeding one that is
     // already running: `write_stdin` carries `shell.execute` without being a command-runner Tool
@@ -5424,6 +5508,10 @@ export class IpcRouter {
     };
     const evaluationInput: Parameters<PermissionBroker['evaluate']>[0] = {
       taskId: request.context.taskId,
+      reviewWorkspaceRead:
+        capability === 'workspace.read' &&
+        facts.resource.kind === 'workspace-path' &&
+        request.entry.sideEffect === 'read',
       turnId: request.context.turnId,
       request: {
         ...permissionRequestBase,
@@ -5441,6 +5529,28 @@ export class IpcRouter {
         sandbox: { feasible: true, profile: sandboxProfile },
       },
       now: new Date().toISOString(),
+      ...(projectCommand === undefined ? {} : { projectCommand }),
+      ...(stdin === undefined
+        ? {}
+        : {
+            projectStdin: {
+              rootId: stdin.command.rootId,
+              target: {
+                tool: 'Bash' as const,
+                executable: stdin.command.executable,
+                argv: stdin.command.argv,
+                trustedExecutableName: stdin.command.trustedExecutableName,
+              },
+            },
+          }),
+      ...(facts.operation === 'read' || facts.operation === 'write'
+        ? {
+            projectGuards: workspaceToolAuthorizationGuards(request.input, facts.operation),
+            projectReadTree:
+              request.entry.providerName === 'search_workspace' ||
+              request.entry.providerName === 'list_workspace',
+          }
+        : {}),
       ...(teamResult !== undefined
         ? { workspace: teamResult.workspace }
         : managedWorkerWorkspace === undefined
@@ -5534,6 +5644,12 @@ export class IpcRouter {
         : undefined,
     );
     if (committedEvent !== undefined) this.publish(committedEvent);
+    const checkProjectSettings = () => {
+      const current = this.permissionBroker.projectDecision(evaluationInput);
+      return evaluation.reason === 'project_settings_allow'
+        ? current === 'allow'
+        : current !== 'deny';
+    };
     if (
       (evaluation.decision === 'allow' || evaluation.decision === 'allow_once') &&
       evaluation.permit !== undefined
@@ -5577,6 +5693,7 @@ export class IpcRouter {
           decision: 'approval_required' as const,
           reason: 'provider_disclosure_requires_explicit_approval',
           beforeExecute: disclosureBoundBeforeExecute,
+          checkProjectSettings,
         };
       // The person's own Task grant for this exact desktop-control command, given on its card. The
       // ApprovalCoordinator accepts no other allow for it but the Full preset's own, so it is kept
@@ -5586,6 +5703,7 @@ export class IpcRouter {
           decision: 'allow' as const,
           reason: evaluation.reason,
           beforeExecute: disclosureBoundBeforeExecute,
+          checkProjectSettings,
         };
       // Outside the Full preset, Provider-issued processes are never covered by a preset-wide
       // silent grant. A policy deny still wins above; only an evaluated allow is upgraded to an
@@ -5595,6 +5713,7 @@ export class IpcRouter {
           decision: 'allow' as const,
           reason: evaluation.reason,
           beforeExecute: disclosureBoundBeforeExecute,
+          checkProjectSettings,
         },
         providerProcessAuthority,
         preset,
@@ -5603,6 +5722,7 @@ export class IpcRouter {
     return requireExplicitProviderCommandApproval(
       {
         decision: evaluation.decision === 'allow_once' ? ('deny' as const) : evaluation.decision,
+        checkProjectSettings,
         reason:
           evaluation.decision === 'allow_once'
             ? 'permission_allow_once_missing_permit'
@@ -7035,6 +7155,7 @@ export class IpcRouter {
             executionBinding: Object.freeze({
               executionId: execution.id,
               agentId: execution.assigneeAgentId,
+              modelSelection: Object.freeze({ ...execution.modelSelection }),
             }),
           }),
       ...(agentId === undefined ? {} : { workerId: agentId }),
@@ -7045,6 +7166,17 @@ export class IpcRouter {
       ...(onApprovalWait === undefined ? {} : { onApprovalWait }),
     });
     return snapshot;
+  }
+
+  /** Worker tools share their parent's broker Turn. Their model is bound to the individual call. */
+  private permissionReviewSelection(
+    taskId: string,
+    turnId: string,
+    callId: string,
+  ): ModelSelection | null {
+    const worker = this.managedWorkerCall.get(JSON.stringify([turnId, callId]));
+    if (worker !== undefined) return worker.executionBinding?.modelSelection ?? null;
+    return this.persistence.getTurnModelIdentity(taskId, turnId).selection;
   }
 
   private registerManagerMcp(
@@ -7597,22 +7729,35 @@ export class IpcRouter {
       const builtin = builtinRuntimeForModelSelection(request.modelSelection);
       let generated: string | null;
       if (builtin !== null)
-        generated = await this.generateCliTaskTitle(request, builtin.runtimeKind, builtin.model);
+        generated = await this.generateCliText(
+          request,
+          builtin.runtimeKind,
+          builtin.model,
+          'title',
+        );
       else if (request.modelSelection.connectionId !== null)
-        generated = await this.generateProviderTaskTitle(
+        generated = await this.generateProviderText(
           request,
           request.modelSelection.connectionId,
+          'title',
         );
       else if (
         request.runtimeKind === 'codex' ||
         request.runtimeKind === 'claude' ||
         request.runtimeKind === 'grok'
       )
-        generated = await this.generateCliTaskTitle(request, request.runtimeKind, request.model);
+        generated = await this.generateCliText(
+          request,
+          request.runtimeKind,
+          request.model,
+          'title',
+        );
       else generated = null;
       if (generated === null || this.disposed) return;
 
-      const updated = this.persistence.applyGeneratedTaskTitle(request.taskId, generated);
+      const title = sanitizeGeneratedTaskTitle(generated);
+      if (title === null) return;
+      const updated = this.persistence.applyGeneratedTaskTitle(request.taskId, title);
       if (updated !== null) this.pushTaskUpdated(updated);
     } catch {
       // Title quality is never allowed to change chat reliability. The immediate local fallback
@@ -7620,18 +7765,20 @@ export class IpcRouter {
     }
   }
 
-  private async generateCliTaskTitle(
-    request: TaskTitleRequest,
+  private async generateCliText(
+    request: AuxiliaryModelRequest,
     kind: 'codex' | 'claude' | 'grok',
     model: string,
+    purpose: AuxiliaryPurpose,
   ): Promise<string | null> {
     if (this.disposed) return null;
     const executionId = randomUUID();
+    const prompt = purpose === 'title' ? TASK_TITLE_PROMPT : AUTO_REVIEW_PROMPT;
     const context = createTaskTitleContext(request.taskId, request.text);
     const catalog = createEmptyToolCatalogSnapshot(kind, null);
     const serializedPayload = serializeCliExecutionPayload({
       kind,
-      request: TASK_TITLE_PROMPT,
+      request: prompt,
       contextFragments: context.fragments.map(toRuntimeContextFragment),
       projectItems: context.projectItems,
       skills: [],
@@ -7650,7 +7797,7 @@ export class IpcRouter {
       context,
       now: new Date().toISOString(),
       payloadDigest: serializedPayload.digest,
-      adapterVersion: 'runtime-protocol-v7:title-v1',
+      adapterVersion: `runtime-protocol-v7:${purpose}-v1`,
       connectionId: `builtin:${kind}-cli`,
       modelId: model,
       endpointTrust: 'trusted-remote',
@@ -7680,6 +7827,7 @@ export class IpcRouter {
       }, MODEL_TASK_TITLE_TIMEOUT_MS);
       this.cliTaskTitleJobs.set(executionId, {
         taskId: request.taskId,
+        purpose,
         kind,
         output: '',
         timer,
@@ -7688,7 +7836,7 @@ export class IpcRouter {
       this.taskTitleRuntimeFor(kind).start(
         request.taskId,
         executionId,
-        TASK_TITLE_PROMPT,
+        prompt,
         null,
         model,
         catalog,
@@ -7702,9 +7850,10 @@ export class IpcRouter {
     });
   }
 
-  private async generateProviderTaskTitle(
-    request: TaskTitleRequest,
+  private async generateProviderText(
+    request: AuxiliaryModelRequest,
     connectionId: string,
+    purpose: AuxiliaryPurpose,
   ): Promise<string | null> {
     if (this.disposed) return null;
     const controller = new AbortController();
@@ -7715,6 +7864,7 @@ export class IpcRouter {
     try {
       await this.ensureProviderEndpointConsent(
         this.persistence.getProviderConnection(connectionId),
+        purpose === 'title',
       );
       const connection = await this.providerVerification.requireVerifiedForExecution(
         connectionId,
@@ -7725,7 +7875,7 @@ export class IpcRouter {
         return null;
       const context = createTaskTitleContext(request.taskId, request.text);
       const messages: ProviderExecutionRequest['messages'] = [
-        { role: 'system', content: TASK_TITLE_PROMPT },
+        { role: 'system', content: purpose === 'title' ? TASK_TITLE_PROMPT : AUTO_REVIEW_PROMPT },
         { role: 'user', content: request.text },
       ];
       const payload = JSON.stringify({ messages });
@@ -7739,7 +7889,7 @@ export class IpcRouter {
           context,
           now: new Date().toISOString(),
           payloadDigest: digestCanonical(payload),
-          adapterVersion: 'provider-registry-v1:title-v1',
+          adapterVersion: `provider-registry-v1:${purpose}-v1`,
           connectionId,
           modelId,
           endpointTrust: trust,
@@ -7759,12 +7909,16 @@ export class IpcRouter {
         { executionId, connectionId, modelId, messages },
         controller.signal,
       )) {
-        if (event.type === 'output_delta' && output.length < 8_192)
+        if (event.type === 'output_delta') {
+          if (purpose === 'permission-review' && output.length + event.text.length > 8_192) {
+            controller.abort();
+            return null;
+          }
           output += event.text.slice(0, 8_192 - output.length);
-        else if (event.type === 'error' || event.type === 'tool_call') return null;
-        else if (event.type === 'completed') break;
+        } else if (event.type === 'error' || event.type === 'tool_call') return null;
+        else if (event.type === 'completed') return output;
       }
-      return sanitizeGeneratedTaskTitle(output);
+      return purpose === 'title' ? output : null;
     } catch {
       return null;
     } finally {
@@ -7789,7 +7943,21 @@ export class IpcRouter {
     event: RuntimeCanonicalEvent,
   ): void {
     const job = this.cliTaskTitleJobs.get(turnId);
-    if (job === undefined || job.kind !== kind) return;
+    if (job === undefined || job.kind !== kind || job.taskId !== _taskId) return;
+    if (
+      job.purpose === 'permission-review' &&
+      (event.type === 'operation' ||
+        (event.type === 'delta' && job.output.length + event.delta.length > 8_192) ||
+        (event.type === 'completed' && (event.finalText?.length ?? 0) > 8_192))
+    ) {
+      clearTimeout(job.timer);
+      this.cliTaskTitleJobs.delete(turnId);
+      job.resolve(null);
+      void this.taskTitleRuntimeFor(kind)
+        .cancel(job.taskId, turnId)
+        .catch(() => undefined);
+      return;
+    }
     if (event.type === 'delta' && job.output.length < 8_192)
       job.output += event.delta.slice(0, 8_192 - job.output.length);
     if (event.type !== 'completed') return;
@@ -7797,7 +7965,7 @@ export class IpcRouter {
     this.cliTaskTitleJobs.delete(turnId);
     const finalOutput =
       event.finalText?.trim() === '' ? job.output : (event.finalText ?? job.output);
-    job.resolve(sanitizeGeneratedTaskTitle(finalOutput));
+    job.resolve(finalOutput);
   }
 
   private routeCliTaskTitleFailure(
@@ -9858,23 +10026,29 @@ export function providerDisclosureRequiresExplicitApproval(input: {
 }
 
 /**
- * A Provider-issued process (`exec_command`, and `write_stdin` feeding one that is already running)
- * is asked about even when the policy engine allowed it, because the Ask and Auto presets never
- * promised to run commands unattended. The Full preset did: the user accepted its impact once when
- * they chose it (FR-COMP-04), so an evaluated allow stays an allow there and the command runs
- * without a per-call prompt. A policy deny is never touched.
+ * Ask and Auto require a card for process access unless a confirmed project rule admits
+ * the sealed command. Full also accepts preset grants. A command rule applies only to launch;
+ * writing new instructions to a running process has its own permission evaluation.
  */
 export function requireExplicitProviderCommandApproval(
   decision: ToolAuthorizationDecision,
   providerProcessAuthority: boolean,
   preset: AccessPreset,
 ): ToolAuthorizationDecision {
-  if (!providerProcessAuthority || decision.decision !== 'allow' || preset === 'full')
+  if (
+    !providerProcessAuthority ||
+    decision.decision !== 'allow' ||
+    preset === 'full' ||
+    decision.reason === 'project_settings_allow'
+  )
     return decision;
   return {
     decision: 'approval_required',
     reason: 'provider_command_requires_explicit_approval',
     ...(decision.beforeExecute === undefined ? {} : { beforeExecute: decision.beforeExecute }),
+    ...(decision.checkProjectSettings === undefined
+      ? {}
+      : { checkProjectSettings: decision.checkProjectSettings }),
   };
 }
 

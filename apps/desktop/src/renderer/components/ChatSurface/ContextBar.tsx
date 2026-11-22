@@ -52,8 +52,8 @@ const PRESET_LABEL: Record<AccessPreset, string> = {
 };
 
 const PRESET_DESC: Record<AccessPreset, string> = {
-  ask: 'Workspace内のファイルの読み取りも含め、権限が必要な操作は実行前に確認します',
-  auto: 'Workspace内のファイル作成・編集は自動許可し、コマンドは実行前に確認します。その他は自動レビューで安全なものだけ自動許可し、残りは確認します',
+  ask: '許可ルールにない操作は、Workspace内の読み取りも含めて実行前に確認します',
+  auto: '禁止ルールを優先し、許可済みの操作は自動で進めます。その他のファイル読み取りは選択中のAIが審査し、未許可のコマンドは実行前に確認します',
   full: '広い操作を許可し、デスクトップ操作（ほかのアプリの窓を読む・押す・入力する・アプリの起動）も確認なしで実行します。管理denyと秘密保護はファイル・コマンド・ネットワークの道具に効き、デスクトップ操作には効きません',
 };
 
@@ -68,6 +68,8 @@ export function PermissionChip({ taskId }: { taskId: string }) {
   const enforcement = accessEnforcement(commandSandbox);
   const [open, setOpen] = useState(false);
   const [confirmingFull, setConfirmingFull] = useState(false);
+  const [reviewingRules, setReviewingRules] = useState(false);
+  const [rulesStatus, setRulesStatus] = useState('');
   const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.permissions?.set === 'function';
@@ -186,20 +188,53 @@ export function PermissionChip({ taskId }: { taskId: string }) {
               </button>
             </div>
           ) : (
-            (['ask', 'auto', 'full'] as AccessPreset[]).map((preset) => (
+            <>
+              {(['ask', 'auto', 'full'] as AccessPreset[]).map((preset) => (
+                <button
+                  key={preset}
+                  data-testid={`access-option-${preset}`}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={permission.preset === preset}
+                  className={`runtime-menu-item${permission.preset === preset ? ' active' : ''}`}
+                  onClick={() => choose(preset)}
+                >
+                  <span className="runtime-menu-title">{PRESET_LABEL[preset]}</span>
+                  <span className="runtime-menu-desc">{PRESET_DESC[preset]}</span>
+                </button>
+              ))}
               <button
-                key={preset}
-                data-testid={`access-option-${preset}`}
                 type="button"
-                role="menuitemradio"
-                aria-checked={permission.preset === preset}
-                className={`runtime-menu-item${permission.preset === preset ? ' active' : ''}`}
-                onClick={() => choose(preset)}
+                role="menuitem"
+                className="runtime-menu-item"
+                disabled={reviewingRules}
+                onClick={async () => {
+                  setReviewingRules(true);
+                  setRulesStatus('');
+                  try {
+                    const permissions = window.sprintCoder?.permissions;
+                    if (!permissions) throw new Error('Permission service unavailable');
+                    setRulesStatus(await permissions.reviewProjectRules(taskId));
+                  } catch {
+                    setRulesStatus('権限ルールを確認できませんでした。もう一度お試しください。');
+                  } finally {
+                    setReviewingRules(false);
+                  }
+                }}
               >
-                <span className="runtime-menu-title">{PRESET_LABEL[preset]}</span>
-                <span className="runtime-menu-desc">{PRESET_DESC[preset]}</span>
+                <span className="runtime-menu-title">
+                  {reviewingRules ? '権限ルールを確認中…' : 'プロジェクトの権限ルールを確認'}
+                </span>
+                <span className="runtime-menu-desc">
+                  .sprint-coder 内の settings.json と settings.local.json を読み込みます
+                </span>
               </button>
-            ))
+              {rulesStatus && (
+                <span role="status" className="runtime-menu-desc">
+                  {rulesStatus}
+                </span>
+              )}
+            </>
           )}
         </div>
       )}

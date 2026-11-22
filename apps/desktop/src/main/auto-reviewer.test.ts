@@ -42,6 +42,36 @@ const request: PermissionRequest = {
 const reviewBinding = { turnId: 'turn-1', callId: 'call-1' } as const;
 
 describe('AutoReviewer', () => {
+  it.each([
+    ['ALLOW_ONCE', 'allow_once'],
+    ['ASK', 'deny'],
+    ['ALLOW_ONCE plus prose', 'schema_failure'],
+    [null, 'model_failure'],
+  ] as const)(
+    'validates the selected model verdict %j and reveals only classification facts',
+    async (output, outcome) => {
+      const generate = vi.fn(async (_facts: string) => output);
+      const reviewer = AutoReviewer.createProduction(() => ({ name: 'selected-model', generate }));
+      const decision = await reviewer.review({
+        reviewRequestId: 'review-live',
+        ...reviewBinding,
+        request,
+        tool: lowTool,
+        policyEpoch: 3,
+      });
+      expect(decision).toMatchObject({ decision: outcome, model: 'selected-model' });
+      expect(JSON.parse(generate.mock.calls[0]![0])).toEqual({
+        capability: 'workspace.read',
+        operation: 'read',
+        resource: 'workspace',
+        providerEgress: 'none',
+        sandboxProfile: 'read-only',
+        risk: 'low',
+        tool: lowTool,
+      });
+    },
+  );
+
   it('passes only immutable policy/risk facts and returns a Main-bound allow-once decision', async () => {
     let captured: AutoReviewerInput | undefined;
     const model: AutoReviewerModel = async (input) => {

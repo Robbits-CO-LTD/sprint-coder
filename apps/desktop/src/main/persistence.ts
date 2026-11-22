@@ -284,6 +284,8 @@ import {
   type TeamUsageOfferRuntime,
 } from './team-usage-mode';
 import { readProjectReference } from './project-reference-file';
+import { ProjectPermissionTrust } from './project-permission-trust';
+import { matchProjectPermissionRules } from './project-permission-settings';
 import {
   isExistingTeamFollowupInput,
   isTeamContinuationInput,
@@ -5498,7 +5500,12 @@ export interface PersistenceClient {
   ): ProviderConnection;
   listTasks(): TaskSummary[];
   getTask(taskId: string): TaskSummary;
-  createTask(title?: string, localOnly?: boolean, projectId?: string): TaskSummary;
+  createTask(
+    title?: string,
+    localOnly?: boolean,
+    projectId?: string,
+    initialAccessPreset?: 'ask' | 'auto',
+  ): TaskSummary;
   listProjects(): ProjectSummary[];
   createProject(
     input: string | { name: string; folders?: readonly ProjectFolderBinding[] },
@@ -6022,6 +6029,8 @@ export interface PersistenceClient {
   acknowledgeFullAccessRisk(): void;
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
+  readProjectPermissionTrust(root: string): string | null;
+  saveProjectPermissionTrust(entries: readonly { root: string; value: string }[]): void;
   getTeamModelSelectionGuidance(): string;
   setTeamModelSelectionGuidance(guidance: string): void;
   getTeamUsageMode(): TeamUsageMode;
@@ -8676,7 +8685,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
-  createTask(title?: string, localOnly = false, projectId?: string): TaskSummary {
+  createTask(
+    title?: string,
+    localOnly = false,
+    projectId?: string,
+    initialAccessPreset: 'ask' | 'auto' = 'ask',
+  ): TaskSummary {
     const now = new Date().toISOString();
     const primaryThreadId = randomUUID();
     const leaderAgentId = randomUUID();
@@ -8767,6 +8781,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare('UPDATE tasks SET primary_thread_id = ? WHERE id = ?')
         .run(primaryThreadId, task.id);
+      if (initialAccessPreset === 'auto') this.writeAccessPreset(task.id, 'auto', 0, now);
     })();
     return task;
   }
@@ -9502,6 +9517,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .get(rootId) as ProjectWorkspaceRootRow | undefined;
     if (row === undefined) throw new NotFoundError('Project folder not found');
     return row;
+  }
+
+  private readReferenceForModel(root: string | null, reference: ProjectReferenceRow) {
+    if (root !== null) {
+      const rules = new ProjectPermissionTrust(this).snapshot(root);
+      if (
+        matchProjectPermissionRules(rules, {
+          tool: 'Read',
+          relativePath: reference.relative_path,
+        }) === 'deny'
+      )
+        return { status: 'permission_denied', content: null, digest: null } as const;
+    }
+    return readProjectReference({
+      workspacePath: root,
+      registeredRootIdentity: reference.registered_root_identity,
+      relativePath: reference.relative_path,
+    });
   }
 
   private projectReferenceWorkspace(row: ProjectReferenceRow): {
@@ -15938,6 +15971,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(enabled ? '1' : '0', new Date().toISOString());
   }
 
+  readProjectPermissionTrust(root: string): string | null {
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(`project.permission-rules:${root}`) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  saveProjectPermissionTrust(entries: readonly { root: string; value: string }[]): void {
+    const save = this.db.prepare(
+      `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    );
+    this.db.transaction(() => {
+      for (const { root, value } of entries)
+        save.run(`project.permission-rules:${root}`, value, new Date().toISOString());
+    })();
+  }
+
   getTeamModelSelectionGuidance(): string {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'team.model-selection-guidance'")
@@ -16366,30 +16417,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const current = this.getPermissionPolicy(taskId);
       if (expectedPolicyEpoch !== undefined && current.policyEpoch !== expectedPolicyEpoch)
         throw new Error('Permission policy epoch changed');
-      const expanded = expandAccessPreset(preset);
       const now = new Date().toISOString();
       const policyEpoch = current.policyEpoch + 1;
-      this.db
-        .prepare(
-          `INSERT INTO permission_policy_state(
-            task_id, preset_label, approval_policy, approval_reason, policy_epoch, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(task_id) DO UPDATE SET
-            preset_label = excluded.preset_label,
-            approval_policy = excluded.approval_policy,
-            approval_reason = excluded.approval_reason,
-            policy_epoch = excluded.policy_epoch,
-            updated_at = excluded.updated_at`,
-        )
-        .run(
-          taskId,
-          preset,
-          expanded.approvalPolicy,
-          expanded.approvalReason ?? null,
-          policyEpoch,
-          now,
-        );
-      this.writePresetRules(taskId, expanded, now);
+      const expanded = this.writeAccessPreset(taskId, preset, policyEpoch, now);
       this.quarantineHeldMutationForTask(taskId, 'policy_epoch_changed', now);
       this.enqueuePermissionPolicyEpoch(taskId, policyEpoch, now);
       return {
@@ -16399,6 +16429,37 @@ export class SqlitePersistenceClient implements PersistenceClient {
         revokedCapabilities: current.revokedCapabilities,
       };
     })();
+  }
+
+  private writeAccessPreset(
+    taskId: string,
+    preset: AccessPreset,
+    policyEpoch: number,
+    now: string,
+  ): ExpandedAccessPolicy {
+    const expanded = expandAccessPreset(preset);
+    this.db
+      .prepare(
+        `INSERT INTO permission_policy_state(
+            task_id, preset_label, approval_policy, approval_reason, policy_epoch, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(task_id) DO UPDATE SET
+            preset_label = excluded.preset_label,
+            approval_policy = excluded.approval_policy,
+            approval_reason = excluded.approval_reason,
+            policy_epoch = excluded.policy_epoch,
+            updated_at = excluded.updated_at`,
+      )
+      .run(
+        taskId,
+        preset,
+        expanded.approvalPolicy,
+        expanded.approvalReason ?? null,
+        policyEpoch,
+        now,
+      );
+    this.writePresetRules(taskId, expanded, now);
+    return expanded;
   }
 
   savePermissionGrant(taskId: string, grant: SessionGrant): void {
@@ -21222,11 +21283,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .all(project.id) as ProjectReferenceRow[];
       for (const reference of references) {
         const referenceWorkspace = this.projectReferenceWorkspace(reference);
-        const read = readProjectReference({
-          workspacePath: referenceWorkspace.path,
-          registeredRootIdentity: reference.registered_root_identity,
-          relativePath: reference.relative_path,
-        });
+        const read = this.readReferenceForModel(referenceWorkspace.path, reference);
         const candidateDigest =
           read.digest ??
           sha256(
@@ -22003,11 +22060,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .all(project.id) as ProjectReferenceRow[];
     for (const reference of references) {
       const referenceWorkspace = this.projectReferenceWorkspace(reference);
-      const read = readProjectReference({
-        workspacePath: referenceWorkspace.path,
-        registeredRootIdentity: reference.registered_root_identity,
-        relativePath: reference.relative_path,
-      });
+      const read = this.readReferenceForModel(referenceWorkspace.path, reference);
       candidates.push({
         itemId: `project:${project.id}:reference:${reference.id}`,
         kind: 'reference',
@@ -25224,7 +25277,7 @@ const managedToolTransitions: Readonly<
   requested: ['prepared', 'failed', 'canceled'],
   prepared: ['awaiting_approval', 'failed', 'canceled'],
   awaiting_approval: ['queued', 'denied', 'failed', 'canceled'],
-  queued: ['running', 'failed', 'canceled'],
+  queued: ['running', 'denied', 'failed', 'canceled'],
   running: ['backgrounded', 'succeeded', 'failed', 'canceled'],
   backgrounded: ['running', 'succeeded', 'failed', 'canceled'],
   succeeded: [],

@@ -3395,7 +3395,11 @@ describe('Main image attachment dispatch boundary', () => {
         // Auto is never stricter than Ask: the command reaches the same card, and since Auto
         // decided nothing, no Auto row claims it was denied.
         await expect(decide('auto')).resolves.toEqual({
-          result: { decision: 'approval_required', reason },
+          result: {
+            decision: 'approval_required',
+            reason,
+            checkProjectSettings: expect.any(Function),
+          },
           autoDecisions: [undefined],
         });
         await expect(decide('ask')).resolves.toMatchObject({
@@ -7613,6 +7617,16 @@ describe('Provider workspace tool capability fallback', () => {
   it('preserves policy denial and upgrades only command allows to explicit approval', () => {
     expect(
       requireExplicitProviderCommandApproval(
+        { decision: 'allow', reason: 'project_settings_allow' },
+        true,
+        'auto',
+      ),
+    ).toEqual({
+      decision: 'allow',
+      reason: 'project_settings_allow',
+    });
+    expect(
+      requireExplicitProviderCommandApproval(
         { decision: 'deny', reason: 'immutable_deny' },
         true,
         'ask',
@@ -8294,6 +8308,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.providersLowerRateLimits]: providerConnectionRateLimitLowerInputSchema,
   [IPC_CHANNELS.providersSetAutomaticModelRelease]: providerConnectionModelReleaseUpdateInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
+  [IPC_CHANNELS.permissionsReviewProjectRules]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
   [IPC_CHANNELS.approvalsListPending]: taskIdPayloadSchema,
   [IPC_CHANNELS.approvalsListRecent]: taskIdPayloadSchema,

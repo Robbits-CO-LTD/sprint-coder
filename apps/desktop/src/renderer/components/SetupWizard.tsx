@@ -963,13 +963,13 @@ export function SetupWizard({
   const lastLabel = lastAccess ? optionLabel(ACCESS_OPTIONS, lastAccess) : null;
   const accessDisplay = (value: AccessPresetDefault): string =>
     value === 'last'
-      ? `${optionLabel(ACCESS_OPTIONS, 'last')}（${lastLabel ? `今は「${lastLabel}」` : 'はじめは「実行前に確認」'}）`
+      ? `${optionLabel(ACCESS_OPTIONS, 'last')}（${lastLabel ? `今は「${lastLabel}」` : 'はじめは「安全時は自動」'}）`
       : optionLabel(ACCESS_OPTIONS, value);
   const accessOptions = ACCESS_OPTIONS.map((option) =>
     option.value === 'last'
       ? {
           ...option,
-          description: lastLabel ? `今は「${lastLabel}」を引き継ぐ` : 'はじめは「実行前に確認」',
+          description: lastLabel ? `今は「${lastLabel}」を引き継ぐ` : 'はじめは「安全時は自動」',
         }
       : option,
   );

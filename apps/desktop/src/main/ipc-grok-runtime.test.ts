@@ -47,13 +47,23 @@ type TitleRequest = Pick<StartedTurn, 'text' | 'runtimeKind' | 'model' | 'modelS
 };
 type Handler = (input: Record<string, unknown>, event?: unknown, envelope?: unknown) => unknown;
 type RouterProbe = {
+  permissionReviewSelection(
+    taskId: string,
+    turnId: string,
+    callId: string,
+  ): StartedTurn['modelSelection'] | null;
   register(): void;
   adoptInstalledRuntime(): Promise<void>;
   refreshModelCatalog(): Promise<void>;
   runtimeFor(kind: CliKind): RuntimeHostClient;
   startSelectedRuntime(started: StartedTurn): Promise<void>;
   handleRuntimeFailure(kind: CliKind, taskId: string, turnId: string, error: PublicError): void;
-  generateCliTaskTitle(request: TitleRequest, kind: CliKind, model: string): Promise<string | null>;
+  generateCliText(
+    request: TitleRequest,
+    kind: CliKind,
+    model: string,
+    purpose: 'title' | 'permission-review',
+  ): Promise<string | null>;
   routeCliTaskTitleEvent(
     kind: CliKind,
     taskId: string,
@@ -210,6 +220,31 @@ afterEach(() => {
 });
 
 describe('Grok CLI Main routing', () => {
+  it('reviews a worker call with its bound model, even when the mission shares the leader turn', () => {
+    const { router } = createHarness();
+    const leader = started.modelSelection;
+    const worker = {
+      connectionId: 'local-worker',
+      requestedProvider: 'ollama',
+      requestedModel: 'review-local',
+    };
+    const getTurnModelIdentity = vi.fn(() => ({ selection: leader }));
+    Object.assign(router, {
+      persistence: { getTurnModelIdentity },
+      managedWorkerCall: new Map([
+        [
+          JSON.stringify(['turn-grok', 'worker-call']),
+          { executionBinding: { modelSelection: worker } },
+        ],
+        [JSON.stringify(['turn-grok', 'unbound-worker']), {}],
+      ]),
+    });
+    expect(router.permissionReviewSelection('task-grok', 'turn-grok', 'worker-call')).toBe(worker);
+    expect(router.permissionReviewSelection('task-grok', 'turn-grok', 'unbound-worker')).toBeNull();
+    expect(getTurnModelIdentity).not.toHaveBeenCalled();
+    expect(router.permissionReviewSelection('task-grok', 'turn-grok', 'leader-call')).toBe(leader);
+  });
+
   it('allocates no streaming lease or runtime after cancellation during workspace verification', async () => {
     const { router, grok, resources } = createHarness();
     let verified!: () => void;
@@ -541,7 +576,12 @@ describe('Grok CLI Main routing', () => {
       return true;
     });
     expect(
-      await router.generateCliTaskTitle({ ...started, taskId: 'task-grok' }, 'grok', 'grok-test'),
+      await router.generateCliText(
+        { ...started, taskId: 'task-grok' },
+        'grok',
+        'grok-test',
+        'title',
+      ),
     ).toBe('Grok title');
     expect(authorizeGrokProviderEgress).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: 'builtin:grok-cli' }),
@@ -550,5 +590,35 @@ describe('Grok CLI Main routing', () => {
     expect(codex.probe).not.toHaveBeenCalled();
     expect(persistence.getEffort).not.toHaveBeenCalled();
     expect(persistence.getCodexEffort).not.toHaveBeenCalled();
+  });
+
+  it('runs a permission review on the selected CLI without a workspace or tools', async () => {
+    const { router, grok } = createHarness();
+    grok.start.mockImplementation((taskId, turnId) => {
+      router.routeCliTaskTitleEvent('grok', taskId, turnId, {
+        type: 'completed',
+        finalText: 'ALLOW_ONCE',
+      });
+      return true;
+    });
+    expect(
+      await router.generateCliText(
+        { ...started, text: '{"operation":"read"}', taskId: 'task-grok' },
+        'grok',
+        'grok-test',
+        'permission-review',
+      ),
+    ).toBe('ALLOW_ONCE');
+    const call = grok.start.mock.calls[0]!;
+    expect(call[2]).toContain('permission reviewer');
+    expect(call[3]).toBeNull();
+    expect(call[5].entries).toEqual([]);
+    expect(call[9]).toBe('read-only');
+    expect(authorizeGrokProviderEgress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapterVersion: 'runtime-protocol-v7:permission-review-v1',
+        modelId: 'grok-test',
+      }),
+    );
   });
 });

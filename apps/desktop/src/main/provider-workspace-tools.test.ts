@@ -93,7 +93,11 @@ async function classifiablePathFixtureRoot(prefix: string): Promise<string> {
 }
 
 async function harness(
-  options: { beforeExecute?: (root: string) => boolean; project?: boolean } = {},
+  options: {
+    beforeExecute?: (root: string) => boolean;
+    project?: boolean;
+    mayRead?: (path: string) => boolean;
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-workspace-'));
   roots.push(root);
@@ -119,6 +123,7 @@ async function harness(
     : undefined;
   const tools = new ProviderWorkspaceTools({
     workspaceFor: () => workspace,
+    ...(options.mayRead === undefined ? {} : { workspaceReadFilter: () => options.mayRead! }),
     rootIdentityFor: () => (options.project ? rootIdentity : undefined),
     policyEpochFor: () => 1,
     authorizer: (request) => {
@@ -142,6 +147,30 @@ async function harness(
 }
 
 describe('Provider workspace read tools', () => {
+  it('withholds a denied file during preparation, directory listings, and both search modes', async () => {
+    const { root, tools, context } = await harness({
+      mayRead: (path) => !path.endsWith('hidden.txt'),
+    });
+    await writeFile(join(root, 'hidden.txt'), 'needle');
+    await writeFile(join(root, 'visible.txt'), 'needle');
+    const invoke = (providerName: string, input: unknown, callId = providerName) =>
+      tools.broker.dispatch({ ...context, callId, providerName, input });
+    await expect(invoke('read_file', { path: 'hidden.txt' })).rejects.toMatchObject({
+      code: 'PROJECT_SETTINGS_DENY',
+    });
+    await expect(invoke('list_workspace', { path: '.' })).resolves.toMatchObject({
+      entries: [{ name: 'visible.txt' }],
+    });
+    await expect(invoke('search_workspace', { query: 'needle' })).resolves.toMatchObject({
+      matches: [{ path: 'visible.txt', text: 'needle' }],
+    });
+    await expect(
+      invoke('search_workspace', { mode: 'files', query: '.txt' }, 'files'),
+    ).resolves.toMatchObject({
+      files: ['visible.txt'],
+    });
+  });
+
   it('authorizes new calls with the current policy after a mid-Turn settings change (issue #885)', async () => {
     let epoch = 1;
     const authorizer = vi.fn(() => ({ decision: 'allow' as const, reason: 'test' }));

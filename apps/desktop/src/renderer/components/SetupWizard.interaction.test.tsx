@@ -205,7 +205,7 @@ describe('SetupWizard', () => {
     });
     await choose('setup-emoji');
     await choose('setup-sound');
-    await choose('setup-access-auto');
+    await choose('setup-access-ask');
     await press('setup-next');
     // The skipped tone stays at what was stored, not the abandoned "きびきび".
     expect(settings.setAssistantPreferences).toHaveBeenCalledExactlyOnceWith({
@@ -213,7 +213,7 @@ describe('SetupWizard', () => {
       callName: '<ゆう>',
       emoji: true,
     });
-    expect(localStorage.getItem('sprint-coder:default-access-preset')).toBe('auto');
+    expect(localStorage.getItem('sprint-coder:default-access-preset')).toBe('ask');
     expect(JSON.parse(localStorage.getItem('sprint-coder:sound-effects') ?? '{}').enabled).toBe(
       true,
     );
@@ -487,7 +487,7 @@ describe('SetupWizard', () => {
     await press('setup-next');
     await press('setup-next');
     await press('setup-next');
-    expect(q('[data-testid="setup-access"]')?.textContent).toContain('はじめは「実行前に確認」');
+    expect(q('[data-testid="setup-access"]')?.textContent).toContain('はじめは「安全時は自動」');
     await act(async () => root.unmount());
     root = createRoot(container);
     localStorage.setItem('sprint-coder:last-access-preset', 'auto');
