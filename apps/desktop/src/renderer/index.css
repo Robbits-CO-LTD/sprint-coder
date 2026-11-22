@@ -3035,6 +3035,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-family: inherit;
   font-size: 14px;
   line-height: 1.55;
+  field-sizing: content;
   max-height: 140px;
   display: block;
 }

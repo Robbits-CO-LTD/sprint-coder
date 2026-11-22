@@ -465,8 +465,6 @@ export function Composer({ taskId }: { taskId: string }) {
       node.setSelectionRange(aliasCaretRef.current, aliasCaretRef.current);
       aliasCaretRef.current = null;
     }
-    node.style.height = 'auto';
-    node.style.height = `${Math.min(node.scrollHeight, 140)}px`;
     syncMirrorScroll(node);
   }, [draft, composing]);
 
