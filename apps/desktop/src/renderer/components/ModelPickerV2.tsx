@@ -760,28 +760,15 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             onChange={selectAccessType}
             onDismiss={() => close(true)}
           />
-          <div
-            className="mpv2-count"
-            role="status"
-            aria-live="polite"
-            data-testid="model-picker-v2-count"
-          >
-            {searching ? <span className="sr-only">{countMessage}</span> : countMessage}
-          </div>
           {/* The current band, named above the list. `aria-hidden` because it states nothing new:
-              it repeats the rail of a row that is already in the listbox, and the count line
-              directly above it is a live region — a second changing text node beside one is noise
-              a screen reader user did not ask for. The listbox itself still announces every row
-              through `aria-activedescendant`. */}
-          {topGroup !== null && (
-            <div
-              className="mpv2-group-cue"
-              data-testid="model-picker-v2-group-cue"
-              aria-hidden="true"
-            >
-              {topGroup.label}
-            </div>
-          )}
+              the listbox already announces every row through `aria-activedescendant`. */}
+          <div
+            className="mpv2-group-cue"
+            data-testid="model-picker-v2-group-cue"
+            aria-hidden="true"
+          >
+            {topGroup?.label}
+          </div>
           <div className="mpv2-list-wrap">
             <div
               ref={listRef}
@@ -868,50 +855,60 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               </div>
             )}
           </div>
-          {page.items.length === 0 && !loading && text === query && (
-            <div className="mpv2-empty">
-              {failed ? (
-                'モデル一覧を取得できませんでした'
-              ) : accessType === 'local' && query === '' ? (
+          <div className="mpv2-status">
+            <div
+              className="mpv2-count"
+              role="status"
+              aria-live="polite"
+              data-testid="model-picker-v2-count"
+            >
+              {searching ? <span className="sr-only">{countMessage}</span> : countMessage}
+            </div>
+            {page.items.length === 0 && !loading && text === query && (
+              <div className="mpv2-empty">
+                {failed ? (
+                  'モデル一覧を取得できませんでした'
+                ) : accessType === 'local' && query === '' ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => {
+                      close(true);
+                      requestOpenProviderSettings();
+                    }}
+                  >
+                    プロバイダー接続を追加
+                  </button>
+                ) : (
+                  '一致するモデルがありません'
+                )}
+              </div>
+            )}
+            {nextPageFailure !== null && (
+              <div className="mpv2-more">
+                <span role="status">続きを読み込めませんでした</span>{' '}
                 <button
+                  ref={retryRef}
                   type="button"
                   className="settings-secondary-button"
-                  onClick={() => {
-                    close(true);
-                    requestOpenProviderSettings();
+                  data-testid="model-picker-v2-next-retry"
+                  aria-disabled={loading}
+                  onClick={retryNextPage}
+                  onKeyDown={(e) => {
+                    if (!e.nativeEvent.isComposing && e.key === 'Escape') {
+                      e.preventDefault();
+                      close(true);
+                    }
                   }}
                 >
-                  プロバイダー接続を追加
+                  {loading ? '再読み込み中…' : '続きを再読み込み'}
                 </button>
-              ) : (
-                '一致するモデルがありません'
-              )}
-            </div>
-          )}
-          {nextPageFailure !== null && (
-            <div className="mpv2-more">
-              <span role="status">続きを読み込めませんでした</span>{' '}
-              <button
-                ref={retryRef}
-                type="button"
-                className="settings-secondary-button"
-                data-testid="model-picker-v2-next-retry"
-                aria-disabled={loading}
-                onClick={retryNextPage}
-                onKeyDown={(e) => {
-                  if (!e.nativeEvent.isComposing && e.key === 'Escape') {
-                    e.preventDefault();
-                    close(true);
-                  }
-                }}
-              >
-                {loading ? '再読み込み中…' : '続きを再読み込み'}
-              </button>
-            </div>
-          )}
-          {loading && page.items.length > 0 && nextPageFailure === null && (
-            <div className="mpv2-more">読み込み中…</div>
-          )}
+              </div>
+            )}
+            {loading && page.items.length > 0 && nextPageFailure === null && (
+              <div className="mpv2-more">読み込み中…</div>
+            )}
+          </div>
         </div>
       )}
     </div>
