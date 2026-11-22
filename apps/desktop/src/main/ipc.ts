@@ -1,3 +1,5 @@
+import { ExternalAcpRuntime } from './external-acp-runtime';
+import { EXTERNAL_ACP_AGENTS, isExternalAcpConnection } from './external-acp-profile';
 import { projectFolderIdentity } from './project-folder-identity';
 import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
 import {
@@ -1201,6 +1203,8 @@ export class IpcRouter {
   private readonly modelCatalog = new ModelCatalogService();
   private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
+  private readonly externalAcpRuntimes: ExternalAcpRuntime[] = [];
+  private externalAcpCatalogAvailable = false;
   private readonly providerProfiles = new MainProviderProfileRegistry();
   private readonly providerEndpointPolicy: ProviderEndpointPolicy;
   private readonly providerEndpointChallenges: ProviderEndpointConsentChallenges;
@@ -1368,6 +1372,18 @@ export class IpcRouter {
       providerId: 'xai',
       runtime: xai,
     });
+    for (const agent of EXTERNAL_ACP_AGENTS) {
+      const runtime = new ExternalAcpRuntime(
+        agent,
+        join(app.getPath('userData'), 'antigravity-cli-home'),
+      );
+      this.externalAcpRuntimes.push(runtime);
+      this.providerRegistry.register({
+        runtimeKind: 'builtin_cli',
+        providerId: agent.providerId,
+        runtime,
+      });
+    }
     this.providerVerification = new ProviderVerificationService(
       this.persistence,
       this.providerRegistry,
@@ -2646,7 +2662,10 @@ export class IpcRouter {
         return {
           ...result,
           selection,
-          multiProviderModelPickerV2: multiProviderModelPickerV2Enabled(),
+          multiProviderModelPickerV2:
+            multiProviderModelPickerV2Enabled() ||
+            this.externalAcpCatalogAvailable ||
+            isExternalAcpConnection(selection.connectionId),
         };
       },
     );
@@ -2808,12 +2827,23 @@ export class IpcRouter {
       IPC_CHANNELS.providersVerifyConnection,
       z.object({ connectionId: connectionIdSchema }).strict(),
       providerConnectionSchema,
-      async (input) =>
-        this.providerVerification.verify(
-          await this.ensureProviderEndpointConsent(
-            this.persistence.getProviderConnection(input.connectionId),
-          ),
-        ),
+      async (input) => {
+        const connection = await this.ensureProviderEndpointConsent(
+          this.persistence.getProviderConnection(input.connectionId),
+        );
+        if (!isExternalAcpConnection(connection.id))
+          return this.providerVerification.verify(connection);
+        const runtime = this.providerRegistry.resolve(connection);
+        if (!(runtime instanceof ExternalAcpRuntime))
+          throw new Error('External CLI runtime is unavailable');
+        const result = await runtime.verify(connection, AbortSignal.timeout(150_000), true);
+        return this.persistence.updateProviderConnectionVerification(connection.id, {
+          status: result.status,
+          verifiedAt: result.verifiedAt,
+          expiresAt: null,
+          message: result.message,
+        });
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.providersLowerRateLimits,
@@ -2871,9 +2901,11 @@ export class IpcRouter {
           await this.ensureProviderEndpointConsent(
             this.persistence.getProviderConnection(input.selection.connectionId),
           );
-          const connection = await this.providerVerification.requireVerifiedForExecution(
-            input.selection.connectionId,
-          );
+          const connection = isExternalAcpConnection(input.selection.connectionId)
+            ? this.persistence.getProviderConnection(input.selection.connectionId)
+            : await this.providerVerification.requireVerifiedForExecution(
+                input.selection.connectionId,
+              );
           if (connection.providerId !== input.selection.requestedProvider || !connection.enabled)
             throw new InvalidModelError('provider');
           const models = await this.providerRegistry
@@ -4530,6 +4562,7 @@ export class IpcRouter {
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
     await this.compatibleRuntime.dispose();
+    await Promise.all(this.externalAcpRuntimes.map((runtime) => runtime.dispose()));
     this.claudeRuntime.dispose();
     this.grokRuntime.dispose();
     this.graphGenerationUnsubscribe?.();
@@ -7186,14 +7219,14 @@ export class IpcRouter {
         .filter(
           (connection) =>
             connection.enabled &&
-            connection.runtimeKind !== 'builtin_cli' &&
-            connection.secretReference !== null,
+            (isExternalAcpConnection(connection.id) ||
+              (connection.runtimeKind !== 'builtin_cli' && connection.secretReference !== null)),
         )
         .map(async (connection) => {
           await this.ensureProviderEndpointConsent(connection, false);
-          const verified = await this.providerVerification.requireVerifiedForExecution(
-            connection.id,
-          );
+          const verified = isExternalAcpConnection(connection.id)
+            ? connection
+            : await this.providerVerification.requireVerifiedForExecution(connection.id);
           const models = await this.providerRegistry
             .resolve(verified)
             .listModels(verified, new AbortController().signal);
@@ -7211,6 +7244,9 @@ export class IpcRouter {
     );
     const externalModels = externalResults.flatMap((result) =>
       result.status === 'fulfilled' ? [...result.value] : [],
+    );
+    this.externalAcpCatalogAvailable = externalModels.some(({ connectionId }) =>
+      isExternalAcpConnection(connectionId),
     );
     this.modelCatalog.replaceCatalog(
       [
@@ -7378,6 +7414,7 @@ export class IpcRouter {
     );
     const result = {
       ...page,
+      items: page.items.filter(({ connectionId }) => !isExternalAcpConnection(connectionId)),
       nextCursor: encodeTeamModelCursor(
         { catalogId: this.modelCatalog.instanceId, revision: page.revision, conditionDigest },
         page.nextCursor,
@@ -7404,6 +7441,8 @@ export class IpcRouter {
       selection.requestedModel === null
     )
       throw new Error('Team Worker model selection must identify a Connection and model');
+    if (isExternalAcpConnection(selection.connectionId))
+      throw new Error('この CLI 接続は通常チャット専用です。');
     if (
       process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1' &&
       (selection.connectionId !== BUILTIN_CODEX_CONNECTION_ID ||
@@ -7535,7 +7574,11 @@ export class IpcRouter {
   }
 
   private rememberTaskTitleRequest(started: StartedTurn): void {
-    if (started.renamedTask === undefined) return;
+    if (
+      started.renamedTask === undefined ||
+      isExternalAcpConnection(started.modelSelection.connectionId)
+    )
+      return;
     this.pendingTaskTitles.set(started.turnId, {
       taskId: started.event.taskId,
       text: started.text,
@@ -7966,11 +8009,14 @@ export class IpcRouter {
     if (started.event.type !== 'turn.accepted')
       throw new Error('Provider Turn did not start from an accepted event');
     const userMessageId = started.event.userMessage.id;
-    const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
-    const skillCreatorTurn = started.skills.some(
-      ({ selection }) =>
-        selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
-    );
+    const chatOnly = isExternalAcpConnection(connectionId);
+    const memoryTurn = !chatOnly && this.persistence.getTask(taskId).projectId !== null;
+    const skillCreatorTurn =
+      !chatOnly &&
+      started.skills.some(
+        ({ selection }) =>
+          selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
+      );
     const controller = new AbortController();
     const providerStartedAtMs = Date.now();
     this.providerAbortByTurn.set(started.turnId, controller);
@@ -7983,13 +8029,16 @@ export class IpcRouter {
     let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
     const streamBudget = new ProviderStreamBudget();
     try {
+      if (chatOnly && teamTurn) throw new Error('この CLI 接続は通常チャット専用です。');
       await this.ensureProviderEndpointConsent(
         this.persistence.getProviderConnection(connectionId),
       );
-      const connection = await this.providerVerification.requireVerifiedForExecution(
-        connectionId,
-        controller.signal,
-      );
+      const connection = chatOnly
+        ? this.persistence.getProviderConnection(connectionId)
+        : await this.providerVerification.requireVerifiedForExecution(
+            connectionId,
+            controller.signal,
+          );
       diagnosticProvider = Object.freeze({
         providerId: connection.providerId,
         profileId: connection.providerId,
@@ -8025,17 +8074,19 @@ export class IpcRouter {
       messages.unshift(...projectContextProviderMessages(context.projectItems));
       if (memoryTurn) messages.unshift({ role: 'system', content: PROJECT_MEMORY_MCP_GUIDANCE });
       const selectedModel = this.modelCatalog.find(connectionId, modelId);
-      const workspaceToolsEligible = providerWorkspaceToolsEligible(
-        teamTurn,
-        started.workspaceSet.roots.length,
-        selectedModel?.toolCalling.value,
-      );
+      const workspaceToolsEligible =
+        !chatOnly &&
+        providerWorkspaceToolsEligible(
+          teamTurn,
+          started.workspaceSet.roots.length,
+          selectedModel?.toolCalling.value,
+        );
       const managedToolsEligible =
         workspaceToolsEligible ||
         teamTurn ||
         memoryTurn ||
         skillCreatorTurn ||
-        autoSkills.length > 0;
+        (!chatOnly && autoSkills.length > 0);
       workspaceToolSnapshot = managedToolsEligible
         ? this.managedCodingHarness.startTurn(
             {
@@ -8063,7 +8114,7 @@ export class IpcRouter {
           role: 'system',
           content: workspaceToolsEligible ? workspaceGuidance : PROVIDER_NO_TOOL_GUIDANCE,
         });
-      if (autoSkills.length > 0)
+      if (!chatOnly && autoSkills.length > 0)
         messages.unshift({
           role: 'system',
           content:
@@ -8373,7 +8424,7 @@ export class IpcRouter {
           if (cause === null) throw new Error('Provider execution was canceled');
           throw new ProviderTurnFailureError(
             cause,
-            providerFailureMessage(roundError.providerCode),
+            chatOnly ? roundError.message : providerFailureMessage(roundError.providerCode),
           );
         }
         if (!roundCompleted)

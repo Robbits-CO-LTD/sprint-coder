@@ -365,6 +365,8 @@ export function connectionKindLabel(connection: ProviderConnection): string {
     if (connection.providerId === 'anthropic') return 'Claude CLI（組み込み）';
     if (connection.providerId === 'openai') return 'Codex CLI（組み込み）';
     if (connection.providerId === 'xai') return 'Grok CLI（組み込み）';
+    if (connection.providerId === 'opencode') return 'OpenCode CLI · テキストチャット';
+    if (connection.providerId === 'antigravity') return 'Antigravity CLI · テキストチャット';
     return '組み込みCLI';
   }
   if (connection.runtimeKind === 'mock') return 'モックProvider';
@@ -603,7 +605,10 @@ export function ProviderConnectionCard({
   const limitHintId = `${limitInputId}-hint`;
   const detailsId = `settings-connection-details-${connection.id}`;
   const [expanded, setExpanded] = useState(false);
-  const hasDetails = isExternalConnection(connection);
+  const cliChat =
+    connection.id === 'builtin:opencode-cli' || connection.id === 'builtin:antigravity-cli';
+  const agy = connection.id === 'builtin:antigravity-cli';
+  const hasDetails = cliChat || isExternalConnection(connection);
   return (
     <li
       className={`settings-connection-card${expanded ? ' expanded' : ''}`}
@@ -714,16 +719,25 @@ export function ProviderConnectionCard({
               )}
           </div>
           <div className="settings-connection-detail-actions">
-            <p className="settings-hint">保存済みの認証情報で接続状態を確認します。</p>
+            <p className="settings-hint">
+              {cliChat
+                ? (connection.verification.message ??
+                  (agy
+                    ? '公式の agy CLI をインストールし、必要に応じて Google にログインします。'
+                    : '公式の OpenCode CLI をインストールして接続を確認します。'))
+                : '保存済みの認証情報で接続状態を確認します。'}
+            </p>
             <button
               type="button"
               className="settings-secondary-button"
-              aria-label={`${connection.displayName}の検証を再実行`}
+              aria-label={
+                agy ? 'Antigravity にログイン・接続確認' : `${connection.displayName}の検証を再実行`
+              }
               disabled={disabled || verifying}
               onClick={() => onRetry(connection)}
             >
               <RefreshCw size={13} />
-              {verifying ? '検証中' : '接続を再検証'}
+              {verifying ? '検証中' : agy ? 'ログイン・接続確認' : '接続を再検証'}
             </button>
           </div>
         </div>
