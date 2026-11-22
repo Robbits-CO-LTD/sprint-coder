@@ -5227,11 +5227,10 @@ export class IpcRouter {
     );
     if (!authorizationTurnIsActive(null, taskId, turnId, this.managedWorkerTurn.values()))
       this.notifyTurnEnded(taskId, turnId, 'finished');
-    // A Turn refused because a command can still write its Workspace must not hand the Workspace to
-    // the next queued Turn: that Turn would edit underneath a process this one left running. The
+    // Keep the queue in place if a command or runtime may still be running. The
     // queue stays as it is and the user restarts it — by stopping the command and retrying, or by
     // sending the next message themselves.
-    if (settled.refusal !== 'active_command') {
+    if (settled.refusal !== 'active_command' && !this.quarantinedRuntimeTasks.has(taskId)) {
       const queued = this.persistence.startNextQueued(taskId);
       if (queued !== null) this.dispatchQueueTransition(queued);
       else if (
@@ -8367,6 +8366,8 @@ export class IpcRouter {
           if (roundCompleted) break;
         }
         if (roundError !== undefined) {
+          if (chatOnly && roundError.providerCode === 'stop_unconfirmed')
+            this.quarantinedRuntimeTasks.add(taskId);
           if (
             shouldRetryEmptyOllamaToolRound({
               providerId: connection.providerId,
@@ -8653,15 +8654,17 @@ export class IpcRouter {
         error instanceof ProviderStreamTimeoutError ||
         error instanceof ProviderQuotaExceededError
       ) {
-        if (runtime !== undefined)
-          void this.cancelProviderExecution(
+        if (runtime !== undefined) {
+          const cancellation = this.cancelProviderExecution(
             runtime,
             controller,
             error instanceof ProviderStreamTimeoutError
               ? error.executionId
               : (this.providerExecutionIdByTurn.get(started.turnId) ?? started.turnId),
-          ).catch(() => undefined);
-        else controller.abort();
+          );
+          if (chatOnly) await cancellation.catch(() => this.quarantinedRuntimeTasks.add(taskId));
+          else void cancellation.catch(() => undefined);
+        } else controller.abort();
         await this.finishProviderFailureWithDiagnostic({
           taskId,
           turnId: started.turnId,

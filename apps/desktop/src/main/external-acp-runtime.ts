@@ -78,6 +78,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
     string,
     { controller: AbortController; stopped: Promise<void> }
   >();
+  private readonly unconfirmedExecutions = new Set<string>();
   private readonly probes = new Map<AbortController, Promise<readonly ProviderModel[]>>();
   private disposed = false;
   private quarantined = false;
@@ -176,9 +177,14 @@ export class ExternalAcpRuntime implements ProviderRuntime {
     const controller = new AbortController();
     const signal = AbortSignal.any([externalSignal, controller.signal]);
     const output = new PassThrough({ objectMode: true });
-    const run = this.prompt(parsed, signal, (event) => {
-      if (!output.destroyed) output.write(event);
-    }).finally(() => output.end());
+    const run = this.prompt(
+      parsed,
+      signal,
+      (event) => {
+        if (!output.destroyed) output.write(event);
+      },
+      () => this.unconfirmedExecutions.add(parsed.executionId),
+    ).finally(() => output.end());
     this.active.set(parsed.executionId, { controller, stopped: run });
     try {
       for await (const event of output as AsyncIterable<CanonicalProviderEvent>) yield event;
@@ -193,6 +199,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
     const active = this.active.get(executionId);
     active?.controller.abort();
     await active?.stopped;
+    if (this.unconfirmedExecutions.has(executionId)) throw new ExternalAcpError('stop_unconfirmed');
   }
 
   async dispose(): Promise<void> {
@@ -217,6 +224,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
     request: ProviderExecutionRequest,
     signal: AbortSignal,
     emit: (event: CanonicalProviderEvent) => void,
+    onStopUnconfirmed: () => void,
   ): Promise<void> {
     let session: Awaited<ReturnType<ExternalAcpRuntime['open']>> | undefined;
     let textReceived = false;
@@ -229,11 +237,16 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         )
       )
         throw new ExternalAcpError('chat_only');
-      session = await this.open(signal, (text) => {
-        if (signal.aborted || text === '') return;
-        textReceived = true;
-        emit({ type: 'output_delta', text });
-      });
+      session = await this.open(
+        signal,
+        (text) => {
+          if (signal.aborted || text === '') return;
+          textReceived = true;
+          emit({ type: 'output_delta', text });
+        },
+        false,
+        onStopUnconfirmed,
+      );
       const { sessionId, models, rpc } = session;
       if (!models.choices.some(({ id }) => id === request.modelId))
         throw new ExternalAcpError('model_not_available');
@@ -281,8 +294,14 @@ export class ExternalAcpRuntime implements ProviderRuntime {
       });
       emit({ type: 'completed', stopReason: 'end_turn' });
     } catch (error) {
-      const code = error instanceof ExternalAcpError ? error.code : 'unavailable';
-      const canceled = signal.aborted;
+      const cleanupError = await session?.close().then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      const failure = cleanupError ?? error;
+      const code = failure instanceof ExternalAcpError ? failure.code : 'unavailable';
+      const stopUnconfirmed = code === 'stop_unconfirmed';
+      const canceled = signal.aborted && !stopUnconfirmed;
       const auth = code === 'authentication_required';
       const rateLimited = code === 'free_limit';
       const invalid =
@@ -301,26 +320,31 @@ export class ExternalAcpRuntime implements ProviderRuntime {
                   : 'provider_unavailable',
           message: canceled
             ? 'チャットを停止しました。'
-            : code === 'chat_only'
-              ? 'この接続は通常のテキストチャットに対応しています。'
-              : auth
-                ? `${this.agent.name} CLI でログインしてください。`
-                : rateLimited
-                  ? 'OpenCode の無料利用上限に達しました。別の無料モデルを選ぶか、上限が回復してから再試行してください。'
-                  : invalid
-                    ? `${this.agent.name} で選択モデルを確認できませんでした。`
-                    : `${this.agent.name} CLI との接続を完了できませんでした。`,
+            : stopUnconfirmed
+              ? 'CLI の停止を確認できませんでした。アプリを再起動してから再試行してください。'
+              : code === 'chat_only'
+                ? 'この接続は通常のテキストチャットに対応しています。'
+                : auth
+                  ? `${this.agent.name} CLI でログインしてください。`
+                  : rateLimited
+                    ? 'OpenCode の無料利用上限に達しました。別の無料モデルを選ぶか、上限が回復してから再試行してください。'
+                    : invalid
+                      ? `${this.agent.name} で選択モデルを確認できませんでした。`
+                      : `${this.agent.name} CLI との接続を完了できませんでした。`,
           retryable: false,
           retryAfterMs: null,
           providerCode: code,
         },
       });
-    } finally {
-      await session?.close().catch(() => undefined);
     }
   }
 
-  private async open(signal: AbortSignal, receive?: (text: string) => void, signIn = false) {
+  private async open(
+    signal: AbortSignal,
+    receive?: (text: string) => void,
+    signIn = false,
+    onStopUnconfirmed?: () => void,
+  ) {
     signal.throwIfAborted();
     if (this.disposed || this.quarantined) throw new ExternalAcpError('unavailable');
     const executable = resolveExternalAcpCli(this.agent);
@@ -359,10 +383,12 @@ export class ExternalAcpRuntime implements ProviderRuntime {
       (stop ??= (async () => {
         signal.removeEventListener('abort', abort);
         rpc.close();
-        const confirmed = await (stopOwnedCliProcess(child) ??
-          terminateRuntimeProcessTree(child, process.env));
+        const confirmed = await (
+          stopOwnedCliProcess(child) ?? terminateRuntimeProcessTree(child, process.env)
+        ).catch(() => false);
         if (!confirmed) {
           this.quarantined = true;
+          onStopUnconfirmed?.();
           throw new ExternalAcpError('stop_unconfirmed');
         }
         profile.cleanup();
@@ -461,7 +487,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         );
       return { rpc, sessionId, models, close };
     } catch (error) {
-      await close().catch(() => undefined);
+      await close();
       throw error;
     }
   }

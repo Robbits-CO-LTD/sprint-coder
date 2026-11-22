@@ -12,6 +12,7 @@ import { EXTERNAL_ACP_AGENTS } from './external-acp-profile';
 import { ExternalAcpRuntime } from './external-acp-runtime';
 import type * as ExternalAcpProfile from './external-acp-profile';
 import type * as OwnedCliProcess from '../runtime-host/owned-cli-process';
+import { terminateRuntimeProcessTree } from '../runtime-host/process-tree';
 import { removeTreeWithoutFollowingLinksSync } from '../runtime-host/link-safe-tree-removal';
 
 const modelId = 'opencode/test-free';
@@ -30,10 +31,12 @@ vi.mock('../runtime-host/owned-cli-process', async (load) => {
       process.platform === 'win32'
         ? new Promise<boolean>((resolve) => {
             if (child.exitCode !== null || child.signalCode !== null) return resolve(true);
-            child.once('exit', () => resolve(true));
+            child.once('exit', () => resolve(!scenario.behavior.endsWith('stop_unconfirmed')));
             child.kill();
           })
-        : undefined,
+        : scenario.behavior.endsWith('stop_unconfirmed')
+          ? terminateRuntimeProcessTree(child, process.env).then(() => false)
+          : undefined,
   };
 });
 
@@ -56,12 +59,16 @@ rl.on('line', line => {
       reply({ protocolVersion: 1, agentInfo: { name: 'OpenCode',
         version: scenario === 'old_version' ? '1.9.0' : '2.2.5' } });
       break;
-    case 'session/new': reply({ sessionId, configOptions: [selection] }); break;
+    case 'session/new':
+      if (scenario === 'startup_stop_unconfirmed')
+        send({ id: request.id, error: { code: -32603, message: 'session initialization failed' } });
+      else reply({ sessionId, configOptions: [selection] });
+      break;
     case 'session/prompt':
       if (scenario === 'free_limit') {
         send({ id: request.id, error: { code: -32603, message: 'raw provider detail',
           data: { errorName: 'provider.free-limit' } } });
-      } else if (scenario === 'pending') {
+      } else if (scenario === 'pending' || scenario === 'stop_unconfirmed') {
         output(sessionId, 'started');
       } else {
         output('different-session', 'wrong');
@@ -152,6 +159,30 @@ describe('External ACP text chat', () => {
     expect(await execute('old_version')).toMatchObject([
       { type: 'error', error: { providerCode: 'unsupported_cli_version' } },
     ]);
+  });
+
+  it('does not report cancellation success if CLI process exit cannot be confirmed', async () => {
+    let stopped: Promise<unknown> | undefined;
+    const events = await execute('stop_unconfirmed', (event) => {
+      if (event.type === 'output_delta')
+        stopped = runtime?.cancel(id).then(
+          () => true,
+          (error: unknown) => error,
+        );
+    });
+    expect(await stopped).toMatchObject({ code: 'stop_unconfirmed' });
+    await expect(runtime?.cancel(id)).rejects.toMatchObject({ code: 'stop_unconfirmed' });
+    expect(events).toMatchObject([
+      { type: 'output_delta', text: 'started' },
+      { type: 'error', error: { providerCode: 'stop_unconfirmed' } },
+    ]);
+  });
+
+  it('keeps a failed shutdown visible even when the session could not be initialized', async () => {
+    expect(await execute('startup_stop_unconfirmed')).toMatchObject([
+      { type: 'error', error: { providerCode: 'stop_unconfirmed' } },
+    ]);
+    await expect(runtime?.cancel(id)).rejects.toMatchObject({ code: 'stop_unconfirmed' });
   });
 
   it('stops an owned process and never marks the cancelled turn complete', async () => {
