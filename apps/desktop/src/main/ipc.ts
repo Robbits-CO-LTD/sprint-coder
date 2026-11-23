@@ -7484,7 +7484,10 @@ export class IpcRouter {
     // (`registerCommandRunnerTool`). With the cursors off or without the mark, the catalog is as
     // it was.
     const desktopControl =
-      agentId !== undefined && desktopControlWorker(taskId, agentId) !== undefined;
+      agentId !== undefined &&
+      (kind !== 'provider' ||
+        isExternalAcpConnection(execution?.modelSelection?.connectionId ?? null)) &&
+      desktopControlWorker(taskId, agentId) !== undefined;
     const allowed = new Set([
       'update_plan',
       ...(workspace.roots.length === 0 ? [] : readable),

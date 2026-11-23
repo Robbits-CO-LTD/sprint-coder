@@ -3771,7 +3771,14 @@ describe('Main image attachment dispatch boundary', () => {
         persistence: {
           getActiveTurnId: () => 'turn-parent',
           getTeamByTask: () => ({ id: 'team-1' }),
-          getTeamExecution: (id: string) => ({ id, teamId: 'team-1', assigneeAgentId: 'worker-1' }),
+          getTeamExecution: (id: string) => ({
+            id,
+            teamId: 'team-1',
+            assigneeAgentId: 'worker-1',
+            modelSelection: {
+              connectionId: id === 'external-cli' ? 'builtin:opencode-cli' : 'custom-api',
+            },
+          }),
           getTeamMissionForExecution: () => null,
           readTurnWorkspaceSetForTask: () => null,
           getPermissionPolicy: () => ({ policyEpoch: 9 }),
@@ -3805,6 +3812,8 @@ describe('Main image attachment dispatch boundary', () => {
           'exec_command',
           'update_plan',
         ]);
+        expect(await tools('provider', 'external-cli', 'worker-1')).toContain('exec_command');
+        expect(await tools('provider', 'external-cli', 'worker-2')).not.toContain('exec_command');
         // Not for an API Worker, an unmarked Worker, or an execution assigned to someone else.
         expect(await tools('provider', 'execution-1', 'worker-1')).not.toContain('exec_command');
         expect(await tools('codex', undefined, 'worker-2')).not.toContain('exec_command');
