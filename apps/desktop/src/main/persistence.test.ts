@@ -1799,7 +1799,9 @@ if (runsWithElectronAbi)
 
     it.each([
       ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+      ['> 担当を雇ってください。\n\nこの例文を添削してください。\n', false],
       ['担当を雇ってください。', true],
+      ['チームで進めてください。\n', true],
     ] as const)(
       'preserves Goal Markdown across start, storage and resumed Turn acceptance',
       (objective, hiring) => {
@@ -1821,6 +1823,7 @@ if (runsWithElectronAbi)
           expect(reopened.getTask(task.id).goal).toBe(objective);
           const resumed = reopened.resumeGoalTurn(task.id);
           expect(resumed.started.text).toBe(`Goalを続けてください:\n\n${objective}`);
+          expect(reopened.listMessages(task.id).at(-1)?.content).toBe(resumed.started.text);
           expect(resumed.started.teamTurn).toBe(hiring);
           expect(requiresTeamWorkersInput(resumed.started.text)).toBe(hiring);
           expect(

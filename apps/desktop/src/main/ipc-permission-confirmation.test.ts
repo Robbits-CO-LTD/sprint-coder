@@ -248,7 +248,9 @@ describe.each(['start', 'resume'] as const)(
   (operation) => {
     it.each([
       ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+      ['> 担当を雇ってください。\n\nこの例文を添削してください。\n', false],
       ['担当を雇ってください。', true],
+      ['チームで進めてください。\n', true],
     ] as const)(
       'seals Team only for actual Goal hiring instructions',
       async (objective, hiring) => {
