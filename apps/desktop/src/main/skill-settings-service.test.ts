@@ -33,6 +33,67 @@ describe('Skill activation source boundary', () => {
   );
 });
 
+describe('GitHub Skill installation', () => {
+  it('does not publish a package if the grant expires during staging', async () => {
+    const root = await home();
+    const service = new SkillSettingsService({ homePath: root });
+    const files = [
+      { path: 'SKILL.md', content: '---\nname: example\ndescription: example skill\n---\nExample' },
+    ];
+    let checks = 0;
+    await expect(
+      service.installGithubSkill('example', files, () => {
+        if (++checks > 1) throw new Error('revoked');
+      }),
+    ).rejects.toThrow();
+    await expect(
+      lstat(join(root, '.sprintcoder', 'skills', 'created', 'example')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('installs the original GitHub package once and keeps an existing different version', async () => {
+    const root = await home();
+    const service = new SkillSettingsService({ homePath: root });
+    const files = [
+      {
+        path: 'SKILL.md',
+        content:
+          '---\r\nname: example\r\ndescription: example skill\r\n---\r\nUse the exact text.\r\n',
+      },
+      { path: 'LICENSE.txt', content: 'License\r\n' },
+      { path: 'references/manifest.json', content: '{"source":true}\n' },
+    ];
+    const check = () => {};
+    await expect(service.installGithubSkill('example', files, check)).resolves.toBe('installed');
+    const skillPath = join(root, '.sprintcoder', 'skills', 'created', 'example', 'SKILL.md');
+    expect(await readFile(skillPath, 'utf8')).toBe(files[0]!.content);
+    const installed = (await service.listCatalog()).items.find(
+      (item) => item.ref.skillId === 'example',
+    )!;
+    const revisionRoot = join(
+      root,
+      '.sprintcoder',
+      'skills',
+      'revisions',
+      'created',
+      'example',
+      installed.ref.digest,
+    );
+    expect(await readFile(join(revisionRoot, 'references', 'manifest.json'), 'utf8')).toBe(
+      files[2]!.content,
+    );
+    await expect(service.installGithubSkill('example', files, check)).resolves.toBe('existing');
+    await expect(
+      service.installGithubSkill(
+        'example',
+        [{ ...files[0]!, content: files[0]!.content + 'changed' }],
+        check,
+      ),
+    ).rejects.toThrow();
+    expect(await readFile(skillPath, 'utf8')).toBe(files[0]!.content);
+  });
+});
+
 describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
   it('projects Claude metadata to portable Grok Skills for manual and automatic selection', async () => {
     const service = new SkillSettingsService({ homePath: await home() });
