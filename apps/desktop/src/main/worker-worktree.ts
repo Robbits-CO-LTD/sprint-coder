@@ -1525,7 +1525,14 @@ export class WorkerWorktreeManager {
   private async assertIntegrationWorkspace(input: IntegrateWorktreeInput): Promise<void> {
     const { stdout } = await this.runGit(
       input.repoPath,
-      ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+      [
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--untracked-files=all',
+        '--ignored=matching',
+        '--ignore-submodules=none',
+      ],
       'integration_failed',
     );
     if (stdout === '') return;
@@ -1535,14 +1542,17 @@ export class WorkerWorktreeManager {
       'base_changed',
       'Workspace has changes outside the isolated Worker worktree',
     );
-    // Staged or tracked edits still require an explicit decision. An unrelated untracked
-    // document can stay in place without being included in the Worker's commit.
+    // Git can overwrite an ignored file during cherry-pick. Treat ignored files like
+    // untracked files for overlap checks, while leaving tracked and staged changes alone.
     if (
-      input.workerHead === input.baseHead ||
       !stdout.endsWith('\0') ||
-      changes.some((change) => !change.startsWith('?? '))
+      changes.some((change) => !change.startsWith('?? ') && !change.startsWith('!! '))
     )
       throw blocked;
+    if (input.workerHead === input.baseHead) {
+      if (changes.some((change) => change.startsWith('?? '))) throw blocked;
+      return;
+    }
     const workerPaths = (await this.readSealedChanges(input)).map(({ path }) =>
       path.normalize('NFD').toLowerCase(),
     );

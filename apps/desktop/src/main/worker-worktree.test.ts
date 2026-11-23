@@ -1901,7 +1901,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('?? usage.md');
   });
 
-  it.each(['overlapping untracked', 'staged'] as const)(
+  it.each(['overlapping untracked', 'overlapping ignored', 'staged'] as const)(
     'preserves %s changes on integration',
     async (kind) => {
       const { repoPath, head, manager } = await fixture();
@@ -1917,6 +1917,10 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       const localFile = kind === 'staged' ? 'usage.md' : 'split.mjs';
       await writeFile(join(repoPath, localFile), 'local draft');
       if (kind === 'staged') await git(['-C', repoPath, 'add', '--', localFile]);
+      if (kind === 'overlapping ignored') {
+        await writeFile(join(repoPath, '.git', 'info', 'exclude'), `${localFile}\n`);
+        expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('');
+      }
 
       await expect(
         manager.integrate({ repoPath, baseHead: head, workerHead }),
