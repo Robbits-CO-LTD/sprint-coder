@@ -2246,7 +2246,14 @@ export function buildControlledEnvironment(
     if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;
     if (userProfile === undefined && home !== undefined) environment['USERPROFILE'] = home;
   } else {
-    environment['PATH'] = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+    const searchPath = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+    if (platform === 'darwin') {
+      // Do not shadow the system Git with a Homebrew image that native execution cannot seal.
+      searchPath.push('/opt/homebrew/bin');
+      const home = source['HOME'];
+      if (home !== undefined && posixPath.isAbsolute(home)) environment['HOME'] = home;
+    }
+    environment['PATH'] = searchPath.join(':');
   }
   return environment;
 }

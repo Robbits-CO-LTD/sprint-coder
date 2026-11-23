@@ -205,7 +205,7 @@ describe('CommandRunner', () => {
     ).toBe(sandboxNodeOptions());
   });
 
-  it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
+  it('adds the standard Homebrew path and absolute HOME on macOS only', () => {
     const environment = buildControlledEnvironment('darwin', {
       PATH: '/private/custom/bin',
       HOME: '/Users/example',
@@ -216,8 +216,15 @@ describe('CommandRunner', () => {
 
     expect(environment).toEqual({
       LANG: 'ja_JP.UTF-8',
-      PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      HOME: '/Users/example',
+      PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin',
     });
+    expect(buildControlledEnvironment('darwin', { HOME: 'relative' })).not.toHaveProperty('HOME');
+    expect(buildControlledEnvironment('linux', { HOME: '/home/example', PATH: '/custom' })).toEqual(
+      {
+        PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      },
+    );
   });
 
   it.runIf(process.platform !== 'win32')(
