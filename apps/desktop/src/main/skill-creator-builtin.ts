@@ -27,7 +27,7 @@ Skillを直接インストールせず、Sprint Coderの管理されたDraftツ�
 Codex Nativeのagents/openai.yamlやClaude Code固有fieldは、ユーザーが対象Runtimeを明示した場合だけ追加する。Claude固有の!command、権限昇格、Sprint CoderのManaged Harnessを迂回する手順は作成しない。Runtimeで意味を保持できない機能が必要なら、Portableなmanaged Tool手順へ変換する。
 
 ユーザーが画面上の「インストール」を明示的に押すまで、作成済みSkillとして扱わない。
-実APIキー、Authorization Header、Cookie、token、実ユーザーの会話やプロジェクト情報をSkillへ含めない。
+実APIキー、AuthorizationやCookieの実値、token、実ユーザーの会話やプロジェクト情報をSkillへ含めない。認証の例には実値を埋めず、Bearerの値を環境変数の参照（例: $TOKEN）にする。
 scripts/の実行許可、Provider設定、Access preset、TeamCoordinator、DB migrationを推測で変更しない。
 `;
 export const BUILTIN_SKILL_CREATOR_DIGEST = createHash('sha256')

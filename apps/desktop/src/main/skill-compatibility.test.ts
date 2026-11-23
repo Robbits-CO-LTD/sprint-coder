@@ -115,6 +115,6 @@ describe('Skill compatibility analysis', () => {
     );
     expect(() =>
       analyzeSkillPackage(skill(`name: nested\ndescription: deep\nmetadata:\n${nested} value`)),
-    ).toThrow(/deep/u);
+    ).toThrow(/階層/u);
   });
 });

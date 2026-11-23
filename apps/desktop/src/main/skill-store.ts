@@ -26,6 +26,7 @@ import {
   analyzeSkillPackage,
   createPortableSkillFile,
   portableSkillCompatibility,
+  SkillMetadataError,
 } from './skill-compatibility';
 import { secureWindowsPath, secureWindowsPaths } from './windows-acl';
 import { formatBlueprintJsonSyntaxError, formatZodIssues } from './zod-issue-message';
@@ -420,31 +421,41 @@ export class SkillStore {
   ): CreatedSkillValidation {
     assertSkillId(skillId);
     if (RESERVED_NAMES.has(skillId.toLowerCase()))
-      throw new SkillStoreError('INVALID_SKILL', 'Skill name conflicts with a reserved capability');
+      throw invalidCreatedSkill('予約済みの名前と重複するため、別のskillIdを指定してください。');
     if (files.length === 0 || files.length > MAX_FILES)
-      throw new SkillStoreError('INVALID_SKILL', 'Skill file count is invalid');
-    const canonical = files.map((file) => ({
-      path: normalizeDraftFilePath(file.path),
-      bytes: Buffer.from(file.content, 'utf8'),
-      content: file.content,
-    }));
+      throw invalidCreatedSkill(`filesは1件以上${MAX_FILES}件以下にしてください。`);
+    const canonical = files.map((file, index) => {
+      let path: string;
+      try {
+        path = normalizeDraftFilePath(file.path);
+      } catch {
+        throw invalidCreatedSkill(
+          `files[${index}].pathを、親フォルダーを参照しない相対パスに直してください。`,
+        );
+      }
+      return { path, bytes: Buffer.from(file.content, 'utf8'), content: file.content, index };
+    });
     const seen = new Set<string>();
     let totalBytes = 0;
     for (const file of canonical) {
       const comparisonKey = file.path.toLocaleLowerCase('en-US');
       if (seen.has(comparisonKey))
-        throw new SkillStoreError('INVALID_SKILL', `Duplicate Skill file: ${file.path}`);
+        throw invalidCreatedSkill(
+          `files[${file.index}].pathが重複しています。別のファイル名にしてください。`,
+        );
       seen.add(comparisonKey);
       if (file.bytes.byteLength > MAX_FILE_BYTES)
-        throw new SkillStoreError('INVALID_SKILL', `Skill file is too large: ${file.path}`);
+        throw invalidCreatedSkill(`files[${file.index}].contentは1 MiB以下にしてください。`);
       totalBytes += file.bytes.byteLength;
       if (totalBytes > MAX_TOTAL_BYTES)
-        throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
+        throw invalidCreatedSkill('Skillのファイルの合計を8 MiB以下にしてください。');
       if (containsSkillCredential(file.content))
-        throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${file.path}`);
+        throw invalidCreatedSkill(
+          `files[${file.index}].contentに認証情報の可能性がある行があります。実値を削除してください。`,
+        );
     }
     const skillFile = canonical.find(({ path }) => path === 'SKILL.md');
-    if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
+    if (skillFile === undefined) throw invalidCreatedSkill('filesにSKILL.mdを含めてください。');
     const { name, description, compatibility } = analyzeSkill(skillFile.bytes, canonical);
     const blueprint = canonical.find(({ path }) => path === 'team/blueprint.json');
     if (blueprint !== undefined) {
@@ -1364,11 +1375,16 @@ function analyzeSkill(
   try {
     return analyzeSkillPackage(bytes, files);
   } catch (error) {
+    if (error instanceof SkillMetadataError) throw invalidCreatedSkill(error.message);
     throw new SkillStoreError(
       'INVALID_SKILL',
       error instanceof Error ? error.message : 'Skill compatibility analysis failed',
     );
   }
+}
+
+function invalidCreatedSkill(detail: string): SkillStoreError {
+  return new SkillStoreError('INVALID_SKILL', detail, false, detail);
 }
 
 async function readCompatibilityFiles(
@@ -1426,8 +1442,15 @@ function normalizeDraftFilePath(path: string): string {
 }
 
 export function containsSkillCredential(content: string): boolean {
+  for (const [, scheme, value] of content.matchAll(
+    /\bAuthorization\s*:\s*(Bearer|Basic)\s+(\S+)/giu,
+  )) {
+    const variable = value?.replace(/["'`]$/u, '') ?? '';
+    // Allow only a bare environment variable reference in a Bearer example.
+    if (scheme?.toLowerCase() !== 'bearer' || !/^\$(?:[a-z_]\w*|\{[a-z_]\w*\})$/iu.test(variable))
+      return true;
+  }
   return [
-    /\bAuthorization\s*:\s*(?:Bearer|Basic)\s+\S+/iu,
     /\bCookie\s*:\s*[^\r\n]{8,}/iu,
     /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/u,
     /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
