@@ -194,6 +194,8 @@ describe('GitHub Issue request in chat', () => {
       'Issueの起票内容を考えて',
       'Issueを起票してくださいという文章を添削して',
       'この文章にコメントして',
+      '.github/workflows/ci.yml にコメントして',
+      'src/issue-list.ts にコメントして',
     ]) {
       expect(parseGithubActionInput(text)).toBeNull();
     }
@@ -338,6 +340,17 @@ const pullInput =
   'https://github.com/team/repo にPRを作成して\n元ブランチ: fix/settings\n先ブランチ: main\nタイトル: 設定の修正\n本文: 設定画面を修正しました。';
 
 describe('GitHub comments and pull requests', () => {
+  it('still explains how to complete an explicit Issue comment request', () => {
+    for (const text of [
+      'https://github.com/team/repo/issues/42 にコメントして',
+      'GitHubのIssueにコメントして',
+      'GitHubにコメントして',
+      'Issueにコメントを投稿してください',
+    ]) {
+      expect(parseGithubActionInput(text)).toEqual({ kind: 'incomplete', action: 'comment' });
+    }
+  });
+
   it('shows the destination and body, checks the Issue, then posts the exact comment', async () => {
     const issue = `${endpoint}/issues/42`;
     showMessageBox.mockResolvedValue({ response: 1 });

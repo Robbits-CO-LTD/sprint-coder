@@ -39,6 +39,10 @@ const repositoryName =
 const fields = /^タイトル[ \t]*[:：][ \t]*([^\n]+)\n本文[ \t]*[:：][ \t]*([\s\S]*)$/u;
 const commentLine =
   /^(?:(.+?)\s*(?:に|へ)\s*)?(?:GitHub\s*(?:の|で)?\s*)?(?:Issue\s*に\s*)?コメント\s*(?:を\s*投稿)?して(?:ください)?[。！!]?$/iu;
+const explicitCommentLine =
+  /^(?:(?:GitHub\s*(?:の|で)?\s*)?Issue\s*に|GitHub\s*(?:に|で))\s*コメント\s*(?:を\s*投稿)?して(?:ください)?[。！!]?$/iu;
+const issueTargetPattern =
+  /^(https:\/\/github\.com\/[^/\s]+\/[^/\s]+)\/issues\/([1-9]\d{0,9})\/?$/iu;
 const pullLine =
   /^(?:(.*?)\s*(?:に|へ)\s*)?(?:GitHub\s*(?:の|で)?\s*)?(?:PR|Pull Request|プルリクエスト)\s*を\s*作成して(?:ください)?[。！!]?$/iu;
 const commentFields = /^本文[ \t]*[:：][ \t]*([\s\S]*)$/u;
@@ -88,16 +92,14 @@ export function parseGithubActionInput(
   const issue = issueLine.exec(namedLine);
   const pull = pullLine.exec(namedLine);
   const comment = commentLine.exec(namedLine);
-  // A plain request such as “コメントして” belongs to the normal chat.
-  if (!issue && !pull && !(comment && /github|issue/i.test(namedLine))) return null;
+  const issueTarget = issueTargetPattern.exec(comment?.[1]?.trim() ?? '');
+  // File paths may include “github” or “issue”; only an Issue URL or explicit intent opts in.
+  if (!issue && !pull && (!comment || (!issueTarget && !explicitCommentLine.test(namedLine))))
+    return null;
   const action = issue ? 'issue' : pull ? 'pull' : 'comment';
-  const target = (issue ?? pull ?? comment)?.[1]?.trim() ?? '';
   const incomplete = { kind: 'incomplete', action } as const;
   const content = other.join('\n');
   if (action === 'comment') {
-    const issueTarget = /^(https:\/\/github\.com\/[^/]+\/[^/]+)\/issues\/([1-9]\d{0,9})\/?$/iu.exec(
-      target,
-    );
     const repository = parseGithubIssueRepository(issueTarget?.[1] ?? '');
     const body = commentFields.exec(content)?.[1];
     if (!repository || !validBody(body)) return incomplete;
@@ -106,7 +108,7 @@ export function parseGithubActionInput(
       request: { action, repository, issueNumber: Number(issueTarget?.[2]), body },
     };
   }
-  const repository = parseGithubIssueRepository(target);
+  const repository = parseGithubIssueRepository((issue ?? pull)?.[1]?.trim() ?? '');
   const branches = action === 'pull' ? pullFields.exec(content) : null;
   const details = fields.exec(action === 'pull' ? (branches?.[3] ?? '') : content);
   const title = details?.[1]?.trim();
