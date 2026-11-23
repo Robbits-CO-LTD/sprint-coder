@@ -18,6 +18,23 @@ const signedWindowsRelease = readFileSync(
 );
 
 describe('release signing and notarization', () => {
+  it('uses the same exact bundled Node version for Forge, Actions, and local Windows releases', () => {
+    const forge = readFileSync(resolve(__dirname, 'forge.config.ts'), 'utf8');
+    const bundledVersion = /const BUNDLED_NODE_VERSION = '(\d+\.\d+\.\d+)'/.exec(forge)?.[1];
+    expect(bundledVersion).toBeDefined();
+
+    const release = parse(workflow) as {
+      jobs: { make: { steps: { uses?: string; with?: Record<string, unknown> }[] } };
+    };
+    const setupNode = release.jobs.make.steps.find((step) =>
+      step.uses?.startsWith('actions/setup-node@'),
+    );
+    expect(setupNode?.with?.['node-version']).toBe(bundledVersion);
+    expect(/\$actualNodeVersion -ne '(\d+\.\d+\.\d+)'/.exec(signedWindowsRelease)?.[1]).toBe(
+      bundledVersion,
+    );
+  });
+
   it('keeps signed builds and draft publication behind the full test run of the tagged commit', () => {
     expect(workflow).toContain('needs: [metadata, tests]');
     expect(workflow).toMatch(/ {2}make:\n(?:.|\n)*? {4}needs: release-validation/);
