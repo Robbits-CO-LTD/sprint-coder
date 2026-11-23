@@ -20,14 +20,16 @@ it('shows export success, cancellation and failure without exposing the destinat
     .fn()
     .mockResolvedValueOnce('C:/private/destination')
     .mockResolvedValueOnce(null)
-    .mockRejectedValueOnce(
-      Object.assign(new Error('書き出し先に同名のフォルダーがあります。'), {
-        code: 'OPERATION_CONFLICT',
-      }),
-    )
-    .mockRejectedValueOnce(
-      Object.assign(new Error('C:/private/destination'), { code: 'OPERATION_CONFLICT' }),
-    );
+    .mockRejectedValueOnce({
+      code: 'OPERATION_CONFLICT',
+      userMessage: '書き出し先に同名のフォルダーがあります。',
+      retryable: false,
+    })
+    .mockRejectedValueOnce({
+      code: 'OPERATION_CONFLICT',
+      userMessage: 'C:/private/destination',
+      retryable: false,
+    });
   Object.defineProperty(window, 'sprintCoder', {
     configurable: true,
     value: {
