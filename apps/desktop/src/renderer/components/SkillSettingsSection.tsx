@@ -19,10 +19,13 @@ function skillSettingsFailure(action: string, error: unknown, fallback: string):
     case 'NOT_FOUND':
       return `${action}。対象が見つかりません。再読み込みしてください。`;
     case 'OPERATION_CONFLICT': {
-      const reason =
-        error instanceof Error
-          ? Object.values(SKILL_CONFLICT_REASONS).find((message) => message === error.message)
+      const publicMessage =
+        error && typeof error === 'object' && 'userMessage' in error
+          ? error.userMessage
           : undefined;
+      const reason = Object.values(SKILL_CONFLICT_REASONS).find(
+        (message) => message === publicMessage,
+      );
       return reason === undefined
         ? `${action}。対象が変更されたか、操作の条件を満たしていません。再読み込みしてください。`
         : `${action}。${reason}`;
