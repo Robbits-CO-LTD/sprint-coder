@@ -18,6 +18,7 @@ import { OperationConflictError } from './persistence';
 import { UpdateInstallMutationGate } from './update-install-mutation-gate';
 import { secureLogger } from './secure-logger';
 import { SkillStore } from './skill-store';
+import { SkillSettingsService } from './skill-settings-service';
 
 type Invoke = (event: unknown, raw: unknown) => Promise<CommandResult<unknown>>;
 const electron = vi.hoisted(() => ({
@@ -178,12 +179,12 @@ function fixture(
     },
     permissionBroker: { getPolicy, drainPolicyEpochOutbox: drain },
     teamSkillReady: builtinsReady,
-    skillSettings: {
+    skillSettings: Object.assign(new SkillSettingsService({ homePath: '/test-skill-home' }), {
       resolveSelections: vi.fn().mockResolvedValue([]),
       refreshContextCatalog,
       markContextCatalogUnavailable,
       listCatalog,
-    },
+    }),
     graphSourceMonitor: { invalidate: vi.fn() },
     dispatchStarted: vi.fn(),
   });
@@ -274,11 +275,11 @@ describe('built-in Skill preparation', () => {
       ok: true,
     });
     expect(f.resumeGoalTurn).toHaveBeenCalledWith('task-1', [], true);
-    expect(open).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenCalledOnce();
     expect(installBuiltin).toHaveBeenCalledTimes(8);
     expect(f.refreshContextCatalog).toHaveBeenCalledOnce();
     await f.invoke(IPC_CHANNELS.skillsList, {});
-    expect(open).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenCalledOnce();
   });
 });
 

@@ -740,7 +740,7 @@ import {
   BUILTIN_IMAGEGEN_SKILL_ID,
   bindBuiltinImagegenSkillForTurn,
 } from './imagegen-builtin';
-import { SkillStore, SkillStoreError } from './skill-store';
+import { SkillStoreError } from './skill-store';
 import { portableSkillCompatibility } from './skill-compatibility';
 import {
   TeamMcpBridge,
@@ -4680,10 +4680,7 @@ export class IpcRouter {
   private async prepareBuiltinSkills(): Promise<boolean> {
     let stage: 'open_store' | 'install_builtin' | 'refresh_catalog' = 'open_store';
     try {
-      const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
-      const store = await SkillStore.open({
-        rootPath: join(skillHome, '.sprintcoder', 'skills'),
-      });
+      const store = await this.skillSettings.getStore();
       stage = 'install_builtin';
       // Wait for every installation to finish before allowing a retry after partial success.
       const results = await Promise.allSettled([
