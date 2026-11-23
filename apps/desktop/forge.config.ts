@@ -19,6 +19,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
+import { MAC_BUNDLED_NODE_SHA256 } from './src/main/macos-bundled-node';
 import {
   DESKTOP_CONTROL_MAC_HELPER,
   DESKTOP_CONTROL_VERSION,
@@ -89,10 +90,6 @@ const allowUnsignedWindows = process.env['SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS'] 
 const windowsSign = resolveWindowsSignOptions(process.env);
 const BUNDLED_NODE_VERSION = '22.23.3';
 const BUNDLED_NODE_SHA256 = '9C9245166B4A8E182E0B797DA9C20136117FF24368EAFF1FEC8343A123C8DB0E';
-const MAC_BUNDLED_NODE_SHA256 = {
-  arm64: '68f4d07ca49e0500cc135c7e0a445093e228e42e126ac22306d045f0a8c2636b',
-  x64: 'fdb8d4da9332c2c99c3b2ae4bad4672bfef225ecd603e656cd1378b3644583a2',
-} as const;
 const MAC_BUNDLED_NODE_LICENSE_SHA256 =
   'c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4';
 const BUNDLED_NODE_SIGNER_SUBJECT =

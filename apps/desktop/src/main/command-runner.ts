@@ -66,6 +66,7 @@ import {
 } from './windows-process-job';
 import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
+import { bundledMacNodePath } from './macos-bundled-node';
 import type { WindowsExecutableFileVersion } from './windows-pe-version';
 
 export type CommandOutputChunk = Readonly<{
@@ -89,6 +90,7 @@ export type CommandResult = Readonly<{
 export type PrepareExecutionSpecInput = Readonly<{
   rootId?: string | undefined;
   workspacePath: string;
+  workspaceRoots?: readonly string[];
   expectedRootIdentityDigest?: string | undefined;
   executable: string;
   argv: readonly string[];
@@ -98,6 +100,7 @@ export type PrepareExecutionSpecInput = Readonly<{
 type PreparedIdentity = {
   pathGuard: PathGuard;
   executable: SealedExecutableIdentity;
+  workspaceRoots: readonly string[];
   trustedExecutableName?: string;
 };
 
@@ -222,6 +225,7 @@ export async function prepareExecutionSpec(
   issuedSpecs.set(spec, {
     pathGuard,
     executable: executableIdentity,
+    workspaceRoots: [...(input.workspaceRoots ?? [input.workspacePath])],
     ...(namedPath === executableCanonicalPath ? { trustedExecutableName: lookupName } : {}),
   });
   return spec;
@@ -242,6 +246,10 @@ async function resolveBareExecutable(
       'EXECUTION_SPEC_INVALID',
       'Executable must be absolute or one sanitized bare name',
     );
+  if (executable === 'node') {
+    const bundled = await bundledMacNodePath();
+    if (bundled !== null) return bundled;
+  }
   const searchPath = environment['PATH'];
   if (searchPath === undefined)
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Sanitized executable PATH is empty');
@@ -1543,11 +1551,10 @@ export class CommandRunner {
       await revalidatePathGuard(identity.pathGuard);
       if (spec.executionIdentityDigest !== sealedExecutableIdentityDigest(identity.executable))
         throw new Error('Approved execution identity changed');
-      return await prepareExecutionImage(
-        identity.executable,
-        true,
-        desktopControlWorkspaceRoots === undefined ? {} : { desktopControlWorkspaceRoots },
-      );
+      return await prepareExecutionImage(identity.executable, true, {
+        ...(desktopControlWorkspaceRoots === undefined ? {} : { desktopControlWorkspaceRoots }),
+        ...(this.sandboxed ? { sandboxedWorkspaceRoots: identity.workspaceRoots } : {}),
+      });
     } catch (error) {
       throw new CommandRunnerError('EXECUTION_IDENTITY_CHANGED', errorMessage(error));
     }

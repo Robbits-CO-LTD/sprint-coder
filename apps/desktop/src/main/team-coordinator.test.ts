@@ -5861,7 +5861,13 @@ if (runsWithElectronAbi)
       const task = persistence.createTask('Resumable multi-repository Mission', false, project.id);
       const runtime = new MultiRootWritingRuntime();
       const manager = new FailRepositoryOnceManager({ worktreesRoot }, 2);
-      const integrate = vi.spyOn(manager, 'integrate');
+      const leaderDraft = join(secondaryRepo, 'leader-draft.md');
+      const integrateRepository = manager.integrate.bind(manager);
+      const integrate = vi.spyOn(manager, 'integrate').mockImplementation((input) => {
+        if (input.repoPath === secondaryRepo)
+          writeFileSync(leaderDraft, 'untracked Leader draft\n');
+        return integrateRepository(input);
+      });
       const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
       const writer = await coordinator.hireWorker({
         taskId: task.id,
@@ -5952,6 +5958,11 @@ if (runsWithElectronAbi)
       ).toBe(0);
       await resumedCoordinator.resumeMission(task.id, mission.id);
       await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 20_000);
+      expect(readFileSync(leaderDraft, 'utf8')).toBe('untracked Leader draft\n');
+      expect(
+        spawnSync('git', ['-C', secondaryRepo, 'status', '--porcelain'], { encoding: 'utf8' })
+          .stdout,
+      ).toBe('?? leader-draft.md\n');
       expect(readFileSync(join(secondaryRepo, 'outside.txt'), 'utf8')).toBe(
         'changed after partial integration\n',
       );

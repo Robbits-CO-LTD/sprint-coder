@@ -15,6 +15,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
 import { runsOutsideCommandSandbox } from './desktop-control';
+import { isBundledMacNode } from './macos-bundled-node';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 
 export type SealedExecutableIdentity = Readonly<{
@@ -135,6 +136,8 @@ export type PrepareExecutionImageOptions = Readonly<{
    * `bundledMacDesktopControl`.
    */
   desktopControlWorkspaceRoots?: readonly string[];
+  /** Main's bound Workspace roots for the bundled Node path in ordinary sandboxed commands. */
+  sandboxedWorkspaceRoots?: readonly string[];
 }>;
 
 export async function prepareExecutionImage(
@@ -217,10 +220,21 @@ export async function prepareExecutionImage(
         ? undefined
         : parseShebang(heldBytes);
     const hasRelativeMachOLoaderPath = containsRelativeMachOLoaderPath(heldBytes);
+    const bundledNode =
+      process.platform === 'darwin' &&
+      process.getuid?.() !== 0 &&
+      shebang === undefined &&
+      !hasRelativeMachOLoaderPath &&
+      options.sandboxedWorkspaceRoots !== undefined &&
+      (await isBundledMacNode(expected.canonicalPath, digest, options.sandboxedWorkspaceRoots));
+    // The signature is checked by pathname. Recheck the sealed identity after that check,
+    // before passing the bundled path to the sandbox runner.
+    if (bundledNode) assertDigestAndSize(await readStablePosixImage(expected), expected);
     const trustedMacPath =
       process.platform === 'darwin' &&
       process.getuid?.() !== 0 &&
-      ((await isRootOwnedSystemExecutable(expected.canonicalPath)) ||
+      (bundledNode ||
+        (await isRootOwnedSystemExecutable(expected.canonicalPath)) ||
         (shebang === undefined &&
           !hasRelativeMachOLoaderPath &&
           bundledMacDesktopControl(expected, digest, options.desktopControlWorkspaceRoots)));
@@ -230,7 +244,7 @@ export async function prepareExecutionImage(
       (await isRootOwnedNonWritableExecutable(expected.canonicalPath));
     // Linux exposes the sealed memfd through the Main process so descendants that reuse
     // process.execPath still resolve an immutable image. macOS has no equivalent and only permits
-    // root-owned, non-writable system images, the shipped desktop-control executable, or
+    // root-owned system images, the sandboxed bundled Node, the shipped desktop-control executable, or
     // descriptor-fed scripts below.
     const descriptor = process.platform === 'linux' ? undefined : held?.fd;
     const baseLaunchPath = trustedWindowsPath

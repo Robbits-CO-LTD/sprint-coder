@@ -1442,7 +1442,7 @@ export class WorkerWorktreeManager {
       });
   }
 
-  /** Integrate onto a clean descendant of baseHead. A failed cherry-pick is always aborted. */
+  /** Integrate onto a descendant of baseHead without staging unrelated Workspace files. */
   async integrate({
     repoPath,
     baseHead,
@@ -1450,15 +1450,13 @@ export class WorkerWorktreeManager {
   }: IntegrateWorktreeInput): Promise<IntegrateWorktreeResult> {
     validateGitHead(baseHead);
     validateGitHead(workerHead);
-    const currentHead = (
-      await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
-    ).stdout.trim();
-    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
-    if (status.stdout.trim() !== '')
+    const { head: currentHead, operationMarkerPaths } = await this.readRepositoryState(repoPath);
+    if ((await Promise.all(operationMarkerPaths.map((path) => pathExists(path)))).some(Boolean))
       throw new WorktreeError(
         'base_changed',
-        'Workspace has changes outside the isolated Worker worktree',
+        'Git operation is already in progress in a workspace repository',
       );
+    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead }, 'integrate');
     const baseIsAncestor =
       currentHead === baseHead ||
       (await this.tryRunGit(repoPath, ['merge-base', '--is-ancestor', baseHead, currentHead])) !==
@@ -1524,6 +1522,57 @@ export class WorkerWorktreeManager {
     return { integratedHead, outcome: 'integrated' };
   }
 
+  private async assertIntegrationWorkspace(
+    input: IntegrateWorktreeInput,
+    mode: 'integrate' | 'revalidate',
+  ): Promise<void> {
+    const { stdout } = await this.runGit(
+      input.repoPath,
+      [
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--untracked-files=all',
+        ...(mode === 'integrate' ? ['--ignored=matching'] : []),
+        '--ignore-submodules=none',
+      ],
+      'integration_failed',
+    );
+    if (stdout === '') return;
+
+    const changes = stdout.split('\0').slice(0, -1);
+    const blocked = new WorktreeError(
+      'base_changed',
+      'Workspace has changes outside the isolated Worker worktree',
+    );
+    // Only cherry-pick can overwrite ignored files. A read-only verification leaves
+    // regenerated artifacts outside the sealed commit alone.
+    if (
+      !stdout.endsWith('\0') ||
+      changes.some((change) => !change.startsWith('?? ') && !change.startsWith('!! '))
+    )
+      throw blocked;
+    if (input.workerHead === input.baseHead) {
+      if (changes.some((change) => change.startsWith('?? '))) throw blocked;
+      return;
+    }
+    const workerPaths = (await this.readSealedChanges(input)).map(({ path }) =>
+      path.normalize('NFD').toLowerCase(),
+    );
+    for (const change of changes) {
+      const path = change.slice(3).replace(/\/$/u, '').normalize('NFD').toLowerCase();
+      if (
+        workerPaths.some(
+          (workerPath) =>
+            workerPath === path ||
+            workerPath.startsWith(`${path}/`) ||
+            path.startsWith(`${workerPath}/`),
+        )
+      )
+        throw blocked;
+    }
+  }
+
   async revalidateIntegration({
     repoPath,
     baseHead,
@@ -1534,12 +1583,7 @@ export class WorkerWorktreeManager {
     const currentHead = (
       await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
     ).stdout.trim();
-    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
-    if (status.stdout.trim() !== '')
-      throw new WorktreeError(
-        'base_changed',
-        'Workspace has changes outside the isolated Worker worktree',
-      );
+    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead }, 'revalidate');
     if (
       currentHead !== integratedHead &&
       (await this.tryRunGit(repoPath, [
