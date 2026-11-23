@@ -2522,19 +2522,32 @@ export class IpcRouter {
         const model = activeCapability.models.some(({ id }) => id === storedModel)
           ? storedModel
           : 'auto';
+        const usesBuiltinRuntime = taskRuntime !== null || taskSelection?.connectionId == null;
+        const aiConnectionRequired =
+          usesBuiltinRuntime &&
+          (kind === 'mock'
+            ? !this.allowsMockRuntime()
+            : activeCapability.readiness === 'authentication_required');
         return {
           kind,
+          ...(aiConnectionRequired ? { aiConnectionRequired: true as const } : {}),
           codexAvailable: codexCapability.available,
           codexReadiness: codexCapability.readiness,
-          codexCli: codexCapability.cli ?? null,
+          codexCli: codexCapability.cli
+            ? { ...codexCapability.cli, capabilities: [...codexCapability.cli.capabilities] }
+            : null,
           claudeAvailable: claudeCapability.available,
           claudeReadiness: claudeCapability.readiness,
-          claudeCli: claudeCapability.cli ?? null,
+          claudeCli: claudeCapability.cli
+            ? { ...claudeCapability.cli, capabilities: [...claudeCapability.cli.capabilities] }
+            : null,
           grokAvailable: grokCapability.available,
           grokReadiness: grokCapability.readiness,
-          grokCli: grokCapability.cli ?? null,
+          grokCli: grokCapability.cli
+            ? { ...grokCapability.cli, capabilities: [...grokCapability.cli.capabilities] }
+            : null,
           model,
-          models: activeCapability.models,
+          models: [...activeCapability.models],
           effort: this.persistence.getEffort(),
           // Clamped for display against whichever Codex model is currently selected. Normally a
           // no-op — setModel clamps and re-persists on every model change — but the cache can also
@@ -2560,6 +2573,7 @@ export class IpcRouter {
           this.claudeRuntime.refreshCapabilityProbe(),
           this.grokRuntime.refreshCapabilityProbe(),
         ]);
+        await this.adoptInstalledRuntime();
       },
     );
     this.handle(
@@ -4283,7 +4297,7 @@ export class IpcRouter {
         const selection = this.persistence.getTaskModelSelection(input.taskId);
         if (selection !== null)
           assertNotRetiredManagedLocal(selection.connectionId, selection.requestedProvider);
-        await this.reconcileTaskBuiltinModel(input.taskId);
+        await this.assertChatAiConnected(selection);
         const skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
           (error) => Promise.reject(skillSettingsPublicError(error)),
         );
@@ -4695,10 +4709,6 @@ export class IpcRouter {
   /**
    * Picks an installed CLI the first time the app runs, instead of leaving Mock in place (issue #50).
    *
-   * Mock is the fallback for a machine with nothing installed, not the default for one with
-   * everything installed. Left as the default it produces plausible-looking code instantly, which
-   * reads as the app working rather than as a stand-in — the failure mode that prompted this.
-   *
    * Only when the user has never chosen. An explicit choice of Mock is a choice and is left alone,
    * which is why this needs `getStoredRuntime()` rather than `getRuntime()`.
    *
@@ -4725,11 +4735,10 @@ export class IpcRouter {
             : grok.readiness === 'ready'
               ? 'grok'
               : null;
-      if (installed === null) return;
+      if (installed === null || this.persistence.getStoredRuntime() !== null) return;
       this.persistence.setRuntime(installed);
     } catch {
-      // Nothing to recover: the stored value stays absent and the app runs on Mock, exactly as
-      // before this existed.
+      // Keep the choice unset so the user can connect an AI later.
     }
   }
 
@@ -6158,11 +6167,14 @@ export class IpcRouter {
         selection.ref.source !== 'created' &&
         selection.ref.source !== (skillCli === 'codex' ? 'agents' : skillCli),
     );
-    const refusal = retired
-      ? new RetiredManagedLocalError().message
-      : wrongSkillRuntime
-        ? '選択したCLI Skillは現在のモデルで使えません。Skillを外すか、対応するモデルを選んでください。'
-        : null;
+    const refusal =
+      !external && !retired && started.runtimeKind === 'mock' && !this.allowsMockRuntime()
+        ? AI_CONNECTION_REQUIRED_MESSAGE
+        : retired
+          ? new RetiredManagedLocalError().message
+          : wrongSkillRuntime
+            ? '選択したCLI Skillは現在のモデルで使えません。Skillを外すか、対応するモデルを選んでください。'
+            : null;
     if (refusal !== null) {
       await this.mailbox.run(taskId, () => {
         if (
@@ -7863,18 +7875,30 @@ export class IpcRouter {
     );
   }
 
-  private async reconcileTaskBuiltinModel(taskId: string): Promise<void> {
-    const selection = this.persistence.getTaskModelSelection(taskId);
+  private allowsMockRuntime(): boolean {
+    return (
+      process.env['SPRINT_CODER_RUNTIME_ADOPT'] === '0' ||
+      this.persistence.getStoredRuntime() === 'mock'
+    );
+  }
+
+  private async assertChatAiConnected(selection: ModelSelection | null): Promise<void> {
     const runtime = selection === null ? null : builtinRuntimeForModelSelection(selection);
-    if (selection !== null && runtime === null) return;
+    if (selection?.connectionId != null && runtime === null) return;
     const selectedKind = runtime?.runtimeKind ?? this.persistence.getRuntime();
-    if (selectedKind !== 'codex' && selectedKind !== 'claude' && selectedKind !== 'grok') return;
+    if (selectedKind === 'mock') {
+      if (!this.allowsMockRuntime()) throw new AiConnectionRequiredError();
+      return;
+    }
+    let authenticationRequired = false;
     try {
       const capability = await this.runtimeFor(selectedKind).probe();
+      authenticationRequired = capability.readiness === 'authentication_required';
       this.reconcileBuiltinCapability(selectedKind, capability);
     } catch {
-      // Catalog retrieval failure alone never mutates or blocks a previously saved selection.
+      // An inconclusive probe or catalog update failure does not invalidate a saved selection.
     }
+    if (authenticationRequired) throw new AiConnectionRequiredError();
   }
 
   private async listTeamModelCandidates(
@@ -10108,6 +10132,9 @@ export function isTrustedIpcSender(
 }
 
 class SecurityError extends Error {}
+const AI_CONNECTION_REQUIRED_MESSAGE =
+  'AI がつながっていません。設定から CLI の導入・ログイン、または API キーの追加を行ってください。';
+class AiConnectionRequiredError extends Error {}
 class RuntimeUnavailableError extends Error {
   constructor(readonly kind: 'codex' | 'claude' | 'grok' = 'codex') {
     super();
@@ -10947,6 +10974,12 @@ export function toPublicError(error: unknown): PublicError {
       code: 'STEER_UNSUPPORTED',
       userMessage: '選択中のruntimeは実行中の追加指示に対応していません。',
       retryable: false,
+    };
+  if (error instanceof AiConnectionRequiredError)
+    return {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage: AI_CONNECTION_REQUIRED_MESSAGE,
+      retryable: true,
     };
   if (error instanceof RuntimeUnavailableError)
     return {

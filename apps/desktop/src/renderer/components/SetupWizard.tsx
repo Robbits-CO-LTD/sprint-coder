@@ -958,6 +958,7 @@ export function SetupWizard({
     claude: runtime.claudeReadiness,
     grok: runtime.grokReadiness,
   };
+  const cliReady = Object.values(runtimeStatus).includes('ready');
   const accessLabel = optionLabel(ACCESS_OPTIONS, accessDefault);
   // "前回選択した設定" says nothing to someone who has never chosen: say what it means right now.
   const lastLabel = lastAccess ? optionLabel(ACCESS_OPTIONS, lastAccess) : null;
@@ -1483,7 +1484,17 @@ export function SetupWizard({
                 </p>
                 {/* What is stored now — Main's values and this PC's — never the drafts on screen. */}
                 <ul className="setup-summary" data-testid="setup-summary">
-                  <SummaryRow index={0} label="AI" value="確認しました" />
+                  <SummaryRow
+                    index={0}
+                    label="AI"
+                    value={cliReady ? '利用できる CLI があります' : 'CLI は未接続です'}
+                    {...(!cliReady && {
+                      note: {
+                        text: '設定から CLI を導入してログインするか、API キーを追加できます。',
+                        tone: 'same',
+                      },
+                    })}
+                  />
                   {support.assistant && (
                     <SummaryRow
                       index={1}

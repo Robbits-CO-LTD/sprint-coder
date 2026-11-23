@@ -55,6 +55,7 @@ type RouterProbe = {
   ): StartedTurn['modelSelection'] | null;
   register(): void;
   adoptInstalledRuntime(): Promise<void>;
+  assertChatAiConnected(selection: StartedTurn['modelSelection'] | null): Promise<void>;
   refreshModelCatalog(): Promise<void>;
   runtimeFor(kind: CliKind): RuntimeHostClient;
   startSelectedRuntime(started: StartedTurn): Promise<void>;
@@ -444,6 +445,41 @@ describe('Grok CLI Main routing', () => {
       });
     }
     expect(invalidModelUserMessage('grok')).toContain('Grok CLI');
+  });
+
+  it('reports an unconnected default Mock without blocking an explicitly chosen Mock', async () => {
+    vi.stubEnv('SPRINT_CODER_RUNTIME_ADOPT', '1');
+    const { router, handlers, persistence } = createHarness();
+    persistence.getRuntime.mockReturnValue('mock');
+    router.register();
+    const getRuntime = handlers.get(IPC_CHANNELS.settingsGetRuntime)!;
+    expect(await getRuntime({})).toMatchObject({ aiConnectionRequired: true });
+    persistence.getStoredRuntime.mockReturnValue('mock');
+    expect(await getRuntime({})).not.toHaveProperty('aiConnectionRequired');
+    persistence.getStoredRuntime.mockReturnValue(null);
+    vi.stubEnv('SPRINT_CODER_RUNTIME_ADOPT', '0');
+    expect(await getRuntime({})).not.toHaveProperty('aiConnectionRequired');
+  });
+
+  it('keeps a selected CLI usable after an inconclusive probe and blocks a known login requirement', async () => {
+    const { router, handlers, grok, persistence } = createHarness();
+    persistence.getStoredRuntime.mockReturnValue('grok');
+    router.register();
+    const getRuntime = handlers.get(IPC_CHANNELS.settingsGetRuntime)!;
+    grok.probe.mockRejectedValueOnce(new Error('Temporary host failure'));
+    await expect(router.assertChatAiConnected(null)).resolves.toBeUndefined();
+    grok.probe.mockResolvedValue({ available: false, readiness: 'unavailable', models: [] });
+    await expect(router.assertChatAiConnected(null)).resolves.toBeUndefined();
+    expect(await getRuntime({})).not.toHaveProperty('aiConnectionRequired');
+
+    grok.probe.mockResolvedValue({
+      available: true,
+      readiness: 'authentication_required',
+      models: [],
+    });
+    const error = await router.assertChatAiConnected(null).catch((cause: unknown) => cause);
+    expect(toPublicError(error)).toMatchObject({ code: 'RUNTIME_UNAVAILABLE' });
+    expect(await getRuntime({})).toMatchObject({ aiConnectionRequired: true });
   });
 
   it('detects every CLI again on request so a Grok missed at startup becomes selectable (issue #581)', async () => {
