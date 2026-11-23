@@ -1442,7 +1442,7 @@ export class WorkerWorktreeManager {
       });
   }
 
-  /** Integrate onto a clean descendant of baseHead. A failed cherry-pick is always aborted. */
+  /** Integrate onto a descendant of baseHead without staging unrelated Workspace files. */
   async integrate({
     repoPath,
     baseHead,
@@ -1450,15 +1450,13 @@ export class WorkerWorktreeManager {
   }: IntegrateWorktreeInput): Promise<IntegrateWorktreeResult> {
     validateGitHead(baseHead);
     validateGitHead(workerHead);
-    const currentHead = (
-      await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
-    ).stdout.trim();
-    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
-    if (status.stdout.trim() !== '')
+    const { head: currentHead, operationMarkerPaths } = await this.readRepositoryState(repoPath);
+    if ((await Promise.all(operationMarkerPaths.map((path) => pathExists(path)))).some(Boolean))
       throw new WorktreeError(
         'base_changed',
-        'Workspace has changes outside the isolated Worker worktree',
+        'Git operation is already in progress in a workspace repository',
       );
+    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead });
     const baseIsAncestor =
       currentHead === baseHead ||
       (await this.tryRunGit(repoPath, ['merge-base', '--is-ancestor', baseHead, currentHead])) !==
@@ -1522,6 +1520,44 @@ export class WorkerWorktreeManager {
     ).stdout.trim();
     await this.assertEquivalentCommitPatch(repoPath, baseHead, workerHead, integratedHead);
     return { integratedHead, outcome: 'integrated' };
+  }
+
+  private async assertIntegrationWorkspace(input: IntegrateWorktreeInput): Promise<void> {
+    const { stdout } = await this.runGit(
+      input.repoPath,
+      ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+      'integration_failed',
+    );
+    if (stdout === '') return;
+
+    const changes = stdout.split('\0').slice(0, -1);
+    const blocked = new WorktreeError(
+      'base_changed',
+      'Workspace has changes outside the isolated Worker worktree',
+    );
+    // Staged or tracked edits still require an explicit decision. An unrelated untracked
+    // document can stay in place without being included in the Worker's commit.
+    if (
+      input.workerHead === input.baseHead ||
+      !stdout.endsWith('\0') ||
+      changes.some((change) => !change.startsWith('?? '))
+    )
+      throw blocked;
+    const workerPaths = (await this.readSealedChanges(input)).map(({ path }) =>
+      path.normalize('NFD').toLowerCase(),
+    );
+    for (const change of changes) {
+      const path = change.slice(3).replace(/\/$/u, '').normalize('NFD').toLowerCase();
+      if (
+        workerPaths.some(
+          (workerPath) =>
+            workerPath === path ||
+            workerPath.startsWith(`${path}/`) ||
+            path.startsWith(`${workerPath}/`),
+        )
+      )
+        throw blocked;
+    }
   }
 
   async revalidateIntegration({

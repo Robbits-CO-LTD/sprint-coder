@@ -601,21 +601,6 @@ export function registerCommandRunnerTool(
           : undefined;
       if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
         throw new Error('CommandRunner Turn Workspace identity is incomplete');
-      const prepareSpec = (argv: readonly string[]) =>
-        prepareExecutionSpec({
-          rootId: root.rootId,
-          workspacePath: root.path,
-          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
-          executable: request.executable,
-          argv: [...argv],
-          ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
-        });
-      let spec = await prepareSpec(request.argv);
-      await rejectWindowsSandboxedNodeTestIsolationWithVersion(
-        spec.absoluteExecutable,
-        spec.argv,
-        commandRunner.isSandboxed,
-      );
       // A Team Worker's call reaches this tool under its parent's Turn, whose Workspace is not all
       // the agent can write: the Worker's own roots (its isolated worktree) are too. Every check
       // that keeps desktop control away from files the agent wrote (a `launch` target, the Start
@@ -627,6 +612,22 @@ export function registerCommandRunnerTool(
           ...(caller === undefined ? [] : caller.roots),
         ]),
       ];
+      const prepareSpec = (argv: readonly string[]) =>
+        prepareExecutionSpec({
+          rootId: root.rootId,
+          workspacePath: root.path,
+          workspaceRoots: roots,
+          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+          executable: request.executable,
+          argv: [...argv],
+          ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+        });
+      let spec = await prepareSpec(request.argv);
+      await rejectWindowsSandboxedNodeTestIsolationWithVersion(
+        spec.absoluteExecutable,
+        spec.argv,
+        commandRunner.isSandboxed,
+      );
       // Judged on the bytes sealed into this ExecutionSpec, as the card and the run are. Refused
       // before a card exists, so nothing the person could approve would escape the sandbox.
       const desktopControl = isDesktopControlExecutable(

@@ -1871,6 +1871,63 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
   });
 
+  it('integrates two Workers while leaving a Leader-created file untracked', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const sealed = await Promise.all(
+      ['split.mjs', 'cli.mjs'].map(async (filename, index) => {
+        const agentId = `worker-${index}`;
+        const worker = await manager.create({ agentId, repoPath });
+        await writeFile(join(worker.path, filename), filename);
+        return manager.finalizeChanges({
+          agentId,
+          repoPath,
+          baseHead: head,
+          commitMessage: filename,
+        });
+      }),
+    );
+    const leaderFile = join(repoPath, 'usage.md');
+    await writeFile(leaderFile, 'Leader documentation\n');
+    for (const { workerHead } of sealed) {
+      await expect(
+        manager.integrate({ repoPath, baseHead: head, workerHead }),
+      ).resolves.toMatchObject({
+        outcome: 'integrated',
+      });
+    }
+    expect(await readFile(leaderFile, 'utf8')).toBe('Leader documentation\n');
+    expect(await readFile(join(repoPath, 'split.mjs'), 'utf8')).toBe('split.mjs');
+    expect(await readFile(join(repoPath, 'cli.mjs'), 'utf8')).toBe('cli.mjs');
+    expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('?? usage.md');
+  });
+
+  it.each(['overlapping untracked', 'staged'] as const)(
+    'preserves %s changes on integration',
+    async (kind) => {
+      const { repoPath, head, manager } = await fixture();
+      const agentId = 'worker-overlap';
+      const worker = await manager.create({ agentId, repoPath });
+      await writeFile(join(worker.path, 'split.mjs'), 'Worker result');
+      const { workerHead } = await manager.finalizeChanges({
+        agentId,
+        repoPath,
+        baseHead: head,
+        commitMessage: 'Worker result',
+      });
+      const localFile = kind === 'staged' ? 'usage.md' : 'split.mjs';
+      await writeFile(join(repoPath, localFile), 'local draft');
+      if (kind === 'staged') await git(['-C', repoPath, 'add', '--', localFile]);
+
+      await expect(
+        manager.integrate({ repoPath, baseHead: head, workerHead }),
+      ).rejects.toMatchObject({
+        code: 'base_changed',
+      });
+      expect(await readFile(join(repoPath, localFile), 'utf8')).toBe('local draft');
+      expect((await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim()).toBe(head);
+    },
+  );
+
   it('recognizes an integration that completed before its durable state was recorded', async () => {
     const { repoPath, head, manager } = await fixture();
     const worktreeId = 'execution-2';
