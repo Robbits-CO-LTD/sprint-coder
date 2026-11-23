@@ -5864,7 +5864,7 @@ if (runsWithElectronAbi)
       const leaderDraft = join(secondaryRepo, 'leader-draft.md');
       const integrateRepository = manager.integrate.bind(manager);
       const integrate = vi.spyOn(manager, 'integrate').mockImplementation((input) => {
-        if (input.repoPath === secondaryRepo)
+        if (basename(input.repoPath) === basename(secondaryRepo))
           writeFileSync(leaderDraft, 'untracked Leader draft\n');
         return integrateRepository(input);
       });
