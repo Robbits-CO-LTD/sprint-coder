@@ -17,6 +17,18 @@ const workspace: RuntimeWorkspaceSet = {
 };
 
 describe('prompt context compiler', () => {
+  it('asks for user-facing capability explanations and a concrete next step', () => {
+    const guidance = compilePromptGuidance({
+      workspace: { primaryRootId: null, digest: 'empty', roots: [] },
+      toolCatalog: catalog([]),
+      workspaceRules: [],
+      vcs: [],
+    });
+    expect(guidance.content).toContain('内部の役割名や設定名をそのまま読み上げず');
+    expect(guidance.content).toContain('作業フォルダーが選ばれていません');
+    expect(guidance.content).toContain('利用者が取れる次の手順を具体的に示す');
+  });
+
   it('discovers the repository AGENTS.md as a scoped workspace rule', () => {
     const root = resolve(fileURLToPath(new URL('../../../../', import.meta.url)));
     const rules = discoverWorkspaceRules({
