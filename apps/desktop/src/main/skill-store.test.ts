@@ -535,7 +535,7 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     const last = installed[32]!;
     await expect(
       store.setActivationPolicy('created', last.skillId, last.digest, 'auto-allowed'),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    ).rejects.toMatchObject({ code: 'AUTO_SELECTION_LIMIT' });
     expect(
       (await store.listSelectable()).filter(
         ({ activationPolicy }) => activationPolicy === 'auto-allowed',

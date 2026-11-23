@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { applyTeamDetailPatch } from '@sprint-coder/contracts';
+import { applyTeamDetailPatch, publicErrorSchema } from '@sprint-coder/contracts';
 import type {
   GraphView,
   ModelSelection,
@@ -3318,7 +3318,8 @@ function keepTaskActivity(updated: TaskSummary, previous: TaskSummary): TaskSumm
 
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
-  return String(err);
+  const publicError = publicErrorSchema.safeParse(err);
+  return publicError.success ? publicError.data.userMessage : String(err);
 }
 function persistSkillDraftSelection(taskId: string, skills: readonly TurnSkillSelection[]): void {
   const setter = window.sprintCoder?.skills?.setDraftSelection;

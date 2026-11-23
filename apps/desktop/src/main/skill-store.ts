@@ -169,7 +169,15 @@ type Snapshot = {
 export class SkillStoreError extends Error {
   constructor(
     readonly code:
-      'UNAVAILABLE' | 'INVALID_SKILL' | 'UNSAFE_SOURCE' | 'SOURCE_CHANGED' | 'CONFLICT',
+      | 'UNAVAILABLE'
+      | 'INVALID_SKILL'
+      | 'UNSAFE_SOURCE'
+      | 'SOURCE_CHANGED'
+      | 'CONFLICT'
+      | 'NOT_FOUND'
+      | 'NAME_EXISTS'
+      | 'AUTO_SELECTION_LIMIT'
+      | 'EXPORT_EXISTS',
     message: string,
     readonly preserveContestedPath = false,
     readonly publicDetail?: string,
@@ -353,7 +361,7 @@ export class SkillStore {
     const createdRoot = join(this.rootPath, 'created');
     const destination = join(createdRoot, skillId);
     if (await pathExists(destination))
-      throw new SkillStoreError('CONFLICT', 'A created Skill with this name already exists');
+      throw new SkillStoreError('NAME_EXISTS', 'A created Skill with this name already exists');
     const staging = join(createdRoot, `.staging-${randomUUID()}`);
     const paths = new Set<string>();
     let totalBytes = 0;
@@ -703,7 +711,7 @@ export class SkillStore {
   async removeCreated(skillId: string, expectedDigest: string): Promise<void> {
     assertSkillId(skillId);
     const current = await this.readSelectableAt('created', skillId, true);
-    if (current === null) throw new SkillStoreError('CONFLICT', 'Created Skill does not exist');
+    if (current === null) throw new SkillStoreError('NOT_FOUND', 'Created Skill does not exist');
     if (current.digest !== expectedDigest)
       throw new SkillStoreError('SOURCE_CHANGED', 'Created Skill changed before removal');
     const createdRoot = join(this.rootPath, 'created');
@@ -722,7 +730,7 @@ export class SkillStore {
   ): Promise<void> {
     assertSkillId(skillId);
     const current = await this.readSelectableAt('created', skillId, true);
-    if (current === null) throw new SkillStoreError('CONFLICT', 'Created Skill does not exist');
+    if (current === null) throw new SkillStoreError('NOT_FOUND', 'Created Skill does not exist');
     if (current.digest !== expectedDigest)
       throw new SkillStoreError('SOURCE_CHANGED', 'Created Skill changed before update');
     const marker = join(this.currentPath('created', skillId), '.disabled');
@@ -742,7 +750,7 @@ export class SkillStore {
       throw new SkillStoreError('INVALID_SKILL', 'Builtin Skill activation policy is fixed');
     assertSkillId(skillId);
     const current = await this.readSelectableAt(source, skillId, true);
-    if (current === null) throw new SkillStoreError('CONFLICT', 'Skill does not exist');
+    if (current === null) throw new SkillStoreError('NOT_FOUND', 'Skill does not exist');
     if (current.digest !== expectedDigest)
       throw new SkillStoreError('SOURCE_CHANGED', 'Skill changed before activation update');
     if (activationPolicy === 'auto-allowed') {
@@ -752,7 +760,7 @@ export class SkillStore {
           !(item.source === source && item.skillId === skillId && item.digest === expectedDigest),
       ).length;
       if (autoCount >= 32)
-        throw new SkillStoreError('CONFLICT', '自動選択を許可できるSkillは最大32件です');
+        throw new SkillStoreError('AUTO_SELECTION_LIMIT', 'Too many Skills allow auto-selection');
     }
     const destination = this.currentPath(source, skillId);
     if (source === 'created') {
@@ -782,7 +790,7 @@ export class SkillStore {
   ): Promise<string> {
     assertSkillId(skillId);
     const current = await this.readSelectableAt('created', skillId, true);
-    if (current === null) throw new SkillStoreError('CONFLICT', 'Created Skill does not exist');
+    if (current === null) throw new SkillStoreError('NOT_FOUND', 'Created Skill does not exist');
     if (current.digest !== expectedDigest)
       throw new SkillStoreError('SOURCE_CHANGED', 'Created Skill changed before export');
     const parent = await realpath(destinationParent);
@@ -791,7 +799,7 @@ export class SkillStore {
       throw new SkillStoreError('UNSAFE_SOURCE', 'Export destination is unsafe');
     const destination = join(parent, format === 'portable' ? `${skillId}-portable` : skillId);
     if (await pathExists(destination))
-      throw new SkillStoreError('CONFLICT', 'Export destination already exists');
+      throw new SkillStoreError('EXPORT_EXISTS', 'Export destination already exists');
     await copySafeDirectory(this.currentPath('created', skillId), destination, {
       omit: new Set([
         'manifest.json',

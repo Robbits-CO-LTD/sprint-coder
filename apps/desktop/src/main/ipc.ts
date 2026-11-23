@@ -2770,7 +2770,9 @@ export class IpcRouter {
         ).value,
     );
     this.handle(IPC_CHANNELS.skillsListDrafts, emptyPayloadSchema, z.array(skillDraftSchema), () =>
-      this.skillSettings.listDrafts(),
+      this.skillSettings
+        .listDrafts()
+        .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
       IPC_CHANNELS.skillsCreateDraft,
@@ -2791,7 +2793,9 @@ export class IpcRouter {
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(IPC_CHANNELS.skillsDiscardDraft, skillDraftIdInputSchema, z.undefined(), (input) =>
-      this.skillSettings.discardDraft(input.draftId),
+      this.skillSettings
+        .discardDraft(input.draftId)
+        .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
       IPC_CHANNELS.skillsRemoveCreated,
@@ -11114,11 +11118,15 @@ export function toPublicError(error: unknown): PublicError {
   if (error instanceof SkillSettingsError)
     return {
       code:
-        error.code === 'PREVIEW_EXPIRED'
+        error.code === 'PREVIEW_EXPIRED' ||
+        error.code === 'SOURCE_CHANGED' ||
+        error.code === 'CONFLICT'
           ? 'OPERATION_CONFLICT'
           : error.code === 'NOT_FOUND'
             ? 'NOT_FOUND'
-            : 'INVALID_REQUEST',
+            : error.code === 'FORBIDDEN'
+              ? 'FORBIDDEN'
+              : 'INVALID_REQUEST',
       userMessage: clipPublicMessage(error.message),
       retryable: error.code === 'PREVIEW_EXPIRED' || error.code === 'SOURCE_CHANGED',
     };

@@ -188,7 +188,8 @@ import { RetainedWorktreeError } from './team-retained-worktrees';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
-import { SkillSettingsError } from './skill-settings-service';
+import { SkillSettingsError, skillSettingsPublicError } from './skill-settings-service';
+import { SkillStoreError } from './skill-store';
 import { CommandRunner, CommandRunnerError, prepareExecutionSpec } from './command-runner';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
@@ -939,6 +940,19 @@ describe('retained worktree public errors (issue #544)', () => {
 });
 
 describe('Skill Draft public errors', () => {
+  it.each([
+    ['NAME_EXISTS', 'OPERATION_CONFLICT', '同名のSkillが既に存在します。'],
+    ['AUTO_SELECTION_LIMIT', 'OPERATION_CONFLICT', '自動選択を許可できるSkillは最大32件です。'],
+    ['EXPORT_EXISTS', 'OPERATION_CONFLICT', '書き出し先に同名のフォルダーがあります。'],
+    ['NOT_FOUND', 'NOT_FOUND', 'Skillが見つかりません。'],
+    ['UNSAFE_SOURCE', 'FORBIDDEN', 'Skillの保存場所に安全にアクセスできません。'],
+    ['SOURCE_CHANGED', 'OPERATION_CONFLICT', '確認後にSkillが変更されました。'],
+    ['CONFLICT', 'OPERATION_CONFLICT', '現在の状態ではSkillの操作を完了できませんでした。'],
+  ] as const)('maps %s to a safe operation reason', (reason, code, userMessage) => {
+    const error = new SkillStoreError(reason, 'C:/private/location');
+    expect(toPublicError(skillSettingsPublicError(error))).toMatchObject({ code, userMessage });
+  });
+
   it('clips actionable validation details to the public message limit', () => {
     const result = toPublicError(new SkillSettingsError('INVALID_SKILL', 'x'.repeat(600)));
 
