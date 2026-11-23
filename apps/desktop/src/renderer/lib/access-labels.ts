@@ -35,6 +35,6 @@ export function commandSandboxDescription(capability: CommandSandboxCapability |
     ? capability.probedAt
     : observed.toLocaleString('ja-JP');
   return capability.available
-    ? ` Command sandbox: ${capability.backend}（probe成功 ${timestamp}）。`
+    ? ` 作業フォルダーで実行するコマンドは外部と通信できません。Command sandbox: ${capability.backend}（probe成功 ${timestamp}）。`
     : ` Command sandbox: 利用不可（${capability.backend} / ${capability.reason ?? 'unknown'} / ${timestamp}）。`;
 }

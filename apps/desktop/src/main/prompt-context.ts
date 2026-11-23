@@ -355,6 +355,10 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
       lines.push(
         `- ${tool.name} [id=${tool.id}; kind=${tool.kind}; sideEffect=${tool.sideEffect}]`,
       );
+    if (context.tools.some(({ name }) => name === 'exec_command' || name === 'sprint_exec_command'))
+      lines.push(
+        '作業フォルダーのコマンドはフルアクセスでも外部と通信できない。GitHub CLIでの起票、リモートとのgit clone・push、パッケージ取得が必要で専用ツールもないときは、最初に制限を説明し、利用者の端末で実行する手順を示す。',
+      );
     lines.push('一覧にないツールを利用可能だと仮定しない。');
   }
   if (context.skills.length > 0) {

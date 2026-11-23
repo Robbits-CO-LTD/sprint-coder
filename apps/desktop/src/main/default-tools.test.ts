@@ -21,6 +21,7 @@ describe('managed exec command guidance', () => {
     expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('--experimental-test-isolation=none');
     expect(MANAGED_EXEC_COMMAND_TOOL.description).not.toContain('launches a blocked child process');
     expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('must not repeat executable');
+    expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('no network access');
     expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('never creates Edit Saga assurance');
     expect(
       (MANAGED_EXEC_COMMAND_TOOL.inputSchema as { properties?: Record<string, unknown> })

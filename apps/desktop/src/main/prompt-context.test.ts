@@ -167,6 +167,7 @@ describe('prompt context compiler', () => {
         [commandName, 'read_file'].sort(),
       );
       expect(compiled.content).toContain(commandName);
+      expect(compiled.content).toContain('フルアクセスでも外部と通信できない');
       expect(compiled.content).not.toContain('write_stdin');
       expect(compiled.context.tools.find(({ name }) => name === commandName)?.id).toBe(
         'command.exec',
