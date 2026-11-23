@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { hasEffectiveWorkspaceRoot } from './effective-workspace-root';
+import {
+  hasEffectiveWorkspaceRoot,
+  taskHasEffectiveWorkspaceRoot,
+} from './effective-workspace-root';
 
 describe('effective Workspace root availability', () => {
   it('disables file editing for loaded and loading rootless tasks', () => {
@@ -14,5 +17,20 @@ describe('effective Workspace root availability', () => {
 
   it('accepts a Project with configured folders even without a legacy Workspace', () => {
     expect(hasEffectiveWorkspaceRoot(null, null, 2)).toBe(true);
+  });
+
+  it('does not use a legacy Task path when Main reports no applicable legacy root', () => {
+    const state = {
+      tasks: [{ id: 'task', projectId: 'project', workspacePath: '/legacy' }],
+      projects: [{ id: 'project', folderCount: 0 }],
+      workspaceByTask: { task: null },
+    };
+    expect(taskHasEffectiveWorkspaceRoot('task', state)).toBe(false);
+    expect(
+      taskHasEffectiveWorkspaceRoot('task', {
+        ...state,
+        projects: [{ id: 'project', folderCount: 1 }],
+      }),
+    ).toBe(true);
   });
 });
