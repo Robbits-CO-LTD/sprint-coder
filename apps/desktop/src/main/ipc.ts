@@ -673,6 +673,7 @@ import {
   providerWorkspaceToolFailure,
 } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
+import { storageGuidanceForPlatform } from '../provider-storage-guidance';
 import { createGraphToolBoundary } from './graph-tools';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
@@ -10962,8 +10963,7 @@ export function toPublicError(error: unknown): PublicError {
   if (error instanceof ProviderSecretStorageUnavailableError)
     return {
       code: 'RUNTIME_UNAVAILABLE',
-      userMessage:
-        'OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。',
+      userMessage: storageGuidanceForPlatform(process.platform),
       retryable: true,
     };
   if (error instanceof InvalidModelError)
