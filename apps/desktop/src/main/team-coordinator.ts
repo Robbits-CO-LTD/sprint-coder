@@ -4061,6 +4061,7 @@ export class TeamCoordinator {
     if (execution.accessMode === 'workspace-write' && storedWorker.writeCapable !== true)
       throw new Error('workspace-write execution requires a write-capable Worker');
     const worker = { ...storedWorker, writeCapable: execution.accessMode === 'workspace-write' };
+    const startedWithDesktopControl = desktopControlWorker(input.taskId, worker.id) !== undefined;
     let attemptId: string | null = null;
     let budget: TeamExecutionBudgetScope | null = null;
     let missionWorktree: TeamMissionWorktreeRecord | null = null;
@@ -4508,9 +4509,15 @@ export class TeamCoordinator {
           retryScheduled = true;
           return;
         }
-        if (
+        // A read-only filesystem assignment can still click or type in another app.
+        // Replaying the assignment after a failure could repeat that action.
+        const mayReplay =
+          !startedWithDesktopControl &&
           !integrationResume &&
           !this.executionInterruptions.has(input.executionId) &&
+          desktopControlWorker(input.taskId, worker.id) === undefined;
+        if (
+          mayReplay &&
           attemptId !== null &&
           error instanceof ProviderRateLimitedError &&
           this.requeueRateLimitedExecution(input, attemptId, worker, error)
@@ -4519,8 +4526,7 @@ export class TeamCoordinator {
           return;
         }
         if (
-          !integrationResume &&
-          !this.executionInterruptions.has(input.executionId) &&
+          mayReplay &&
           attemptId !== null &&
           this.requeueSafeRuntimeFailure(input, attemptId, worker, error)
         ) {

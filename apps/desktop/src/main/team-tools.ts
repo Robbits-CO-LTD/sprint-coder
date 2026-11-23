@@ -28,6 +28,7 @@ import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
+import { EXTERNAL_ACP_AGENTS } from './external-acp-profile';
 import { builtinRuntimeForModelSelection } from './connection-identity';
 import {
   DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
@@ -843,9 +844,7 @@ function desktopControlHireResult(
 }
 
 /**
- * Whether the Worker runs on a built-in CLI, as the Team's Worker runtime decides it
- * (`ProviderAwareTeamWorkerRuntime`): no Connection (the default CLI) or a built-in CLI's
- * Connection. Anything it cannot read counts as not.
+ * A default CLI, a built-in CLI or an external ACP CLI can use the desktop command through its managed catalog.
  */
 function runsOnCli(
   worker: Readonly<{
@@ -855,6 +854,15 @@ function runsOnCli(
   }>,
 ): boolean {
   if (worker.connectionId === null) return true;
+  if (
+    EXTERNAL_ACP_AGENTS.some(
+      (agent) =>
+        agent.connectionId === worker.connectionId &&
+        agent.providerId === worker.requestedProvider &&
+        !!worker.requestedModel,
+    )
+  )
+    return true;
   try {
     return (
       builtinRuntimeForModelSelection({

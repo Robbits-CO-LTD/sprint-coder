@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { formatProviderToolResult, providerWorkspaceToolFailure } from './provider-tool-result';
 import { isExternalAcpConnection } from './external-acp-profile';
 import { assertNotRetiredManagedLocal } from './retired-managed-local';
 import type {
@@ -31,14 +33,24 @@ import {
   canonicalWorkspaceRoots,
   reserveTeamWorkerContext,
   WORKER_CANNOT_WRITE_NOTICE,
+  WORKSPACE_WRITE_TOOL_NAMES,
+  isCommittedManagedWrite,
+  managedResultChanges,
   workerWriteCheckedCompletion,
   workerWriteFailure,
   workspaceRootLabels,
   type TeamWorkerEgressVerdict,
   type WorkerWriteObservation,
 } from './team-worker-runtime';
-import type { ApprovalWaitObserver } from './tool-broker';
+import { ToolAuthorizationDeniedError, type ApprovalWaitObserver } from './tool-broker';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
+import { ToolImageBridge } from './tool-image-bridge';
+import {
+  matchesScreenshotPicture,
+  isScreenshotToolResult,
+  SCREENSHOT_PICTURE_ATTACHED,
+  type ScreenshotPicture,
+} from './desktop-control-screenshot';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
 import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
@@ -53,6 +65,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     executionId: string;
     connection: ProviderConnection;
     prompt: string;
+    attachment?: { manifestDigest: string; byteCount: number };
     context: PreparedContext;
     knownWorkspaceRoots: readonly string[];
     /** The labels Main declared for those roots (issue #849). */
@@ -63,6 +76,25 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   managerTools: readonly ProviderTool[];
   workerGuidance: string;
   workerTools: readonly ProviderTool[];
+  onCliStopUnconfirmed?(taskId: string): void;
+  openCliWorkspace?(
+    input: Parameters<TeamWorkerRuntime['execute']>[0],
+    turnId: string,
+  ): Promise<{
+    tools: ProviderTool[];
+    writable: boolean;
+    desktopGuidance?: string;
+    invoke(
+      call: ProviderMessageToolCall,
+      signal: AbortSignal,
+      onPicture?: (picture: ScreenshotPicture) => void,
+    ): Promise<unknown>;
+    approveScreenshot?(
+      picture: ScreenshotPicture,
+      signal: AbortSignal,
+    ): Promise<(() => boolean) | null>;
+    close(): void;
+  }>;
   executeManagerTool(input: {
     worker: AgentRecord;
     name: string;
@@ -83,6 +115,8 @@ type ActiveProviderWorker = {
   executionId: string;
   connection: ProviderConnection;
   controller: AbortController;
+  workerExecutionId: string;
+  taskId: string;
 };
 
 const MAX_PROVIDER_MANAGER_ROUNDS = 32;
@@ -98,6 +132,7 @@ function emptyPreparedContext(): PreparedContext {
 }
 
 export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
+  private readonly unconfirmed = new Map<string, string>();
   private readonly active = new Map<string, ActiveProviderWorker>();
   private readonly executions = new Map<
     string,
@@ -140,6 +175,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       builtinRuntimeForModelSelection(input.worker.modelSelection) !== null
     )
       return this.deps.fallback.execute(input);
+    if (this.unconfirmed.has(input.worker.id)) throw new Error('CLIの停止を確認できませんでした。');
     if (this.executions.has(input.worker.id)) throw new Error('Worker execution is already active');
     const controller = new AbortController();
     let settle!: () => void;
@@ -171,9 +207,11 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     const modelId = input.worker.modelSelection.requestedModel;
     if (connectionId === null || modelId === null)
       throw new Error('Provider Worker model selection is incomplete');
-    if (isExternalAcpConnection(connectionId))
-      throw new Error('この CLI 接続は通常チャット専用です。');
-    const connection = await this.deps.verification.requireVerifiedForExecution(connectionId);
+    const externalCli = isExternalAcpConnection(connectionId);
+    const connection = externalCli
+      ? this.deps.getConnection(connectionId)
+      : await this.deps.verification.requireVerifiedForExecution(connectionId);
+    if (!connection.enabled) throw new Error('Worker connection is disabled');
     input.signal?.throwIfAborted();
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
@@ -184,7 +222,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
       ),
     );
-    if (input.worker.writeCapable)
+    if (input.worker.writeCapable && (!externalCli || !this.deps.openCliWorkspace))
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
@@ -193,14 +231,17 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       input.content,
       input.priorConversation,
       input.doneCriteria,
-      input.accessMode === 'workspace-write',
+      input.accessMode === 'workspace-write' && !externalCli,
+      externalCli,
     );
 
     const controller = new AbortController();
     const abortFromCaller = (): void => controller.abort(input.signal?.reason);
     if (input.signal?.aborted === true) abortFromCaller();
     else input.signal?.addEventListener('abort', abortFromCaller, { once: true });
-    this.active.set(input.worker.id, { executionId, connection, controller });
+    const workerExecutionId = input.executionId ?? input.envelope.messageId;
+    const activeWorker = { connection, controller, workerExecutionId, taskId: input.worker.taskId };
+    this.active.set(input.worker.id, { executionId, ...activeWorker });
     const startedAt = Date.now();
     const output: string[] = [];
     let resolution: ExecutionResolution | undefined;
@@ -282,18 +323,41 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       at: new Date().toISOString(),
     });
     let modelLease: ProviderModelLease | undefined;
+    let workspace:
+      | Awaited<ReturnType<NonNullable<ProviderTeamWorkerRuntimeDeps['openCliWorkspace']>>>
+      | undefined;
     try {
       controller.signal.throwIfAborted();
+      if (externalCli && this.deps.openCliWorkspace) {
+        workspace = await this.deps.openCliWorkspace(input, randomUUID());
+        availableTools.push(...workspace.tools);
+        if (workspace.desktopGuidance)
+          messages.unshift({ role: 'system', content: workspace.desktopGuidance });
+        if (input.accessMode === 'workspace-write' && !workspace.writable)
+          messages.unshift({ role: 'system', content: WORKER_CANNOT_WRITE_NOTICE });
+      }
       const runtime = this.deps.registry.resolve(connection);
       const streamBudget = new ProviderStreamBudget();
+      const imageBridge = new ToolImageBridge();
+      let screenshotGrant: (() => boolean) | null = null;
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         controller.signal.throwIfAborted();
         providerCallCount += 1;
+        const dispatch = imageBridge.consumeForNextDispatch({
+          baseMessages: messages,
+          directImages: [],
+        });
         const egress = this.deps.authorizeEgress({
+          ...(dispatch.hasToolImage ? { attachment: dispatch.audit } : {}),
           worker: input.worker,
           executionId,
           connection,
-          prompt: JSON.stringify(providerMessagesForEgressPolicy(messages)),
+          prompt: externalCli
+            ? JSON.stringify({
+                messages: providerMessagesForEgressPolicy(dispatch.messages),
+                tools: availableTools,
+              })
+            : JSON.stringify(providerMessagesForEgressPolicy(messages)),
           context: inheritedContext,
           // Same declaration the CLI Worker makes: the Workspace roots plus the isolation
           // worktree Main generated, so naming that directory is not read as an opaque secret.
@@ -323,11 +387,13 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           );
         else await modelLease.prepare(controller.signal);
         controller.signal.throwIfAborted();
+        if (dispatch.hasToolImage && !screenshotGrant?.())
+          throw new Error('画像の送信先が変わったため、Workerを停止しました。');
+        screenshotGrant = null;
         const providerExecutionId = providerCallExecutionId(executionId, providerCallCount);
         this.active.set(input.worker.id, {
           executionId: providerExecutionId,
-          connection,
-          controller,
+          ...activeWorker,
         });
         const roundOutput: string[] = [];
         const roundToolCalls: ProviderMessageToolCall[] = [];
@@ -338,13 +404,19 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             executionId: providerExecutionId,
             connectionId,
             modelId,
-            messages,
+            messages: dispatch.messages,
             ...(availableTools.length > 0 ? { tools: [...availableTools] } : {}),
             ...(webSearch ? { webSearch: true } : {}),
           },
           controller.signal,
           streamBudget,
         )) {
+          if (
+            externalCli &&
+            event.type === 'error' &&
+            event.error.providerCode === 'stop_unconfirmed'
+          )
+            this.markUnconfirmed(input.worker.id, workerExecutionId, input.worker.taskId);
           controller.signal.throwIfAborted();
           if (event.type === 'output_delta') {
             output.push(event.text);
@@ -403,16 +475,56 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             label: `${input.worker.canDelegate ? 'Manager' : 'Worker'}が${toolCall.name}を実行中`,
             at: new Date().toISOString(),
           });
-          const toolResult = JSON.stringify(
-            (await this.deps.executeManagerTool({
-              worker: input.worker,
-              name: toolCall.name,
-              input: toolCall.input,
-              reportCursor,
-              modelCatalogAudit,
-              ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
-            })) ?? null,
-          );
+          let toolResult: string;
+          if (workspace?.tools.some((tool) => tool.name === toolCall.name)) {
+            try {
+              let picture: ScreenshotPicture | undefined;
+              let result = await workspace.invoke(toolCall, controller.signal, (taken) => {
+                picture = taken;
+              });
+              if (
+                picture &&
+                !screenshotGrant &&
+                matchesScreenshotPicture(result, picture) &&
+                isScreenshotToolResult(result) &&
+                !inheritedContext.projectItems.some((item) => item.localOnly)
+              ) {
+                screenshotGrant =
+                  (await workspace.approveScreenshot?.(picture, controller.signal)) ?? null;
+                if (screenshotGrant) {
+                  imageBridge.acceptScreenshot(toolCall.callId, picture);
+                  result = { ...result, picture: SCREENSHOT_PICTURE_ATTACHED };
+                }
+              }
+              if (isCommittedManagedWrite(result)) writes.committed++;
+              const changes = managedResultChanges(result);
+              if (changes.length) input.onEvent?.({ type: 'fileChange', changes });
+              toolResult = formatProviderToolResult(
+                connection.providerId,
+                toolCall.name,
+                result,
+                input.workspaceSet?.roots.map(({ path }) => path),
+              );
+            } catch (error) {
+              controller.signal.throwIfAborted();
+              if (
+                error instanceof ToolAuthorizationDeniedError &&
+                WORKSPACE_WRITE_TOOL_NAMES.has(toolCall.name)
+              )
+                writes.denied++;
+              toolResult = providerWorkspaceToolFailure(error);
+            }
+          } else
+            toolResult = JSON.stringify(
+              (await this.deps.executeManagerTool({
+                worker: input.worker,
+                name: toolCall.name,
+                input: toolCall.input,
+                reportCursor,
+                modelCatalogAudit,
+                ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+              })) ?? null,
+            );
           input.onEvent?.({
             type: 'activity',
             phase: 'executing',
@@ -442,12 +554,12 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       const summary = report.summary;
       const writeFailure = workerWriteFailure({
         accessMode: input.accessMode,
-        writeCapable: false,
+        writeCapable: externalCli && input.worker.writeCapable,
         workspacePath:
           input.workspaceSet?.roots.find(
             ({ rootId }) => rootId === input.workspaceSet?.primaryRootId,
           )?.path ?? null,
-        writeScope: 'read-only',
+        writeScope: workspace?.writable ? 'workspace-write' : 'read-only',
         writes,
         readOnlyCause:
           'このWorkerに渡されたツールに書き込み用のものが無かったため、読み取り専用で実行されました。ファイルは変更されていません。',
@@ -460,7 +572,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         },
         completion: workerWriteCheckedCompletion({
           runtimeVerification: {
-            name: `worker-runtime:${connection.providerId}:official-api`,
+            name: `worker-runtime:${connection.providerId}:${externalCli ? 'cli' : 'official-api'}`,
             outcome: 'pass',
           },
           report,
@@ -480,6 +592,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       try {
         await modelLease?.release();
       } finally {
+        workspace?.close();
         clearInterval(heartbeat);
         input.signal?.removeEventListener('abort', abortFromCaller);
         if (reasoningActive) input.onEvent?.({ type: 'reasoningPresence', active: false });
@@ -491,28 +604,39 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
 
   async stop(agentId: string): Promise<void> {
     const execution = this.executions.get(agentId);
+    if (this.unconfirmed.has(agentId)) throw new Error('CLIの停止を確認できませんでした。');
     if (execution === undefined) return this.deps.fallback.stop(agentId);
     execution.controller.abort();
     const active = this.active.get(agentId);
     try {
       if (active !== undefined)
         await this.deps.registry.resolve(active.connection).cancel(active.executionId);
+    } catch (error) {
+      if (active && isExternalAcpConnection(active.connection.id))
+        this.markUnconfirmed(agentId, active.workerExecutionId, active.taskId);
+      throw error;
     } finally {
       // Cancellation is a request. A tool or stream may still be unwinding after it returns.
       await execution.settled;
     }
   }
 
-  /**
-   * A Provider execution has settled before its `stop` returns, so only a CLI Turn of the fallback
-   * runtime can outlive the execution it ran for (issue #544).
-   */
+  private markUnconfirmed(agentId: string, executionId: string, taskId: string) {
+    this.unconfirmed.set(agentId, executionId);
+    this.deps.onCliStopUnconfirmed?.(taskId);
+  }
+
   hasUnsettledTurn(agentId: string, executionId: string): boolean {
-    return this.deps.fallback.hasUnsettledTurn?.(agentId, executionId) === true;
+    return (
+      this.unconfirmed.get(agentId) === executionId ||
+      this.deps.fallback.hasUnsettledTurn?.(agentId, executionId) === true
+    );
   }
 
   hasUnsettledWorker(agentId: string): boolean {
-    return this.deps.fallback.hasUnsettledWorker?.(agentId) === true;
+    return (
+      this.unconfirmed.has(agentId) || this.deps.fallback.hasUnsettledWorker?.(agentId) === true
+    );
   }
 
   dispose(): void {
@@ -568,6 +692,7 @@ function workerPrompt(
   priorConversation: readonly TeamRuntimeConversationItem[] | undefined,
   doneCriteria: readonly string[] | undefined,
   writeRequested: boolean,
+  externalCli: boolean,
 ): string {
   return [
     `あなたはチームの「${worker.role}」担当Workerです。`,
@@ -575,7 +700,9 @@ function workerPrompt(
     `親Agent ID: ${worker.parentAgentId ?? 'Leader'}`,
     worker.objective === null ? '' : `目的: ${worker.objective}`,
     `Context継承: ${worker.contextInheritancePolicy}`,
-    'Workspace書き込み: 公式API Workerでは利用不可',
+    externalCli
+      ? 'Workspaceの操作はこの実行に渡されたSprint Coderのツールを使います。'
+      : 'Workspace書き込み: 公式API Workerでは利用不可',
     writeRequested ? WORKER_CANNOT_WRITE_NOTICE : '',
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
     formatPriorTeamConversation(priorConversation),

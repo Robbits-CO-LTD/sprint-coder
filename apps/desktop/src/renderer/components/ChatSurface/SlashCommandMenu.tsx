@@ -9,7 +9,11 @@ export type SlashMenuItem = Readonly<{
     | 'Team Skills'
     | 'Built-in Skills'
     | 'Codex Skills'
-    | 'Claude Code Skills';
+    | 'Claude Code Skills'
+    | 'Grok Skills'
+    | 'OpenCode Skills'
+    | 'Antigravity Skills'
+    | 'Cursor Skills';
   command: string;
   label: string;
   description: string;

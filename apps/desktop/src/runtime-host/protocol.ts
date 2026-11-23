@@ -812,7 +812,16 @@ function isManagedRuntimeSkillPath(name: string, path: string): boolean {
   const revisions = parts.at(-4);
   return (
     revisions === 'revisions' &&
-    ['builtin', 'created', 'claude', 'agents'].includes(source ?? '') &&
+    [
+      'builtin',
+      'created',
+      'claude',
+      'agents',
+      'grok',
+      'antigravity',
+      'cursor',
+      'opencode',
+    ].includes(source ?? '') &&
     skillId === name &&
     /^[a-f0-9]{64}$/.test(digest ?? '')
   );

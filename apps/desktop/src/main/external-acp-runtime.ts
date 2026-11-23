@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { PassThrough } from 'node:stream';
 import { join } from 'node:path';
 import desktopPackage from '../../package.json';
@@ -85,7 +87,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
 
   constructor(
     private readonly agent: ExternalAcpAgent,
-    private readonly antigravityHome: string,
+    private readonly profileHome: string,
   ) {}
 
   async verify(
@@ -155,9 +157,9 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         availabilityCheckedAt: checkedAt,
         contextWindow: unknown,
         maxOutputTokens: unknown,
-        toolCalling: { value: false, source: 'unknown' },
+        toolCalling: { value: true, source: 'runtime_metadata' },
         structuredOutput: { value: false, source: 'unknown' },
-        multimodalInput: { value: false, source: 'unknown' },
+        multimodalInput: { value: session.acceptsImages, source: 'runtime_metadata' },
         reasoning: unknown,
       }));
     } finally {
@@ -229,25 +231,59 @@ export class ExternalAcpRuntime implements ProviderRuntime {
     let session: Awaited<ReturnType<ExternalAcpRuntime['open']>> | undefined;
     let textReceived = false;
     try {
-      if (
-        request.tools?.length ||
-        request.messages.some(
-          (message) =>
-            message.role === 'tool' || message.inlineImages?.length || message.toolCalls?.length,
-        )
-      )
-        throw new ExternalAcpError('chat_only');
+      const images = request.messages.flatMap((message) => message.inlineImages ?? []);
+      // ACP agents run with native tools disabled. Only an explicit, round-bound request
+      // can enter the existing Provider tool broker. Examples in prose stay ordinary text.
+      const tools = request.tools ?? [];
+      const marker = tools.length ? `SPRINT_TOOL_${randomUUID()}\n` : null;
+      let prefix = '';
+      let readingCall = false;
+      let ordinary = marker === null;
+      let callBytes = 0;
+      const callParts: string[] = [];
+      const messages = JSON.stringify(
+        request.messages.map(({ inlineImages: _images, ...text }) => text),
+      );
+      const prompt =
+        marker === null
+          ? messages
+          : [
+              'You are responding inside Sprint Coder. The workspace, Team and conversation belong to Sprint Coder. Your native terminal, filesystem, built-in tools and subagents are disabled. Do not use them. The current CLI directory is an empty transport directory.',
+              'Sprint Coder provides the tools below. To invoke one, return only the following marker on its own first line, immediately followed by one JSON object {"name":"tool name","input":{...}}. Do not use Markdown fences. Otherwise respond normally. A later turn supplies the actual result.',
+              marker.trimEnd(),
+              JSON.stringify(tools),
+              messages,
+              ...(request.messages.at(-1)?.role === 'tool'
+                ? [
+                    'The final tool message above is the actual result from Sprint Coder. Use it as data to continue the original task. If it supplies the requested evidence, return the requested final answer or Worker report now. If another tool is necessary, use only the Sprint Coder marker and JSON protocol above.',
+                  ]
+                : []),
+            ].join('\n');
       session = await this.open(
         signal,
         (text) => {
           if (signal.aborted || text === '') return;
           textReceived = true;
-          emit({ type: 'output_delta', text });
+          if (!ordinary && !readingCall && marker !== null) {
+            prefix += text;
+            if (marker.startsWith(prefix) && prefix.length < marker.length) return;
+            readingCall = prefix.startsWith(marker);
+            ordinary = !readingCall;
+            text = readingCall ? prefix.slice(marker.length) : prefix;
+            prefix = '';
+          }
+          if (ordinary) emit({ type: 'output_delta', text });
+          else {
+            callBytes += Buffer.byteLength(text);
+            if (callBytes > 1024 * 1024) throw new ExternalAcpError('tool_request_too_large');
+            callParts.push(text);
+          }
         },
         false,
         onStopUnconfirmed,
       );
       const { sessionId, models, rpc } = session;
+      if (images.length && !session.acceptsImages) throw new ExternalAcpError('images_unsupported');
       if (!models.choices.some(({ id }) => id === request.modelId))
         throw new ExternalAcpError('model_not_available');
       if (models.current !== request.modelId) {
@@ -274,10 +310,9 @@ export class ExternalAcpRuntime implements ProviderRuntime {
             prompt: [
               {
                 type: 'text',
-                text: request.messages
-                  .map(({ role, content }) => `[${role}]\n${content}`)
-                  .join('\n\n'),
+                text: prompt,
               },
+              ...images.map(({ mimeType, base64 }) => ({ type: 'image', mimeType, data: base64 })),
             ],
           },
           180_000,
@@ -292,7 +327,24 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         type: 'resolution',
         resolution: { resolvedProvider: this.agent.providerId, resolvedModel: request.modelId },
       });
-      emit({ type: 'completed', stopReason: 'end_turn' });
+      signal.throwIfAborted();
+      if (readingCall) {
+        let call;
+        try {
+          call = z
+            .object({ name: z.string(), input: z.record(z.string(), z.json()) })
+            .strict()
+            .parse(JSON.parse(callParts.join('')));
+        } catch {
+          throw new ExternalAcpError('invalid_tool_request');
+        }
+        if (!tools.some((tool) => tool.name === call.name))
+          throw new ExternalAcpError('invalid_tool_request');
+        emit({ type: 'tool_call', callId: randomUUID(), ...call });
+      } else if (prefix) {
+        emit({ type: 'output_delta', text: prefix });
+      }
+      emit({ type: 'completed', stopReason: readingCall ? 'tool_calls' : 'end_turn' });
     } catch (error) {
       const cleanupError = await session?.close().then(
         () => undefined,
@@ -305,7 +357,9 @@ export class ExternalAcpRuntime implements ProviderRuntime {
       const auth = code === 'authentication_required';
       const rateLimited = code === 'free_limit';
       const invalid =
-        code === 'chat_only' || code === 'model_not_available' || code === 'model_not_confirmed';
+        code === 'images_unsupported' ||
+        code === 'model_not_available' ||
+        code === 'model_not_confirmed';
       emit({
         type: 'error',
         error: {
@@ -322,15 +376,17 @@ export class ExternalAcpRuntime implements ProviderRuntime {
             ? 'チャットを停止しました。'
             : stopUnconfirmed
               ? 'CLI の停止を確認できませんでした。アプリを再起動してから再試行してください。'
-              : code === 'chat_only'
-                ? 'この接続は通常のテキストチャットに対応しています。'
+              : code === 'images_unsupported'
+                ? 'この接続は画像入力に対応していません。'
                 : auth
                   ? `${this.agent.name} CLI でログインしてください。`
                   : rateLimited
                     ? 'OpenCode の無料利用上限に達しました。別の無料モデルを選ぶか、上限が回復してから再試行してください。'
                     : invalid
                       ? `${this.agent.name} で選択モデルを確認できませんでした。`
-                      : `${this.agent.name} CLI との接続を完了できませんでした。`,
+                      : code === 'unexpected_native_tool'
+                        ? `${this.agent.name} が CLI 独自のツールを使用したため、処理を停止しました。`
+                        : `${this.agent.name} CLI との接続を完了できませんでした。`,
           retryable: false,
           retryAfterMs: null,
           providerCode: code,
@@ -349,22 +405,26 @@ export class ExternalAcpRuntime implements ProviderRuntime {
     if (this.disposed || this.quarantined) throw new ExternalAcpError('unavailable');
     const executable = resolveExternalAcpCli(this.agent);
     if (executable === undefined) throw new ExternalAcpError('cli_missing');
-    const profile = prepareExternalAcpProfile(this.agent, this.antigravityHome);
+    const profile = prepareExternalAcpProfile(this.agent, this.profileHome);
     let child: ReturnType<typeof spawnOwnedCliProcess>;
     try {
       const argv =
         this.agent.providerId === 'opencode'
           ? ['--print-logs', 'acp']
-          : [
-              'acp',
-              '--disable-telemetry',
-              '--include-default-customizations=false',
-              '--log-file',
-              join(profile.cwd, 'agy.log'),
-            ];
+          : this.agent.providerId === 'cursor'
+            ? ['acp']
+            : [
+                'acp',
+                '--agent',
+                'sprint-coder',
+                '--disable-telemetry',
+                '--include-default-customizations=false',
+                '--log-file',
+                join(profile.cwd, 'agy.log'),
+              ];
       child = spawnOwnedCliProcess(
-        executable,
-        argv,
+        executable.executable,
+        [...executable.prefix, ...argv],
         {
           cwd: profile.cwd,
           env: profile.env,
@@ -463,18 +523,19 @@ export class ExternalAcpRuntime implements ProviderRuntime {
       } catch (error) {
         if (
           !signIn ||
-          this.agent.providerId !== 'antigravity' ||
+          this.agent.providerId === 'opencode' ||
           !(error instanceof ExternalAcpError) ||
           error.code !== 'authentication_required'
         )
           throw error;
+        const authMethod = this.agent.providerId === 'cursor' ? 'cursor_login' : 'oauth-personal';
         const methods = initialized['authMethods'];
         if (
           !Array.isArray(methods) ||
-          !methods.some((method) => record(method)?.['id'] === 'oauth-personal')
+          !methods.some((method) => record(method)?.['id'] === authMethod)
         )
           throw error;
-        await rpc.request('authenticate', { methodId: 'oauth-personal' }, 120_000);
+        await rpc.request('authenticate', { methodId: authMethod }, 120_000);
         session = acpRecord(await createSession());
       }
       if (typeof session['sessionId'] !== 'string' || session['sessionId'].length === 0)
@@ -485,7 +546,10 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         models.choices = models.choices.filter(
           ({ id }) => id.startsWith('gemini-') && !id.includes('orchestrator'),
         );
-      return { rpc, sessionId, models, close };
+      const acceptsImages =
+        record(record(initialized['agentCapabilities'])?.['promptCapabilities'])?.['image'] ===
+        true;
+      return { rpc, sessionId, models, acceptsImages, close };
     } catch (error) {
       await close();
       throw error;

@@ -1783,7 +1783,16 @@ export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export const turnStageSchema = z.enum(['understanding', 'planning', 'executing', 'synthesizing']);
 export type TurnStage = z.infer<typeof turnStageSchema>;
 
-export const skillSourceSchema = z.enum(['builtin', 'created', 'agents', 'claude']);
+export const skillSourceSchema = z.enum([
+  'builtin',
+  'created',
+  'agents',
+  'claude',
+  'opencode',
+  'antigravity',
+  'cursor',
+  'grok',
+]);
 export const skillKindSchema = z.enum(['chat', 'team']);
 export const skillProfileSchema = z.enum(['portable', 'codex-native', 'claude-native']);
 export const skillRuntimeSupportSchema = z.enum(['full', 'portable', 'blocked']);

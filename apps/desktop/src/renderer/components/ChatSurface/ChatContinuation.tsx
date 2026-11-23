@@ -1,15 +1,10 @@
+import { skillRuntimeForConnection } from './skill-runtime';
 import { useState } from 'react';
 import { requestedSkill, WORKSPACE_REQUEST } from '../../../chat-continuation';
 import type { SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
 import { useAppStore } from '../../store/appStore';
 import { ProjectEditorDialog } from '../ProjectEditorDialog';
 import { skillUnavailable } from './skill-picker';
-
-const cliSkillRuntimes = new Map<string, 'claude' | 'codex' | 'grok'>([
-  ['builtin:claude-cli', 'claude'],
-  ['builtin:codex-cli', 'codex'],
-  ['builtin:grok-cli', 'grok'],
-]);
 
 export function ChatContinuation({
   taskId,
@@ -34,17 +29,12 @@ export function ChatContinuation({
 
   if (reply?.author !== 'assistant' || reply.turnId === null) return null;
   const connection = picker.taskId === taskId ? picker.selection?.connectionId : null;
-  if (connection === 'builtin:antigravity-cli' || connection === 'builtin:opencode-cli')
-    return null;
   const lastLine = reply.content.trimEnd().split('\n').at(-1)?.trim();
   const folderRequested = lastLine === WORKSPACE_REQUEST;
   const match = requestedSkill(lastLine ?? '');
   const skill =
     match && catalog.find(({ ref }) => ref.source === match[1] && ref.skillId === match[2]);
-  const defaultRuntime = runtime === 'mock' ? 'provider' : runtime;
-  const skillRuntime = connection
-    ? (cliSkillRuntimes.get(connection) ?? 'provider')
-    : defaultRuntime;
+  const skillRuntime = skillRuntimeForConnection(connection, runtime);
   if (
     !folderRequested &&
     (!skill || skillUnavailable(skill, skillRuntime, [], teamStarted === true))

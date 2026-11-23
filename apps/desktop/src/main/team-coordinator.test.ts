@@ -1,3 +1,8 @@
+import {
+  configureDesktopControlTeamCursors,
+  markDesktopControlWorker,
+  resetDesktopControlSessions,
+} from './desktop-control-session';
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
@@ -2406,6 +2411,40 @@ if (runsWithElectronAbi)
         persistence.close();
       },
     );
+
+    it('does not replay a desktop action after a read-only Worker fails', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Desktop Worker');
+      const runtime = new TestWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute').mockImplementation(async () => {
+        configureDesktopControlTeamCursors(false);
+        throw new Error('provider failed after click');
+      });
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      try {
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'desktop',
+          objective: 'click',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        configureDesktopControlTeamCursors(true);
+        markDesktopControlWorker(task.id, worker.id, worker.role);
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'click',
+          doneCriteria: ['clicked'],
+        });
+        await waitFor(
+          () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        );
+        expect(execute).toHaveBeenCalledTimes(1);
+      } finally {
+        resetDesktopControlSessions();
+      }
+    });
 
     it('never redelivers a timed-out Worker before its previous runtime stop is confirmed', async () => {
       const persistence = createPersistence();

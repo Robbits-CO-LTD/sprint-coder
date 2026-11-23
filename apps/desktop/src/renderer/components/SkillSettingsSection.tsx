@@ -129,7 +129,7 @@ export function SkillSettingsSection({
 
   const taskCatalog = useAppStore((state) => state.skillCatalog);
   const cliSkills = taskCatalog.filter(
-    ({ ref }) => ref.source === 'claude' || ref.source === 'agents',
+    ({ ref }) => ref.source !== 'created' && ref.source !== 'builtin',
   );
   const builtins = catalog.filter(({ ref }) => ref.source === 'builtin');
   const created = catalog.filter(({ ref }) => ref.source === 'created');
@@ -172,6 +172,8 @@ export function SkillSettingsSection({
           を入力します。青字のSkill名の後ろで、続けて別のSkillも選べます。名前を入力欄から削除すると、その送信から外れます。
         </p>
         <dl>
+          <dt>OpenCode・Antigravity・Grok・Cursorで接続</dt>
+          <dd>選択したCLIのSkillとSprint Coder用のSkillを一緒に使えます。</dd>
           <dt>Claude Codeで接続</dt>
           <dd>Sprint Coder用とClaude Code用のSkillを一緒に使えます。</dd>
           <dt>Codex CLIで接続</dt>
@@ -212,7 +214,11 @@ export function SkillSettingsSection({
                 <strong>/{ref.skillId}</strong>
                 {name !== ref.skillId && <> · {name}</>}
                 <small>
-                  {ref.source === 'claude' ? 'Claude Code' : 'Codex CLI'}
+                  {ref.source === 'claude'
+                    ? 'Claude Code'
+                    : ref.source === 'agents'
+                      ? 'Codex CLI'
+                      : ref.source}
                   {enabled ? '' : ' · 使用不可'} · {description}
                 </small>
               </li>

@@ -25,6 +25,15 @@ import { createPortableSkillFile } from './skill-compatibility';
 import { expandSkillArguments } from '../runtime-host/skill-arguments';
 import { clipPublicMessage, formatZodIssues } from './zod-issue-message';
 
+type SkillRuntime = 'codex' | 'claude' | 'grok' | 'provider';
+export type SkillCli = Exclude<SkillRef['source'], 'builtin' | 'created' | 'agents'> | 'codex';
+function nativeSkillSource(cli: SkillCli | 'provider') {
+  return cli === 'codex' ? 'agents' : cli === 'provider' ? null : cli;
+}
+function compatibilityRuntime(cli: SkillCli | 'provider'): SkillRuntime {
+  return cli === 'claude' || cli === 'codex' || cli === 'grok' ? cli : 'provider';
+}
+
 export type ResolvedTurnSkill = Readonly<{
   selection: TurnSkillSelection;
   name: string;
@@ -72,8 +81,36 @@ export class SkillSettingsService {
     return (await this.getStore()).exportCreated(skillId, digest, destinationParent, format);
   }
 
-  private nativeRoots(runtime: 'codex' | 'claude', workspaceRoots: readonly string[]): string[] {
+  private nativeRoots(runtime: SkillCli, workspaceRoots: readonly string[]): string[] {
     const home = this.input.homePath;
+    if (runtime !== 'codex' && runtime !== 'claude') {
+      const roots = {
+        opencode: {
+          project: ['.opencode', '.agents', '.claude'],
+          user: [join(home, '.config', 'opencode'), join(home, '.agents'), join(home, '.claude')],
+        },
+        antigravity: {
+          project: ['.agents', '.agent'],
+          user: [
+            join(home, '.gemini', 'config'),
+            join(home, '.gemini', 'antigravity-cli'),
+            join(home, '.gemini', 'antigravity'),
+          ],
+        },
+        cursor: {
+          project: ['.cursor', '.agents', '.claude'],
+          user: [join(home, '.cursor'), join(home, '.agents'), join(home, '.claude')],
+        },
+        grok: {
+          project: ['.grok', '.agents', '.claude'],
+          user: [join(home, '.grok'), join(home, '.agents'), join(home, '.claude')],
+        },
+      }[runtime];
+      return [
+        ...workspaceRoots.flatMap((root) => roots.project.map((dir) => join(root, dir, 'skills'))),
+        ...roots.user.map((root) => join(root, 'skills')),
+      ];
+    }
     return runtime === 'claude'
       ? [
           ...workspaceRoots.map((root) => join(root, '.claude', 'skills')),
@@ -90,18 +127,21 @@ export class SkillSettingsService {
   }
 
   async listCatalog(
-    runtime?: 'codex' | 'claude' | 'grok' | 'provider',
+    runtime?: SkillCli | 'provider',
     workspaceRoots: readonly string[] = [],
   ): Promise<SkillCatalog> {
     const store = await this.getStore();
     const selectable = await store.listSelectable();
-    if (runtime === 'codex' || runtime === 'claude') {
+    if (runtime && runtime !== 'provider') {
       for (const candidate of await store.nativeCandidates(
         runtime === 'claude' ? 'claude' : 'agents',
         this.nativeRoots(runtime, workspaceRoots),
+        runtime === 'opencode',
       )) {
         try {
-          selectable.push(await store.readNative(candidate));
+          selectable.push(
+            await store.readNative(candidate, undefined, runtime === 'codex' ? 'agents' : runtime),
+          );
         } catch (error) {
           if (!(error instanceof SkillStoreError) && !(error instanceof Error && 'code' in error))
             throw error;
@@ -224,7 +264,7 @@ export class SkillSettingsService {
     try {
       const nativeEntries: SkillCatalogSnapshotEntry[] = skills.flatMap((skill) => {
         const { source, skillId, digest } = skill.selection.ref;
-        if ((source !== 'agents' && source !== 'claude') || !skill.compatibility) return [];
+        if (source === 'builtin' || source === 'created' || !skill.compatibility) return [];
         return [
           {
             source,
@@ -375,31 +415,30 @@ export class SkillSettingsService {
   async resolveSelections(
     selections: readonly TurnSkillSelection[],
     defaultArguments?: string,
-    runtime: 'codex' | 'claude' | 'grok' | 'provider' = 'provider',
+    cli: SkillCli | 'provider' = 'provider',
     workspaceRoots: readonly string[] = [],
   ): Promise<ResolvedTurnSkill[]> {
+    const runtime = compatibilityRuntime(cli);
     const resolved = await Promise.all(
       selections.map(async (selection) => {
         const store = await this.getStore();
         const { source, skillId, digest } = selection.ref;
         let item: ResolvedSkillPackage;
-        if (source === 'claude' || source === 'agents') {
-          if (
-            (runtime !== 'codex' && runtime !== 'claude') ||
-            source !== (runtime === 'claude' ? 'claude' : 'agents')
-          )
+        if (source !== 'builtin' && source !== 'created') {
+          if (cli === 'provider' || source !== nativeSkillSource(cli))
             throw new SkillSettingsError(
               'INVALID_SKILL',
               '選択したモデルのCLIではこのSkillを使用できません',
             );
           const candidates = await store.nativeCandidates(
-            source,
-            this.nativeRoots(runtime, workspaceRoots),
+            source === 'claude' ? 'claude' : 'agents',
+            this.nativeRoots(cli, workspaceRoots),
+            cli === 'opencode',
           );
           const candidate = candidates.find((entry) => entry.skillId === skillId);
           if (!candidate)
             throw new SkillSettingsError('SOURCE_CHANGED', '選択したCLI Skillが見つかりません');
-          item = await store.readNative(candidate, digest);
+          item = await store.readNative(candidate, digest, source);
         } else {
           item = await store.resolveSelectable(source, skillId, digest);
         }

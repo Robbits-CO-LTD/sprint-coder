@@ -9,6 +9,10 @@ const SOURCE_ORDER: Readonly<Record<SkillSource, number>> = {
   claude: 1,
   agents: 2,
   created: 3,
+  opencode: 4,
+  antigravity: 5,
+  grok: 6,
+  cursor: 7,
 };
 
 export class SkillCatalogContextError extends Error {
