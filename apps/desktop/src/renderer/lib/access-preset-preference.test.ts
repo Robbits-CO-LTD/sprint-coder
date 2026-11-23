@@ -25,10 +25,16 @@ beforeEach(() => {
 });
 
 describe('access preset preference', () => {
-  it('starts safe and reuses the last confirmed selection, including full access', () => {
-    expect(accessPresetForNewTask()).toBe('ask');
-    rememberAccessPreset('auto');
+  it('starts in Auto and keeps that default when a single task changes preset', () => {
+    expect(readAccessPresetDefault()).toBe('auto');
+    rememberAccessPreset('full');
     expect(accessPresetForNewTask()).toBe('auto');
+  });
+
+  it('preserves the previous version’s last-choice setting when a selection was stored', () => {
+    window.localStorage.setItem('sprint-coder:last-access-preset', 'ask');
+    expect(readAccessPresetDefault()).toBe('last');
+    expect(accessPresetForNewTask()).toBe('ask');
     rememberAccessPreset('full');
     expect(accessPresetForNewTask()).toBe('full');
   });

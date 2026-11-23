@@ -394,9 +394,7 @@ describe('prompt context compiler', () => {
       expect(guided.context).not.toHaveProperty('desktopControl');
       expect(guided.content).toContain('Sprint Coder のデスクトップ操作（このTurnでは使えない）:');
       expect(guided.content).toContain('デスクトップ操作は Project を選んだ Task でだけ使える');
-      expect(guided.content).toContain(
-        '道具が無いとだけ答えず、Project（作業フォルダー）を選んだ Task で、もう一度頼むよう案内する',
-      );
+      expect(guided.content).toContain('回答の最後の行に「作業フォルダーを選んでください。」');
       expect(guided.content).toContain('使えるふりをせず');
       // The how-to section, with the command, stays out.
       expect(guided.content).not.toContain('skills get desktop');

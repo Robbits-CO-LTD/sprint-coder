@@ -3035,6 +3035,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-family: inherit;
   font-size: 14px;
   line-height: 1.55;
+  field-sizing: content;
   max-height: 140px;
   display: block;
 }
@@ -3398,6 +3399,7 @@ button.composer-permission-chip[aria-expanded='true'] {
    column's heading rather than as a second status line, and set in the rail's type so the eye ties
    the two together. */
 .mpv2-group-cue {
+  min-height: 1lh;
   padding: 0 10px;
   font-size: 10.5px;
   font-weight: 600;
@@ -3581,9 +3583,18 @@ button.composer-permission-chip[aria-expanded='true'] {
     }
   }
 }
+/* The popup opens upwards. Keep a line of feedback (including its action button) in place
+   while the query changes so neither the search field nor the scrollport moves. */
+.mpv2-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+}
 .mpv2-empty,
 .mpv2-more {
-  padding: 6px 10px;
+  padding: 0 2px;
   font-size: 11.5px;
   color: var(--text-secondary);
 }

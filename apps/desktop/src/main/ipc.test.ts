@@ -1,4 +1,5 @@
 import { TurnStreamingResources } from './turn-streaming-resources';
+import { SKILL_REQUEST_GUIDANCE } from '../chat-continuation';
 import { RetryableActionRegistry } from './retryable-action';
 import * as desktopControlModule from './desktop-control';
 import { describe, expect, it, vi } from 'vitest';
@@ -2913,6 +2914,7 @@ describe('Main image attachment dispatch boundary', () => {
       const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
       Object.assign(router, {
         managedWorkerTurn: new Map(),
+        githubSkillImports: new Map(),
         approvalCoordinator: { turnEnded },
         // Every Turn ending reaches the approval coordinator through `notifyTurnEnded`.
         managedCodingHarness: {
@@ -3000,6 +3002,7 @@ describe('Main image attachment dispatch boundary', () => {
           ['worker-b', { taskId: 'task-1', parentTurnId, released: new AbortController() }],
         ]),
         persistence: { getActiveTurnId: () => null },
+        githubSkillImports: new Map(),
         approvalCoordinator: { turnEnded },
         managedCodingHarness: { finishTurn },
       });
@@ -3032,6 +3035,7 @@ describe('Main image attachment dispatch boundary', () => {
       const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
       Object.assign(router, {
         managedWorkerTurn: new Map(),
+        githubSkillImports: new Map(),
         approvalCoordinator: { turnEnded: vi.fn() },
         managedCodingHarness: {
           broker: { getTurnSnapshot: () => started.get(missionTurnId) },
@@ -3395,7 +3399,11 @@ describe('Main image attachment dispatch boundary', () => {
         // Auto is never stricter than Ask: the command reaches the same card, and since Auto
         // decided nothing, no Auto row claims it was denied.
         await expect(decide('auto')).resolves.toEqual({
-          result: { decision: 'approval_required', reason },
+          result: {
+            decision: 'approval_required',
+            reason,
+            checkProjectSettings: expect.any(Function),
+          },
           autoDecisions: [undefined],
         });
         await expect(decide('ask')).resolves.toMatchObject({
@@ -3499,6 +3507,50 @@ describe('Main image attachment dispatch boundary', () => {
       desktop.mockRestore();
       await rm(workspacePath, { recursive: true, force: true });
     }
+  });
+
+  it('does not commit a late review when Stop arrives before a model reply is recorded', async () => {
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace' })
+      .entries[0]!;
+    const router = Object.create(IpcRouter.prototype) as {
+      evaluateToolPermission(
+        request: ToolAuthorizationRequest,
+        capability: string,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+    };
+    const stop = new AbortController();
+    const commitEvaluation = vi.fn();
+    const review = vi.fn(async (_request: unknown, signal: AbortSignal) => {
+      expect(signal).toBe(stop.signal);
+      stop.abort(new Error('Stopped before commit'));
+      return { decision: 'allow_once' };
+    });
+    Object.assign(router, {
+      managedWorkerCall: new Map(),
+      autoReviewer: { review },
+      permissionBroker: {
+        getPolicy: () => ({ preset: 'auto', policyEpoch: 1 }),
+        previewExecutionSpec: () => ({ decision: 'approval_required', policyEpoch: 1 }),
+        commitEvaluation,
+      },
+    });
+    await expect(
+      router.evaluateToolPermission(
+        {
+          context: { taskId: 'task', turnId: 'turn', workspaceId: 'workspace', policyEpoch: 1 },
+          callId: 'call',
+          entry,
+          input: {},
+        },
+        'shell.execute',
+        stop.signal,
+      ),
+    ).rejects.toThrow('Stopped before commit');
+    expect(review).toHaveBeenCalledOnce();
+    expect(commitEvaluation).not.toHaveBeenCalled();
   });
 
   it('consults no Auto reviewer for a desktop-control run that touches no other app', async () => {
@@ -7613,6 +7665,16 @@ describe('Provider workspace tool capability fallback', () => {
   it('preserves policy denial and upgrades only command allows to explicit approval', () => {
     expect(
       requireExplicitProviderCommandApproval(
+        { decision: 'allow', reason: 'project_settings_allow' },
+        true,
+        'auto',
+      ),
+    ).toEqual({
+      decision: 'allow',
+      reason: 'project_settings_allow',
+    });
+    expect(
+      requireExplicitProviderCommandApproval(
         { decision: 'deny', reason: 'immutable_deny' },
         true,
         'ask',
@@ -8294,6 +8356,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.providersLowerRateLimits]: providerConnectionRateLimitLowerInputSchema,
   [IPC_CHANNELS.providersSetAutomaticModelRelease]: providerConnectionModelReleaseUpdateInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
+  [IPC_CHANNELS.permissionsReviewProjectRules]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
   [IPC_CHANNELS.approvalsListPending]: taskIdPayloadSchema,
   [IPC_CHANNELS.approvalsListRecent]: taskIdPayloadSchema,
@@ -8676,6 +8739,15 @@ describe('Ollama empty-round integration', () => {
       emptyRounds: 1,
       calls: 3,
       completes: true,
+      partial: false,
+      images: false,
+      teamTurn: true,
+    },
+    {
+      providerId: 'ollama',
+      emptyRounds: 1,
+      calls: 3,
+      completes: true,
       partial: 'whitespace',
       images: false,
     },
@@ -8720,8 +8792,8 @@ describe('Ollama empty-round integration', () => {
       images: true,
     },
   ])(
-    'bounds recovery without repeating prior tools: $providerId / empty=$emptyRounds / partial=$partial / images=$images',
-    async ({ providerId, emptyRounds, calls, completes, partial, images }) => {
+    'bounds recovery without repeating prior tools: $providerId / empty=$emptyRounds / partial=$partial / images=$images / team=$teamTurn',
+    async ({ providerId, emptyRounds, calls, completes, partial, images, teamTurn = false }) => {
       const taskId = 'empty-recovery-task';
       const turnId = 'empty-recovery-turn';
       const connection = {
@@ -8805,6 +8877,7 @@ describe('Ollama empty-round integration', () => {
           requireVerifiedForExecution: vi.fn().mockResolvedValue(connection),
         },
         providerRegistry: { resolve: () => ({ execute, cancel: vi.fn() }) },
+        acknowledgeRuntimeContext: vi.fn(),
         modelCatalog: { find: () => ({ toolCalling: { value: true } }) },
         permissionBroker: {
           evaluate: () => ({
@@ -8900,9 +8973,18 @@ describe('Ollama empty-round integration', () => {
       const start = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
         started: unknown,
         connectionId: string,
+        teamTurn: boolean,
       ) => Promise<void>;
-      await start.call(router, started, connection.id);
+      await start.call(router, started, connection.id, teamTurn);
       expect(execute).toHaveBeenCalledTimes(calls);
+      const first = execute.mock.calls[0]?.[1] as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(
+        first.messages.some(
+          ({ role, content }) => role === 'system' && content === SKILL_REQUEST_GUIDANCE,
+        ),
+      ).toBe(!teamTurn);
       expect(dispatch).toHaveBeenCalledOnce();
       expect(complete).toHaveBeenCalledTimes(completes ? 1 : 0);
       expect(fail).toHaveBeenCalledTimes(completes ? 0 : 1);
@@ -8976,6 +9058,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       runtimeDiagnosticContextByTurn: new Map(),
       pendingProjectMemoriesByTurn: new Map(),
       managedWorkerTurn: new Map(),
+      githubSkillImports: new Map(),
       approvalCoordinator: { turnEnded: vi.fn() },
       pushRuntimeStatus,
       publish,

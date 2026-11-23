@@ -92,7 +92,7 @@ export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 const ACCESS_OPTIONS: readonly SetupOption<AccessPresetDefault>[] = [
   { value: 'last', label: '前回選択した設定', description: '直近の選択を引き継ぐ' },
   { value: 'ask', label: '実行前に確認', description: '作業のたびに確認' },
-  { value: 'auto', label: '安全時は自動', description: '安全な作業は自動で' },
+  { value: 'auto', label: '自動モード', description: '安全な作業は自動で' },
   { value: 'full', label: 'フルアクセス', description: '使う前に確認が出ます' },
 ];
 
@@ -963,13 +963,13 @@ export function SetupWizard({
   const lastLabel = lastAccess ? optionLabel(ACCESS_OPTIONS, lastAccess) : null;
   const accessDisplay = (value: AccessPresetDefault): string =>
     value === 'last'
-      ? `${optionLabel(ACCESS_OPTIONS, 'last')}（${lastLabel ? `今は「${lastLabel}」` : 'はじめは「実行前に確認」'}）`
+      ? `${optionLabel(ACCESS_OPTIONS, 'last')}（${lastLabel ? `今は「${lastLabel}」` : 'はじめは「自動モード」'}）`
       : optionLabel(ACCESS_OPTIONS, value);
   const accessOptions = ACCESS_OPTIONS.map((option) =>
     option.value === 'last'
       ? {
           ...option,
-          description: lastLabel ? `今は「${lastLabel}」を引き継ぐ` : 'はじめは「実行前に確認」',
+          description: lastLabel ? `今は「${lastLabel}」を引き継ぐ` : 'はじめは「自動モード」',
         }
       : option,
   );

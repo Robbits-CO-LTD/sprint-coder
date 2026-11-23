@@ -36,6 +36,7 @@ import {
 } from './stable-file-snapshot';
 
 const MAX_FILES = 256;
+export const MAX_EXECUTABLE_SKILL_CHARACTERS = 40_000;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_DEPTH = 8;
@@ -260,7 +261,7 @@ export class SkillStore {
       const content = file.bytes.toString('utf8');
       if (!Buffer.from(content, 'utf8').equals(file.bytes))
         throw new SkillStoreError('INVALID_SKILL', `Skill file must be UTF-8: ${file.path}`);
-      if (containsCredential(content))
+      if (containsSkillCredential(content))
         throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${file.path}`);
       totalBytes += file.bytes.byteLength;
       if (totalBytes > 700 * 1024)
@@ -343,6 +344,7 @@ export class SkillStore {
   async installCreatedSkill(
     skillId: string,
     files: readonly CreatedSkillFile[],
+    beforeCommit?: () => void,
   ): Promise<SelectableSkill> {
     const validated = this.validateCreatedSkill(skillId, files);
 
@@ -366,7 +368,7 @@ export class SkillStore {
         totalBytes += bytes.byteLength;
         if (totalBytes > MAX_TOTAL_BYTES)
           throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
-        if (containsCredential(file.content))
+        if (containsSkillCredential(file.content))
           throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${path}`);
         const target = safeChild(staging, path);
         await ensurePrivateDirectory(dirname(target));
@@ -381,7 +383,9 @@ export class SkillStore {
         teamBlueprintSchema.parse(JSON.parse(raw));
       }
       await syncDirectoryTree(staging);
+      beforeCommit?.();
       await this.ensureRevisionFromDirectory('created', skillId, validated.digest, staging);
+      beforeCommit?.();
       await rename(staging, destination);
       await syncDirectory(createdRoot);
       const installed = await this.readSelectableAt('created', skillId, true);
@@ -421,7 +425,7 @@ export class SkillStore {
       totalBytes += file.bytes.byteLength;
       if (totalBytes > MAX_TOTAL_BYTES)
         throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
-      if (containsCredential(file.content))
+      if (containsSkillCredential(file.content))
         throw new SkillStoreError('INVALID_SKILL', `認証情報を含む可能性があります: ${file.path}`);
     }
     const skillFile = canonical.find(({ path }) => path === 'SKILL.md');
@@ -792,7 +796,7 @@ export class SkillStore {
         'revision.json',
         '.disabled',
         '.auto-allowed',
-        ...(format === 'portable' ? ['openai.yaml'] : []),
+        ...(format === 'portable' ? ['agents/openai.yaml', 'openai.yaml'] : []),
       ]),
       secureDestination: false,
     });
@@ -923,8 +927,8 @@ export class SkillStore {
     const file = snapshot.files.find((item) => item.path === 'SKILL.md')!;
     const content = file.bytes.toString('utf8');
     if (
-      content.length > 40_000 ||
-      snapshot.files.some((item) => containsCredential(item.bytes.toString('utf8')))
+      content.length > MAX_EXECUTABLE_SKILL_CHARACTERS ||
+      snapshot.files.some((item) => containsSkillCredential(item.bytes.toString('utf8')))
     )
       throw new SkillStoreError('INVALID_SKILL', 'Native Skill is not eligible for dispatch');
     const runtime = candidate.provider === 'claude' ? 'claude' : 'codex';
@@ -1013,7 +1017,7 @@ export class SkillStore {
       this.currentPath(source, skillId),
     );
     let content = await readFile(join(packagePath, 'SKILL.md'), 'utf8');
-    if (content.length > 40_000)
+    if (content.length > MAX_EXECUTABLE_SKILL_CHARACTERS)
       throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is too large to execute');
     if (current.kind === 'team') {
       const blueprintText = await readFile(join(packagePath, 'team', 'blueprint.json'), 'utf8');
@@ -1291,8 +1295,12 @@ async function readCompatibilityFiles(
     if (depth > MAX_DEPTH)
       throw new SkillStoreError('INVALID_SKILL', 'Skill compatibility scan is too deep');
     for (const name of (await readdir(directory)).sort()) {
-      if (name.startsWith('.') || name === 'manifest.json' || name === 'revision.json') continue;
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      if (
+        name.startsWith('.') ||
+        (depth === 0 && (name === 'manifest.json' || name === 'revision.json'))
+      )
+        continue;
+      const relativePath = relativeDirectory === '' ? name : relativeDirectory + '/' + name;
       const absolutePath = safeChild(packagePath, relativePath);
       const item = await lstat(absolutePath);
       if (item.isSymbolicLink() || (!item.isDirectory() && !item.isFile()))
@@ -1330,7 +1338,7 @@ function normalizeDraftFilePath(path: string): string {
   return normalized;
 }
 
-function containsCredential(content: string): boolean {
+export function containsSkillCredential(content: string): boolean {
   return [
     /\bAuthorization\s*:\s*(?:Bearer|Basic)\s+\S+/iu,
     /\bCookie\s*:\s*[^\r\n]{8,}/iu,
@@ -1629,8 +1637,12 @@ async function digestDirectory(root: string): Promise<string> {
     if (depth > MAX_DEPTH)
       throw new SkillStoreError('INVALID_SKILL', 'Skill directory nesting is too deep');
     for (const name of (await readdir(directory)).sort()) {
-      if (name === 'manifest.json' || name === 'revision.json' || name.startsWith('.')) continue;
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      if (
+        name.startsWith('.') ||
+        (depth === 0 && (name === 'manifest.json' || name === 'revision.json'))
+      )
+        continue;
+      const relativePath = relativeDirectory === '' ? name : relativeDirectory + '/' + name;
       const absolutePath = safeChild(root, relativePath);
       const item = await lstat(absolutePath);
       if (item.isSymbolicLink() || (!item.isDirectory() && !item.isFile()))
@@ -1678,8 +1690,8 @@ async function copySafeDirectory(
     )
       throw new SkillStoreError('UNSAFE_SOURCE', 'Skill directory changed identity');
     for (const name of (await readdir(sourceDirectory)).sort()) {
-      if (name.startsWith('.') || options.omit.has(name)) continue;
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      const relativePath = relativeDirectory === '' ? name : relativeDirectory + '/' + name;
+      if (name.startsWith('.') || options.omit.has(relativePath)) continue;
       const sourcePath = safeChild(sourceRoot, relativePath);
       const destinationPath = safeChild(destinationRoot, relativePath);
       const before = await lstat(sourcePath, { bigint: true });

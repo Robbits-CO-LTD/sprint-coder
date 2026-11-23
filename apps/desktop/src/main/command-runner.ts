@@ -101,6 +101,7 @@ type PreparedIdentity = {
   pathGuard: PathGuard;
   executable: SealedExecutableIdentity;
   workspaceRoots: readonly string[];
+  trustedExecutableName?: string;
 };
 
 const issuedSpecs = new WeakMap<object, PreparedIdentity>();
@@ -159,10 +160,19 @@ export async function prepareExecutionSpec(
   input: PrepareExecutionSpecInput,
 ): Promise<ExecutionSpec> {
   const controlledEnvironment = buildControlledEnvironment();
-  const executablePath = isAbsolute(input.executable)
+  const absolute = isAbsolute(input.executable);
+  const executablePath = absolute
     ? input.executable
     : await resolveBareExecutable(input.executable, controlledEnvironment);
   const executableCanonicalPath = await realpath(executablePath);
+  const lookupName = basename(input.executable);
+  // An absolute spelling gains a bare-name rule only when a fresh controlled PATH lookup
+  // independently identifies this executable. A same-named file in the workspace never does.
+  const namedPath = absolute
+    ? await resolveBareExecutable(lookupName, controlledEnvironment)
+        .then((path) => realpath(path))
+        .catch(() => null)
+    : executableCanonicalPath;
   rejectArgvRepeatingExecutable(input.executable, executableCanonicalPath, input.argv);
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
@@ -216,6 +226,7 @@ export async function prepareExecutionSpec(
     pathGuard,
     executable: executableIdentity,
     workspaceRoots: [...(input.workspaceRoots ?? [input.workspacePath])],
+    ...(namedPath === executableCanonicalPath ? { trustedExecutableName: lookupName } : {}),
   });
   return spec;
 }
@@ -683,6 +694,23 @@ export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {
       'ExecutionSpec was not sealed by CommandRunner preparation',
     );
   return identity.pathGuard;
+}
+
+/** For project rules, a bare-name allow belongs only to a command found on the controlled PATH. */
+export function projectCommandFacts(input: unknown) {
+  if (typeof input !== 'object' || input === null) return undefined;
+  const identity = issuedSpecs.get(input);
+  if (identity === undefined) return undefined;
+  const spec = input as ExecutionSpec;
+  return {
+    guard: identity.pathGuard,
+    target: {
+      tool: 'Bash' as const,
+      executable: spec.absoluteExecutable,
+      argv: spec.argv,
+      trustedExecutableName: identity.trustedExecutableName,
+    },
+  };
 }
 
 /**

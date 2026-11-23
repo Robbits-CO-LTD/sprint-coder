@@ -722,7 +722,7 @@ describe('access preset expansion', () => {
     });
   });
 
-  // issue #526: 「安全時は自動」は Workspace 内のファイルの作成・編集（Edit Saga の workspace.write）
+  // issue #526: 「自動モード」は Workspace 内のファイルの作成・編集（Edit Saga の workspace.write）
   // だけを自動許可し、コマンド・Workspace 外への書き込みは自動レビューのまま。
   describe('Workspace file edits under Auto (issue #526)', () => {
     const PROTECTED = [

@@ -16,6 +16,7 @@ import {
   BUILTIN_SKILL_IDS,
   SkillStore,
   SkillStoreError,
+  type CreatedSkillFile,
   type ResolvedSkillPackage,
   type SkillCatalogSnapshotEntry,
 } from './skill-store';
@@ -251,6 +252,50 @@ export class SkillSettingsService {
         );
       throw error;
     }
+  }
+
+  async acceptsGithubSkillPackage(skillId: string, files: readonly CreatedSkillFile[]) {
+    const store = await this.getStore();
+    try {
+      const validated = store.validateCreatedSkill(skillId, files);
+      return validated.kind === 'chat' && !validated.compatibility.requiresConversion;
+    } catch (error) {
+      if (
+        error instanceof SkillStoreError &&
+        (error.code === 'INVALID_SKILL' || error.code === 'UNSAFE_SOURCE')
+      )
+        return false;
+      throw error;
+    }
+  }
+
+  async installGithubSkill(
+    skillId: string,
+    files: readonly CreatedSkillFile[],
+    beforeCommit: () => void,
+  ) {
+    const store = await this.getStore();
+    const validation = store.validateCreatedSkill(skillId, files);
+    if (validation.kind !== 'chat' || validation.compatibility.requiresConversion)
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        'このSkillは原文のままChat Skillとして使用できません。',
+      );
+    beforeCommit();
+    const current = (await store.listSelectable()).find(
+      (item) => item.source === 'created' && item.skillId === skillId,
+    );
+    if (current && current.digest === validation.digest) {
+      if (!current.enabled)
+        throw new SkillSettingsError(
+          'INVALID_SKILL',
+          '同じSkillは登録済みで、設定で無効になっています。',
+        );
+      return 'existing' as const;
+    }
+    await store.installCreatedSkill(skillId, files, beforeCommit);
+    await this.refreshContextCatalog();
+    return 'installed' as const;
   }
 
   async listDrafts(): Promise<SkillDraft[]> {

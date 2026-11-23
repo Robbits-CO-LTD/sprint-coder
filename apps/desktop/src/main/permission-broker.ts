@@ -11,6 +11,13 @@ import {
   type PermissionOperation,
 } from '@sprint-coder/domain';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import {
+  matchProjectPermissionRules,
+  projectRuleAllowsReadTree,
+  type ProjectPermissionSettings,
+  type ProjectPermissionTarget,
+} from './project-permission-settings';
 import type { PermissionPolicyRecord, PersistenceClient } from './persistence';
 import {
   pathGuardIdentityDigest,
@@ -41,11 +48,20 @@ export interface PolicyRevocationCoordinator {
 
 type PermissionEvaluationInput = {
   taskId: string;
+  /** Ask the selected AI about a managed read unless an explicit rule or grant already covers it. */
+  reviewWorkspaceRead?: boolean;
   turnId?: string;
   request: PermissionRequest;
   basePolicy: PermissionPolicyBase;
   now: string;
   pathGuard?: PathGuard;
+  projectGuards?: readonly PathGuard[];
+  projectReadTree?: boolean;
+  projectCommand?: { guard: PathGuard; target: Extract<ProjectPermissionTarget, { tool: 'Bash' }> };
+  projectStdin?: {
+    rootId: string | undefined;
+    target: Extract<ProjectPermissionTarget, { tool: 'Bash' }>;
+  };
   /** A sealed, execution-specific Workspace such as a Team Worker isolation root. */
   workspace?: EffectiveWorkspaceSet;
   /** The sealed Workspace is an app-created Team isolation root, not app-private data. */
@@ -75,11 +91,25 @@ type PermissionPersistence = Pick<
   | 'commitPermissionEvaluation'
 >;
 
+function fileRuleDecision(
+  settings: ProjectPermissionSettings,
+  tool: 'Read' | 'Edit',
+  root: string,
+  path: string,
+) {
+  const name = relative(root, path);
+  if (isAbsolute(name) || name === '..' || name.startsWith('..' + sep)) return 'deny';
+  return matchProjectPermissionRules(settings, { tool, relativePath: name });
+}
+
 export class PermissionBroker {
   private readonly notificationsInFlight = new Map<string, Promise<void>>();
   constructor(
     private readonly persistence: PermissionPersistence,
     private readonly coordinator: PolicyRevocationCoordinator = new NoActivePolicySubjects(),
+    private readonly projectPermissions?: {
+      snapshot(workspacePath: string): ProjectPermissionSettings;
+    },
   ) {}
 
   getPolicy(taskId: string): PermissionPolicyRecord {
@@ -230,13 +260,104 @@ export class PermissionBroker {
     return evaluation;
   }
 
-  private evaluateCurrentPolicy(input: {
-    taskId: string;
-    request: PermissionRequest;
-    basePolicy: PermissionPolicyBase;
-    now: string;
-    pathGuard?: PathGuard;
-  }): PermissionEvaluation {
+  private policyWorkspace(taskId: string, turnId?: string) {
+    return turnId === undefined
+      ? this.persistence.getEffectiveWorkspaceSet(taskId)
+      : this.persistence.readTurnWorkspaceSetForTask(taskId, turnId);
+  }
+
+  private settingsForRoot(
+    workspace: EffectiveWorkspaceSet | null,
+    issuedRootId: string | undefined,
+  ) {
+    const rootId = issuedRootId === 'legacy-primary' ? workspace?.primaryRootId : issuedRootId;
+    const root = workspace?.roots.find((entry) => entry.rootId === rootId);
+    // Team isolation preserves root IDs. The original root, not a worker-editable worktree,
+    // supplies the rules even when the actual guarded read/write takes place under isolation.
+    return root === undefined ? undefined : this.projectPermissions?.snapshot(root.path);
+  }
+
+  workspaceReadFilter(
+    taskId: string,
+    turnId: string,
+    guard: PathGuard,
+  ): (absolutePath: string) => boolean {
+    if (!this.projectPermissions) return () => true;
+    const settings = this.settingsForRoot(this.policyWorkspace(taskId, turnId), guard.rootId);
+    if (!settings?.valid) return () => false;
+    // The directory action was authorized separately. Searching many files only needs to
+    // exclude names denied by this snapshot.
+    const readDenials = settings.deny.filter((rule) => rule === 'Read' || rule.startsWith('Read('));
+    if (!readDenials.length) return () => true;
+    const restrictions = { ...settings, allow: [], deny: readDenials };
+    return (path) => fileRuleDecision(restrictions, 'Read', guard.workspacePath, path) !== 'deny';
+  }
+
+  projectDecision(input: PermissionEvaluationInput): 'deny' | 'allow' | null {
+    if (!this.projectPermissions) return null;
+    const { request, projectCommand, projectStdin } = input;
+    const guards = input.projectGuards ?? (input.pathGuard ? [input.pathGuard] : []);
+    if (!projectCommand && !projectStdin && guards.length === 0) return null;
+    const workspace = this.policyWorkspace(input.taskId, input.turnId);
+    if (projectCommand) {
+      const settings = this.settingsForRoot(workspace, projectCommand.guard.rootId);
+      if (!settings || !workspace) return 'deny';
+      const target = projectCommand.target;
+      // A PATH entry can be a Workspace folder on Windows. A project-built namesake must not
+      // inherit an allow written for an installed program on the machine.
+      const inWorkspace = workspace.roots.some((root) => {
+        const name = relative(root.path, target.executable);
+        return !isAbsolute(name) && name !== '..' && !name.startsWith('..' + sep);
+      });
+      return matchProjectPermissionRules(
+        settings,
+        inWorkspace ? { ...target, trustedExecutableName: undefined } : target,
+      );
+    }
+    if (projectStdin) {
+      // stdin carries new instructions for an existing process. Its parent's allow never grants it.
+      const settings = this.settingsForRoot(workspace, projectStdin.rootId);
+      return !settings || matchProjectPermissionRules(settings, projectStdin.target) === 'deny'
+        ? 'deny'
+        : null;
+    }
+    if (request.capability !== 'workspace.read' && request.capability !== 'workspace.write')
+      return null;
+    const tool = request.capability === 'workspace.read' ? 'Read' : 'Edit';
+    let allAllowed = guards.length > 0;
+    const snapshots = new Map<string, ProjectPermissionSettings>();
+    for (const guard of guards) {
+      if (!isIssuedPathGuard(guard)) return 'deny';
+      const settings = snapshots.get(guard.rootId) ?? this.settingsForRoot(workspace, guard.rootId);
+      if (!settings) return 'deny';
+      // A hard-linked image may also be named by a denied path; its other names are not sealed.
+      if (
+        tool === 'Read' &&
+        guard.targetIdentity?.kind === 'file' &&
+        guard.targetIdentity.nlink > 1 &&
+        settings.deny.some((rule) => rule === 'Read' || rule.startsWith('Read('))
+      )
+        return 'deny';
+      snapshots.set(guard.rootId, settings);
+      const paths = new Set([
+        guard.resolvedPath,
+        resolve(guard.workspacePath, guard.originalTargetPath),
+      ]);
+      for (const path of paths) {
+        const decision = fileRuleDecision(settings, tool, guard.workspacePath, path);
+        if (decision === 'deny') return 'deny';
+        if (decision !== 'allow') allAllowed = false;
+        if (
+          input.projectReadTree &&
+          !projectRuleAllowsReadTree(settings, relative(guard.workspacePath, path))
+        )
+          allAllowed = false;
+      }
+    }
+    return allAllowed && request.resource.kind === 'workspace-path' ? 'allow' : null;
+  }
+
+  private evaluateCurrentPolicy(input: PermissionEvaluationInput): PermissionEvaluation {
     const stored = this.persistence.getPermissionPolicy(input.taskId);
     const grants = this.persistence.listPermissionGrants(
       input.taskId,
@@ -244,6 +365,13 @@ export class PermissionBroker {
       input.now,
     );
     const expanded = stored.expandedPolicy;
+    const projectDecision = this.projectDecision(input);
+    const projectRule = {
+      capability: input.request.capability,
+      resourceSet: { kind: 'all' as const },
+      operations: [input.request.operation],
+      auditReason: projectDecision === 'allow' ? 'project_settings_allow' : 'project_settings_deny',
+    };
     return evaluatePermissionPolicy({
       request: input.request,
       now: input.now,
@@ -251,6 +379,7 @@ export class PermissionBroker {
         ...input.basePolicy,
         projectDeny: [
           ...input.basePolicy.projectDeny,
+          ...(projectDecision === 'deny' ? [projectRule] : []),
           ...stored.revokedCapabilities.map((capability) => ({
             capability,
             resourceSet: { kind: 'all' as const },
@@ -259,7 +388,18 @@ export class PermissionBroker {
           })),
         ],
         rememberedGrants: grants,
-        allowRules: [...(input.basePolicy.allowRules ?? []), ...expanded.allowRules],
+        allowRules: [
+          ...(input.basePolicy.allowRules ?? []),
+          ...expanded.allowRules.filter(
+            (rule) =>
+              !(
+                stored.preset === 'auto' &&
+                input.reviewWorkspaceRead &&
+                rule.auditReason === 'preset_auto_safe'
+              ),
+          ),
+          ...(projectDecision === 'allow' ? [projectRule] : []),
+        ],
         immutableDeny: [
           ...(input.basePolicy.immutableDeny ?? []),
           ...(expanded.immutableDeny ?? []),

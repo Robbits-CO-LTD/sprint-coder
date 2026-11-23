@@ -2019,16 +2019,25 @@ export const useAppStore = create<AppState>((set, get) => {
         }
       }
       try {
-        const task = await window.sprintCoder.tasks.create(
-          projectId === undefined ? {} : { projectId },
-        );
-        set((state) => ({ tasks: [task, ...state.tasks] }));
-        await get().selectTask(task.id);
         const preset = accessPresetForNewTask();
+        const initialPreset = preset === 'full' ? 'ask' : preset;
+        const task = await window.sprintCoder.tasks.create({
+          ...(projectId === undefined ? {} : { projectId }),
+          // Full access still needs the separate native confirmation. Start at Ask until accepted.
+          ...(initialPreset === 'auto' ? {} : { initialAccessPreset: initialPreset }),
+        });
+        set((state) => ({
+          tasks: [task, ...state.tasks],
+          permissionByTask: {
+            ...state.permissionByTask,
+            [task.id]: { preset: initialPreset, policyEpoch: 0 },
+          },
+        }));
+        await get().selectTask(task.id);
         // `setAccessPreset` crosses the permissions IPC boundary. Main asks for native confirmation
         // the first time `full` is accepted on this installation; declining leaves the newly
         // created Task at the initial `ask` preset.
-        if (preset !== 'ask') await get().setAccessPreset(task.id, preset);
+        if (preset === 'full') await get().setAccessPreset(task.id, preset);
         if (projectId !== undefined) void get().refreshProjects();
         return task;
       } catch (err) {

@@ -62,6 +62,68 @@ it('reads qualified mentions from every contracted source and leaves unknown qua
   expect(skillMentions('$unknown:review', [...selections, item('unknown', 'created')])).toEqual([]);
 });
 const taskId = 'inline-skills';
+const completedReply = {
+  id: 'reply',
+  taskId,
+  turnId: 'previous-turn',
+  author: 'assistant' as const,
+  attachments: [],
+  createdAt: '2026-11-22T00:00:00Z',
+};
+
+it('continues the same conversation with the enabled Skill the user approves', async () => {
+  const creator = item('skill-creator', 'builtin');
+  await withComposer('', [creator], [], async ({ container, send }) => {
+    const button = () =>
+      [...container.querySelectorAll('button')].find(
+        (element) => element.textContent === 'builtin/skill-creator を使って続ける',
+      );
+    await act(async () =>
+      useAppStore.setState({
+        messagesByTask: {
+          [taskId]: [{ ...completedReply, content: '使用するSkill「builtin/skill-creator」' }],
+        },
+        skillCatalog: [{ ...creator, enabled: false }],
+      }),
+    );
+    expect(button()).toBeUndefined();
+    await act(async () => useAppStore.setState({ skillCatalog: [creator] }));
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => button()!.click());
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId,
+        skills: [{ kind: creator.kind, ref: creator.ref }],
+      }),
+    );
+  });
+});
+
+it('waits for a folder selection before resuming a folderless chat', async () => {
+  await withComposer('', [], [], async ({ container, send }) => {
+    const select = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ name: 'demo', path: '/demo' });
+    Object.assign(window.sprintCoder!, { workspace: { select } });
+    const button = (label: string) =>
+      [...container.querySelectorAll('button')].find((element) => element.textContent === label);
+    await act(async () =>
+      useAppStore.setState({
+        messagesByTask: {
+          [taskId]: [{ ...completedReply, content: '作業フォルダーを選んでください。' }],
+        },
+      }),
+    );
+    await act(async () => button('作業フォルダーを選ぶ')!.click());
+    expect(button('この作業フォルダーで続ける')).toBeUndefined();
+    await act(async () => button('作業フォルダーを選ぶ')!.click());
+    expect(select).toHaveBeenCalledWith(taskId);
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => button('この作業フォルダーで続ける')!.click());
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ taskId, skills: [] }));
+  });
+});
 const teamDraft = '/team リポジトリを並列調査して';
 const firstSelection = { kind: first.kind, ref: first.ref };
 

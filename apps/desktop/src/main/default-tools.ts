@@ -901,6 +901,11 @@ export function registerCommandRunnerTool(
           : { desktopControlExpectedWindowOwner: control.desktopControlExpectedWindowOwner }),
         ...(desktopSession === undefined ? {} : { desktopControlSession: desktopSession }),
         beforeSpawn: () => {
+          if (control.checkProjectSettings?.() === false)
+            throw new CommandRunnerError(
+              'EXECUTION_SPEC_INVALID',
+              'プロジェクトの権限設定が変わったため、このコマンドを停止しました。',
+            );
           // A run the Full access preset allowed without a card is judged again here, just before
           // its process starts: after the Task's session was prepared and its turn in the Task's
           // order came, both of which can take long. Back to ask or auto meanwhile (or a Turn that
