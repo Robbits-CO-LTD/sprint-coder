@@ -10,6 +10,7 @@ import {
 } from './ipc';
 import { createEmptyToolCatalogSnapshot, MANAGED_EXEC_COMMAND_TOOL } from './default-tools';
 import * as editBaseline from './edit-baseline';
+import * as promptContext from './prompt-context';
 import { ModelCatalogService } from './model-catalog-service';
 import type { StartedTurn } from './persistence';
 import type { RuntimeHostClient } from './runtime-host';
@@ -272,6 +273,39 @@ describe('Grok CLI Main routing', () => {
     await pending;
     expect(resources.size).toBe(0);
     expect(grok.start).not.toHaveBeenCalled();
+  });
+
+  it('allocates no streaming lease or runtime after cancellation during Git discovery', async () => {
+    const { router, grok, resources } = createHarness();
+    let finish!: () => void;
+    const wait = new Promise<Awaited<ReturnType<typeof promptContext.capturePromptWorkspace>>>(
+      (resolve) => {
+        finish = () => resolve({ vcs: [], workspaceRules: [] });
+      },
+    );
+    let announce!: () => void;
+    const discovered = new Promise<void>((resolve) => {
+      announce = resolve;
+    });
+    const capture = vi.spyOn(promptContext, 'capturePromptWorkspace').mockImplementation(() => {
+      announce();
+      return wait;
+    });
+    const canceled = new Set<string>();
+    Object.assign(router, { canceledRuntimeTurns: canceled });
+    try {
+      const pending = router.startSelectedRuntime(started);
+      await discovered;
+      expect(resources.size).toBe(0);
+      canceled.add(started.turnId);
+      finish();
+      await pending;
+      expect(resources.size).toBe(0);
+      expect(grok.start).not.toHaveBeenCalled();
+    } finally {
+      finish();
+      capture.mockRestore();
+    }
   });
 
   it('begins an external Provider lease before dispatch without starting workspace watchers', async () => {

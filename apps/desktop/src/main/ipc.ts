@@ -290,7 +290,11 @@ import {
 } from './image-attachment-capability';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
-import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
+import {
+  capturePromptWorkspace,
+  compilePromptGuidance,
+  injectPromptGuidance,
+} from './prompt-context';
 import type {
   PersistedTurnSkill,
   ImageAttachmentAcceptanceSelection,
@@ -6257,6 +6261,17 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
+    const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
+    const promptWorkspace =
+      external || started.runtimeKind === 'mock'
+        ? undefined
+        : await capturePromptWorkspace(runtimeWorkspaceSet);
+    if (
+      promptWorkspace !== undefined &&
+      (this.canceledRuntimeTurns.has(started.turnId) ||
+        this.persistence.getActiveTurnId(taskId) !== started.turnId)
+    )
+      return;
     if (this.turnStreamingResources.begin(taskId, started.turnId) === undefined) return;
     const importRequest = userChatInput
       ? githubSkillRequest(
@@ -6459,7 +6474,6 @@ export class IpcRouter {
         'INVALID_SKILL',
         `${blockedSkill.name}は選択中のRuntimeで実行できません。Portable版へ変換してください。`,
       );
-    const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
     const toolCatalogSnapshot = this.managedCodingHarness.startTurn(
       {
         taskId,
@@ -6534,6 +6548,7 @@ export class IpcRouter {
           .map(toRuntimeContextFragment),
         compilePromptGuidance({
           workspace: runtimeWorkspaceSet,
+          ...promptWorkspace,
           toolCatalog: toolCatalogSnapshot,
           // What the agent may do through the managed tools, which under Ask is more than the
           // CLI's own read-only scope: each write and command waits on its card (issue #826).
