@@ -38,14 +38,25 @@ const execFileAsync = promisify(execFile);
 
 const tempDirs: string[] = [];
 
+const recoveryTestFile = 'src/main/persistence-recovery.test.ts';
+const recoverySuiteName = 'database corruption recovery (backup/restore)';
+const crashCheckpoints = [
+  'after_main_retired_before_sidecar_cleanup',
+  'after_corrupt_wal_bundled',
+  'after_main_retired',
+  'after_staging_validated',
+  'before_publish',
+] as const;
+const crashTestName = (checkpoint: string) =>
+  `resumes recovery after a process exit at ${checkpoint}`;
+const crashGroupPatterns = [
+  'resumes recovery after a process exit at (after_main_retired_before_sidecar_cleanup|after_corrupt_wal_bundled)$',
+  'resumes recovery after a process exit at (after_main_retired|after_staging_validated|before_publish)$',
+] as const;
+
 const recoveryCrashFixturePath = process.env.SPRINT_CODER_RECOVERY_CRASH_FIXTURE_PATH;
 const recoveryCrashFixtureCheckpoint = process.env.SPRINT_CODER_RECOVERY_CRASH_CHECKPOINT as
-  | 'after_main_retired_before_sidecar_cleanup'
-  | 'after_corrupt_wal_bundled'
-  | 'after_main_retired'
-  | 'after_staging_validated'
-  | 'before_publish'
-  | undefined;
+  (typeof crashCheckpoints)[number] | undefined;
 
 function tempDatabasePath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'sprint-coder-recovery-'));
@@ -59,7 +70,7 @@ afterEach(() => {
 });
 
 if (runsWithElectronAbi)
-  describe('database corruption recovery (backup/restore)', () => {
+  describe(recoverySuiteName, () => {
     it('uses parent-directory fsync only on platforms that support it', () => {
       expect(__persistenceRecoveryTestables.supportsDirectorySync('win32')).toBe(false);
       expect(__persistenceRecoveryTestables.supportsDirectorySync('darwin')).toBe(true);
@@ -79,16 +90,8 @@ if (runsWithElectronAbi)
       throw new Error(`Recovery did not stop at ${recoveryCrashFixtureCheckpoint}`);
     });
 
-    const crashCheckpoints = [
-      'after_main_retired_before_sidecar_cleanup',
-      'after_corrupt_wal_bundled',
-      'after_main_retired',
-      'after_staging_validated',
-      'before_publish',
-    ] as const;
-
     for (const checkpoint of crashCheckpoints)
-      it(`resumes recovery after a process exit at ${checkpoint}`, async () => {
+      it(crashTestName(checkpoint), async () => {
         const path = tempDatabasePath();
         const seeded = new SqlitePersistenceClient(path);
         const task = seeded.createTask(`survives ${checkpoint}`);
@@ -110,7 +113,7 @@ if (runsWithElectronAbi)
             [
               join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
               'run',
-              'src/main/persistence-recovery.test.ts',
+              recoveryTestFile,
               '-t',
               '__recovery_crash_fixture_child__',
             ],
@@ -397,18 +400,39 @@ if (runsWithElectronAbi)
       const orphanShm = `${orphan}-shm`;
       const similar = `${path}.pre-migration.bak.tmp-not-a-uuid`;
       const otherDatabase = join(directory, `other.db.pre-migration.bak.tmp-${orphanId}`);
-      const symlink = `${path}.pre-migration.bak.tmp-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
-      const symlinkTarget = join(directory, 'must-survive');
-      for (const file of [orphan, orphanWal, orphanShm, similar, otherDatabase, symlinkTarget])
+      for (const file of [orphan, orphanWal, orphanShm, similar, otherDatabase])
         writeFileSync(file, file);
-      symlinkSync(symlinkTarget, symlink);
 
       const client = new SqlitePersistenceClient(path);
       client.close();
 
       for (const file of [orphan, orphanWal, orphanShm]) expect(existsSync(file)).toBe(false);
-      for (const file of [similar, otherDatabase, symlink, symlinkTarget])
-        expect(existsSync(file)).toBe(true);
+      for (const file of [similar, otherDatabase]) expect(existsSync(file)).toBe(true);
+    });
+
+    it('preserves a symlink named like an orphan validation file and its target', ({ skip }) => {
+      const path = tempDatabasePath();
+      const symlink = `${path}.pre-migration.bak.tmp-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
+      const symlinkTarget = join(path, '..', 'must-survive');
+      writeFileSync(symlinkTarget, symlinkTarget);
+      try {
+        symlinkSync(symlinkTarget, symlink);
+      } catch (error) {
+        if (
+          process.platform === 'win32' &&
+          error instanceof Error &&
+          'code' in error &&
+          error.code === 'EPERM'
+        )
+          return skip('Windows denied permission to create the file symlink fixture');
+        throw error;
+      }
+
+      const client = new SqlitePersistenceClient(path);
+      client.close();
+
+      expect(existsSync(symlink)).toBe(true);
+      expect(existsSync(symlinkTarget)).toBe(true);
     });
 
     it('removes the validation database and sidecars when backup rotation fails', () => {
@@ -526,7 +550,7 @@ describe('recovery suite Electron ABI bridge', () => {
       [
         join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
         'run',
-        'src/main/persistence-recovery.test.ts',
+        recoveryTestFile,
         '-t',
         testNamePattern,
       ],
@@ -541,15 +565,25 @@ describe('recovery suite Electron ABI bridge', () => {
     return result.stdout ?? '';
   };
 
+  it('selects every crash-recovery checkpoint in exactly one Electron bridge group', () => {
+    const patterns = crashGroupPatterns.map((pattern) => new RegExp(pattern));
+    for (const checkpoint of crashCheckpoints) {
+      // Vitest 3 matches space-separated names, including the file name.
+      const fullName = `${recoveryTestFile} ${recoverySuiteName} ${crashTestName(checkpoint)}`;
+      expect(
+        patterns.filter((pattern) => pattern.test(fullName)),
+        fullName,
+      ).toHaveLength(1);
+    }
+  });
+
   // Vitest 3's worker RPC has a fixed 60s response deadline. A single bridge test containing all
   // recovery cases can exceed it on Windows CI even though the Electron child is still healthy.
   // Keep each bridge invocation below that control-plane limit while preserving the same coverage.
   it(
     'runs the first crash-recovery group with the Electron Node ABI',
     async () => {
-      await runElectronAbiTests(
-        'resumes recovery after a process exit at (after_main_retired_before_sidecar_cleanup|after_corrupt_wal_bundled)',
-      );
+      await runElectronAbiTests(crashGroupPatterns[0]);
     },
     recoveryBridgeTimeoutMs + 30_000,
   );
@@ -557,9 +591,7 @@ describe('recovery suite Electron ABI bridge', () => {
   it(
     'runs the remaining crash-recovery group with the Electron Node ABI',
     async () => {
-      await runElectronAbiTests(
-        'resumes recovery after a process exit at (after_main_retired|after_staging_validated|before_publish)$',
-      );
+      await runElectronAbiTests(crashGroupPatterns[1]);
     },
     recoveryBridgeTimeoutMs + 30_000,
   );
@@ -568,7 +600,7 @@ describe('recovery suite Electron ABI bridge', () => {
     'runs the non-crash corruption-recovery group with the Electron Node ABI',
     async () => {
       await runElectronAbiTests(
-        'database corruption recovery \\(backup/restore\\) > (?!resumes recovery after a process exit)',
+        'database corruption recovery \\(backup/restore\\) (?!resumes recovery after a process exit)',
       );
     },
     recoveryBridgeTimeoutMs + 30_000,
