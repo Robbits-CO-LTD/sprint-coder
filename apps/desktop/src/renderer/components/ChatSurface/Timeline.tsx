@@ -42,8 +42,14 @@ import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png'
 import { GraphTaskContext } from '../GraphTaskContext';
 import { InlineGraphCard } from '../InlineGraphCard';
 import { hasKnownGraphAnchor } from '../../lib/graph-anchor';
+import { taskHasEffectiveWorkspaceRoot } from '../../lib/effective-workspace-root';
+import { WorkspaceFolderButton } from './WorkspaceFolderButton';
 
-const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
+const WORKSPACE_SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
+const CHAT_SUGGESTIONS = [
+  '仕事の優先順位を整理する方法を教えて',
+  '説明を分かりやすくするコツを教えて',
+];
 const NO_MESSAGES: ChatMessage[] = [];
 const NO_APPROVALS: ApprovalSummary[] = [];
 const NO_COMMANDS: ReturnType<typeof useAppStore.getState>['commandsByTask'][string] = [];
@@ -62,6 +68,8 @@ export function Timeline({
   variant?: 'main' | 'node';
 }) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
+  const hasWorkspace = useAppStore((state) => taskHasEffectiveWorkspaceRoot(taskId, state));
+  const commandsAvailable = useAppStore((state) => state.commandSandbox?.available === true);
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const setDraft = useAppStore((s) => s.setDraft);
   const cancelActiveTurn = useAppStore((s) => s.cancelActiveTurn);
@@ -80,6 +88,7 @@ export function Timeline({
   const graphVersions = useAppStore((s) => s.graphVersionsByTask[taskId]);
   const liveFileEdits = useLiveFileEdits();
   const skillDrafts = useAppStore((s) => s.skillDraftsByTask[taskId]) ?? NO_SKILL_DRAFTS;
+  const toolsDisabledTurnIds = useAppStore((s) => s.toolsDisabledTurnIdsByTask[taskId]);
   const installSkillDraft = useAppStore((s) => s.installSkillDraft);
   const discardSkillDraft = useAppStore((s) => s.discardSkillDraft);
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
@@ -324,16 +333,28 @@ export function Timeline({
                   <img src={sprintCoderIcon} alt="" draggable={false} />
                 </div>
                 <div className="timeline-welcome-copy">
-                  <p className="timeline-welcome-kicker">SPRINT CODER · AI CODING WORKSPACE</p>
+                  <p className="timeline-welcome-kicker">SPRINT CODER</p>
                   <h2 id="timeline-welcome-title">なんでも相談してください</h2>
                   <p>
-                    相談だけでも大丈夫です。Workspaceでの実行が必要になったときは、事前に確認します。
+                    {hasWorkspace
+                      ? '相談のほか、作業フォルダーのファイルを調べたり編集したりできます。操作の確認は権限の設定に従います。'
+                      : '文章の下書きや考えの整理など、ファイルを使わない相談ができます。'}
                   </p>
+                  {!hasWorkspace && (
+                    <>
+                      <p>
+                        {commandsAvailable
+                          ? '作業フォルダーを選ぶと、ファイルとコマンドを使えます。'
+                          : '作業フォルダーを選ぶと、ファイルを使えます。'}
+                      </p>
+                      <WorkspaceFolderButton taskId={taskId} />
+                    </>
+                  )}
                 </div>
                 <div className="timeline-welcome-actions" aria-label="入力例">
                   <span className="timeline-welcome-actions-label">入力例</span>
                   <div className="timeline-welcome-suggestions">
-                    {SUGGESTIONS.map((s) => (
+                    {(hasWorkspace ? WORKSPACE_SUGGESTIONS : CHAT_SUGGESTIONS).map((s) => (
                       <button
                         key={s}
                         type="button"
@@ -450,6 +471,13 @@ export function Timeline({
                   content={message.content}
                   attachments={message.attachments}
                 />
+                {message.author === 'user' &&
+                  message.turnId !== null &&
+                  toolsDisabledTurnIds?.includes(message.turnId) && (
+                    <p className="sys-notice" role="status">
+                      接続先がツール付きの送信を受け付けなかったため、ツールなしで再送しました。
+                    </p>
+                  )}
                 {interruptedMarker !== null && (
                   <p
                     className="turn-interrupted-marker"
@@ -505,8 +533,8 @@ export function Timeline({
                   <SkillDraftCard
                     key={draft.id}
                     draft={draft}
-                    onInstall={() => void installSkillDraft(taskId, draft)}
-                    onDiscard={() => void discardSkillDraft(taskId, draft.id)}
+                    onInstall={() => installSkillDraft(taskId, draft)}
+                    onDiscard={() => discardSkillDraft(taskId, draft.id)}
                   />
                 ))}
                 {imageRequestUnfulfilled && <MissingGeneratedImageNotice />}

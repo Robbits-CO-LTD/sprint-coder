@@ -205,7 +205,7 @@ describe('CommandRunner', () => {
     ).toBe(sandboxNodeOptions());
   });
 
-  it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
+  it('adds the standard Homebrew path and absolute HOME on macOS only', () => {
     const environment = buildControlledEnvironment('darwin', {
       PATH: '/private/custom/bin',
       HOME: '/Users/example',
@@ -216,8 +216,15 @@ describe('CommandRunner', () => {
 
     expect(environment).toEqual({
       LANG: 'ja_JP.UTF-8',
-      PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      HOME: '/Users/example',
+      PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin',
     });
+    expect(buildControlledEnvironment('darwin', { HOME: 'relative' })).not.toHaveProperty('HOME');
+    expect(buildControlledEnvironment('linux', { HOME: '/home/example', PATH: '/custom' })).toEqual(
+      {
+        PATH: '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      },
+    );
   });
 
   it.runIf(process.platform !== 'win32')(
@@ -316,6 +323,30 @@ describe('CommandRunner', () => {
       process.platform === 'win32' ? /\\cmd\.exe$/iu : /\/(?:ba|da|z)?sh$/u,
     );
     expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
+  });
+
+  it.runIf(process.platform === 'win32').each([
+    ['git', 'https://git-scm.com/install/'],
+    ['GH.exe', 'https://cli.github.com/'],
+  ])('explains how to install missing %s and restart the app', async (executable, url) => {
+    const root = await workspace();
+    const nativePath = vi
+      .spyOn(preparedExecutionImageModule, 'getTrustedWindowsSystemDirectory')
+      .mockReturnValue(join(root, 'Windows', 'System32'));
+    vi.stubEnv('PATH', root);
+    try {
+      await expect(
+        prepareExecutionSpec({ workspacePath: root, executable, argv: [] }),
+      ).rejects.toMatchObject({
+        code: 'EXECUTION_SPEC_INVALID',
+        message: expect.stringMatching(
+          new RegExp(`${executable.split('.')[0]}.*${url}.*再起動`, 'i'),
+        ),
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      nativePath.mockRestore();
+    }
   });
 
   it('detects an argv entry that repeats the executable', () => {

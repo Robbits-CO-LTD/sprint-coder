@@ -5,10 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PermissionChip } from './ContextBar';
 import { useAppStore } from '../../store/appStore';
 
-// The text shown before macOS got its own file manager name (Issue #1320). Windows keeps it as is.
-const WINDOWS_TEXT =
-  '作業フォルダー内のファイル操作とコマンド実行を許可します。コマンドは外部と通信できないため、GitHubへの起票やpush、パッケージのダウンロードには使えません。 利用できるコマンドの実行と、実行中のコマンドへの入力は 都度の承認なしで実行します。デスクトップ操作（ほかのアプリの窓を読む・押す・入力する、 アプリの起動。ログイン済みのブラウザーやメールのアプリも含む）も、確認なしで実行します。 窓や画面の画像を撮る操作も含み、撮った画像はこの Task の AI（接続先のサービス）に送ります。クラウドAPIには、画像を送るたびに接続先とモデルを表示し、承認を求めます。 Workspace内ファイルの読み取りは、秘密情報を 含む可能性があるものもredact済みの本文をProviderへ都度確認なしで渡します。管理deny、 秘密情報、provider egress、Renderer非特権は常に維持されます。ただし、これらはファイル・ コマンド・ネットワークの道具に効く保護で、デスクトップ操作が開いている窓（端末、 エクスプローラー、パスワード管理のアプリ、ブラウザーなど）を読んだり入力したりすることは止めません。';
-
 const taskId = 'full-access-wording';
 let container: HTMLDivElement;
 let root: Root;
@@ -67,16 +63,59 @@ describe('full access impact text', () => {
   it('names Finder on macOS', async () => {
     await renderWith('darwin');
     const text = await openFullAccessImpact();
-    expect(text).toContain('（端末、 Finder、パスワード管理のアプリ');
+    expect(text).toContain('（端末、Finder、パスワード管理アプリ');
     expect(text).not.toContain('エクスプローラー');
-    expect(text).toBe(WINDOWS_TEXT.replace('エクスプローラー', 'Finder'));
   });
 
   it.each(['win32', 'linux', undefined])(
-    'keeps the current text unchanged elsewhere (platform=%s)',
+    'keeps the desktop and image disclosures elsewhere (platform=%s)',
     async (platform) => {
       await renderWith(platform);
-      expect(await openFullAccessImpact()).toBe(WINDOWS_TEXT);
+      const text = await openFullAccessImpact();
+      expect(text).toContain('エクスプローラー');
+      expect(text).toContain('ログイン済みのブラウザーやメール');
+      expect(text).toContain('撮影した画面の画像は接続先のAIに送ります');
+      expect(text).toContain('画像ごとに接続先とモデルを表示し、承認を求めます');
     },
   );
+});
+
+it('shows the real restriction by Full Access when the Task has no workspace', async () => {
+  useAppStore.setState({ permissionByTask: { [taskId]: { preset: 'full', policyEpoch: 1 } } });
+  await renderWith('win32');
+  const button = container.querySelector<HTMLButtonElement>('[data-testid="access-selector"]')!;
+  expect(button.textContent).toContain('フルアクセス');
+  expect(document.getElementById(button.getAttribute('aria-describedby')!)?.textContent).toContain(
+    'ファイル・コマンド不可（フォルダー未設定）',
+  );
+  const text = await openFullAccessImpact();
+  expect(text).not.toContain('作業フォルダー内のファイルの読み書き');
+  expect(text).not.toContain('コマンドの実行と、実行中のコマンドへの入力');
+});
+
+it('distinguishes unavailable commands from available file operations in a workspace', async () => {
+  useAppStore.setState({
+    workspaceByTask: { [taskId]: { path: '/workspace', name: 'workspace' } },
+  });
+  await renderWith('win32');
+  const text = await openFullAccessImpact();
+  expect(container.querySelector('.composer-access-status')?.textContent).toContain(
+    'コマンドは使えません',
+  );
+  expect(text).toContain('作業フォルダー内のファイルの読み書き');
+  expect(text).not.toContain('実行中のコマンドへの入力');
+});
+
+it('keeps the network restriction when commands are available', async () => {
+  useAppStore.setState({
+    workspaceByTask: { [taskId]: { path: '/workspace', name: 'workspace' } },
+    commandSandbox: {
+      available: true,
+      backend: 'windows-appcontainer',
+      reason: null,
+      probedAt: '2026-11-23T00:00:00.000Z',
+    },
+  });
+  await renderWith('win32');
+  expect(await openFullAccessImpact()).toContain('コマンドは外部と通信できない');
 });

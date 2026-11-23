@@ -293,6 +293,26 @@ it('converts two typed aliases at the edit position and sends both pinned Skills
     },
   );
 });
+it('selects an exact dollar mention at a typed space and warns before sending an unbound mention', async () => {
+  await withComposer('', [first], [], async ({ change, key, send, textarea }) => {
+    expect(textarea.placeholder).toContain('/ で Skill を選べます');
+    await change('$outline', '$outline'.length);
+    expect(useAppStore.getState().skillSelectionByTask[taskId]).toEqual([]);
+    await change('$outline ', '$outline '.length);
+    expect(useAppStore.getState().skillSelectionByTask[taskId]).toEqual([firstSelection]);
+    await key('Enter');
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ skills: [firstSelection] }));
+  });
+  await withComposer('', [first], [], async ({ change, key, send, container }) => {
+    await change('$outline ', '$outline '.length, 'insertFromPaste');
+    await key('Enter');
+    expect(send).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('入力した名前のSkillが選択されていません');
+    await key('Enter');
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ text: '$outline ', skills: [] }));
+  });
+});
+
 it('defers shared prefixes and respects source ambiguity, availability and the selection limit', async () => {
   const duplicate = item('outline', 'builtin');
   const disabled = { ...item('off', 'created'), enabled: false };

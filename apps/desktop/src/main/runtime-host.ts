@@ -120,6 +120,8 @@ type ToolRequestHandler = (
   signal: AbortSignal,
 ) => Promise<unknown>;
 export type RuntimeCapabilityReport = {
+  // Present only when the runtime host answered its CLI detection request.
+  cliNotDetected?: true;
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
   models: readonly CodexModelOption[];
@@ -247,7 +249,7 @@ export class RuntimeHostClient {
     const rawContextFragments = (prepared?.fragments ?? []).map(toRuntimeContextFragment);
     // Main may hand us already-sealed payload bytes after its provider-egress gate. In that case
     // the canonical guidance is already inside those bytes and must not be sampled a second time.
-    // Team Workers and compatibility callers use this fallback immediately before serialization.
+    // Compatibility callers without sealed bytes keep synchronous dispatch and use root rules only.
     const contextFragments =
       serializedPayload === undefined
         ? injectPromptGuidance(
@@ -645,7 +647,7 @@ export class RuntimeHostClient {
     }
     if (raw.type === 'hello') {
       if (this.resolveProbe === null || raw.operationId !== this.expectedProbeOperationId) return;
-      const report =
+      const detected =
         this.kind === 'claude'
           ? {
               available: raw.claudeAvailable,
@@ -666,6 +668,12 @@ export class RuntimeHostClient {
                 models: raw.codexModels,
                 ...(raw.codexCli === undefined ? {} : { cli: raw.codexCli }),
               };
+      const report: RuntimeCapabilityReport =
+        !detected.available &&
+        detected.readiness === 'unavailable' &&
+        (this.kind !== 'grok' || raw.grokAvailable === false)
+          ? { ...detected, cliNotDetected: true }
+          : detected;
       this.recordCapabilityState(instanceId, report);
       // The probe CLI answered but its exit was not confirmed (issue #581). The answer stands;
       // the Runtime Host keeps that probe's isolation until it can confirm the stop.

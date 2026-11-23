@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { SkillCatalogItem } from '@sprint-coder/contracts';
-import { buildSkillSearchIndex, filterSkillSearchIndex, virtualWindow } from './skill-picker';
+import {
+  buildSkillSearchIndex,
+  filterSkillSearchIndex,
+  skillUnavailable,
+  virtualWindow,
+} from './skill-picker';
 
 function fixture(index: number): SkillCatalogItem {
   return {
@@ -31,6 +36,26 @@ function fixture(index: number): SkillCatalogItem {
 
 describe('skill picker index and virtualization', () => {
   const catalog = Array.from({ length: 1_200 }, (_, index) => fixture(index));
+
+  it('explains why a text-only connection cannot use the Skill creator', () => {
+    const item = fixture(5);
+    const creator = { ...item, ref: { ...item.ref, skillId: 'skill-creator' } };
+    expect(skillUnavailable(creator, 'provider', [], false)).toBeUndefined();
+    expect(
+      skillUnavailable(
+        {
+          ...creator,
+          compatibility: {
+            ...creator.compatibility,
+            runtimeSupport: { ...creator.compatibility.runtimeSupport, provider: 'blocked' },
+          },
+        },
+        'provider',
+        [],
+        false,
+      ),
+    ).toBe('この接続ではSkillを作れません');
+  });
 
   it('searches a 1000+ item catalog through one prebuilt index', () => {
     const index = buildSkillSearchIndex(catalog);

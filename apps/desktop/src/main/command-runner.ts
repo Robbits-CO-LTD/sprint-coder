@@ -67,6 +67,7 @@ import {
 import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
 import { bundledMacNodePath } from './macos-bundled-node';
+import { GIT_INSTALL_GUIDANCE, GITHUB_CLI_INSTALL_GUIDANCE } from './git-install-guidance';
 import type { WindowsExecutableFileVersion } from './windows-pe-version';
 
 export type CommandOutputChunk = Readonly<{
@@ -271,10 +272,12 @@ export async function resolveBareExecutable(
       }
     }
   }
-  throw new CommandRunnerError(
-    'EXECUTION_SPEC_INVALID',
-    'Executable was not found on the sanitized PATH',
-  );
+  let message = 'Executable was not found on the sanitized PATH';
+  const name =
+    process.platform === 'win32' ? executable.toLowerCase().replace(/\.exe$/, '') : executable;
+  if (name === 'git') message = GIT_INSTALL_GUIDANCE;
+  if (name === 'gh') message = GITHUB_CLI_INSTALL_GUIDANCE;
+  throw new CommandRunnerError('EXECUTION_SPEC_INVALID', message);
 }
 
 async function isTrustedWindowsMultiLinkExecutable(
@@ -2243,7 +2246,14 @@ export function buildControlledEnvironment(
     if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;
     if (userProfile === undefined && home !== undefined) environment['USERPROFILE'] = home;
   } else {
-    environment['PATH'] = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+    const searchPath = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+    if (platform === 'darwin') {
+      // Do not shadow the system Git with a Homebrew image that native execution cannot seal.
+      searchPath.push('/opt/homebrew/bin');
+      const home = source['HOME'];
+      if (home !== undefined && posixPath.isAbsolute(home)) environment['HOME'] = home;
+    }
+    environment['PATH'] = searchPath.join(':');
   }
   return environment;
 }

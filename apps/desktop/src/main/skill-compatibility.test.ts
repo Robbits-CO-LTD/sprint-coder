@@ -17,6 +17,17 @@ describe('Skill compatibility analysis', () => {
         .compatibility.runtimeSupport.grok,
     ).toBe(support);
   });
+  it('does not classify code, inline code, and Markdown quotations as file references', () => {
+    const examples = 'Use `@types/node`.\n\n> @param input\n\n```js\n * @param value\n```\n';
+    const frontmatter = 'name: review\ndescription: Review files';
+    expect(analyzeSkillPackage(skill(frontmatter, examples)).compatibility.requiresConversion).toBe(
+      false,
+    );
+    expect(
+      analyzeSkillPackage(skill(frontmatter, examples + '\nRead @guide.md.')).compatibility
+        .requiresConversion,
+    ).toBe(true);
+  });
   it('accepts the portable Agent Skills metadata without granting requested tools', () => {
     const result = analyzeSkillPackage(
       skill(
@@ -104,6 +115,6 @@ describe('Skill compatibility analysis', () => {
     );
     expect(() =>
       analyzeSkillPackage(skill(`name: nested\ndescription: deep\nmetadata:\n${nested} value`)),
-    ).toThrow(/deep/u);
+    ).toThrow(/階層/u);
   });
 });

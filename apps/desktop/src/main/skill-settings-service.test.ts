@@ -16,6 +16,37 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+it('rejects incompatible or conflicting Skill drafts before displaying them for review', async () => {
+  const service = new SkillSettingsService({ homePath: await home() });
+  const input = (extraFields: string, body: string) => ({
+    kind: 'chat' as const,
+    skillId: 'review-helper',
+    files: [
+      {
+        path: 'SKILL.md',
+        content: `---\nname: Review\ndescription: Review files\n${extraFields}---\n${body}`,
+      },
+    ],
+  });
+  await expect(service.createDraft(input('version: one\n', 'Review files.'))).rejects.toThrow(
+    '先頭に未対応の項目',
+  );
+  await expect(service.createDraft(input('', 'Review @guide.md.'))).rejects.toThrow('ファイル参照');
+  expect(await service.listDrafts()).toEqual([]);
+
+  // Named arguments are supported today. Markdown examples do not require conversion.
+  const valid = input(
+    '',
+    'Review $1. For TypeScript examples use `@types/node`.\n\n> @param sample',
+  );
+  const draft = await service.createDraft(valid);
+  expect(await service.listDrafts()).toEqual([draft]);
+  const installed = await service.installDraft(draft.id, draft.digest);
+  expect(installed.ref.digest).toBe(draft.digest);
+  await expect(service.createDraft(valid)).rejects.toMatchObject({ code: 'NAME_EXISTS' });
+  expect(await service.listDrafts()).toEqual([]);
+});
+
 describe('Skill activation source boundary', () => {
   it.each(['agents', 'claude', 'builtin'] as const)(
     'rejects activation changes for %s before opening or creating a Skill Store',

@@ -1,13 +1,27 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SkillCatalogItem, SkillDraft } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
+import { skillActionFailure } from '../../skill-feedback';
+
+export type SkillCreationFailure =
+  'catalog-unavailable' | 'builtin-unavailable' | 'task-unavailable';
+
+const creationFailureMessages: Record<SkillCreationFailure, string> = {
+  'catalog-unavailable': 'Skill一覧を取得できませんでした。もう一度試してください。',
+  'builtin-unavailable':
+    'Skill作成に必要な組み込みSkillを読み込めませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
+  'task-unavailable': '新しいTaskを作れませんでした。もう一度試してください。',
+};
 
 export function SkillSettingsSection({
   active,
   onCreateWithAi,
 }: {
   active: boolean;
-  onCreateWithAi?: (request?: { prompt: string; builtinSkillId: 'skill-creator' }) => Promise<void>;
+  onCreateWithAi?: (request?: {
+    prompt: string;
+    builtinSkillId: 'skill-creator';
+  }) => Promise<SkillCreationFailure | undefined>;
 }) {
   const [catalog, setCatalog] = useState<SkillCatalogItem[]>([]);
   const [drafts, setDrafts] = useState<SkillDraft[]>([]);
@@ -20,10 +34,15 @@ export function SkillSettingsSection({
   const [creatingWithAi, setCreatingWithAi] = useState(false);
   const loaded = useRef(false);
 
-  async function refresh() {
+  const clearFeedback = useCallback(() => {
+    setError(null);
+    setStatus('');
+  }, []);
+
+  const refresh = useCallback(async () => {
     setLoading(true);
     setLoadFailed(false);
-    setError(null);
+    clearFeedback();
     try {
       const api = window.sprintCoder?.skills;
       if (!api) throw new Error('unavailable');
@@ -35,18 +54,22 @@ export function SkillSettingsSection({
       setReviewed(new Set());
       loaded.current = true;
       setStatus('Sprint Coder Skillsを読み込みました。');
-    } catch {
+    } catch (error) {
       setLoadFailed(true);
       setError(
-        'Skill一覧を取得できませんでした。再読み込みし、解消しない場合はアプリを再起動してください。',
+        skillActionFailure(
+          'Skill一覧を取得できませんでした',
+          error,
+          '再読み込みし、解消しない場合はアプリを再起動してください。',
+        ),
       );
     } finally {
       setLoading(false);
     }
-  }
+  }, [clearFeedback]);
   useEffect(() => {
     if (active && !loaded.current && !loading && !loadFailed) void refresh();
-  }, [active, loading, loadFailed]);
+  }, [active, loading, loadFailed, refresh]);
   async function reload() {
     loaded.current = false;
     const state = useAppStore.getState();
@@ -54,9 +77,10 @@ export function SkillSettingsSection({
   }
   async function createWithAi() {
     setCreatingWithAi(true);
-    setError(null);
+    clearFeedback();
     try {
-      await onCreateWithAi?.();
+      const failure = await onCreateWithAi?.();
+      if (failure !== undefined) setError(creationFailureMessages[failure]);
     } catch {
       setError(
         'Skill作成を始められませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
@@ -66,12 +90,11 @@ export function SkillSettingsSection({
     }
   }
   async function toggleCreated(item: SkillCatalogItem) {
+    clearFeedback();
     try {
-      await window.sprintCoder?.skills?.setCreatedEnabled(
-        item.ref.skillId,
-        item.ref.digest,
-        !item.enabled,
-      );
+      const api = window.sprintCoder?.skills;
+      if (!api) throw new Error('unavailable');
+      await api.setCreatedEnabled(item.ref.skillId, item.ref.digest, !item.enabled);
       setCatalog((xs) =>
         xs.map((x) =>
           x.ref.source === 'created' && x.ref.skillId === item.ref.skillId
@@ -79,14 +102,20 @@ export function SkillSettingsSection({
             : x,
         ),
       );
-    } catch {
-      setError(`${item.name}の状態を変更できませんでした。`);
+      setStatus(`${item.name}を${item.enabled ? '無効' : '有効'}にしました。`);
+    } catch (error) {
+      setError(
+        skillActionFailure('Skillの状態を変更できませんでした', error, '再試行してください。'),
+      );
     }
   }
   async function toggleActivation(item: SkillCatalogItem) {
+    clearFeedback();
     try {
+      const api = window.sprintCoder?.skills;
+      if (!api) throw new Error('unavailable');
       const next = item.activationPolicy === 'manual' ? 'auto-allowed' : 'manual';
-      await window.sprintCoder?.skills?.setActivationPolicy(item.ref, next);
+      await api.setActivationPolicy(item.ref, next);
       setCatalog((xs) =>
         xs.map((x) =>
           x.ref.skillId === item.ref.skillId && x.ref.digest === item.ref.digest
@@ -94,8 +123,11 @@ export function SkillSettingsSection({
             : x,
         ),
       );
-    } catch {
-      setError(`${item.name}の自動選択設定を変更できませんでした。`);
+      setStatus(`${item.name}の自動選択を${next === 'auto-allowed' ? '有効' : '無効'}にしました。`);
+    } catch (error) {
+      setError(
+        skillActionFailure('Skillの自動選択を変更できませんでした', error, '再試行してください。'),
+      );
     }
   }
   async function removeCreated(item: SkillCatalogItem) {
@@ -104,42 +136,67 @@ export function SkillSettingsSection({
       setPendingRemoval(key);
       return;
     }
+    clearFeedback();
     try {
-      await window.sprintCoder?.skills?.removeCreated(item.ref.skillId, item.ref.digest);
+      const api = window.sprintCoder?.skills;
+      if (!api) throw new Error('unavailable');
+      await api.removeCreated(item.ref.skillId, item.ref.digest);
       setCatalog((xs) => xs.filter((x) => x.ref.skillId !== item.ref.skillId));
       setPendingRemoval(null);
-    } catch {
-      setError(`${item.name}を削除できませんでした。`);
+      setStatus(`${item.name}を削除しました。`);
+    } catch (error) {
+      setError(skillActionFailure('Skillを削除できませんでした', error, '再試行してください。'));
     }
   }
   async function exportCreated(item: SkillCatalogItem, format: 'original' | 'portable') {
+    clearFeedback();
     try {
-      const path = await window.sprintCoder?.skills?.exportCreated(
-        item.ref.skillId,
-        item.ref.digest,
-        format,
+      const api = window.sprintCoder?.skills;
+      if (!api) throw new Error('unavailable');
+      const destination = await api.exportCreated(item.ref.skillId, item.ref.digest, format);
+      setStatus(
+        destination === null ? '書き出しをキャンセルしました。' : `${item.name}を書き出しました。`,
       );
-      if (path) setStatus(`${item.name}を${path}へExportしました。`);
-    } catch {
-      setError(`${item.name}をExportできませんでした。`);
+    } catch (error) {
+      setError(
+        skillActionFailure(
+          'Skillを書き出せませんでした',
+          error,
+          '書き出し先を確認して再試行してください。',
+        ),
+      );
     }
   }
   async function installDraft(draft: SkillDraft) {
+    clearFeedback();
     try {
       const api = window.sprintCoder?.skills;
       if (!api) throw new Error('unavailable');
       await api.installDraft(draft.id, draft.digest, true);
       await reload();
-    } catch {
-      setError(`${draft.name}をインストールできませんでした。`);
+      setStatus(`${draft.name}をインストールしました。`);
+    } catch (error) {
+      setError(
+        skillActionFailure(
+          'Skillをインストールできませんでした',
+          error,
+          '下書きの内容を確認して再試行してください。',
+        ),
+      );
     }
   }
   async function discardDraft(draft: SkillDraft) {
+    clearFeedback();
     try {
-      await window.sprintCoder?.skills?.discardDraft(draft.id);
+      const api = window.sprintCoder?.skills;
+      if (!api) throw new Error('unavailable');
+      await api.discardDraft(draft.id);
       setDrafts((xs) => xs.filter((x) => x.id !== draft.id));
-    } catch {
-      setError(`${draft.name}のDraftを破棄できませんでした。`);
+      setStatus(`${draft.name}の下書きを破棄しました。`);
+    } catch (error) {
+      setError(
+        skillActionFailure('Skillの下書きを破棄できませんでした', error, '再試行してください。'),
+      );
     }
   }
 
@@ -364,7 +421,7 @@ export function SkillSettingsSection({
           {error}
         </p>
       )}
-      <p className="sr-only" role="status" aria-live="polite">
+      <p className={status ? 'settings-note' : 'sr-only'} role="status">
         {status}
       </p>
     </section>

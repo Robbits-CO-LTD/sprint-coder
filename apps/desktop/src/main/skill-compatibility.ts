@@ -1,7 +1,15 @@
 import type { SkillCompatibilityReport, SkillProfile } from '@sprint-coder/contracts';
 import { parseDocument, stringify } from 'yaml';
+import remarkParse from 'remark-parse';
+import { unified } from 'unified';
 
 const MAX_FRONTMATTER_BYTES = 64 * 1024;
+const markdownParser = unified().use(remarkParse);
+type MarkdownNode = {
+  type: string;
+  position?: ReturnType<typeof markdownParser.parse>['position'];
+  children?: readonly MarkdownNode[];
+};
 const STANDARD_FIELDS = new Set([
   'name',
   'description',
@@ -30,6 +38,8 @@ export type ParsedSkillMetadata = Readonly<{
   body: string;
   compatibility: SkillCompatibilityReport;
 }>;
+
+export class SkillMetadataError extends Error {}
 
 export function portableSkillCompatibility(): SkillCompatibilityReport {
   return {
@@ -63,28 +73,36 @@ export function analyzeSkillPackage(
 ): ParsedSkillMetadata {
   const text = decodeUtf8(skillFile, 'SKILL.md');
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(text);
-  if (match === null) throw new Error('SKILL.md frontmatter is required');
+  if (match === null)
+    throw new SkillMetadataError('SKILL.mdの先頭に---で囲んだ項目（frontmatter）が必要です。');
   if (Buffer.byteLength(match[1]!, 'utf8') > MAX_FRONTMATTER_BYTES)
-    throw new Error('SKILL.md frontmatter is too large');
+    throw new SkillMetadataError('SKILL.mdの先頭の項目（frontmatter）は64 KiB以下にしてください。');
 
   const document = parseDocument(match[1]!, {
     schema: 'failsafe',
     prettyErrors: false,
     uniqueKeys: true,
   });
-  if (document.errors.length > 0)
-    throw new Error(`Invalid SKILL.md frontmatter: ${document.errors[0]!.message}`);
-  if (document.warnings.length > 0)
-    throw new Error(`Unsafe SKILL.md frontmatter: ${document.warnings[0]!.message}`);
+  if (document.errors.length > 0 || document.warnings.length > 0)
+    throw new SkillMetadataError(
+      'SKILL.mdの先頭の項目（frontmatter）を有効なYAMLに直してください。重複した項目名や独自のタグは使えません。',
+    );
 
   let parsed: unknown;
   try {
     parsed = document.toJS({ maxAliasCount: 0, mapAsMap: false });
   } catch {
-    throw new Error('SKILL.md frontmatter aliases are not allowed');
+    throw new SkillMetadataError('SKILL.mdの先頭の項目にはYAMLのエイリアス（alias）を使えません。');
   }
-  if (!isPlainRecord(parsed)) throw new Error('SKILL.md frontmatter must be a mapping');
-  assertJsonLike(parsed, 'frontmatter');
+  if (!isPlainRecord(parsed))
+    throw new SkillMetadataError(
+      'SKILL.mdの先頭の項目（frontmatter）を項目名と値の組にしてください。',
+    );
+  try {
+    assertJsonLike(parsed, 'frontmatter');
+  } catch {
+    throw new SkillMetadataError('SKILL.mdの先頭の項目は、値の種類や階層を簡素にしてください。');
+  }
 
   const name = requiredText(parsed['name'], 'name', 200);
   const description = requiredText(parsed['description'], 'description', 2_000);
@@ -125,7 +143,7 @@ function buildCompatibility(
   if (hasCodexMetadata) features.add('codex:openai-metadata');
   if (hasPackageResources) features.add('package:resources');
   const hasArguments = /\$(?:ARGUMENTS(?:\[\d+\])?|\d+)\b/u.test(body);
-  const hasFileReferences = /(^|[\s(])@[.\w/-]+/mu.test(body);
+  const hasFileReferences = /(^|[\s(])@[.\w/-]+/mu.test(withoutMarkdownExamples(body));
   const hasDynamicCommand = /^\s*!`[^`\r\n]+`\s*$/mu.test(body);
   if (hasArguments) features.add('claude:arguments');
   if (hasFileReferences) features.add('claude:file-reference');
@@ -198,39 +216,69 @@ function buildCompatibility(
   };
 }
 
+function withoutMarkdownExamples(body: string): string {
+  if (!body.includes('@')) return body;
+  const nodes: MarkdownNode[] = [markdownParser.parse(body)];
+  const ranges: { start: number; end: number }[] = [];
+  while (nodes.length > 0) {
+    const node = nodes.pop()!;
+    if (node.type === 'code' || node.type === 'inlineCode' || node.type === 'blockquote') {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start !== undefined && end !== undefined) ranges.push({ start, end });
+    } else if (node.children !== undefined) {
+      nodes.push(...node.children);
+    }
+  }
+  let cursor = 0;
+  const segments = [];
+  for (const { start, end } of ranges.sort((a, b) => a.start - b.start)) {
+    segments.push(body.slice(cursor, start), ' ');
+    cursor = end;
+  }
+  segments.push(body.slice(cursor));
+  return segments.join('');
+}
+
 function validateCodexMetadata(
   files: readonly { path: string; bytes?: Buffer; content?: string }[],
 ): void {
   const file = files.find(({ path }) => path === 'agents/openai.yaml');
   if (file === undefined) return;
-  const text = file.content ?? (file.bytes === undefined ? '' : decodeUtf8(file.bytes, file.path));
+  const text =
+    file.content ?? (file.bytes === undefined ? '' : decodeUtf8(file.bytes, 'agents/openai.yaml'));
   if (Buffer.byteLength(text, 'utf8') > MAX_FRONTMATTER_BYTES)
-    throw new Error('agents/openai.yaml is too large');
+    throw new SkillMetadataError('agents/openai.yamlは64 KiB以下にしてください。');
   const document = parseDocument(text, {
     schema: 'failsafe',
     prettyErrors: false,
     uniqueKeys: true,
   });
   if (document.errors.length > 0 || document.warnings.length > 0)
-    throw new Error('agents/openai.yaml is invalid or unsafe');
+    throw new SkillMetadataError('agents/openai.yamlを有効なYAMLに直してください。');
   try {
     const value: unknown = document.toJS({ maxAliasCount: 0, mapAsMap: false });
     if (!isPlainRecord(value)) throw new Error('not a mapping');
     assertJsonLike(value, 'agents/openai.yaml');
   } catch {
-    throw new Error('agents/openai.yaml aliases are not allowed');
+    throw new SkillMetadataError(
+      'agents/openai.yamlは、エイリアスのない項目名と値の組にしてください。',
+    );
   }
 }
 
-function decodeUtf8(bytes: Buffer, label: string): string {
+function decodeUtf8(bytes: Buffer, label: 'SKILL.md' | 'agents/openai.yaml'): string {
   const text = bytes.toString('utf8');
-  if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error(`${label} must be valid UTF-8`);
+  if (!Buffer.from(text, 'utf8').equals(bytes))
+    throw new SkillMetadataError(`${label}をUTF-8で保存してください。`);
   return text;
 }
 
-function requiredText(value: unknown, field: string, maxLength: number): string {
-  if (typeof value !== 'string' || value.trim() === '' || value.length > maxLength)
-    throw new Error(`SKILL.md ${field} is invalid`);
+function requiredText(value: unknown, field: 'name' | 'description', maxLength: number): string {
+  if (typeof value !== 'string' || value.trim() === '')
+    throw new SkillMetadataError(`SKILL.mdの先頭に${field}を文字列で指定してください。`);
+  if (value.length > maxLength)
+    throw new SkillMetadataError(`SKILL.mdの${field}を${maxLength}文字以下にしてください。`);
   return value.trim();
 }
 

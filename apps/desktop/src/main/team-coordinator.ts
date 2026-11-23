@@ -6358,9 +6358,15 @@ export class TeamCoordinator {
       throw new Error(`workspace-write root is not available: ${unhealthy.label}`);
     const manager = this.worktreeManager;
     const rootPaths = workspace.roots.map(({ path }) => path);
-    return this.outsideIntegration(rootPaths, () =>
-      manager.requireCleanRepositorySet(rootPaths, options),
-    );
+    try {
+      return await this.outsideIntegration(rootPaths, () =>
+        manager.requireCleanRepositorySet(rootPaths, options),
+      );
+    } catch (error) {
+      const problem = workspaceRepositoryProblemOf(error);
+      if (problem === null) throw error;
+      throw new TeamWorkspaceRepositoryError(problem, { cause: error });
+    }
   }
 
   /**
@@ -6402,14 +6408,7 @@ export class TeamCoordinator {
     taskId: string,
     options: Readonly<{ timeoutMs?: number }> = {},
   ): Promise<void> {
-    try {
-      await this.requireWorkspaceWriteEligibility(taskId, options);
-    } catch (error) {
-      if (error instanceof TeamWorkspaceRepositoryError) throw error;
-      const problem = workspaceRepositoryProblemOf(error);
-      if (problem === null) throw error;
-      throw new TeamWorkspaceRepositoryError(problem, { cause: error });
-    }
+    await this.requireWorkspaceWriteEligibility(taskId, options);
   }
 
   /**

@@ -24,6 +24,7 @@ import { buildSkillCatalogContext, SkillCatalogContextError } from './skill-cata
 import { createPortableSkillFile } from './skill-compatibility';
 import { expandSkillArguments } from '../runtime-host/skill-arguments';
 import { clipPublicMessage, formatZodIssues } from './zod-issue-message';
+import { SKILL_CONFLICT_REASONS } from '../skill-feedback';
 
 type SkillRuntime = 'codex' | 'claude' | 'grok' | 'provider';
 export type SkillCli = Exclude<SkillRef['source'], 'builtin' | 'created' | 'agents'> | 'codex';
@@ -348,7 +349,8 @@ export class SkillSettingsService {
   async createDraft(input: SkillDraftCreateInput): Promise<SkillDraft> {
     if (this.drafts.size >= 64)
       throw new SkillSettingsError('PREVIEW_LIMIT', 'Skill Draft数の上限に達しました');
-    const validation = (await this.getStore()).validateCreatedSkill(input.skillId, input.files);
+    const store = await this.getStore();
+    const validation = store.validateCreatedSkill(input.skillId, input.files);
     if (validation.kind !== input.kind)
       throw new SkillSettingsError(
         'INVALID_SKILL',
@@ -356,6 +358,8 @@ export class SkillSettingsService {
           ? 'Team Skillにはteam/blueprint.jsonが必要です'
           : 'Chat SkillへTeam Blueprintを含めることはできません',
       );
+    assertDraftCompatibility(validation.compatibility);
+    await store.assertCreatedSkillNameAvailable(validation.skillId);
     const now = new Date(this.now()).toISOString();
     const draft: SkillDraft = {
       id: randomUUID(),
@@ -368,7 +372,7 @@ export class SkillSettingsService {
       createdAt: now,
       updatedAt: now,
     };
-    await (await this.getStore()).saveCreatedDraft(draft);
+    await store.saveCreatedDraft(draft);
     this.drafts.set(draft.id, draft);
     return draft;
   }
@@ -381,8 +385,7 @@ export class SkillSettingsService {
     if (draft.digest !== expectedDigest)
       throw new SkillSettingsError('SOURCE_CHANGED', 'Skill Draftが確認後に変更されました');
     const validation = (await this.getStore()).validateCreatedSkill(draft.skillId, draft.files);
-    if (validation.compatibility.requiresConversion)
-      throw new SkillSettingsError('INVALID_SKILL', 'Skill DraftはPortable版への変換が必要です');
+    assertDraftCompatibility(validation.compatibility);
     const installed = await (await this.getStore()).installCreatedSkill(draft.skillId, draft.files);
     await (await this.getStore()).removeCreatedDraft(draftId);
     this.drafts.delete(draftId);
@@ -513,10 +516,30 @@ export class SkillSettingsService {
   }
 }
 
+function assertDraftCompatibility(compatibility: SkillCompatibilityReport): void {
+  if (!compatibility.requiresConversion) return;
+  let message =
+    'SkillをPortable版に直してください。利用するモデルの専用機能を共通の手順に置き換えてください。';
+  if (compatibility.blockers.some((blocker) => blocker.startsWith('未対応のfrontmatter field:')))
+    message =
+      'SKILL.mdの先頭に未対応の項目があります。versionやauthorなどはmetadataに入れてください。';
+  else if (compatibility.features.includes('claude:dynamic-command'))
+    message = 'SKILL.mdの動的なコマンド指定を、通常の手順に書き換えてください。';
+  else if (compatibility.features.includes('claude:file-reference'))
+    message = 'SKILL.mdの@によるファイル参照を、ファイルを読む通常の手順に書き換えてください。';
+  throw new SkillSettingsError('INVALID_SKILL', message);
+}
+
 export class SkillSettingsError extends Error {
   constructor(
     readonly code:
-      'NOT_FOUND' | 'INVALID_SKILL' | 'PREVIEW_EXPIRED' | 'PREVIEW_LIMIT' | 'SOURCE_CHANGED',
+      | 'NOT_FOUND'
+      | 'INVALID_SKILL'
+      | 'PREVIEW_EXPIRED'
+      | 'PREVIEW_LIMIT'
+      | 'SOURCE_CHANGED'
+      | 'FORBIDDEN'
+      | 'CONFLICT',
     message: string,
   ) {
     super(message);
@@ -528,13 +551,29 @@ export function skillSettingsPublicError(error: unknown): SkillSettingsError {
   if (error instanceof SkillSettingsError) return error;
   if (error instanceof SkillStoreError) {
     if (error.code === 'SOURCE_CHANGED')
-      return new SkillSettingsError('SOURCE_CHANGED', 'Skillがプレビュー後に変更されました');
+      return new SkillSettingsError('SOURCE_CHANGED', '確認後にSkillが変更されました。');
+    if (error.code === 'NOT_FOUND')
+      return new SkillSettingsError('NOT_FOUND', 'Skillが見つかりません。');
+    if (error.code === 'UNSAFE_SOURCE')
+      return new SkillSettingsError('FORBIDDEN', 'Skillの保存場所に安全にアクセスできません。');
+    if (error.code === 'NAME_EXISTS')
+      return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.nameExists);
+    if (error.code === 'AUTO_SELECTION_LIMIT')
+      return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.autoSelectionLimit);
+    if (error.code === 'EXPORT_EXISTS')
+      return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.exportExists);
     if (error.code === 'CONFLICT')
-      return new SkillSettingsError('INVALID_SKILL', '同名のSkillが既に存在します');
+      return new SkillSettingsError(
+        'CONFLICT',
+        '現在の状態ではSkillの操作を完了できませんでした。',
+      );
     if (error.code === 'INVALID_SKILL' && error.publicDetail !== undefined)
       return new SkillSettingsError('INVALID_SKILL', clipPublicMessage(error.publicDetail));
     return new SkillSettingsError('INVALID_SKILL', 'Skillを安全に読み込めません');
   }
+  const code = error instanceof Error && 'code' in error ? error.code : undefined;
+  if (code === 'EACCES' || code === 'EPERM')
+    return new SkillSettingsError('FORBIDDEN', 'Skillを操作する権限がありません。');
   return new SkillSettingsError('INVALID_SKILL', 'Skillの読み込みに失敗しました');
 }
 

@@ -6,7 +6,7 @@ import {
   createSkillDraftWithPublicError,
   skillSettingsPublicError,
 } from './skill-settings-service';
-import { SkillStore, SkillStoreError } from './skill-store';
+import { containsSkillCredential, SkillStore, SkillStoreError } from './skill-store';
 
 const skillFile = {
   path: 'SKILL.md',
@@ -129,6 +129,43 @@ describe('Skill Draft public contract', () => {
     );
     expect(result.message).toBe('Skillを安全に読み込めません');
     expect(result.message).not.toContain('private/path.md');
+  });
+
+  it.each([
+    ['# No metadata PRIVATE_MARKER_VALUE', 'frontmatter'],
+    ['---\nname: broken\ndescription: [PRIVATE_MARKER_VALUE\n---\n', 'YAML'],
+    ['---\ndescription: PRIVATE_MARKER_VALUE\n---\n', 'nameを文字列'],
+    [
+      '---\nname: test\ndescription: Test\n---\nAuthorization: Bearer PRIVATE_MARKER_VALUE',
+      'files[0].contentに認証情報',
+    ],
+    [
+      `---\nname: test\ndescription: Test\n---\nPRIVATE_MARKER_VALUE${'x'.repeat(1024 * 1024)}`,
+      '1 MiB以下',
+    ],
+  ])('gives AI a safe correction for invalid draft content (%#)', (content, reason) => {
+    const store = Object.create(SkillStore.prototype) as SkillStore;
+    let publicError: Error | undefined;
+    try {
+      store.validateCreatedSkill('skill-draft-contract', [{ ...skillFile, content }]);
+    } catch (error) {
+      publicError = skillSettingsPublicError(error);
+    }
+    expect(publicError?.message).toContain(reason);
+    expect(publicError?.message).not.toContain('PRIVATE_MARKER_VALUE');
+  });
+
+  it('accepts illustrative Bearer environment references while rejecting credentials', () => {
+    expect(containsSkillCredential('Authorization: Bearer $TOKEN')).toBe(false);
+    expect(
+      containsSkillCredential('curl -H "Authorization: Bearer ${TOKEN}" https://example.invalid'),
+    ).toBe(false);
+    expect(containsSkillCredential('Authorization: Bearer ${TOKEN:-literal-value}')).toBe(true);
+    expect(containsSkillCredential('Authorization: Basic $TOKEN')).toBe(true);
+    expect(containsSkillCredential('Authorization: Bearer actual-value')).toBe(true);
+    expect(
+      containsSkillCredential('Authorization: Bearer $TOKEN\nCookie: session=actual-value'),
+    ).toBe(true);
   });
 
   it('teaches the built-in creator to confirm the Draft ID', () => {

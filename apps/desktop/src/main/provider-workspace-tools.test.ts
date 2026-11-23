@@ -25,6 +25,7 @@ import {
   PROVIDER_WORKSPACE_GUIDANCE,
   SKILL_DRAFT_TOOL,
   providerWorkspaceGuidance,
+  providerTurnToolGuidance,
   ProviderWorkspaceTools,
   projectMemoryAuthorizationFacts,
   providerDisclosureAuthorizationFacts,
@@ -41,6 +42,27 @@ import { nativeWorkspaceEditSupport, type NativeSafeFsProbe } from './native-saf
 import { ManagedCommandSessions } from './managed-command-sessions';
 
 const roots: string[] = [];
+
+it('explains the actual limits when a folder, model tools, or command execution is unavailable', () => {
+  const root = { rootId: 'root', label: 'root', path: '/root', role: 'primary' as const };
+  const guidance = (roots: (typeof root)[], toolCalling: boolean | undefined, names: string[]) =>
+    providerTurnToolGuidance({
+      platform: 'linux',
+      roots,
+      toolCalling,
+      tools: names.map((name) => ({ name })),
+    });
+  expect(guidance([], undefined, [])).toContain('作業フォルダーがありません');
+  expect(guidance([], false, [])).toContain('モデルはツール呼び出しに対応していません');
+  expect(guidance([root], undefined, ['list_workspace'])).toContain('コマンド実行の準備');
+  expect(guidance([root], true, ['list_workspace', 'exec_command'])).not.toContain(
+    'コマンド実行の準備',
+  );
+  const auxiliaryOnly = guidance([], true, ['skill_draft_create']);
+  expect(auxiliaryOnly).toContain('ファイル操作とコマンドは使えません');
+  expect(auxiliaryOnly).toContain('下書きは、利用できる skill_draft_create で作成できます');
+  expect(auxiliaryOnly).not.toContain('モデルはツール呼び出しに対応していません');
+});
 const searchRace = vi.hoisted(() => ({ beforeReaddir: null as (() => void) | null }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const original = await importOriginal<typeof FsPromises>();

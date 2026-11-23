@@ -29,7 +29,14 @@ import {
   type SlashCommand,
   type SlashCommandId,
 } from './slash-commands';
-import { mentionText, presentSkillDraft, skillMentions, typedSkillAlias } from './skill-mentions';
+import {
+  hasUnselectedSkillMention,
+  isSkillCreator,
+  mentionText,
+  presentSkillDraft,
+  skillMentions,
+  typedSkillAlias,
+} from './skill-mentions';
 import { buildSkillSearchIndex, filterSkillSearchIndex, skillUnavailable } from './skill-picker';
 import { useTaskBoundary } from '../TaskBoundary';
 // Shared with the preload bridge, which arms the clipboard read from the same predicate — the two
@@ -287,17 +294,23 @@ export function Composer({ taskId }: { taskId: string }) {
   const skillCatalogRevision = useAppStore((s) => s.skillCatalogRevision);
   const selectedSkills =
     useAppStore((s) => s.skillSelectionByTask[taskId]) ?? EMPTY_SKILL_SELECTION;
+  const creatingSkill = selectedSkills.some(isSkillCreator);
   const { text: presentedDraft, mentions } = useMemo(
     () => presentSkillDraft(storedDraft, selectedSkills),
     [storedDraft, selectedSkills],
   );
   const aliasCaretRef = useRef<number | null>(null);
+  const warnedSkillDraft = useRef<{ taskId: string; text: string } | null>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
   const [compositionDraft, setCompositionDraft] = useState<string | null>(null);
   const composing = compositionDraft !== null;
   const draft = compositionDraft ?? presentedDraft;
   // An untouched legacy draft carries its selections separately and may contain a standalone command.
-  const sendText = storedDraft.trim() ? storedDraft : presentedDraft;
+  const sendText = storedDraft.trim()
+    ? storedDraft
+    : selectedSkills.length === 1 && creatingSkill
+      ? ''
+      : presentedDraft;
   const activatedSkills =
     useAppStore((s) => s.activatedSkillsByTask[taskId]) ?? EMPTY_ACTIVATED_SKILLS;
   const loadSkills = useAppStore((s) => s.loadSkills);
@@ -519,7 +532,7 @@ export function Composer({ taskId }: { taskId: string }) {
     (turnActive && goalRequested);
   const actionPolicy = composerActionPolicy({
     turnStatus: turn?.status === 'canceling' ? 'canceling' : turnActive ? 'running' : 'idle',
-    hasDraft: draft.trim().length > 0,
+    hasDraft: sendText.trim().length > 0,
     canQueue,
     canStopAndSend,
     canCancel,
@@ -570,6 +583,7 @@ export function Composer({ taskId }: { taskId: string }) {
     const raw = sendText;
     if (!raw.trim() || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel')
       return;
+    if (needsSkillMentionConfirmation(raw)) return;
     // Enter while the slash picker is open already runs `/team` through runSlashCommand. Keep the
     // send button and `/team ` (with a trailing space) consistent: a standalone command opens the
     // Canvas, while `/team <request>` remains a message and Main routes it through Sprint Coder
@@ -620,6 +634,25 @@ export function Composer({ taskId }: { taskId: string }) {
     if (actionPolicy.primary.kind === 'queue') {
       runTurnAction('queue', () => queueMessage(taskId, text, selectedSkills));
     }
+  }
+
+  function needsSkillMentionConfirmation(text: string): boolean {
+    const warned = warnedSkillDraft.current;
+    if (
+      (warned?.taskId !== taskId || warned.text !== text) &&
+      hasUnselectedSkillMention(text, selectedSkills, skillCatalog)
+    ) {
+      warnedSkillDraft.current = { taskId, text };
+      setTurnStartError({
+        taskId,
+        message:
+          '入力した名前のSkillが選択されていません。/ で選ぶか、もう一度送信するとSkillを使わずに送れます。',
+      });
+      return true;
+    }
+    warnedSkillDraft.current = null;
+    if (warned?.taskId === taskId) setTurnStartError(null);
+    return false;
   }
 
   function startMessage(
@@ -676,6 +709,7 @@ export function Composer({ taskId }: { taskId: string }) {
     if (attachmentDraftIsUnresolved(useAppStore.getState(), taskId)) return;
     const raw = sendText;
     if (!raw.trim() || actionPolicy.interrupt.disabled) return;
+    if (needsSkillMentionConfirmation(raw)) return;
     const text = composerMessageText(raw, imageRequested);
     const restoreImageRequest = imageRequested;
     updateImageRequested(false);
@@ -801,6 +835,10 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function editSkillDraft(next: string, caret: number, allowAlias = false) {
+    if (warnedSkillDraft.current?.taskId === taskId && warnedSkillDraft.current.text !== next) {
+      warnedSkillDraft.current = null;
+      setTurnStartError(null);
+    }
     const existing = new Set(skillMentions(next, selectedSkills).map((m) => m.selection));
     const retained = selectedSkills.filter((skill) => existing.has(skill));
     const alias = allowAlias ? typedSkillAlias(next, caret, skillCatalog) : null;
@@ -811,11 +849,8 @@ export function Composer({ taskId }: { taskId: string }) {
         ref,
         retained.map((selection) => selection.ref),
       );
-      next =
-        next.slice(0, alias.trigger) +
-        spelling +
-        next.slice(alias.trigger + 1 + ref.skillId.length);
-      caret += spelling.length - (1 + ref.skillId.length);
+      next = next.slice(0, alias.trigger) + spelling + next.slice(alias.trigger + alias.length);
+      caret += spelling.length - alias.length;
       if (!retained.some((s) => s.ref.source === ref.source && s.ref.skillId === ref.skillId)) {
         retained.push({ ref, kind });
       }
@@ -910,6 +945,13 @@ export function Composer({ taskId }: { taskId: string }) {
             shadow rather than stacking two framed boxes on top of each other. */}
         <div className="composer-panel">
           <ContextBar taskId={taskId} />
+          {selectedSkills.length > 0 && (
+            <p className="composer-skill-hint">
+              {creatingSkill
+                ? 'Skill作成は下書きができるまで、このTaskで続けられます。ほかのSkillはこの送信だけで使います。'
+                : '選択したSkillはこの送信だけで使います。'}
+            </p>
+          )}
           {aiConnectionRequired && githubIssue === null && (
             <div className="composer-ai-connection">
               <div role="status">
@@ -1074,7 +1116,7 @@ export function Composer({ taskId }: { taskId: string }) {
                     ? 'Goalを入力（Enterで開始 / Escでキャンセル）'
                     : turnActive
                       ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
-                      : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
+                      : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)。/ で Skill を選べます。'
                 }
                 value={draft}
                 disabled={sending}

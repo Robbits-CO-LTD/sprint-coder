@@ -1,9 +1,9 @@
 import { skillRuntimeForConnection } from './skill-runtime';
-import { useState } from 'react';
 import { requestedSkill, WORKSPACE_REQUEST } from '../../../chat-continuation';
 import type { SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
 import { useAppStore } from '../../store/appStore';
-import { ProjectEditorDialog } from '../ProjectEditorDialog';
+import { taskHasEffectiveWorkspaceRoot } from '../../lib/effective-workspace-root';
+import { WorkspaceFolderButton } from './WorkspaceFolderButton';
 import { skillUnavailable } from './skill-picker';
 
 export function ChatContinuation({
@@ -14,18 +14,13 @@ export function ChatContinuation({
   onResume: (text: string, skills: readonly TurnSkillSelection[]) => void;
 }) {
   const reply = useAppStore((s) => s.messagesByTask[taskId]?.at(-1));
-  const projectId = useAppStore((s) => s.tasks.find((task) => task.id === taskId)?.projectId);
-  const project = useAppStore((s) => s.projects.find((item) => item.id === projectId));
-  const workspace = useAppStore((s) => s.workspaceByTask[taskId]);
+  const hasFolder = useAppStore((state) => taskHasEffectiveWorkspaceRoot(taskId, state));
   const catalog = useAppStore((s) => s.skillCatalog);
   const runtime = useAppStore((s) => s.runtime.kind);
   const picker = useAppStore((s) => s.modelPicker);
   const teamStarted = useAppStore((s) =>
     s.teamByTask[taskId]?.workers.some((w) => w.kind === 'worker'),
   );
-  const [editing, setEditing] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   if (reply?.author !== 'assistant' || reply.turnId === null) return null;
   const connection = picker.taskId === taskId ? picker.selection?.connectionId : null;
@@ -41,26 +36,7 @@ export function ChatContinuation({
   )
     return null;
 
-  const hasFolder = projectId != null ? Boolean(project?.primaryFolder) : Boolean(workspace?.path);
-  async function selectFolder() {
-    if (projectId != null) {
-      if (project) setEditing(true);
-      return;
-    }
-    setPending(true);
-    setError(null);
-    try {
-      const selected = await window.sprintCoder?.workspace.select(taskId);
-      if (selected)
-        useAppStore.setState((s) => ({
-          workspaceByTask: { ...s.workspaceByTask, [taskId]: selected },
-        }));
-    } catch {
-      setError('作業フォルダーを設定できませんでした。');
-    } finally {
-      setPending(false);
-    }
-  }
+  if (folderRequested && !hasFolder) return <WorkspaceFolderButton taskId={taskId} />;
   function resume(item?: SkillCatalogItem) {
     const state = useAppStore.getState();
     if (state.sendingByTask[taskId] || state.messagesByTask[taskId]?.at(-1)?.id !== reply?.id)
@@ -72,29 +48,11 @@ export function ChatContinuation({
   }
   return (
     <div>
-      <button
-        type="button"
-        className="turn-diff-action"
-        disabled={pending || (folderRequested && projectId != null && !project)}
-        onClick={() =>
-          folderRequested && !hasFolder ? void selectFolder() : void resume(skill || undefined)
-        }
-      >
+      <button type="button" className="turn-diff-action" onClick={() => resume(skill || undefined)}>
         {skill
           ? `${skill.ref.source}/${skill.ref.skillId} を使って続ける`
-          : hasFolder
-            ? 'この作業フォルダーで続ける'
-            : '作業フォルダーを選ぶ'}
+          : 'この作業フォルダーで続ける'}
       </button>
-      {editing && project && (
-        <ProjectEditorDialog
-          open
-          project={project}
-          onClose={() => setEditing(false)}
-          onSaved={() => setEditing(false)}
-        />
-      )}
-      {error && <p role="alert">{error}</p>}
     </div>
   );
 }
