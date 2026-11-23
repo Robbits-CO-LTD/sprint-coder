@@ -379,7 +379,7 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
   return lines.join('\n');
 }
 
-function renderDesktopControl(command: string, macos: boolean): string[] {
+export function renderDesktopControl(command: string, macos: boolean): string[] {
   const cli = JSON.stringify(command);
   // The OS-specific lines: how apps are named and launched, the keys, and what must not be
   // operated. The rest is the same on every OS.

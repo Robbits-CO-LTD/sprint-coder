@@ -44,6 +44,13 @@ import {
 } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError, type ApprovalWaitObserver } from './tool-broker';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
+import { ToolImageBridge } from './tool-image-bridge';
+import {
+  matchesScreenshotPicture,
+  isScreenshotToolResult,
+  SCREENSHOT_PICTURE_ATTACHED,
+  type ScreenshotPicture,
+} from './desktop-control-screenshot';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
 import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
@@ -58,6 +65,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     executionId: string;
     connection: ProviderConnection;
     prompt: string;
+    attachment?: { manifestDigest: string; byteCount: number };
     context: PreparedContext;
     knownWorkspaceRoots: readonly string[];
     /** The labels Main declared for those roots (issue #849). */
@@ -75,7 +83,16 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   ): Promise<{
     tools: ProviderTool[];
     writable: boolean;
-    invoke(call: ProviderMessageToolCall, signal: AbortSignal): Promise<unknown>;
+    desktopGuidance?: string;
+    invoke(
+      call: ProviderMessageToolCall,
+      signal: AbortSignal,
+      onPicture?: (picture: ScreenshotPicture) => void,
+    ): Promise<unknown>;
+    approveScreenshot?(
+      picture: ScreenshotPicture,
+      signal: AbortSignal,
+    ): Promise<(() => boolean) | null>;
     close(): void;
   }>;
   executeManagerTool(input: {
@@ -314,21 +331,30 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       if (externalCli && this.deps.openCliWorkspace) {
         workspace = await this.deps.openCliWorkspace(input, randomUUID());
         availableTools.push(...workspace.tools);
+        if (workspace.desktopGuidance)
+          messages.unshift({ role: 'system', content: workspace.desktopGuidance });
         if (input.accessMode === 'workspace-write' && !workspace.writable)
           messages.unshift({ role: 'system', content: WORKER_CANNOT_WRITE_NOTICE });
       }
       const runtime = this.deps.registry.resolve(connection);
       const streamBudget = new ProviderStreamBudget();
+      const imageBridge = new ToolImageBridge();
+      let screenshotGrant: (() => boolean) | null = null;
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         controller.signal.throwIfAborted();
         providerCallCount += 1;
+        const dispatch = imageBridge.consumeForNextDispatch({
+          baseMessages: messages,
+          directImages: [],
+        });
         const egress = this.deps.authorizeEgress({
+          ...(dispatch.hasToolImage ? { attachment: dispatch.audit } : {}),
           worker: input.worker,
           executionId,
           connection,
           prompt: externalCli
             ? JSON.stringify({
-                messages: providerMessagesForEgressPolicy(messages),
+                messages: providerMessagesForEgressPolicy(dispatch.messages),
                 tools: availableTools,
               })
             : JSON.stringify(providerMessagesForEgressPolicy(messages)),
@@ -361,6 +387,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           );
         else await modelLease.prepare(controller.signal);
         controller.signal.throwIfAborted();
+        if (dispatch.hasToolImage && !screenshotGrant?.())
+          throw new Error('画像の送信先が変わったため、Workerを停止しました。');
+        screenshotGrant = null;
         const providerExecutionId = providerCallExecutionId(executionId, providerCallCount);
         this.active.set(input.worker.id, {
           executionId: providerExecutionId,
@@ -375,7 +404,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             executionId: providerExecutionId,
             connectionId,
             modelId,
-            messages,
+            messages: dispatch.messages,
             ...(availableTools.length > 0 ? { tools: [...availableTools] } : {}),
             ...(webSearch ? { webSearch: true } : {}),
           },
@@ -449,7 +478,24 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           let toolResult: string;
           if (workspace?.tools.some((tool) => tool.name === toolCall.name)) {
             try {
-              const result = await workspace.invoke(toolCall, controller.signal);
+              let picture: ScreenshotPicture | undefined;
+              let result = await workspace.invoke(toolCall, controller.signal, (taken) => {
+                picture = taken;
+              });
+              if (
+                picture &&
+                !screenshotGrant &&
+                matchesScreenshotPicture(result, picture) &&
+                isScreenshotToolResult(result) &&
+                !inheritedContext.projectItems.some((item) => item.localOnly)
+              ) {
+                screenshotGrant =
+                  (await workspace.approveScreenshot?.(picture, controller.signal)) ?? null;
+                if (screenshotGrant) {
+                  imageBridge.acceptScreenshot(toolCall.callId, picture);
+                  result = { ...result, picture: SCREENSHOT_PICTURE_ATTACHED };
+                }
+              }
               if (isCommittedManagedWrite(result)) writes.committed++;
               const changes = managedResultChanges(result);
               if (changes.length) input.onEvent?.({ type: 'fileChange', changes });

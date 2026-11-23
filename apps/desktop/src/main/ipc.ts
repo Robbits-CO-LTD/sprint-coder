@@ -340,7 +340,8 @@ import {
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
-import { configureDesktopControlStateRoot } from './desktop-control';
+import { renderDesktopControl } from './prompt-context';
+import { configureDesktopControlStateRoot, resolveDesktopControlCommand } from './desktop-control';
 import {
   DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
   configureDesktopControlTeamCursors,
@@ -413,6 +414,12 @@ type ProviderToolImageBinding = Readonly<{
   modelCatalogRevision: number;
   selectionDigest: string;
   capability: ProviderImageAttachmentCapabilityBinding;
+}>;
+
+type CliScreenshotBinding = Readonly<{
+  kind: 'cli-screenshot';
+  destination: string;
+  identity: string;
 }>;
 
 type CloudScreenshotBinding = Readonly<{
@@ -1613,6 +1620,7 @@ export class IpcRouter {
         executionId,
         connection,
         prompt,
+        attachment,
         context,
         knownWorkspaceRoots,
         knownWorkspaceLabels,
@@ -1623,6 +1631,12 @@ export class IpcRouter {
             task: this.persistence.getTask(worker.taskId),
             turnId: executionId,
             prompt,
+            ...(attachment
+              ? {
+                  attachmentManifestDigest: attachment.manifestDigest,
+                  attachmentByteCount: attachment.byteCount,
+                }
+              : {}),
             knownWorkspaceRoots,
             knownWorkspaceLabels,
             context,
@@ -1674,11 +1688,63 @@ export class IpcRouter {
           input.onApprovalWait,
           worker.id,
         );
+        const desktopCommand =
+          snapshot.entries.some((entry) => entry.providerName === 'exec_command') &&
+          desktopControlWorker(worker.taskId, worker.id) !== undefined
+            ? resolveDesktopControlCommand()
+            : null;
+        const { connectionId, requestedModel: modelId } = worker.modelSelection;
+        if (!connectionId || !modelId) throw new InvalidModelError('provider');
+        const connection = this.persistence.getProviderConnection(connectionId);
+        const binding = () => {
+          const run = this.managedWorkerTurn.get(turnId)?.executionBinding;
+          if (
+            !run ||
+            run.agentId !== worker.id ||
+            desktopControlWorker(worker.taskId, worker.id) === undefined
+          )
+            return null;
+          const current = this.persistence.getTeamExecution(run.executionId);
+          if (
+            current.assigneeAgentId !== worker.id ||
+            digestCanonical(current.modelSelection) !== digestCanonical(run.modelSelection)
+          )
+            return null;
+          return this.cliScreenshotBinding(
+            worker.taskId,
+            turnId,
+            connection,
+            modelId,
+            current.modelSelection,
+          );
+        };
         return {
           writable,
+          ...(desktopCommand
+            ? {
+                desktopGuidance: [
+                  ...renderDesktopControl(desktopCommand, process.platform === 'darwin'),
+                  WORKER_DESKTOP_CONTROL_PROMPT,
+                ].join('\n'),
+              }
+            : {}),
+          approveScreenshot: async (picture, signal) => {
+            const approved = binding();
+            if (!approved) return null;
+            const endWait = input.onApprovalWait?.();
+            try {
+              if (
+                !(await this.approveCloudScreenshot(approved, connection, modelId, picture, signal))
+              )
+                return null;
+              return () => binding()?.identity === approved.identity;
+            } finally {
+              endWait?.();
+            }
+          },
           tools: providerToolsFromSnapshot(snapshot).filter(({ name }) => name !== 'view_image'),
-          invoke: (call, signal) =>
-            genericManagedRuntimeTools.cliTeam(
+          invoke: (call, signal, onPicture) =>
+            this.dispatchManagedRuntimeTool(
               worker.taskId,
               turnId,
               {
@@ -1688,6 +1754,9 @@ export class IpcRouter {
                 catalogDigest: snapshot.digest,
               },
               signal,
+              undefined,
+              undefined,
+              onPicture,
             ),
           close: () => this.releaseManagedWorkerTurn(turnId),
         };
@@ -6863,12 +6932,60 @@ export class IpcRouter {
     );
   }
 
+  private cliScreenshotBinding(
+    taskId: string,
+    turnId: string,
+    connection: ProviderConnection,
+    modelId: string,
+    selection: ModelSelection | null,
+  ): CliScreenshotBinding | null {
+    const agent = EXTERNAL_ACP_AGENTS.find(
+      (a) => a.connectionId === connection.id && a.providerId === connection.providerId,
+    );
+    if (
+      !agent ||
+      !selection ||
+      selection.connectionId !== agent.connectionId ||
+      selection.requestedProvider !== agent.providerId ||
+      selection.requestedModel !== modelId ||
+      this.persistence.getTask(taskId).localOnly
+    )
+      return null;
+    const current = this.persistence.getProviderConnection(connection.id);
+    const model = this.modelCatalog.find(connection.id, modelId);
+    if (
+      !current.enabled ||
+      current.runtimeKind !== 'builtin_cli' ||
+      digestCanonical(current) !== digestCanonical(connection) ||
+      !model?.available ||
+      model.connectionId !== agent.connectionId ||
+      model.modelId !== modelId ||
+      model.providerId !== agent.providerId ||
+      model.multimodalInput?.value !== true ||
+      model.multimodalInput.source !== 'runtime_metadata'
+    )
+      return null;
+    return {
+      kind: 'cli-screenshot',
+      destination: agent.name + ' CLI（選択したモデルの提供元）',
+      identity: digestCanonical({ taskId, turnId, connection, selection }),
+    };
+  }
+
   private cloudScreenshotBinding(
     started: StartedTurn,
     connection: ProviderConnection,
     modelId: string,
-  ): CloudScreenshotBinding | null {
+  ): CloudScreenshotBinding | CliScreenshotBinding | null {
     const taskId = started.event.taskId;
+    if (isExternalAcpConnection(connection.id))
+      return this.cliScreenshotBinding(
+        taskId,
+        started.turnId,
+        connection,
+        modelId,
+        this.persistence.getTaskModelSelection(taskId),
+      );
     const current = this.persistence.getProviderConnection(connection.id);
     const selection = this.persistence.getTaskModelSelection(taskId);
     if (
@@ -6912,7 +7029,7 @@ export class IpcRouter {
   }
 
   private async approveCloudScreenshot(
-    binding: CloudScreenshotBinding,
+    binding: CloudScreenshotBinding | CliScreenshotBinding,
     connection: ProviderConnection,
     modelId: string,
     picture: ScreenshotPicture,
@@ -6926,7 +7043,7 @@ export class IpcRouter {
       title: 'スクリーンショットの外部送信',
       message: 'このスクリーンショットを次の接続先に1回送りますか？',
       detail: [
-        `接続先: ${binding.requestUrl}`,
+        `接続先: ${binding.kind === 'cli-screenshot' ? binding.destination : binding.requestUrl}`,
         `Provider: ${connection.providerId}`,
         `モデル: ${modelId}`,
         `画像: ${picture.mimeType}（${picture.byteLength} バイト）`,
@@ -7367,9 +7484,7 @@ export class IpcRouter {
     // (`registerCommandRunnerTool`). With the cursors off or without the mark, the catalog is as
     // it was.
     const desktopControl =
-      kind !== 'provider' &&
-      agentId !== undefined &&
-      desktopControlWorker(taskId, agentId) !== undefined;
+      agentId !== undefined && desktopControlWorker(taskId, agentId) !== undefined;
     const allowed = new Set([
       'update_plan',
       ...(workspace.roots.length === 0 ? [] : readable),
@@ -8504,7 +8619,8 @@ export class IpcRouter {
       runtime = this.providerRegistry.resolve(connection);
       const providerImageDispatch = this.prepareProviderTurnImageAttachments(started, connection);
       const toolImageBridge = new ToolImageBridge();
-      let pendingToolImageBinding: ProviderToolImageBinding | CloudScreenshotBinding | undefined;
+      let pendingToolImageBinding:
+        ProviderToolImageBinding | CloudScreenshotBinding | CliScreenshotBinding | undefined;
       let pendingScreenshot = false;
       const messages = providerMessagesFromContext(
         context.fragments,
@@ -8569,6 +8685,17 @@ export class IpcRouter {
           ? []
           : providerToolsFromSnapshot(workspaceToolSnapshot)),
       ]);
+      if (externalCli && roundTools.some((tool) => tool.name === 'exec_command')) {
+        const command = resolveDesktopControlCommand();
+        if (command)
+          messages.unshift({
+            role: 'system',
+            content: [
+              ...renderDesktopControl(command, process.platform === 'darwin'),
+              leaderDesktopControlGuidance(teamTurn),
+            ].join('\n'),
+          });
+      }
       const seenProviderToolCallIds = new Set<string>();
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
@@ -8667,10 +8794,17 @@ export class IpcRouter {
         const roundOutput: string[] = [];
         let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;
         let roundCompleted = false;
-        let finalToolImageEndpoint: PreparedProviderEndpoint | null = null;
         if (toolImageBinding !== undefined) {
-          if ('kind' in toolImageBinding) {
-            finalToolImageEndpoint = await this.providerEndpointPolicy.prepareRequestUrl(
+          let imageTrust: 'trusted-remote' | 'trusted-local';
+          if ('kind' in toolImageBinding && toolImageBinding.kind === 'cli-screenshot') {
+            if (
+              this.cloudScreenshotBinding(started, connection, modelId)?.identity !==
+              toolImageBinding.identity
+            )
+              throw new ProviderImageAttachmentError();
+            imageTrust = 'trusted-remote';
+          } else if ('kind' in toolImageBinding) {
+            const finalToolImageEndpoint = await this.providerEndpointPolicy.prepareRequestUrl(
               toolImageBinding.requestUrl,
             );
             controller.signal.throwIfAborted();
@@ -8680,14 +8814,17 @@ export class IpcRouter {
                 toolImageBinding.identity
             )
               throw new ProviderImageAttachmentError();
+            imageTrust = 'trusted-remote';
           } else {
-            finalToolImageEndpoint = await this.revalidateProviderToolImageBinding(
+            const finalToolImageEndpoint = await this.revalidateProviderToolImageBinding(
               started,
               toolImageBinding,
               controller.signal,
             );
             controller.signal.throwIfAborted();
-            if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
+            if (finalToolImageEndpoint?.trust !== 'trusted-local')
+              throw new ProviderImageAttachmentError();
+            imageTrust = 'trusted-local';
             if (!this.providerToolImageFinalStateMatches(started, toolImageBinding, connection))
               throw new ProviderImageAttachmentError();
           }
@@ -8719,14 +8856,14 @@ export class IpcRouter {
               adapterVersion: 'provider-registry-v1',
               connectionId,
               modelId,
-              endpointTrust: finalToolImageEndpoint.trust,
+              endpointTrust: imageTrust,
               round: ordinal,
               toolCatalogDigest: digestCanonical(roundTools),
               attachmentManifestDigest: toolImageDispatch.audit.manifestDigest,
               attachmentByteCount: toolImageDispatch.audit.byteCount,
             },
             connection.providerId,
-            finalToolImageEndpoint.trust,
+            imageTrust,
           );
           if (!finalEgress.allowed)
             throw new ProviderTurnFailureError(

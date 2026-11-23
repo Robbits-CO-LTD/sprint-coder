@@ -63,7 +63,7 @@ rl.on('line', line => {
   const reply = (result) => send({ id: request.id, result });
   switch (request.method) {
     case 'initialize':
-      reply({ protocolVersion: 1, agentInfo: { name: 'OpenCode',
+      reply({ protocolVersion: 1, agentCapabilities:{promptCapabilities:{image:scenario === 'picture'}}, agentInfo: { name: 'OpenCode',
         version: scenario === 'old_version' ? '1.9.0' : '2.2.5' } });
       break;
     case 'session/new':
@@ -72,6 +72,11 @@ rl.on('line', line => {
       else reply({ sessionId, configOptions: [selection] });
       break;
     case 'session/prompt':
+      if (scenario === 'picture') {
+        const [text, image] = request.params.prompt;
+        output(sessionId,image?.type === 'image' && image.mimeType === 'image/png' && image.data === 'QUJD' && !text.text.includes('QUJD') ? 'saw image block' : 'wrong image');
+        reply({stopReason:'end_turn'}); break;
+      }
       if (scenario.startsWith('tool-')) {
         const prompt = request.params.prompt[0].text;
         const marker = prompt.match(/^SPRINT_TOOL_[a-f0-9-]+$/m)?.[0];
@@ -162,6 +167,24 @@ describe('External ACP text chat', () => {
     return output;
   }
 
+  it('delivers the image as ACP content only when the current agent supports it', async () => {
+    const request = {
+      messages: [
+        {
+          role: 'user' as const,
+          content: 'inspect',
+          inlineImages: [{ mimeType: 'image/png' as const, base64: 'QUJD' }],
+        },
+      ],
+    };
+    expect(await execute('picture', undefined, request)).toContainEqual({
+      type: 'output_delta',
+      text: 'saw image block',
+    });
+    expect(await execute('success', undefined, request)).toMatchObject([
+      { type: 'error', error: { providerCode: 'images_unsupported' } },
+    ]);
+  });
   it('decodes a split managed call, rejects unoffered tools and returns the actual result to the model', async () => {
     const tools = [
       { name: 'team_get_status', description: 'Team status', inputSchema: { type: 'object' } },

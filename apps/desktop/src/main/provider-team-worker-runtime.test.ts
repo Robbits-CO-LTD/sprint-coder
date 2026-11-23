@@ -12,6 +12,7 @@ import {
   ProviderAwareTeamWorkerRuntime,
   type ProviderTeamWorkerRuntimeDeps,
 } from './provider-team-worker-runtime';
+import { SCREENSHOT_PICTURE_UNAVAILABLE } from './desktop-control-screenshot';
 import { WorkerEgressDeniedError } from './team-coordinator';
 import { normalizeGeminiContentStream } from './gemini-content-stream';
 
@@ -1010,6 +1011,76 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       expect(close).toHaveBeenCalledOnce();
     },
   );
+  it.each(['grant', 'deny', 'changed'])(
+    'binds a desktop Worker screenshot to one dispatch: %s',
+    async (mode) => {
+      const cli: ProviderConnection = {
+        ...connection,
+        id: 'builtin:antigravity-cli',
+        providerId: 'antigravity',
+        runtimeKind: 'builtin_cli',
+      };
+      const registry = new MainProviderRegistry();
+      let round = 0;
+      const sent: string[][] = [];
+      const runtime: ProviderRuntime = {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        async *execute(_connection, request) {
+          sent.push(
+            request.messages.flatMap((message) =>
+              (message.inlineImages ?? []).map((image) => image.base64),
+            ),
+          );
+          if (++round <= 2)
+            yield { type: 'tool_call', callId: 'call-' + round, name: 'exec_command', input: {} };
+          else yield { type: 'output_delta', text: 'done' };
+          yield { type: 'completed', stopReason: 'end_turn' };
+        },
+      };
+      registry.register({ runtimeKind: 'builtin_cli', providerId: 'antigravity', runtime });
+      const picture = {
+        mimeType: 'image/png' as const,
+        dataUrl: 'data:image/png;base64,QUJD',
+        byteLength: 3,
+        sha256: 'a'.repeat(64),
+      };
+      const adapter = controlledProviderAdapter(runtime, {
+        registry,
+        getConnection: () => cli,
+        openCliWorkspace: async () => ({
+          tools: [
+            { name: 'exec_command', description: 'desktop', inputSchema: { type: 'object' } },
+          ],
+          writable: false,
+          close: vi.fn(),
+          invoke: async (call, _signal, onPicture) => {
+            if (call.callId !== 'call-1') return {};
+            onPicture?.(picture);
+            return {
+              picture: SCREENSHOT_PICTURE_UNAVAILABLE,
+              stdout: JSON.stringify({ ok: true, data: { sha256: picture.sha256 } }),
+            };
+          },
+          approveScreenshot: async () => (mode === 'deny' ? null : () => mode === 'grant'),
+        }),
+      });
+      const worker = {
+        ...providerWorker(),
+        modelSelection: {
+          connectionId: cli.id,
+          requestedProvider: cli.providerId,
+          requestedModel: 'test',
+        },
+      };
+      const result = adapter.execute({ worker, envelope, content: 'inspect' });
+      if (mode === 'changed') await expect(result).rejects.toThrow('画像の送信先');
+      else await result;
+      expect(sent).toEqual(mode === 'changed' ? [[]] : [[], mode === 'grant' ? ['QUJD'] : [], []]);
+    },
+  );
+
   it('lets an external API Manager execute coordinator-bound Team tools and continue', async () => {
     const requests: unknown[] = [];
     const release = vi.fn(async () => undefined);

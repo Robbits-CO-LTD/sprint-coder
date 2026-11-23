@@ -324,6 +324,11 @@ describe('the Leader’s desktop mark on a hire', () => {
         requestedModel: 'm',
       },
       { connectionId: BUILTIN_GROK_CONNECTION_ID, requestedProvider: 'xai', requestedModel: 'm' },
+      ...['antigravity', 'opencode', 'cursor'].map((id) => ({
+        connectionId: 'builtin:' + id + '-cli',
+        requestedProvider: id,
+        requestedModel: 'sample',
+      })),
       // A built-in CLI's Connection with another provider, and an API Connection.
       { connectionId: BUILTIN_CODEX_CONNECTION_ID, requestedProvider: 'xai', requestedModel: 'm' },
       { connectionId: 'connection-api-1', requestedProvider: 'openai', requestedModel: 'm' },
@@ -346,7 +351,11 @@ describe('the Leader’s desktop mark on a hire', () => {
           requestedModel: worker.requestedModel,
         },
       } as unknown as AgentRecord);
-      const onCli = cli.mock.calls.length === 1;
+      const onCli =
+        cli.mock.calls.length === 1 ||
+        ['builtin:antigravity-cli', 'builtin:cursor-cli', 'builtin:opencode-cli'].includes(
+          worker.connectionId ?? '',
+        );
       expect({ modelSelection, marked: hired['desktopControl'] }).toEqual({
         modelSelection,
         marked: onCli,

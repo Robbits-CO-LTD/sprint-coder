@@ -159,7 +159,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         maxOutputTokens: unknown,
         toolCalling: { value: true, source: 'runtime_metadata' },
         structuredOutput: { value: false, source: 'unknown' },
-        multimodalInput: { value: false, source: 'unknown' },
+        multimodalInput: { value: session.acceptsImages, source: 'runtime_metadata' },
         reasoning: unknown,
       }));
     } finally {
@@ -231,8 +231,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
     let session: Awaited<ReturnType<ExternalAcpRuntime['open']>> | undefined;
     let textReceived = false;
     try {
-      if (request.messages.some((message) => message.inlineImages?.length))
-        throw new ExternalAcpError('images_unsupported');
+      const images = request.messages.flatMap((message) => message.inlineImages ?? []);
       // ACP agents run with native tools disabled. Only an explicit, round-bound request
       // can enter the existing Provider tool broker. Examples in prose stay ordinary text.
       const tools = request.tools ?? [];
@@ -242,7 +241,9 @@ export class ExternalAcpRuntime implements ProviderRuntime {
       let ordinary = marker === null;
       let callBytes = 0;
       const callParts: string[] = [];
-      const messages = JSON.stringify(request.messages);
+      const messages = JSON.stringify(
+        request.messages.map(({ inlineImages: _images, ...text }) => text),
+      );
       const prompt =
         marker === null
           ? messages
@@ -282,6 +283,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         onStopUnconfirmed,
       );
       const { sessionId, models, rpc } = session;
+      if (images.length && !session.acceptsImages) throw new ExternalAcpError('images_unsupported');
       if (!models.choices.some(({ id }) => id === request.modelId))
         throw new ExternalAcpError('model_not_available');
       if (models.current !== request.modelId) {
@@ -310,6 +312,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
                 type: 'text',
                 text: prompt,
               },
+              ...images.map(({ mimeType, base64 }) => ({ type: 'image', mimeType, data: base64 })),
             ],
           },
           180_000,
@@ -543,7 +546,10 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         models.choices = models.choices.filter(
           ({ id }) => id.startsWith('gemini-') && !id.includes('orchestrator'),
         );
-      return { rpc, sessionId, models, close };
+      const acceptsImages =
+        record(record(initialized['agentCapabilities'])?.['promptCapabilities'])?.['image'] ===
+        true;
+      return { rpc, sessionId, models, acceptsImages, close };
     } catch (error) {
       await close();
       throw error;

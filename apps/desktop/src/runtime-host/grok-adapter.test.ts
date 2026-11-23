@@ -335,6 +335,13 @@ describe('Grok catalog and capability gates', () => {
       },
     });
     expect(models.map((m) => m.id)).toEqual(['auto', 'grok-new']);
+    expect(models.every((m) => m.capabilities?.multimodalInput.value === false)).toBe(true);
+    expect(
+      grokModelsFromInitialize({
+        _meta: { grokShell: true },
+        agentCapabilities: { promptCapabilities: { image: true } },
+      })[0]?.capabilities?.multimodalInput.value,
+    ).toBe(true);
     expect(() => grokModelsFromInitialize({})).toThrow();
   });
   it('never chooses interactive authentication in a background probe', () => {

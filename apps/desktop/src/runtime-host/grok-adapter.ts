@@ -64,7 +64,7 @@ const capability = (value: boolean) => ({
   source: 'runtime_metadata' as const,
   sourceReference: MODEL_SOURCE,
 });
-const AUTO: CodexModelOption = {
+const AUTO = {
   id: 'auto',
   displayName: 'Auto',
   description: 'Grok CLIの既定モデルを使用',
@@ -74,7 +74,7 @@ const AUTO: CodexModelOption = {
     multimodalInput: capability(false),
     reasoning: capability(true),
   },
-};
+} satisfies CodexModelOption;
 
 export function grokModelsFromInitialize(value: unknown): CodexModelOption[] {
   const init = grokRecord(value);
@@ -82,8 +82,14 @@ export function grokModelsFromInitialize(value: unknown): CodexModelOption[] {
   if (meta['grokShell'] !== true) throw new Error('Not the official Grok ACP agent');
   const state = grokRecord(meta['modelState'] ?? {});
   const models = state['availableModels'];
-  if (!Array.isArray(models)) return [AUTO];
-  const result: CodexModelOption[] = [AUTO];
+  const caps = grokRecord(init['agentCapabilities'] ?? {});
+  const acceptsImages = grokRecord(caps['promptCapabilities'] ?? {})['image'] === true;
+  const auto = {
+    ...AUTO,
+    capabilities: { ...AUTO.capabilities, multimodalInput: capability(acceptsImages) },
+  };
+  if (!Array.isArray(models)) return [auto];
+  const result: CodexModelOption[] = [auto];
   for (const raw of models) {
     const model = grokRecord(raw);
     const id = model['modelId'];
@@ -95,7 +101,7 @@ export function grokModelsFromInitialize(value: unknown): CodexModelOption[] {
     )
       continue;
     result.push({
-      ...AUTO,
+      ...auto,
       id,
       displayName: typeof model['name'] === 'string' ? model['name'].slice(0, 128) : id,
       description: `Grok CLI: ${id}`,
