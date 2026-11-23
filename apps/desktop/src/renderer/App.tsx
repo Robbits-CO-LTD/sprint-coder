@@ -544,11 +544,15 @@ export default function App() {
                 </button>
                 <h2>Taskを選択してください</h2>
                 <p>左のTask履歴から選ぶか、新しいタスクを作成して会話を始めます。</p>
+                <p id="empty-state-new-task-workspace">
+                  新しく作るタスクには作業フォルダーがありません。
+                </p>
                 <div className="chips">
                   <button
                     type="button"
                     className="chip"
                     data-testid="empty-state-create-task-button"
+                    aria-describedby="empty-state-new-task-workspace"
                     onClick={() => void createTaskFromUi()}
                   >
                     <Plus size={14} /> 新しいタスクを作成
