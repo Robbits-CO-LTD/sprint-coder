@@ -17,6 +17,7 @@ import {
 import { OperationConflictError } from './persistence';
 import { UpdateInstallMutationGate } from './update-install-mutation-gate';
 import { secureLogger } from './secure-logger';
+import { SkillStore } from './skill-store';
 
 type Invoke = (event: unknown, raw: unknown) => Promise<CommandResult<unknown>>;
 const electron = vi.hoisted(() => ({
@@ -25,6 +26,7 @@ const electron = vi.hoisted(() => ({
     vi.fn<(_window: unknown, options: MessageBoxOptions) => Promise<MessageBoxReturnValue>>(),
 }));
 vi.mock('electron', () => ({
+  app: { getPath: () => 'synthetic-skill-home' },
   ipcMain: {
     on: vi.fn(),
     handle: (channel: string, invoke: Invoke) => electron.handlers.set(channel, invoke),
@@ -44,7 +46,7 @@ const newWork = [
   [IPC_CHANNELS.goalsResume, { skills: [] }],
 ] as const;
 
-function fixture(acknowledged = false, objective = '既存の目標') {
+function fixture(acknowledged = false, objective = '既存の目標', builtinsReady = true) {
   const policies = new Map<string, PermissionSettings>();
   const operations = new Map<string, { hash: string; value: unknown }>();
   const confirmations: Array<{ signal: AbortSignal; respond: (response: number) => void }> = [];
@@ -111,8 +113,12 @@ function fixture(acknowledged = false, objective = '既存の目標') {
   ) => void;
   const channels = new Set<string>([
     IPC_CHANNELS.permissionsSet,
+    IPC_CHANNELS.skillsList,
     ...newWork.map(([channel]) => channel),
   ]);
+  const refreshContextCatalog = vi.fn().mockResolvedValue(undefined);
+  const markContextCatalogUnavailable = vi.fn();
+  const listCatalog = vi.fn().mockResolvedValue({ revision: 'a'.repeat(64), items: [] });
   const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
   Object.assign(router, {
     window: { webContents: { id: 1, once: vi.fn() } },
@@ -166,7 +172,13 @@ function fixture(acknowledged = false, objective = '既存の目標') {
       getTask: () => taskWithGoal(objective),
     },
     permissionBroker: { getPolicy, drainPolicyEpochOutbox: drain },
-    skillSettings: { resolveSelections: vi.fn().mockResolvedValue([]) },
+    teamSkillReady: builtinsReady,
+    skillSettings: {
+      resolveSelections: vi.fn().mockResolvedValue([]),
+      refreshContextCatalog,
+      markContextCatalogUnavailable,
+      listCatalog,
+    },
     graphSourceMonitor: { invalidate: vi.fn() },
     dispatchStarted: vi.fn(),
   });
@@ -197,6 +209,8 @@ function fixture(acknowledged = false, objective = '既存の目標') {
     startTurn,
     startGoalTurn,
     resumeGoalTurn,
+    refreshContextCatalog,
+    markContextCatalogUnavailable,
     setAccessPreset,
     drain,
     invoke,
@@ -214,6 +228,54 @@ function fixture(acknowledged = false, objective = '既存の目標') {
 async function flush() {
   for (let index = 0; index < 15; index += 1) await Promise.resolve();
 }
+
+describe('built-in Skill preparation', () => {
+  it('shares an attempt, waits for pending installs after a failure, and retries on the next Goal', async () => {
+    let finishInstall!: () => void;
+    const pendingInstall = new Promise<void>((resolve) => {
+      finishInstall = resolve;
+    });
+    const installBuiltin = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('private path'), { code: 'EBUSY' }))
+      .mockReturnValueOnce(pendingInstall)
+      .mockResolvedValue(undefined);
+    const store = Object.assign(Object.create(SkillStore.prototype) as SkillStore, {
+      installBuiltin,
+    });
+    const open = vi.spyOn(SkillStore, 'open').mockResolvedValue(store);
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    const f = fixture(false, 'チームで進めてください。', false);
+    const first = f.invoke(IPC_CHANNELS.skillsList, {});
+    await flush();
+    const second = f.invoke(IPC_CHANNELS.skillsList, {});
+    await flush();
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(installBuiltin).toHaveBeenCalledTimes(4);
+    expect(f.markContextCatalogUnavailable).not.toHaveBeenCalled();
+
+    finishInstall();
+    await Promise.all([first, second]);
+    expect(f.markContextCatalogUnavailable).toHaveBeenCalledOnce();
+    expect(f.refreshContextCatalog).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledExactlyOnceWith('Built-in Skill preparation failed', {
+      stage: 'install_builtin',
+      reason: 'EBUSY',
+    });
+
+    expect(
+      await f.invoke(IPC_CHANNELS.goalsResume, { taskId: 'task-1', skills: [] }),
+    ).toMatchObject({
+      ok: true,
+    });
+    expect(f.resumeGoalTurn).toHaveBeenCalledWith('task-1', [], true);
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(installBuiltin).toHaveBeenCalledTimes(8);
+    expect(f.refreshContextCatalog).toHaveBeenCalledOnce();
+    await f.invoke(IPC_CHANNELS.skillsList, {});
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe('Turn text through the registered IPC handler', () => {
   it.each([

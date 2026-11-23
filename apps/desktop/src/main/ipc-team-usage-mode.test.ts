@@ -286,7 +286,8 @@ describe('Team usage mode in dispatch', () => {
     await h.router.startSelectedRuntime(requested());
     expect(h.handleRuntimeFailure).toHaveBeenCalledWith('grok', 'task-1', 'turn-1', {
       code: 'RUNTIME_FAILED',
-      userMessage: '組み込みTeam Skillを検証できないためTeamを開始できません。',
+      userMessage:
+        '組み込みTeam Skillを準備できませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
       retryable: true,
     });
     expect(h.grok.start).not.toHaveBeenCalled();

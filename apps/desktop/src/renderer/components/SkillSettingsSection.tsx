@@ -7,7 +7,7 @@ export function SkillSettingsSection({
   onCreateWithAi,
 }: {
   active: boolean;
-  onCreateWithAi?: (request?: { prompt: string; builtinSkillId: 'skill-creator' }) => void;
+  onCreateWithAi?: (request?: { prompt: string; builtinSkillId: 'skill-creator' }) => Promise<void>;
 }) {
   const [catalog, setCatalog] = useState<SkillCatalogItem[]>([]);
   const [drafts, setDrafts] = useState<SkillDraft[]>([]);
@@ -17,6 +17,7 @@ export function SkillSettingsSection({
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [creatingWithAi, setCreatingWithAi] = useState(false);
   const loaded = useRef(false);
 
   async function refresh() {
@@ -36,7 +37,9 @@ export function SkillSettingsSection({
       setStatus('Sprint Coder Skillsを読み込みました。');
     } catch {
       setLoadFailed(true);
-      setError('Skill一覧を取得できませんでした。再読み込みしてください。');
+      setError(
+        'Skill一覧を取得できませんでした。再読み込みし、解消しない場合はアプリを再起動してください。',
+      );
     } finally {
       setLoading(false);
     }
@@ -48,6 +51,19 @@ export function SkillSettingsSection({
     loaded.current = false;
     const state = useAppStore.getState();
     await Promise.all([refresh(), state.selectedTaskId === null ? undefined : state.loadSkills()]);
+  }
+  async function createWithAi() {
+    setCreatingWithAi(true);
+    setError(null);
+    try {
+      await onCreateWithAi?.();
+    } catch {
+      setError(
+        'Skill作成を始められませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
+      );
+    } finally {
+      setCreatingWithAi(false);
+    }
   }
   async function toggleCreated(item: SkillCatalogItem) {
     try {
@@ -149,7 +165,8 @@ export function SkillSettingsSection({
             <button
               type="button"
               className="settings-primary-button"
-              onClick={() => onCreateWithAi()}
+              disabled={creatingWithAi}
+              onClick={() => void createWithAi()}
             >
               AIでSkillを作成
             </button>

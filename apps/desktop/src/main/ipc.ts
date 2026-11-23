@@ -738,7 +738,7 @@ import {
   BUILTIN_IMAGEGEN_SKILL_ID,
   bindBuiltinImagegenSkillForTurn,
 } from './imagegen-builtin';
-import { SkillStore } from './skill-store';
+import { SkillStore, SkillStoreError } from './skill-store';
 import { portableSkillCompatibility } from './skill-compatibility';
 import {
   TeamMcpBridge,
@@ -1280,6 +1280,7 @@ export class IpcRouter {
   private readonly attachmentCustodyByTurn = new Map<string, AttachmentCustodyLease>();
   private attachmentCustodyReady = false;
   private teamSkillReady = false;
+  private builtinSkillPreparation: Promise<boolean> | undefined;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
   private readonly teamRequiredTurns = new Set<string>();
@@ -2726,13 +2727,15 @@ export class IpcRouter {
       IPC_CHANNELS.skillsList,
       skillCatalogRequestSchema,
       skillCatalogSchema,
-      ({ taskId }) =>
-        this.skillSettings
+      async ({ taskId }) => {
+        await this.ensureBuiltinSkills();
+        return this.skillSettings
           .listCatalog(
             taskId === undefined ? undefined : this.skillRuntimeForTask(taskId),
             taskId === undefined ? [] : this.skillWorkspaceRoots(taskId),
           )
-          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+      },
     );
     this.handle(
       IPC_CHANNELS.skillsGetDraftSelection,
@@ -3659,16 +3662,9 @@ export class IpcRouter {
       goalResumeInputSchema,
       goalRunResultSchema,
       async (input, event, envelope) => {
-        const skills = await this.skillSettings
-          .resolveSelections(
-            input.skills,
-            undefined,
-            this.skillRuntimeForTask(input.taskId),
-            input.skills.some((s) => s.ref.source !== 'builtin' && s.ref.source !== 'created')
-              ? this.skillWorkspaceRoots(input.taskId)
-              : [],
-          )
-          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        const skills = await this.resolveTurnSkills(input.taskId, undefined, input.skills).catch(
+          (error) => Promise.reject(skillSettingsPublicError(error)),
+        );
         await this.refreshTeamOfferWorkspace(input.taskId);
         let started: StartedTurn | undefined;
         const result = this.runMutation(
@@ -4656,12 +4652,28 @@ export class IpcRouter {
     };
     this.managedCodingHarness.setCommandSandboxAvailable(commandSandbox.available);
     await this.teamMcpBridge.ensureStarted();
+    await this.ensureBuiltinSkills();
+    await this.adoptInstalledRuntime();
+  }
+
+  private async ensureBuiltinSkills(): Promise<boolean> {
+    if (this.teamSkillReady) return true;
+    this.builtinSkillPreparation ??= this.prepareBuiltinSkills().finally(() => {
+      this.builtinSkillPreparation = undefined;
+    });
+    return this.builtinSkillPreparation;
+  }
+
+  private async prepareBuiltinSkills(): Promise<boolean> {
+    let stage: 'open_store' | 'install_builtin' | 'refresh_catalog' = 'open_store';
     try {
       const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
       const store = await SkillStore.open({
         rootPath: join(skillHome, '.sprintcoder', 'skills'),
       });
-      await Promise.all([
+      stage = 'install_builtin';
+      // Wait for every installation to finish before allowing a retry after partial success.
+      const results = await Promise.allSettled([
         store.installBuiltin(
           BUILTIN_TEAM_SKILL_ID,
           BUILTIN_TEAM_SKILL_CONTENT,
@@ -4683,13 +4695,33 @@ export class IpcRouter {
           BUILTIN_IMAGEGEN_SKILL_DIGEST,
         ),
       ]);
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed?.status === 'rejected') throw failed.reason;
+      stage = 'refresh_catalog';
       await this.skillSettings.refreshContextCatalog();
       this.teamSkillReady = true;
-    } catch {
+      return true;
+    } catch (error) {
       this.skillSettings.markContextCatalogUnavailable();
-      this.teamSkillReady = false;
+      const code = error instanceof Error && 'code' in error ? error.code : undefined;
+      secureLogger.warn('Built-in Skill preparation failed', {
+        stage,
+        reason:
+          error instanceof SkillStoreError || error instanceof SkillSettingsError
+            ? error.code
+            : code === 'EACCES' ||
+                code === 'EPERM' ||
+                code === 'EBUSY' ||
+                code === 'ENOENT' ||
+                code === 'ENOSPC' ||
+                code === 'EIO' ||
+                code === 'EEXIST' ||
+                code === 'EROFS'
+              ? code
+              : 'unknown',
+      });
+      return false;
     }
-    await this.adoptInstalledRuntime();
   }
 
   /**
@@ -6284,7 +6316,8 @@ export class IpcRouter {
         started.turnId,
         {
           code: 'RUNTIME_FAILED',
-          userMessage: '組み込みTeam Skillを検証できないためTeamを開始できません。',
+          userMessage:
+            '組み込みTeam Skillを準備できませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
           retryable: true,
         },
       );
@@ -6642,16 +6675,26 @@ export class IpcRouter {
     return this.persistence.getEffectiveWorkspaceSet(taskId)?.roots.map((root) => root.path) ?? [];
   }
 
-  private resolveTurnSkills(
+  private async resolveTurnSkills(
     taskId: string,
-    text: string,
+    text: string | undefined,
     selections: readonly TurnSkillSelection[],
   ): Promise<PersistedTurnSkill[]> {
     const skillRuntime = this.skillRuntimeForTask(taskId);
-    return this.skillSettings.resolveSelections(
-      skillRuntime === 'codex'
+    const requested =
+      skillRuntime === 'codex' && text !== undefined
         ? bindBuiltinImagegenSkillForTurn(text, skillRuntime, selections)
-        : [...selections],
+        : [...selections];
+    if (
+      !(await this.ensureBuiltinSkills()) &&
+      requested.some(({ ref }) => ref.source === 'builtin')
+    )
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        '組み込みSkillを準備できませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
+      );
+    return this.skillSettings.resolveSelections(
+      requested,
       text,
       skillRuntime,
       selections.some((s) => s.ref.source !== 'builtin' && s.ref.source !== 'created')
