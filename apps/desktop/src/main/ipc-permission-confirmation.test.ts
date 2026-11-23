@@ -44,7 +44,7 @@ const newWork = [
   [IPC_CHANNELS.goalsResume, { skills: [] }],
 ] as const;
 
-function fixture(acknowledged = false, objective = '既存の目標') {
+function fixture(acknowledged = false, objective = '既存の目標', mockChosen = true) {
   const policies = new Map<string, PermissionSettings>();
   const operations = new Map<string, { hash: string; value: unknown }>();
   const confirmations: Array<{ signal: AbortSignal; respond: (response: number) => void }> = [];
@@ -159,6 +159,7 @@ function fixture(acknowledged = false, objective = '既存の目標') {
       },
       getTaskModelSelection: () => null,
       getRuntime: () => 'mock',
+      getStoredRuntime: () => (mockChosen ? 'mock' : null),
       setAccessPreset,
       startTurn,
       startGoalTurn,
@@ -216,6 +217,23 @@ async function flush() {
 }
 
 describe('Turn text through the registered IPC handler', () => {
+  it('refuses an implicit Mock before accepting a message in an unconnected task', async () => {
+    vi.stubEnv('SPRINT_CODER_RUNTIME_ADOPT', '1');
+    try {
+      const f = fixture(false, undefined, false);
+      expect(await f.send()).toMatchObject({
+        ok: false,
+        error: {
+          code: 'RUNTIME_UNAVAILABLE',
+          userMessage: expect.stringContaining('AI がつながっていません'),
+        },
+      });
+      expect(f.startTurn).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each([
     ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
     ['担当を雇ってください。', true],

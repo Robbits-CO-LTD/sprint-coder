@@ -219,6 +219,7 @@ describe('SetupWizard', () => {
     );
     await press('setup-next'); // workspace -> done
     const summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
+    expect(summary).toContain('CLI は未接続です');
     // The summary says what is stored: the skipped reply style is the stored one, unchanged.
     expect(summary).toContain('返事の仕方ていねい・ふつう・理由も変更なし');
     expect(summary).toContain('呼び名「ゆう」'); // what Main kept
