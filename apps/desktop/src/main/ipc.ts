@@ -8120,7 +8120,7 @@ export class IpcRouter {
               ? `このTurnには作業フォルダーがありません。${WORKSPACE_REQUEST_GUIDANCE}`
               : PROVIDER_NO_TOOL_GUIDANCE,
         });
-      if (!chatOnly && selectedModel?.toolCalling.value !== false)
+      if (!teamTurn && !chatOnly && selectedModel?.toolCalling.value !== false)
         messages.unshift({ role: 'system', content: SKILL_REQUEST_GUIDANCE });
       if (!chatOnly && autoSkills.length > 0)
         messages.unshift({
