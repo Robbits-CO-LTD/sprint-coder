@@ -19,7 +19,7 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
   const [query, setQuery] = useState('');
   const [foldersByProject, setFoldersByProject] = useState<Record<string, ProjectFolder[]>>({});
   const [pending, setPending] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [editorProject, setEditorProject] = useState<ProjectSummary | null | undefined>(undefined);
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -71,6 +71,16 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
     }
   }
 
+  function openEditor(project: ProjectSummary | null): void {
+    setOpen(false);
+    setEditorProject(project);
+  }
+
+  function closeEditor(): void {
+    setEditorProject(undefined);
+    requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+  }
+
   return (
     <>
       <div
@@ -111,6 +121,16 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
           <Folder size={15} />
           {selected?.name ?? 'プロジェクトを選択'}
         </button>
+        {selected?.folderCount === 0 && (
+          <button
+            type="button"
+            className="ctx-chip chip-btn"
+            disabled={pending}
+            onClick={() => openEditor(selected)}
+          >
+            フォルダー未設定・追加
+          </button>
+        )}
         {open && (
           <div className="project-picker-popover" role="dialog" aria-label="Projectを選択">
             <div className="project-picker-header">
@@ -148,31 +168,48 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
               </div>
               <div
                 className="project-picker-options"
-                role={filtered.length > 0 ? 'listbox' : undefined}
+                role={filtered.length > 0 ? 'list' : undefined}
                 aria-label={filtered.length > 0 ? 'Project一覧' : undefined}
               >
                 {filtered.map((project) => (
-                  <button
-                    key={project.id}
-                    type="button"
-                    role="option"
-                    aria-selected={task?.projectId === project.id}
-                    disabled={pending}
-                    onClick={() => void choose(project)}
-                  >
-                    <span className="project-picker-item-icon">
-                      <Folder size={16} />
-                    </span>
-                    <span className="project-picker-item-copy">
-                      <strong>{project.name}</strong>
-                      {project.primaryFolder != null && <small>{project.primaryFolder.path}</small>}
-                    </span>
-                    {task?.projectId === project.id && (
-                      <span className="project-picker-selection" aria-label="選択中">
-                        <Check size={15} />
+                  <div className="project-picker-option-row" role="listitem" key={project.id}>
+                    <button
+                      type="button"
+                      aria-current={task?.projectId === project.id}
+                      disabled={pending}
+                      onClick={() => void choose(project)}
+                    >
+                      <span className="project-picker-item-icon">
+                        <Folder size={16} />
                       </span>
+                      <span className="project-picker-item-copy">
+                        <strong>{project.name}</strong>
+                        {project.folderCount === 0 ? (
+                          <small>フォルダー未設定</small>
+                        ) : (
+                          project.primaryFolder != null && (
+                            <small>{project.primaryFolder.path}</small>
+                          )
+                        )}
+                      </span>
+                      {task?.projectId === project.id && (
+                        <span className="project-picker-selection" aria-label="選択中">
+                          <Check size={15} />
+                        </span>
+                      )}
+                    </button>
+                    {project.folderCount === 0 && (
+                      <button
+                        type="button"
+                        className="project-picker-add-folder"
+                        aria-label={`${project.name}にフォルダーを追加`}
+                        disabled={pending}
+                        onClick={() => openEditor(project)}
+                      >
+                        追加
+                      </button>
                     )}
-                  </button>
+                  </div>
                 ))}
                 {filtered.length === 0 && (
                   <div className="project-picker-empty" role="status">
@@ -194,14 +231,7 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
               </div>
             </div>
             <div className="project-picker-actions">
-              <button
-                type="button"
-                disabled={pending}
-                onClick={() => {
-                  setOpen(false);
-                  setCreating(true);
-                }}
-              >
+              <button type="button" disabled={pending} onClick={() => openEditor(null)}>
                 <span className="project-picker-action-icon project-picker-action-icon-accent">
                   <Plus size={16} />
                 </span>
@@ -226,12 +256,12 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
         )}
       </div>
       <ProjectEditorDialog
-        open={creating}
-        project={null}
-        onClose={() => setCreating(false)}
+        open={editorProject !== undefined}
+        project={editorProject ?? null}
+        onClose={closeEditor}
         onSaved={(project) => {
-          setCreating(false);
-          void choose(project);
+          closeEditor();
+          if (editorProject === null) void choose(project);
         }}
       />
     </>

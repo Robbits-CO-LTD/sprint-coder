@@ -180,7 +180,10 @@ import {
 } from './image-attachment-capability';
 import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import { requiresTeamWorkersInput } from './team-tools';
-import { teamWorkspaceRepositoryMessage } from './team-workspace-repository';
+import {
+  TeamWorkspaceRepositoryError,
+  teamWorkspaceRepositoryMessage,
+} from './team-workspace-repository';
 import { RetainedWorktreeError } from './team-retained-worktrees';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
@@ -899,6 +902,18 @@ describe('image attachment public errors', () => {
       userMessage: '画像添付の状態が変わりました。最新の一覧を確認してください。',
       retryable: false,
     });
+  });
+});
+
+it('preserves the fixed workspace Git guidance at the public IPC boundary', () => {
+  const reason = 'workspace_no_commit';
+  const error = new TeamWorkspaceRepositoryError(reason, {
+    cause: new Error('raw local Git diagnostics'),
+  });
+  expect(toPublicError(error)).toEqual({
+    code: 'INVALID_REQUEST',
+    userMessage: teamWorkspaceRepositoryMessage(reason),
+    retryable: false,
   });
 });
 

@@ -714,6 +714,7 @@ import {
 import {
   TEAM_OFFER_WORKSPACE_CHECK_TIMEOUT_MS,
   TeamOfferWorkspaceGate,
+  TeamWorkspaceRepositoryError,
 } from './team-workspace-repository';
 import {
   BUILTIN_TEAM_SKILL_AUDIT,
@@ -740,7 +741,7 @@ import {
   BUILTIN_IMAGEGEN_SKILL_ID,
   bindBuiltinImagegenSkillForTurn,
 } from './imagegen-builtin';
-import { SkillStore } from './skill-store';
+import { SkillStoreError } from './skill-store';
 import { portableSkillCompatibility } from './skill-compatibility';
 import {
   TeamMcpBridge,
@@ -1282,6 +1283,7 @@ export class IpcRouter {
   private readonly attachmentCustodyByTurn = new Map<string, AttachmentCustodyLease>();
   private attachmentCustodyReady = false;
   private teamSkillReady = false;
+  private builtinSkillPreparation: Promise<boolean> | undefined;
   private readonly teamSkillExpectedTurns = new Set<string>();
   private readonly teamSkillResolutionByTurn = new Map<string, TeamSkillResolutionAudit>();
   private readonly teamRequiredTurns = new Set<string>();
@@ -2743,6 +2745,7 @@ export class IpcRouter {
       skillCatalogRequestSchema,
       skillCatalogSchema,
       async ({ taskId }) => {
+        await this.ensureBuiltinSkills();
         const catalog = await this.skillSettings
           .listCatalog(
             taskId === undefined ? undefined : this.skillRuntimeForTask(taskId),
@@ -4684,12 +4687,25 @@ export class IpcRouter {
     };
     this.managedCodingHarness.setCommandSandboxAvailable(commandSandbox.available);
     await this.teamMcpBridge.ensureStarted();
+    await this.ensureBuiltinSkills();
+    await this.adoptInstalledRuntime();
+  }
+
+  private async ensureBuiltinSkills(): Promise<boolean> {
+    if (this.teamSkillReady) return true;
+    this.builtinSkillPreparation ??= this.prepareBuiltinSkills().finally(() => {
+      this.builtinSkillPreparation = undefined;
+    });
+    return this.builtinSkillPreparation;
+  }
+
+  private async prepareBuiltinSkills(): Promise<boolean> {
+    let stage: 'open_store' | 'install_builtin' | 'refresh_catalog' = 'open_store';
     try {
-      const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
-      const store = await SkillStore.open({
-        rootPath: join(skillHome, '.sprintcoder', 'skills'),
-      });
-      await Promise.all([
+      const store = await this.skillSettings.getStore();
+      stage = 'install_builtin';
+      // Wait for every installation to finish before allowing a retry after partial success.
+      const results = await Promise.allSettled([
         store.installBuiltin(
           BUILTIN_TEAM_SKILL_ID,
           BUILTIN_TEAM_SKILL_CONTENT,
@@ -4711,13 +4727,33 @@ export class IpcRouter {
           BUILTIN_IMAGEGEN_SKILL_DIGEST,
         ),
       ]);
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed?.status === 'rejected') throw failed.reason;
+      stage = 'refresh_catalog';
       await this.skillSettings.refreshContextCatalog();
       this.teamSkillReady = true;
-    } catch {
+      return true;
+    } catch (error) {
       this.skillSettings.markContextCatalogUnavailable();
-      this.teamSkillReady = false;
+      const code = error instanceof Error && 'code' in error ? error.code : undefined;
+      secureLogger.warn('Built-in Skill preparation failed', {
+        stage,
+        reason:
+          error instanceof SkillStoreError || error instanceof SkillSettingsError
+            ? error.code
+            : code === 'EACCES' ||
+                code === 'EPERM' ||
+                code === 'EBUSY' ||
+                code === 'ENOENT' ||
+                code === 'ENOSPC' ||
+                code === 'EIO' ||
+                code === 'EEXIST' ||
+                code === 'EROFS'
+              ? code
+              : 'unknown',
+      });
+      return false;
     }
-    await this.adoptInstalledRuntime();
   }
 
   /**
@@ -6310,7 +6346,8 @@ export class IpcRouter {
         started.turnId,
         {
           code: 'RUNTIME_FAILED',
-          userMessage: '組み込みTeam Skillを検証できないためTeamを開始できません。',
+          userMessage:
+            '組み込みTeam Skillを準備できませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
           retryable: true,
         },
       );
@@ -6696,10 +6733,20 @@ export class IpcRouter {
         'INVALID_SKILL',
         'この接続ではSkillを作れません。ツールに対応するモデルを選んでください。',
       );
-    return this.skillSettings.resolveSelections(
+    const requested =
       skillRuntime === 'codex' && text !== undefined
         ? bindBuiltinImagegenSkillForTurn(text, skillRuntime, selections)
-        : [...selections],
+        : [...selections];
+    if (
+      !(await this.ensureBuiltinSkills()) &&
+      requested.some(({ ref }) => ref.source === 'builtin')
+    )
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        '組み込みSkillを準備できませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
+      );
+    return this.skillSettings.resolveSelections(
+      requested,
       text,
       skillRuntime,
       selections.some((s) => s.ref.source !== 'builtin' && s.ref.source !== 'created')
@@ -10922,6 +10969,8 @@ async function projectFolderHealth(
 }
 
 export function toPublicError(error: unknown): PublicError {
+  if (error instanceof TeamWorkspaceRepositoryError)
+    return { code: 'INVALID_REQUEST', userMessage: error.message, retryable: false };
   if (error instanceof RetiredManagedLocalError)
     return { code: 'RUNTIME_UNAVAILABLE', userMessage: error.message, retryable: false };
   if (error instanceof ImageAttachmentValidationError)

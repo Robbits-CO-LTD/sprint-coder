@@ -1,4 +1,5 @@
 import { WorktreeError } from './worker-worktree';
+import { GIT_INSTALL_GUIDANCE } from './git-install-guidance';
 
 /**
  * Team の Worker がファイルを書く作業（workspace-write）は、割り当ての時の確かめ
@@ -34,8 +35,7 @@ const PROBLEM_MESSAGES: Readonly<Record<TeamWorkspaceRepositoryProblem, string>>
     'この作業フォルダーでは Git の操作（merge や rebase など）が途中なので、Team で作業を分担できません。その操作を終えてから、もう一度頼んでください。',
   workspace_nested_git:
     'この作業フォルダーは、Git の repo の中に別の Git の repo が入れ子になっているので、Team で作業を分担できません。作業フォルダーの組み方を見直してから、もう一度頼んでください。',
-  git_unavailable:
-    'このパソコンで Git が見つからないので、Team で作業を分担できません。Git を入れてから、もう一度頼んでください。',
+  git_unavailable: `Team で作業を分担するには Git が必要です。${GIT_INSTALL_GUIDANCE}`,
 });
 
 /** 雇う前に断った理由。Leader が利用者にそのまま伝えられる文を message に持つ。 */

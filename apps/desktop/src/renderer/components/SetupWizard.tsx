@@ -67,9 +67,20 @@ import type { CueName } from 'uisfx';
 import { ArrowLeft, ArrowRight, Check, Folder, Settings, X } from './icons';
 import { SetupConfetti, SetupStage } from './SetupAnimation';
 import { SetupChoiceGroup, SetupSwitch, SetupTeamCards } from './SetupControls';
+import {
+  CLI_CHECKING_LABEL,
+  CLI_RECHECK_LABEL,
+  RUNTIME_LABEL,
+  runtimeCliFoundOf,
+} from '../lib/runtime-labels';
 
 type PickedFolder = { path: string; label: string };
 type Readiness = 'ready' | 'authentication_required' | 'unavailable';
+const CLI_SETUP = {
+  codex: { install: 'https://learn.chatgpt.com/docs/codex/cli', login: 'codex login' },
+  claude: { install: 'https://code.claude.com/docs/en/quickstart', login: 'claude auth login' },
+  grok: { install: 'https://docs.x.ai/build/overview', login: 'grok login' },
+} as const;
 type PreferenceStep = 'reply' | 'team' | 'details';
 /** Whether a stored value has been read. Until it has, nothing stands in for it on screen. */
 type Known = 'loading' | 'ready' | 'failed' | 'unsupported';
@@ -136,10 +147,10 @@ function skyLook(
   }
 }
 
-function readinessLabel(readiness: Readiness): string {
+function readinessLabel(readiness: Readiness, cliFound: boolean): string {
   if (readiness === 'ready') return '接続済み';
   if (readiness === 'authentication_required') return 'ログインが必要';
-  return '未検出';
+  return cliFound ? '利用できるか確認できませんでした' : '未検出';
 }
 
 const PREFERENCE_KEYS: readonly (keyof AssistantPreferences)[] = [
@@ -215,6 +226,8 @@ export function SetupWizard({
   onBusyChange?: (busy: boolean) => void;
 }) {
   const runtime = useAppStore((state) => state.runtime);
+  const detectionStatus = useAppStore((state) => state.runtimeDetectionStatus);
+  const refreshRuntimeDetection = useAppStore((state) => state.refreshRuntimeDetection);
   const createTask = useAppStore((state) => state.createTask);
   const createProject = useAppStore((state) => state.createProject);
   const pickProjectFolders = useAppStore((state) => state.pickProjectFolders);
@@ -1224,33 +1237,55 @@ export function SetupWizard({
               <>
                 {heading('使う AI を確認')}
                 <p className="setup-lead">
-                  このパソコンに入っている AI を、自動で探しました。ほかの AI
-                  は、設定からつなげられます。
+                  このパソコンに入っているCLIを確認します。未検出のCLIは、公式サイトから入手できます。
                 </p>
-                <ul className="setup-runtime-list">
-                  <li>
-                    <span className={`setup-status setup-status--${runtime.codexReadiness}`} />
-                    <strong>Codex</strong>
-                    <small>{readinessLabel(runtime.codexReadiness)}</small>
-                  </li>
-                  <li>
-                    <span className={`setup-status setup-status--${runtime.claudeReadiness}`} />
-                    <strong>Claude Code</strong>
-                    <small>{readinessLabel(runtime.claudeReadiness)}</small>
-                  </li>
-                  <li>
-                    <span className={`setup-status setup-status--${runtime.grokReadiness}`} />
-                    <strong>Grok CLI</strong>
-                    <small>
-                      {runtime.grokReadiness === 'authentication_required'
-                        ? 'ログインが必要です（grok login）'
-                        : readinessLabel(runtime.grokReadiness)}
-                    </small>
-                  </li>
+                <ul className="setup-runtime-list" aria-busy={detectionStatus === 'checking'}>
+                  {(['codex', 'claude', 'grok'] as const).map((kind) => {
+                    const readiness = runtimeStatus[kind];
+                    const current = detectionStatus === 'ready';
+                    return (
+                      <li key={kind}>
+                        <span
+                          className={`setup-status setup-status--${current ? readiness : detectionStatus}`}
+                          aria-hidden="true"
+                        />
+                        <strong>{RUNTIME_LABEL[kind]}</strong>
+                        <small>
+                          {detectionStatus === 'checking'
+                            ? CLI_CHECKING_LABEL
+                            : current
+                              ? readinessLabel(readiness, runtimeCliFoundOf(kind, runtime))
+                              : '確認できませんでした'}
+                        </small>
+                        {detectionStatus !== 'checking' && (!current || readiness !== 'ready') && (
+                          <div className="setup-runtime-guide">
+                            <span>
+                              公式の入手先 <code>{CLI_SETUP[kind].install}</code>
+                            </span>
+                            <span>
+                              ターミナルでログイン <code>{CLI_SETUP[kind].login}</code>
+                            </span>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
-                <button type="button" className="setup-secondary" onClick={openSettings}>
-                  <Settings size={15} /> 接続を設定
-                </button>
+                <div className="setup-runtime-actions">
+                  {typeof window.sprintCoder?.settings?.refreshRuntimeDetection === 'function' && (
+                    <button
+                      type="button"
+                      className="setup-secondary"
+                      disabled={detectionStatus === 'checking'}
+                      onClick={() => void refreshRuntimeDetection().catch(() => undefined)}
+                    >
+                      {CLI_RECHECK_LABEL}
+                    </button>
+                  )}
+                  <button type="button" className="setup-secondary" onClick={openSettings}>
+                    <Settings size={15} /> 接続を設定
+                  </button>
+                </div>
               </>
             )}
 

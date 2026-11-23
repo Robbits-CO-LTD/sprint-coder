@@ -318,6 +318,30 @@ describe('CommandRunner', () => {
     expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
   });
 
+  it.runIf(process.platform === 'win32').each([
+    ['git', 'https://git-scm.com/install/'],
+    ['GH.exe', 'https://cli.github.com/'],
+  ])('explains how to install missing %s and restart the app', async (executable, url) => {
+    const root = await workspace();
+    const nativePath = vi
+      .spyOn(preparedExecutionImageModule, 'getTrustedWindowsSystemDirectory')
+      .mockReturnValue(join(root, 'Windows', 'System32'));
+    vi.stubEnv('PATH', root);
+    try {
+      await expect(
+        prepareExecutionSpec({ workspacePath: root, executable, argv: [] }),
+      ).rejects.toMatchObject({
+        code: 'EXECUTION_SPEC_INVALID',
+        message: expect.stringMatching(
+          new RegExp(`${executable.split('.')[0]}.*${url}.*再起動`, 'i'),
+        ),
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      nativePath.mockRestore();
+    }
+  });
+
   it('detects an argv entry that repeats the executable', () => {
     expect(
       argvRepeatsExecutable('/usr/bin/tee', '/usr/bin/tee', ['/usr/bin/tee', 'out'], 'darwin'),

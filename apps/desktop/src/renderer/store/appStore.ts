@@ -264,6 +264,7 @@ type AppState = {
    * Defaults to Mock/unavailable until `settings.getRuntime` resolves (or forever if the
    * backend hasn't wired the `settings` API yet — see `loadRuntime`). */
   runtime: RuntimeState;
+  runtimeDetectionStatus: 'checking' | 'ready' | 'failed';
 
   /** Flag + canonical selection for the multi-provider Model Picker (UI slice U1b). */
   modelPicker: ModelPickerState;
@@ -294,7 +295,8 @@ type AppState = {
   toast: { id: number; message: string } | null;
 
   init(): Promise<void>;
-  loadRuntime(): Promise<void>;
+  loadRuntime(): Promise<boolean>;
+  refreshRuntimeDetection(): Promise<void>;
   loadModelPicker(taskId: string): Promise<void>;
   setModelSelection(taskId: string, selection: ModelSelection): Promise<void>;
   acknowledgeRecovery(): void;
@@ -1189,6 +1191,8 @@ export function showUnassignedTaskWorkspaceNote(state: AppState): boolean {
 }
 
 export const useAppStore = create<AppState>((set, get) => {
+  let runtimeRefresh: Promise<void> | null = null;
+  let runtimeDetectionGeneration = 0;
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
   // Snapshot of "the user is still looking at this Task". A late result or error from a Team
   // operation is dropped once the user has switched away (A -> B -> A included).
@@ -1423,6 +1427,7 @@ export const useAppStore = create<AppState>((set, get) => {
       effort: 'medium',
       codexEffort: '',
     },
+    runtimeDetectionStatus: 'checking',
     modelPicker: { taskId: null, enabled: null, selection: null },
     reasoningSeenByTurn: {},
     recovery: null,
@@ -1438,7 +1443,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async init() {
       if (!window.sprintCoder) {
-        set({ sprintCoderAvailable: false, initialized: true });
+        set({ sprintCoderAvailable: false, initialized: true, runtimeDetectionStatus: 'failed' });
         return;
       }
       set({ sprintCoderAvailable: true, loadingTasks: true, error: null });
@@ -1563,11 +1568,15 @@ export const useAppStore = create<AppState>((set, get) => {
     // signature so the callers that predate this (SettingsDialog, the Composer chips) get the
     // canonical behaviour without changing.
     async loadRuntime() {
-      if (!window.sprintCoder || typeof window.sprintCoder.settings?.getRuntime !== 'function')
-        return;
       const taskId = get().selectedTaskId;
+      const generation = runtimeDetectionGeneration;
+      const current = () =>
+        generation === runtimeDetectionGeneration && get().selectedTaskId === taskId;
       try {
-        const runtime = await window.sprintCoder.settings.getRuntime(taskId ?? undefined);
+        const settings = window.sprintCoder?.settings;
+        if (typeof settings?.getRuntime !== 'function')
+          throw new Error('Runtime settings unavailable');
+        const runtime = await settings.getRuntime(taskId ?? undefined);
         const { modelFallbackNotice, ...runtimeState } = runtime;
         if (modelFallbackNotice !== null) {
           const migrated = modelFallbackNotice.changes.reduce(
@@ -1583,11 +1592,40 @@ export const useAppStore = create<AppState>((set, get) => {
           );
         }
         // A slow answer for a Task the user has already left would overwrite the newer one.
-        if (get().selectedTaskId !== taskId) return;
-        set({ runtime: runtimeState });
+        if (current())
+          set({
+            runtime: runtimeState,
+            ...(runtimeRefresh === null ? { runtimeDetectionStatus: 'ready' } : {}),
+          });
+        return true;
       } catch {
         // Non-fatal: keep the last-known (or default) runtime state.
+        if (runtimeRefresh === null && current() && get().runtimeDetectionStatus === 'checking')
+          set({ runtimeDetectionStatus: 'failed' });
+        return false;
       }
+    },
+
+    refreshRuntimeDetection() {
+      if (runtimeRefresh !== null) return runtimeRefresh;
+      const settings = window.sprintCoder?.settings;
+      if (typeof settings?.refreshRuntimeDetection !== 'function') return Promise.resolve();
+      runtimeRefresh = Promise.resolve().then(async () => {
+        try {
+          await settings.refreshRuntimeDetection();
+          // Earlier reads may have taken their readiness snapshot before the CLIs were checked.
+          runtimeDetectionGeneration += 1;
+          if (!(await get().loadRuntime())) throw new Error('Runtime settings unavailable');
+          set({ runtimeDetectionStatus: 'ready' });
+        } catch (error) {
+          set({ runtimeDetectionStatus: 'failed' });
+          throw error;
+        } finally {
+          runtimeRefresh = null;
+        }
+      });
+      set({ runtimeDetectionStatus: 'checking' });
+      return runtimeRefresh;
     },
 
     /** Resolves the Model Picker flag and Main's canonical selection for `taskId`.
