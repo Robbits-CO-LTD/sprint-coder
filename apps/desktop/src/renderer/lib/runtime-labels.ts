@@ -11,6 +11,9 @@ export const RUNTIME_LABEL: Record<RuntimeKind, string> = {
   grok: 'Grok CLI',
 };
 
+export const CLI_RECHECK_LABEL = 'CLIをもう一度確かめる';
+export const CLI_CHECKING_LABEL = '確認中…';
+
 export const RUNTIME_DESC: Record<RuntimeKind, string> = {
   mock: '決定論的ローカル応答',
   codex: 'ローカルのCodex CLIで実応答',

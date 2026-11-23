@@ -368,6 +368,8 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
     '- ローカルで可逆な操作と、外部・破壊的・復元困難な操作を区別する。承認は対象操作だけに適用し、包括的な許可と解釈しない。',
     '- 未知のファイル、未commitの変更、利用者の作業を保持する。',
     '- 作業中は短い進捗を伝え、最終回答は結果・検証・残課題を簡潔に示す。',
+    '- 利用者に説明するときは、内部の役割名や設定名をそのまま読み上げず、「作業フォルダーが選ばれていません」「ファイルは読み取り専用です」など、実際にできることを利用者の言葉で伝える。',
+    '- 依頼された操作ができないときは、理由に続けて、その状態で利用者が取れる次の手順を具体的に示す。',
     '',
     `実行主体: ${context.agent.role === 'primary' ? 'primary agent' : 'subagent'} / ${context.agent.mode}`,
   ];
@@ -404,6 +406,10 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
     for (const tool of context.tools)
       lines.push(
         `- ${tool.name} [id=${tool.id}; kind=${tool.kind}; sideEffect=${tool.sideEffect}]`,
+      );
+    if (context.tools.some(({ name }) => name === 'exec_command' || name === 'sprint_exec_command'))
+      lines.push(
+        '作業フォルダーのコマンドはフルアクセスでも外部と通信できない。GitHub CLIでの起票、リモートとのgit clone・push、パッケージ取得が必要で専用ツールもないときは、最初に制限を説明し、利用者の端末で実行する手順を示す。',
       );
     lines.push('一覧にないツールを利用可能だと仮定しない。');
   }

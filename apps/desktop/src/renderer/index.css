@@ -2386,6 +2386,9 @@ body.is-resizing-sidebar iframe {
 }
 .project-picker {
   position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
 }
 .project-picker-trigger {
   max-width: 220px;
@@ -2539,6 +2542,18 @@ body.is-resizing-sidebar iframe {
   transition:
     background var(--t-instant) var(--ease-ui),
     color var(--t-instant) var(--ease-ui);
+}
+.project-picker-option-row {
+  display: flex;
+  align-items: center;
+}
+.project-picker-option-row > button:first-child {
+  min-width: 0;
+}
+.project-picker-options .project-picker-add-folder {
+  width: auto;
+  flex: none;
+  color: var(--text-secondary);
 }
 .project-picker-options button:hover,
 .project-picker-options button:focus-visible,
