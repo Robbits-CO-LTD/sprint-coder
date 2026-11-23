@@ -2780,8 +2780,14 @@ body.is-resizing-sidebar iframe {
 }
 .composer-permission-wrap {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   min-width: 0;
+}
+.composer-access-status {
+  padding-inline: 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 .composer-permission-chip {
   display: inline-flex;
