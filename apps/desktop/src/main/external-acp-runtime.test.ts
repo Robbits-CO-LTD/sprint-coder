@@ -76,7 +76,7 @@ rl.on('line', line => {
         const prompt = request.params.prompt[0].text;
         const marker = prompt.match(/^SPRINT_TOOL_[a-f0-9-]+$/m)?.[0];
         if (scenario === 'tool-result') {
-          const hasResult = prompt.includes('"role":"tool"') && prompt.includes('"toolCallId":"call-1"');
+          const hasResult = prompt.includes('The final tool message above is the actual result') && prompt.includes('native terminal, filesystem, built-in tools and subagents are disabled') && prompt.includes('"role":"tool"') && prompt.includes('"toolCallId":"call-1"');
           output(sessionId, hasResult ? 'used actual result' : 'missing result');
         } else {
           output(sessionId, marker.slice(0, 4));

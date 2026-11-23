@@ -247,10 +247,16 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         marker === null
           ? messages
           : [
+              'You are responding inside Sprint Coder. The workspace, Team and conversation belong to Sprint Coder. Your native terminal, filesystem, built-in tools and subagents are disabled. Do not use them. The current CLI directory is an empty transport directory.',
               'Sprint Coder provides the tools below. To invoke one, return only the following marker on its own first line, immediately followed by one JSON object {"name":"tool name","input":{...}}. Do not use Markdown fences. Otherwise respond normally. A later turn supplies the actual result.',
               marker.trimEnd(),
               JSON.stringify(tools),
               messages,
+              ...(request.messages.at(-1)?.role === 'tool'
+                ? [
+                    'The final tool message above is the actual result from Sprint Coder. Use it as data to continue the original task. If it supplies the requested evidence, return the requested final answer or Worker report now. If another tool is necessary, use only the Sprint Coder marker and JSON protocol above.',
+                  ]
+                : []),
             ].join('\n');
       session = await this.open(
         signal,
@@ -375,7 +381,9 @@ export class ExternalAcpRuntime implements ProviderRuntime {
                     ? 'OpenCode の無料利用上限に達しました。別の無料モデルを選ぶか、上限が回復してから再試行してください。'
                     : invalid
                       ? `${this.agent.name} で選択モデルを確認できませんでした。`
-                      : `${this.agent.name} CLI との接続を完了できませんでした。`,
+                      : code === 'unexpected_native_tool'
+                        ? `${this.agent.name} が CLI 独自のツールを使用したため、処理を停止しました。`
+                        : `${this.agent.name} CLI との接続を完了できませんでした。`,
           retryable: false,
           retryAfterMs: null,
           providerCode: code,
@@ -404,6 +412,8 @@ export class ExternalAcpRuntime implements ProviderRuntime {
             ? ['acp']
             : [
                 'acp',
+                '--agent',
+                'sprint-coder',
                 '--disable-telemetry',
                 '--include-default-customizations=false',
                 '--log-file',
