@@ -4628,7 +4628,6 @@ export class IpcRouter {
 
   async dispose(): Promise<void> {
     this.disposed = true;
-    for (const controller of this.githubSkillImports.values()) controller.abort();
     let streamingFailure: { cause: unknown } | undefined;
     try {
       this.turnStreamingResources.dispose();
@@ -4636,6 +4635,7 @@ export class IpcRouter {
       // A transient final emit must not prevent the existing Runtime and custody teardown.
       streamingFailure = { cause: error };
     }
+    for (const controller of this.githubSkillImports.values()) controller.abort();
     this.fullAccessConfirmation.dispose();
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
