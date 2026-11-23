@@ -111,6 +111,63 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect((await stat(result.path)).isDirectory()).toBe(true);
   });
 
+  it('serializes concurrent registrations sharing a Git common directory without blocking a separate repository', async () => {
+    const { repoPath, head, worktreesRoot, manager } = await fixture();
+    const linked = await manager.create({ agentId: 'linked-source', repoPath });
+    const separate = await fixture();
+    let activeShared = 0;
+    let sharedOverlap = false;
+    let separateOverlap = false;
+    let notifyFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      notifyFirst = resolve;
+    });
+    let releaseFirst!: () => void;
+    const holdFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const parallel = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        if (!args.includes('worktree') || !args.includes('add'))
+          return gitExecFile(file, args, options);
+        if (args.includes(separate.repoPath)) {
+          separateOverlap = activeShared > 0;
+          return gitExecFile(file, args, options);
+        }
+        activeShared += 1;
+        if (activeShared > 1) sharedOverlap = true;
+        try {
+          notifyFirst();
+          await holdFirst;
+          return await gitExecFile(file, args, options);
+        } finally {
+          activeShared -= 1;
+        }
+      },
+    });
+    const workers = Promise.allSettled(
+      Array.from({ length: 9 }, (_, index) =>
+        parallel.create({
+          agentId: `agent-${index}`,
+          repoPath: index % 2 === 0 ? repoPath : linked.path,
+        }),
+      ),
+    );
+    await firstStarted;
+    try {
+      await parallel.create({ agentId: 'separate', repoPath: separate.repoPath });
+    } finally {
+      releaseFirst();
+    }
+    const results = await workers;
+    expect(separateOverlap).toBe(true);
+    expect(sharedOverlap).toBe(false);
+    expect(results).toHaveLength(9);
+    for (const result of results)
+      expect(result).toMatchObject({ status: 'fulfilled', value: { baseHead: head } });
+  });
+
   it('starts and integrates a clean CRLF checkout using the host autocrlf policy (issue #908)', async () => {
     const { repoPath, head, manager, hostGit } = await crlfFixture();
     expect(await hostGit(['status', '--porcelain'])).toBe('');
