@@ -1,16 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ShieldAlert } from '../icons';
 import { useAppStore } from '../../store/appStore';
 import {
   accessDescription,
   accessEnforcement,
   commandSandboxDescription,
+  NO_WORKSPACE_ACCESS,
 } from '../../lib/access-labels';
 import type { ContextUsage } from '../../types/sprint-coder';
 import type { AccessPreset } from '../../types/sprint-coder';
 import { ProjectPicker } from '../ProjectPicker';
 import { FileEditorDialog } from '../FileEditorDialog';
-import { hasEffectiveWorkspaceRoot } from '../../lib/effective-workspace-root';
+import { taskHasEffectiveWorkspaceRoot } from '../../lib/effective-workspace-root';
 
 const SOURCE_LABEL: Record<ContextUsage['fragments'][number]['source'], string> = {
   system: 'システム',
@@ -26,15 +27,7 @@ const WARNING_THRESHOLD_PCT = 80;
 // ContextBar: Project / usage (§4.2). Access mode lives beside the Composer's plus button because
 // it configures the next send; keeping it in this row made that action look like Project metadata.
 export function ContextBar({ taskId }: { taskId: string }) {
-  const hasWorkspace = useAppStore((state) => {
-    const currentTask = state.tasks.find(({ id }) => id === taskId);
-    const project = state.projects.find(({ id }) => id === currentTask?.projectId);
-    return hasEffectiveWorkspaceRoot(
-      state.workspaceByTask[taskId],
-      currentTask?.workspacePath,
-      project?.folderCount,
-    );
-  });
+  const hasWorkspace = useAppStore((state) => taskHasEffectiveWorkspaceRoot(taskId, state));
   return (
     <div className="context-bar">
       <ProjectPicker taskId={taskId} />
@@ -52,9 +45,9 @@ const PRESET_LABEL: Record<AccessPreset, string> = {
 };
 
 const PRESET_DESC: Record<AccessPreset, string> = {
-  ask: '許可ルールにない操作は、Workspace内の読み取りも含めて実行前に確認します',
-  auto: '禁止ルールを優先し、許可済みの操作は自動で進めます。その他のファイル読み取りは選択中のAIが審査し、未許可のコマンドは実行前に確認します',
-  full: '広い操作を許可し、デスクトップ操作（ほかのアプリの窓を読む・押す・入力する・アプリの起動）も確認なしで実行します。管理denyと秘密保護はファイル・コマンド・ネットワークの道具に効き、デスクトップ操作には効きません',
+  ask: '作業フォルダー内の読み取りも含め、許可ルールにない操作は実行前に確認します',
+  auto: '禁止ルールを優先し、許可済みの操作は自動で進めます。その他のファイル読み取りは選択中のAIが審査します',
+  full: 'ほかのアプリの画面を読む、クリックする、入力する、アプリを開く操作も確認なしで行います',
 };
 
 export function PermissionChip({ taskId }: { taskId: string }) {
@@ -65,7 +58,16 @@ export function PermissionChip({ taskId }: { taskId: string }) {
   const setAccessPreset = useAppStore((state) => state.setAccessPreset);
   const pending = useAppStore((state) => state.permissionChangeByTask[taskId]) !== undefined;
   const commandSandbox = useAppStore((state) => state.commandSandbox);
-  const enforcement = accessEnforcement(commandSandbox);
+  const hasWorkspace = useAppStore((state) => taskHasEffectiveWorkspaceRoot(taskId, state));
+  const enforcement = accessEnforcement(hasWorkspace ? commandSandbox : null);
+  const restrictionId = useId();
+  const commandDescription = commandSandboxDescription(commandSandbox);
+  const accessStatus = hasWorkspace ? commandDescription : NO_WORKSPACE_ACCESS;
+  const restriction = enforcement === 'command-unavailable' && (
+    <span id={restrictionId} className="composer-access-status" title={accessStatus}>
+      {hasWorkspace ? commandDescription : 'ファイル・コマンド不可（フォルダー未設定）'}
+    </span>
+  );
   const [open, setOpen] = useState(false);
   const [confirmingFull, setConfirmingFull] = useState(false);
   const [reviewingRules, setReviewingRules] = useState(false);
@@ -104,10 +106,13 @@ export function PermissionChip({ taskId }: { taskId: string }) {
 
   if (!supported) {
     return (
-      <span className="composer-permission-chip" data-access-preset={permission.preset}>
-        <ShieldAlert size={16} />
-        {PRESET_LABEL[permission.preset]}
-      </span>
+      <div className="composer-permission-wrap">
+        <span className="composer-permission-chip" data-access-preset={permission.preset}>
+          <ShieldAlert size={16} />
+          {PRESET_LABEL[permission.preset]}
+        </span>
+        {restriction}
+      </div>
     );
   }
 
@@ -130,6 +135,7 @@ export function PermissionChip({ taskId }: { taskId: string }) {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-busy={pending}
+        aria-describedby={restriction ? restrictionId : undefined}
         disabled={pending}
         onClick={() => {
           setOpen((value) => !value);
@@ -140,32 +146,29 @@ export function PermissionChip({ taskId }: { taskId: string }) {
         title={
           pending
             ? `権限の変更を確認中です。変更前の権限: ${PRESET_LABEL[permission.preset]}`
-            : accessDescription(permission.preset, commandSandbox)
+            : accessDescription(permission.preset, commandSandbox, hasWorkspace)
         }
       >
         <ShieldAlert size={16} />
         {pending ? '確認待ち' : PRESET_LABEL[permission.preset]}
       </button>
+      {restriction}
       {open && (
         <div className="runtime-menu permission-menu" role="menu" aria-label="Access mode選択">
-          <span className="runtime-menu-desc">{commandSandboxDescription(commandSandbox)}</span>
+          <span className="runtime-menu-desc">{accessStatus}</span>
           {confirmingFull ? (
             <div className="permission-confirm">
               <span className="runtime-menu-title">フルアクセスの影響</span>
               <span className="runtime-menu-desc">
-                作業フォルダー内のファイル操作とコマンド実行を許可します。コマンドは外部と通信できないため、GitHubへの起票やpush、パッケージのダウンロードには使えません。
-                利用できるコマンドの実行と、実行中のコマンドへの入力は
-                都度の承認なしで実行します。デスクトップ操作（ほかのアプリの窓を読む・押す・入力する、
-                アプリの起動。ログイン済みのブラウザーやメールのアプリも含む）も、確認なしで実行します。
-                窓や画面の画像を撮る操作も含み、撮った画像はこの Task の
-                AI（接続先のサービス）に送ります。クラウドAPIには、画像を送るたびに接続先とモデルを表示し、承認を求めます。
-                Workspace内ファイルの読み取りは、秘密情報を
-                含む可能性があるものもredact済みの本文をProviderへ都度確認なしで渡します。管理deny、
-                秘密情報、provider
-                egress、Renderer非特権は常に維持されます。ただし、これらはファイル・
-                コマンド・ネットワークの道具に効く保護で、デスクトップ操作が開いている窓（端末、{' '}
+                {hasWorkspace &&
+                  '作業フォルダー内のファイルの読み書きは確認なしで行います。読み取った内容は、秘密情報を伏せる処理を経て接続先のAIに送ります。'}
+                {enforcement === 'os-sandbox' &&
+                  'コマンドの実行と、実行中のコマンドへの入力も確認なしで行います。コマンドは外部と通信できないため、GitHubへの起票やpush、パッケージのダウンロードには使えません。'}
+                ほかのアプリの画面を読み、クリックや入力を行い、アプリを開く操作も確認なしで行います。
+                ファイルやコマンドに適用する秘密情報の保護や禁止ルールは、開いている画面（端末、
                 {fileManagerName}
-                、パスワード管理のアプリ、ブラウザーなど）を読んだり入力したりすることは止めません。
+                、パスワード管理アプリ、ログイン済みのブラウザーやメールなど）を操作する場合には適用されません。
+                撮影した画面の画像は接続先のAIに送ります。クラウドAPIに画像を送るときは、画像ごとに接続先とモデルを表示し、承認を求めます。
               </span>
               <button
                 data-testid="access-full-confirm"
