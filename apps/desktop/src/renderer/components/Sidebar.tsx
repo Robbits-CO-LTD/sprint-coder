@@ -426,7 +426,8 @@ export function Sidebar({
                     if (created !== null) focusLater(`[data-task-id="${created.id}"]`);
                   });
                 }}
-                onRename={() =>
+                editLabel={projectMultiFolderUx ? 'Projectを編集（名前・フォルダ）' : undefined}
+                onEdit={() =>
                   projectMultiFolderUx
                     ? setEditorProject(group.project)
                     : openDialog({ kind: 'rename-project', project: group.project })
@@ -493,9 +494,7 @@ export function Sidebar({
                           return next;
                         })
                       }
-                      onRename={() =>
-                        openDialog({ kind: 'rename-project', project: group.project })
-                      }
+                      onEdit={() => openDialog({ kind: 'rename-project', project: group.project })}
                       onRestore={() => void restoreProject(group.project)}
                       {...rowProps}
                     />
@@ -636,7 +635,8 @@ function ProjectGroup({
   onToggle,
   onToggleArchived,
   onCreateTask,
-  onRename,
+  editLabel = '名前を変更',
+  onEdit,
   onArchive,
   onRestore,
   ...rowProps
@@ -647,7 +647,8 @@ function ProjectGroup({
   onToggle: () => void;
   onToggleArchived: () => void;
   onCreateTask?: () => void;
-  onRename?: () => void;
+  editLabel?: string | undefined;
+  onEdit?: () => void;
   onArchive?: () => void;
   onRestore?: () => void;
 } & RowProps) {
@@ -686,10 +687,10 @@ function ProjectGroup({
               <MoreHorizontal size={14} />
             </summary>
             <div className="sb-menu-popover">
-              {onRename && (
-                <button onClick={onRename}>
+              {onEdit && (
+                <button onClick={onEdit}>
                   <Pencil size={13} />
-                  名前を変更
+                  {editLabel}
                 </button>
               )}
               {onArchive && (
