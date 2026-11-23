@@ -15,6 +15,9 @@ import {
   protectedWorkspaceRootMessage,
 } from './permission-broker';
 import type { PermissionPolicyRecord } from './persistence';
+import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
+import { prepareExecutionSpec, projectCommandFacts } from './command-runner';
+import type { ProjectPermissionSettings } from './project-permission-settings';
 import {
   createPathGuard,
   workspacePermissionResourceFromGuard,
@@ -78,6 +81,8 @@ afterAll(async () => {
 function fixture(
   notify?: (taskId: string, epoch: number) => void | Promise<void>,
   revokedCapabilities: Capability[] = [],
+  projectPermissions?: { snapshot(path: string): ProjectPermissionSettings },
+  secondaryRoot?: string,
 ) {
   const events: string[] = [];
   let policy: PermissionPolicyRecord = {
@@ -143,6 +148,17 @@ function fixture(
             role: 'primary' as const,
             status: 'available' as const,
           },
+          ...(secondaryRoot === undefined
+            ? []
+            : [
+                {
+                  rootId: 'second',
+                  path: secondaryRoot,
+                  label: 'Secondary',
+                  role: 'secondary' as const,
+                  status: 'available' as const,
+                },
+              ]),
         ],
         digest: 'd'.repeat(64),
       };
@@ -172,16 +188,211 @@ function fixture(
       return undefined;
     },
   };
-  const broker = new PermissionBroker(persistence, {
-    policyEpochChanged: async (taskId, epoch) => {
-      await notify?.(taskId, epoch);
-      events.push('subjects-stopped');
+  const broker = new PermissionBroker(
+    persistence,
+    {
+      policyEpochChanged: async (taskId, epoch) => {
+        await notify?.(taskId, epoch);
+        events.push('subjects-stopped');
+      },
     },
-  });
+    projectPermissions,
+  );
   return { broker, events, audits, pending };
 }
 
 describe('Main PermissionBroker', () => {
+  it('admits an Auto workspace read once after the selected model approves its bound facts', async () => {
+    const { broker } = fixture();
+    const tool = { kind: 'fileRead', sideEffect: 'read', risk: 'low' } as const;
+    const facts = { ...request, risk: 'low' as const };
+    const reviewedRequest = {
+      ...facts,
+      reviewerInputDigest: autoReviewerInputDigest({ request: facts, tool, policyEpoch: 2 }),
+    };
+    const input = {
+      taskId: request.taskId,
+      request: reviewedRequest,
+      now: NOW,
+      pathGuard,
+      reviewWorkspaceRead: true,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: ceiling,
+        modeCeiling: ceiling,
+        sandbox: { feasible: true, profile: 'read-only' as const },
+      },
+    };
+    expect(broker.preview(input).decision).toBe('approval_required');
+    const reviewerDecision = await AutoReviewer.createProduction(() => ({
+      name: 'test-selected',
+      generate: async () => 'ALLOW_ONCE',
+    })).review({
+      reviewRequestId: 'review-bound-read',
+      turnId: 'turn-1',
+      callId: 'call-1',
+      request: reviewedRequest,
+      tool,
+      policyEpoch: 2,
+    });
+    const approved = { ...input, basePolicy: { ...input.basePolicy, reviewerDecision } };
+    const evaluation = broker.evaluate(approved);
+    expect(evaluation.decision).toBe('allow_once');
+    expect(broker.revalidate({ ...approved, permit: evaluation.permit! }).valid).toBe(true);
+    expect(broker.revalidate({ ...approved, permit: evaluation.permit! }).valid).toBe(false);
+  });
+
+  it('checks every path of a batch and refuses a previously allowed read after the rules change', async () => {
+    let settings: ProjectPermissionSettings = {
+      valid: true,
+      digest: 'test',
+      allow: ['Read(src/**)'],
+      deny: [],
+    };
+    const { broker } = fixture(undefined, [], { snapshot: () => settings });
+    await broker.setAccessPreset('task-1', 'ask', 2);
+    const input = {
+      taskId: 'task-1',
+      request,
+      now: NOW,
+      pathGuard,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: ceiling,
+        modeCeiling: ceiling,
+        sandbox: { feasible: true, profile: 'read-only' as const },
+      },
+    };
+    const allowed = broker.evaluate(input);
+    expect(allowed.reason).toBe('project_settings_allow');
+    expect(
+      broker.preview({
+        ...input,
+        basePolicy: { ...input.basePolicy, sandbox: { feasible: false, profile: 'read-only' } },
+      }).reason,
+    ).toBe('sandbox_infeasible');
+    settings = { ...settings, deny: ['Read(src/app.ts)'] };
+    expect(broker.revalidate({ ...input, permit: allowed.permit! }).valid).toBe(false);
+    const sibling = await createPathGuard({
+      workspacePath: selectedWorkspacePath,
+      targetPath: 'src',
+      operation: 'read',
+    });
+    expect(
+      broker.projectDecision({ ...input, projectReadTree: true, projectGuards: [sibling] }),
+    ).toBe('allow');
+    settings = { ...settings, allow: ['Read(src)'] };
+    expect(
+      broker.projectDecision({ ...input, projectReadTree: true, projectGuards: [sibling] }),
+    ).toBeNull();
+    const full = await broker.setAccessPreset('task-1', 'full', 3);
+    expect(full.preset).toBe('full');
+    expect(broker.preview({ ...input, projectGuards: [sibling, pathGuard] })).toMatchObject({
+      decision: 'deny',
+      reason: 'project_settings_deny',
+    });
+  });
+
+  it('applies a command rule to the controlled name and the sealed argv, while preserving a newer deny', async () => {
+    const executable = process.platform === 'win32' ? 'where' : 'uname';
+    const argv = process.platform === 'win32' ? ['/?'] : ['-s'];
+    const spec = await prepareExecutionSpec({
+      workspacePath: selectedWorkspacePath,
+      executable,
+      argv,
+    });
+    const projectCommand = projectCommandFacts(spec)!;
+    expect(projectCommand.target.trustedExecutableName).toBe(executable);
+    const absolute = await prepareExecutionSpec({
+      workspacePath: selectedWorkspacePath,
+      executable: spec.absoluteExecutable,
+      argv,
+    });
+    expect(projectCommandFacts(absolute)?.target.trustedExecutableName?.toLowerCase()).toMatch(
+      process.platform === 'win32' ? /^where\.exe$/u : /^uname$/u,
+    );
+    expect(projectCommandFacts({ ...spec })).toBeUndefined();
+    const rule = `Bash(${executable} ${argv[0]})`;
+    let settings: ProjectPermissionSettings = {
+      valid: true,
+      digest: 'test',
+      allow: [rule],
+      deny: [],
+    };
+    const { broker } = fixture(undefined, [], { snapshot: () => settings });
+    const commandRequest = {
+      ...request,
+      capability: 'shell.execute' as const,
+      operation: 'execute' as const,
+      resource: { kind: 'external' as const, target: 'command:fixture' },
+    };
+    const commandCeiling: CapabilityCeiling = {
+      ...ceiling,
+      entries: [
+        {
+          ...ceiling.entries[0]!,
+          capability: 'shell.execute',
+          operations: ['execute'],
+          resourceSet: { kind: 'external-exact', target: 'command:fixture' },
+        },
+      ],
+    };
+    const input = {
+      taskId: 'task-1',
+      request: commandRequest,
+      now: NOW,
+      projectCommand,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: commandCeiling,
+        modeCeiling: commandCeiling,
+        sandbox: { feasible: true, profile: 'read-only' as const },
+      },
+    };
+    const permit = broker.previewExecutionSpec(input);
+    expect(permit).toMatchObject({ decision: 'allow', reason: 'project_settings_allow' });
+    settings = { ...settings, deny: [rule] };
+    expect(broker.revalidate({ ...input, permit: permit.permit! }).valid).toBe(false);
+  });
+
+  it('checks stdin against only the command’s sealed root and never inherits its allow', () => {
+    const secondary = join(testRoot, 'another-root');
+    const { broker } = fixture(
+      undefined,
+      [],
+      {
+        snapshot: (path) => ({
+          valid: true,
+          digest: 'test',
+          allow: ['Bash'],
+          deny: path === secondary ? ['Bash'] : [],
+        }),
+      },
+      secondary,
+    );
+    const decide = (rootId: string | undefined) =>
+      broker.projectDecision({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        now: NOW,
+        request: { ...request, capability: 'shell.execute', operation: 'execute' },
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: ceiling,
+          modeCeiling: ceiling,
+          sandbox: { feasible: true, profile: 'read-only' },
+        },
+        projectStdin: { rootId, target: { tool: 'Bash', executable: process.execPath, argv: [] } },
+      });
+    expect(decide('root-a')).toBeNull();
+    expect(decide('second')).toBe('deny');
+    expect(decide(undefined)).toBe('deny');
+  });
+
   it('loads expanded policy, records the audit, and returns an execution-bound permit', () => {
     const { broker, audits } = fixture();
     const result = broker.evaluate({

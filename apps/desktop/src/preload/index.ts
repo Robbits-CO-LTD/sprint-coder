@@ -1190,6 +1190,10 @@ const api: SprintCoderApi = {
       ),
   },
   permissions: {
+    reviewProjectRules: (taskId) =>
+      invoke(IPC_CHANNELS.permissionsReviewProjectRules, taskIdPayloadSchema, z.string(), {
+        taskId,
+      }),
     get: (taskId) =>
       invoke(IPC_CHANNELS.permissionsGet, taskIdPayloadSchema, permissionSettingsSchema, {
         taskId,

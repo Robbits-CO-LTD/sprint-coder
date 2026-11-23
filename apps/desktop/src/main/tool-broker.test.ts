@@ -1213,6 +1213,42 @@ describe('Main ToolBroker', () => {
     expect(executed).toBe(false);
   });
 
+  it('refuses an approved command if its project rule changes in the resource queue', async () => {
+    const { registry, command } = createRegistry();
+    let ruleAllows = true;
+    const execute = vi.fn();
+    const terminalize = vi.fn();
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      () => ({
+        decision: 'allow',
+        reason: 'project_settings_allow',
+        checkProjectSettings: () => ruleAllows,
+      }),
+      (event) => {
+        if (event.state === 'queued') ruleAllows = false;
+      },
+    );
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      execute,
+      authorizationDenied: terminalize,
+    });
+    broker.startTurn(context, 'mock');
+    await expect(
+      broker.dispatch({
+        ...context,
+        callId: 'changed-rule',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: [] },
+      }),
+    ).rejects.toThrow('project_settings_changed');
+    expect(terminalize).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('terminalizes prepared input when execution revalidation throws', async () => {
     const { registry, command } = createRegistry();
     let terminalized = false;

@@ -6,6 +6,7 @@ import {
   CommandRunner,
   CommandRunnerError,
   executionSpecPathGuard,
+  projectCommandFacts,
   type CommandOutputChunk,
   type CommandResult,
   type RunOptions,
@@ -31,6 +32,8 @@ export type ManagedCommandIdentity = Readonly<{
   executable: string;
   argv: readonly string[];
   cwd: string;
+  rootId?: string;
+  trustedExecutableName?: string | undefined;
 }>;
 
 type Session = {
@@ -205,11 +208,18 @@ export class ManagedCommandSessions {
     owner: Readonly<{ taskId: string; turnId: string }>,
   ): ManagedCommandIdentity {
     const session = this.require(sessionId, owner);
+    const project = projectCommandFacts(session.spec);
     return Object.freeze({
       sessionId: session.id,
       executable: session.spec.absoluteExecutable,
       argv: Object.freeze([...session.spec.argv]),
       cwd: session.spec.cwdIdentity.canonicalPath,
+      ...(project === undefined
+        ? {}
+        : {
+            rootId: project.guard.rootId,
+            trustedExecutableName: project.target.trustedExecutableName,
+          }),
     });
   }
 

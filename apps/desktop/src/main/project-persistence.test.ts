@@ -635,6 +635,37 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('omits a registered project reference when a Read rule forbids it', async () => {
+      const { persistence } = createPersistence();
+      const rootPath = mkdtempSync(join(tmpdir(), 'sc-reference-permissions-'));
+      directories.push(rootPath);
+      writeFileSync(join(rootPath, 'README.md'), '# Reference');
+      const binding = await workspaceMutationBinding(rootPath);
+      const project = persistence.createProject({
+        name: 'Project reference rules',
+        folders: [{ ...binding, path: binding.canonicalPath, label: 'root', role: 'primary' }],
+      });
+      persistence.addProjectReference({
+        projectId: project.id,
+        projectRootId: persistence.listProjectFolders(project.id)[0]!.id,
+        relativePath: 'README.md',
+        registeredRootIdentity: binding.rootIdentityDigest,
+      });
+      mkdirSync(join(rootPath, '.sprint-coder'));
+      writeFileSync(
+        join(rootPath, '.sprint-coder', 'settings.json'),
+        JSON.stringify({ permissions: { deny: ['Read(README.md)'] } }),
+      );
+      const task = persistence.createTask('Reference permission', false, project.id);
+      const turn = persistence.startTurn(task.id, 'Use the project');
+      expect(
+        persistence
+          .prepareContext(task.id, turn.turnId)
+          .projectItems.filter(({ kind }) => kind === 'reference'),
+      ).toEqual([]);
+      persistence.close();
+    });
+
     it('keeps a referenced root on explicit same-path relink without trusting its old references', async () => {
       const { persistence } = createPersistence();
       const rootPath = mkdtempSync(join(tmpdir(), 'sc-legacy-relink-'));

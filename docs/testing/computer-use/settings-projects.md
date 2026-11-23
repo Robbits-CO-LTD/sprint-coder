@@ -87,7 +87,7 @@
 
 - 前提: 隔離profile。
 - 操作: 新規TaskのAccess既定選択を開いてフルアクセスに設定、設定を閉じ再度開く。
-- 合格条件: 選択肢は前回選択した設定・実行前に確認・安全時は自動・フルアクセス。保存値fullが再表示される。
+- 合格条件: 選択肢は前回選択した設定・実行前に確認・自動モード・フルアクセス。保存値fullが再表示される。
 - 証拠・制約: 選択一覧と再表示。実ファイル操作は行わない。
 
 <a id="settings-dialog-06"></a>
@@ -163,8 +163,8 @@
 旧ケース: `tests/e2e/model-and-access-settings.spec.ts` — selects and restores a Codex model and an Access preset
 
 - 前提: 旧Picker、fixture catalog。
-- 操作: Codex→GPT-5.6-Terra→安全時は自動を選んで再起動。
-- 合格条件: Runtime/モデル/Accessの3選択がCodex／GPT-5.6-Terra／安全時は自動として復元。
+- 操作: Codex→GPT-5.6-Terra→自動モードを選んで再起動。
+- 合格条件: Runtime/モデル/Accessの3選択がCodex／GPT-5.6-Terra／自動モードとして復元。
 - 証拠・制約: 選択と復元画面。固定名は旧fixture基準で実catalogの現在値ではない。
 
 <a id="model-and-access-settings-02"></a>

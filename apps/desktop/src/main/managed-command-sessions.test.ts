@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandRunner, CommandRunnerError, prepareExecutionSpec } from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
+import { createManagedStdinRequest } from './managed-command-stdin';
 import { probeSandboxRunner } from './sandbox-runner';
 import { workspaceMutationBinding } from './path-guard';
 
@@ -23,6 +24,7 @@ describe('Managed command Workspace observation', () => {
     await mkdir(sibling);
     const binding = await workspaceMutationBinding(workspace);
     const spec = await prepareExecutionSpec({
+      rootId: 'second',
       workspacePath: workspace,
       cwd: 'nested',
       executable: process.execPath,
@@ -37,11 +39,19 @@ describe('Managed command Workspace observation', () => {
         }),
     );
     const sessions = new ManagedCommandSessions(runner);
-    const started = sessions.start(spec, { taskId: 'writer-task', turnId: 'writer-turn' });
+    const owner = { taskId: 'writer-task', turnId: 'writer-turn' };
+    const sessionId = '00000000-0000-4000-8000-000000000001';
+    const started = sessions.start(spec, owner, {}, sessionId);
     const settled = expect(started).rejects.toThrow('test startup settled');
     const observes = (path: string, rootIdentityDigest?: string) =>
       sessions.hasActiveWorkspaceSessions([{ path, rootIdentityDigest }]);
     try {
+      const stdin = createManagedStdinRequest({
+        chars: '',
+        close: true,
+        command: sessions.commandIdentity(sessionId, owner),
+      });
+      expect(stdin.command.rootId).toBe('second');
       expect(observes(workspace, binding.rootIdentityDigest)).toBe(true);
       expect(observes(nested)).toBe(true);
       expect(observes(parent)).toBe(true);
