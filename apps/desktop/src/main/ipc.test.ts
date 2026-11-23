@@ -3542,6 +3542,126 @@ describe('Main image attachment dispatch boundary', () => {
     }
   });
 
+  it('publishes a durable approval request when an Auto workspace read review times out', async () => {
+    const root = await realpath(await mkdtemp(join(process.cwd(), '.review-timeout-')));
+    const abort = new AbortController();
+    try {
+      await writeFile(join(root, 'fixture.txt'), 'fixture');
+      const workspace: EffectiveWorkspaceSet = {
+        source: 'task',
+        projectId: null,
+        primaryRootId: 'root',
+        roots: [
+          { rootId: 'root', path: root, label: 'fixture', role: 'primary', status: 'available' },
+        ],
+        digest: 'b'.repeat(64),
+      };
+      const router = Object.create(IpcRouter.prototype) as {
+        evaluateToolPermission(
+          request: ToolAuthorizationRequest,
+          capability: Capability,
+          signal?: AbortSignal,
+        ): Promise<ToolAuthorizationDecision>;
+      };
+      const commitPermissionEvaluation = vi.fn();
+      const publish = vi.fn();
+      Object.assign(router, {
+        managedWorkerCall: new Map(),
+        autoReviewer: AutoReviewer.createForTesting({
+          model: () => new Promise(() => undefined),
+          timeoutMs: 5,
+        }),
+        publish: vi.fn(),
+        permissionBroker: new PermissionBroker({
+          getPermissionPolicy: () => ({
+            preset: 'auto',
+            policyEpoch: 1,
+            expandedPolicy: expandAccessPreset('auto'),
+            revokedCapabilities: [],
+          }),
+          listPermissionGrants: () => [],
+          readTurnWorkspaceSetForTask: () => workspace,
+          commitPermissionEvaluation,
+        } as never),
+      });
+      const coordinator = new ApprovalCoordinator({
+        persistence: {
+          requestApproval: (input) => ({
+            approval: {
+              id: input.id,
+              taskId: input.taskId,
+              turnId: input.turnId,
+              callId: input.callId,
+              policyEpoch: input.policyEpoch,
+              challenge: input.challenge,
+              revision: 0,
+              state: 'pending',
+              decision: null,
+            },
+            event: { type: 'approval.requested', taskId: input.taskId, turnId: input.turnId },
+          }),
+          getApproval: () => undefined,
+          resolveApproval: () => {
+            throw new Error('This fixture leaves the approval unanswered');
+          },
+          cancelPendingApprovalForCall: () => null,
+        },
+        now: () => new Date().toISOString(),
+        expiresAt: () => '2099-01-01T00:00:00.000Z',
+        getCurrentPolicyEpoch: () => 1,
+        isTurnActive: () => true,
+        evaluatePermission: ({ capability, request, signal }) =>
+          router.evaluateToolPermission(request, capability, signal),
+        publish,
+      });
+      const harness = new ManagedCodingHarness({
+        workspaceFor: () => workspace,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => 1,
+        authorizer: (request, control) => coordinator.authorizeTool(request, control),
+      });
+      const context = {
+        taskId: 'task',
+        turnId: 'parent-turn',
+        workspaceId: workspace.digest,
+        policyEpoch: 1,
+      };
+      harness.startTurn(context, 'codex');
+      const pending = harness.broker
+        .dispatch({
+          ...context,
+          callId: 'read-call',
+          providerName: 'read_file',
+          input: { path: 'fixture.txt' },
+          signal: abort.signal,
+        })
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+      try {
+        await vi.waitFor(() =>
+          expect(publish).toHaveBeenCalledWith(expect.objectContaining({ state: 'pending' }), {
+            type: 'approval.requested',
+            taskId: 'task',
+            turnId: 'parent-turn',
+          }),
+        );
+        expect(commitPermissionEvaluation.mock.calls[0]?.[2]).toMatchObject({
+          decision: 'approval_required',
+          reason: 'reviewer_escalated_timeout',
+          reviewerAudit: { decision: 'timeout' },
+        });
+      } finally {
+        abort.abort();
+        expect(await pending).toHaveProperty('error');
+        await harness.dispose();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('does not commit a late review when Stop arrives before a model reply is recorded', async () => {
     const registry = new ToolRegistry();
     registry.register(MANAGED_EXEC_COMMAND_TOOL);
