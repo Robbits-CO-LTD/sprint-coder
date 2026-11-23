@@ -106,6 +106,7 @@ import {
   permissionSettingsSchema,
   modelCatalogQueryInputSchema,
   modelCatalogQueryResultSchema,
+  type ModelCatalogQueryResult,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
   type ModelSelection,
@@ -2853,8 +2854,10 @@ export class IpcRouter {
         // here would re-probe every Provider per page, and a Provider that flickers between
         // success and failure would move the revision under the cursor on every page (#906).
         // Revision 0 means no catalog has been built yet in this process, so it is built once.
-        if (input.cursor === null || this.modelCatalog.revision === 0)
-          await this.refreshModelCatalog();
+        const unavailableSubscriptions =
+          input.cursor === null || this.modelCatalog.revision === 0
+            ? await this.refreshModelCatalog()
+            : undefined;
         const result = this.modelCatalog.query(input);
         const runtimeKind = this.persistence.getRuntime();
         const selection =
@@ -2862,7 +2865,11 @@ export class IpcRouter {
           modelSelectionForRuntime(runtimeKind, this.persistence.getModel());
         return {
           ...result,
+          items: [...result.items],
           selection,
+          ...(input.accessTypes.includes('subscription') && unavailableSubscriptions !== undefined
+            ? { unavailableSubscriptions }
+            : {}),
           multiProviderModelPickerV2:
             multiProviderModelPickerV2Enabled() ||
             this.externalAcpCatalogAvailable ||
@@ -7780,7 +7787,9 @@ export class IpcRouter {
     }
   }
 
-  private async refreshModelCatalog(): Promise<void> {
+  private async refreshModelCatalog(): Promise<
+    NonNullable<ModelCatalogQueryResult['unavailableSubscriptions']>
+  > {
     const [codexCapability, claudeCapability, grokCapability] = await Promise.all([
       this.codexRuntime.probe(),
       this.claudeRuntime.probe(),
@@ -7827,33 +7836,39 @@ export class IpcRouter {
     this.externalAcpCatalogAvailable = externalModels.some(({ connectionId }) =>
       isExternalAcpConnection(connectionId),
     );
+    const builtinConnections = [
+      {
+        kind: 'codex',
+        displayName: 'Codex CLI',
+        providerId: 'openai',
+        capability: codexCapability,
+      },
+      {
+        kind: 'claude',
+        displayName: 'Claude Code',
+        providerId: 'anthropic',
+        capability: claudeCapability,
+      },
+      { kind: 'grok', displayName: 'Grok CLI', providerId: 'xai', capability: grokCapability },
+    ] as const;
+    const subscriptions = builtinConnections.map(({ kind, ...entry }) => ({
+      ...entry,
+      connectionId: `builtin:${kind}-cli`,
+      available:
+        entry.capability.readiness === 'ready' && this.teamRuntimeAvailability.isAvailable(kind),
+    }));
     this.modelCatalog.replaceCatalog(
       [
-        ...providerModelsForBuiltin(
-          'builtin:codex-cli',
-          'Codex CLI',
-          'openai',
-          codexCapability.models,
-          codexCapability.readiness === 'ready' &&
-            this.teamRuntimeAvailability.isAvailable('codex'),
-          checkedAt,
-        ),
-        ...providerModelsForBuiltin(
-          'builtin:claude-cli',
-          'Claude Code',
-          'anthropic',
-          claudeCapability.models,
-          claudeCapability.readiness === 'ready' &&
-            this.teamRuntimeAvailability.isAvailable('claude'),
-          checkedAt,
-        ),
-        ...providerModelsForBuiltin(
-          'builtin:grok-cli',
-          'Grok CLI',
-          'xai',
-          grokCapability.models,
-          grokCapability.readiness === 'ready' && this.teamRuntimeAvailability.isAvailable('grok'),
-          checkedAt,
+        ...subscriptions.flatMap(
+          ({ connectionId, displayName, providerId, capability, available }) =>
+            providerModelsForBuiltin(
+              connectionId,
+              displayName,
+              providerId,
+              capability.models,
+              available,
+              checkedAt,
+            ),
         ),
         ...externalModels,
       ],
@@ -7870,6 +7885,19 @@ export class IpcRouter {
         ),
       ]),
     );
+    return subscriptions
+      .filter(({ available }) => !available)
+      .map(({ connectionId, displayName, capability }) => ({
+        connectionId,
+        displayName,
+        reason:
+          capability.readiness === 'authentication_required'
+            ? 'login_required'
+            : capability.cliNotDetected === true
+              ? 'cli_not_found'
+              : 'unavailable',
+        hasModels: capability.models.length > 0,
+      }));
   }
 
   private async captureProviderImageAttachmentCapability(

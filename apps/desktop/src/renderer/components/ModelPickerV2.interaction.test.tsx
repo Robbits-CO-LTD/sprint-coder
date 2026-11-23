@@ -680,6 +680,45 @@ describe('ModelPickerV2 IME keyboard boundary', () => {
   });
 });
 
+it('explains unavailable subscriptions and blocks both mouse and keyboard selection', async () => {
+  const setModelSelection = vi.fn();
+  useAppStore.setState({ setModelSelection });
+  query.mockResolvedValue({
+    ...catalogResult([model({ available: false })]),
+    unavailableSubscriptions: [
+      {
+        connectionId: 'builtin:claude-cli',
+        displayName: 'Claude Code',
+        reason: 'login_required',
+        hasModels: true,
+      },
+      {
+        connectionId: 'builtin:grok-cli',
+        displayName: 'Grok CLI',
+        reason: 'cli_not_found',
+        hasModels: false,
+      },
+    ],
+  });
+  await renderPicker('unavailable');
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!.click(),
+  );
+  const option = container.querySelector<HTMLElement>('[role="option"]')!;
+  expect(option.getAttribute('aria-disabled')).toBe('true');
+  expect(option.textContent).toContain('ログインが必要です');
+  expect(container.textContent).toContain('Grok CLI — CLI を検出できませんでした');
+  expect(container.textContent).toContain('接続設定を開く');
+  await act(async () => option.click());
+  await act(async () =>
+    container
+      .querySelector('input')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+  );
+  expect(setModelSelection).not.toHaveBeenCalled();
+  expect(container.contains(option)).toBe(true);
+});
+
 describe('local catalog Provider-settings destination', () => {
   async function showLocalCatalog() {
     const trigger = container.querySelector<HTMLButtonElement>(
