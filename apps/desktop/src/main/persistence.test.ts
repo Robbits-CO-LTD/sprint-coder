@@ -1837,6 +1837,21 @@ if (runsWithElectronAbi)
       },
     );
 
+    it('persists the tools-disabled retry notice only for the affected Task', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('Retry notice');
+      const other = persistence.createTask('Another task');
+      try {
+        const started = persistence.startTurn(task.id, 'Test retry');
+        const notice = persistence.recordTurnToolsDisabled(task.id, started.turnId);
+        expect(persistence.listEventsAfter(task.id, notice.seq - 1)).toContainEqual(notice);
+        expect(persistence.snapshot(task.id).toolsDisabledTurnIds).toEqual([started.turnId]);
+        expect(persistence.snapshot(other.id).toolsDisabledTurnIds).toBeUndefined();
+      } finally {
+        persistence.close();
+      }
+    });
+
     it('enforces the untrimmed Goal length bound and rejects blank-only objectives', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('Goal length boundary');

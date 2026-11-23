@@ -68,6 +68,7 @@ import {
 import type { TeamCoordinator, TeamResultReadSource } from './team-coordinator';
 import { canonicalizeProviderToolImage } from './image-attachment-store';
 import { parseProjectMemoryCandidate } from './project-memory-guidance';
+import { WORKSPACE_REQUEST_GUIDANCE } from '../chat-continuation';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
@@ -92,9 +93,8 @@ without explicit authorization. Do not execute unknown or downloaded code. If an
 scope is unclear, do not call a tool; ask the user. Never expose secrets or personal data. If a tool
 is unavailable, fails, or is denied, report that accurately.`;
 
-export const PROVIDER_NO_TOOL_GUIDANCE = `This model has no verified tool-calling capability for this
-turn. You cannot read, create, or change workspace files or run commands. Do not claim that you did;
-explain the limitation and provide instructions only if that is useful.`;
+export const PROVIDER_TOOL_RETRY_GUIDANCE =
+  '接続先がツール付きの送信を受け付けなかったため、この送信はツールなしで再試行しています。この送信ではファイル操作、コマンド、Skillの下書き作成などのツールを使えません。実行していない操作を完了したと報告しないでください。';
 
 export function providerWorkspaceGuidance(
   platform: NodeJS.Platform = process.platform,
@@ -125,6 +125,33 @@ absolute node.exe with -e and node:fs instead. Verify every requested change wit
         `- rootId=${rootId} (${role}) label=${JSON.stringify(label)} path=${JSON.stringify(path)}`,
     ),
   ].join('\n');
+}
+
+export function providerTurnToolGuidance(input: {
+  platform: NodeJS.Platform;
+  roots: readonly Pick<
+    EffectiveWorkspaceSet['roots'][number],
+    'rootId' | 'label' | 'path' | 'role'
+  >[];
+  toolCalling: boolean | null | undefined;
+  tools: readonly Pick<ProviderTool, 'name'>[];
+}): string {
+  const available = new Set(input.tools.map(({ name }) => name));
+  const context =
+    input.toolCalling === false
+      ? '選択されたモデルはツール呼び出しに対応していません。'
+      : input.roots.length === 0
+        ? `このTurnには作業フォルダーがありません。ファイル操作とコマンドは使えません。${WORKSPACE_REQUEST_GUIDANCE}`
+        : available.has('list_workspace')
+          ? providerWorkspaceGuidance(input.platform, input.roots)
+          : 'この送信では作業フォルダーのファイル操作は使えません。';
+  const guidance = [context];
+  if (input.toolCalling !== false && input.roots.length > 0 && !available.has('exec_command'))
+    guidance.push('コマンド実行の準備ができていないため、コマンドは使えません。');
+  if (available.has('skill_draft_create'))
+    guidance.push('Skillの下書きは、利用できる skill_draft_create で作成できます。');
+  guidance.push('一覧にあるツールだけを使い、実行していない操作を完了したと報告しないでください。');
+  return guidance.join('\n');
 }
 
 export const LIST_WORKSPACE_TOOL = createToolDefinition({

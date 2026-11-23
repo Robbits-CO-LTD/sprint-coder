@@ -204,6 +204,7 @@ type AppState = {
   // Same ownership invariant as drafts; includes asynchronous selection-persistence rollback.
   skillSelectionRevisionByTask: Record<string, number | undefined>;
   skillDraftsByTask: Record<string, { turnId: string; draft: SkillDraft }[]>;
+  toolsDisabledTurnIdsByTask: Record<string, string[]>;
   activatedSkillsByTask: Record<
     string,
     { turnId: string; ref: TurnSkillSelection['ref']; name: string }[]
@@ -947,6 +948,18 @@ export function handleTurnEvent(
       apply((state) => taskTurnEventUpdate(state, taskId, ev, Date.now()));
       break;
     }
+    case 'turn.tools_disabled': {
+      apply((state) => ({
+        toolsDisabledTurnIdsByTask: {
+          ...state.toolsDisabledTurnIdsByTask,
+          [taskId]: [
+            ev.turnId,
+            ...(state.toolsDisabledTurnIdsByTask[taskId] ?? []).filter((id) => id !== ev.turnId),
+          ].slice(0, 4096),
+        },
+      }));
+      break;
+    }
     case 'skill.draft.created': {
       apply((state) => ({
         skillDraftsByTask: {
@@ -1329,6 +1342,7 @@ export const useAppStore = create<AppState>((set, get) => {
     skillSelectionByTask: {},
     skillSelectionRevisionByTask: {},
     skillDraftsByTask: {},
+    toolsDisabledTurnIdsByTask: {},
     activatedSkillsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
@@ -2010,6 +2024,10 @@ export const useAppStore = create<AppState>((set, get) => {
         const projection = hydrateTaskTurn(snapshot);
         apply((state) => ({
           turnByTask: { ...state.turnByTask, [taskId]: projection.turn },
+          toolsDisabledTurnIdsByTask: {
+            ...state.toolsDisabledTurnIdsByTask,
+            [taskId]: snapshot.toolsDisabledTurnIds ?? [],
+          },
           queuedByTask: { ...state.queuedByTask, [taskId]: projection.queued },
           lastSeqByTask: { ...state.lastSeqByTask, [taskId]: snapshot.lastSeq },
           contextUsageByTask: snapshot.contextUsage

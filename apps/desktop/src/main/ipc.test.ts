@@ -7690,6 +7690,40 @@ describe('Provider workspace tool capability fallback', () => {
     expect(providerWorkspaceToolsEligible(false, 0, true)).toBe(false);
   });
 
+  it('allows Skill creation on managed ACP connections but not text-only API models or Mock', () => {
+    const available = Reflect.get(IpcRouter.prototype, 'skillDraftAvailable') as (
+      this: unknown,
+      taskId: string,
+    ) => boolean;
+    const find = vi.fn(() => ({ toolCalling: { value: false } }));
+    const router = (selection: unknown) => ({
+      persistence: { getTaskModelSelection: () => selection, getRuntime: () => 'mock' },
+      modelCatalog: { find },
+    });
+    expect(available.call(router(null), 'task-1')).toBe(false);
+    expect(
+      available.call(
+        router({
+          connectionId: 'api-connection',
+          requestedProvider: 'openai',
+          requestedModel: 'text-only',
+        }),
+        'task-1',
+      ),
+    ).toBe(false);
+    expect(
+      available.call(
+        router({
+          connectionId: 'builtin:opencode-cli',
+          requestedProvider: 'opencode',
+          requestedModel: 'available',
+        }),
+        'task-1',
+      ),
+    ).toBe(true);
+    expect(find).toHaveBeenCalledExactlyOnceWith('api-connection', 'text-only');
+  });
+
   it('retries unknown capability exactly once without tools only on a side-effect-free invalid request', () => {
     const base = {
       ordinal: 1,
