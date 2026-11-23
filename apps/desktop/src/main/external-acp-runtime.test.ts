@@ -6,7 +6,11 @@ import {
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CanonicalProviderEvent, ProviderConnection } from '@sprint-coder/contracts';
+import type {
+  CanonicalProviderEvent,
+  ProviderConnection,
+  ProviderExecutionRequest,
+} from '@sprint-coder/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EXTERNAL_ACP_AGENTS } from './external-acp-profile';
 import { ExternalAcpRuntime } from './external-acp-runtime';
@@ -19,7 +23,10 @@ const modelId = 'opencode/test-free';
 const scenario = vi.hoisted(() => ({ behavior: 'success' }));
 vi.mock('./external-acp-profile', async (load) => {
   const original = await load<typeof ExternalAcpProfile>();
-  return { ...original, resolveExternalAcpCli: () => process.execPath };
+  return {
+    ...original,
+    resolveExternalAcpCli: () => ({ executable: process.execPath, prefix: [] }),
+  };
 });
 vi.mock('../runtime-host/owned-cli-process', async (load) => {
   const original = await load<typeof OwnedCliProcess>();
@@ -65,6 +72,19 @@ rl.on('line', line => {
       else reply({ sessionId, configOptions: [selection] });
       break;
     case 'session/prompt':
+      if (scenario.startsWith('tool-')) {
+        const prompt = request.params.prompt[0].text;
+        const marker = prompt.match(/^SPRINT_TOOL_[a-f0-9-]+$/m)?.[0];
+        if (scenario === 'tool-result') {
+          const hasResult = prompt.includes('"role":"tool"') && prompt.includes('"toolCallId":"call-1"');
+          output(sessionId, hasResult ? 'used actual result' : 'missing result');
+        } else {
+          output(sessionId, marker.slice(0, 4));
+          output(sessionId, marker.slice(4) + '\n' + JSON.stringify({name: scenario === 'tool-absent' ? 'absent' : 'team_get_status', input: {}}));
+        }
+        reply({stopReason:'end_turn'});
+        break;
+      }
       if (scenario === 'free_limit') {
         send({ id: request.id, error: { code: -32603, message: 'raw provider detail',
           data: { errorName: 'provider.free-limit' } } });
@@ -115,7 +135,11 @@ describe('External ACP text chat', () => {
     removeTreeWithoutFollowingLinksSync(root);
   });
 
-  async function execute(behavior: string, onEvent?: (event: CanonicalProviderEvent) => void) {
+  async function execute(
+    behavior: string,
+    onEvent?: (event: CanonicalProviderEvent) => void,
+    request: Partial<ProviderExecutionRequest> = {},
+  ) {
     scenario.behavior = behavior;
     const active = new ExternalAcpRuntime(EXTERNAL_ACP_AGENTS[0], root);
     runtime = active;
@@ -128,6 +152,7 @@ describe('External ACP text chat', () => {
         connectionId: connection.id,
         modelId,
         messages: [{ role: 'user', content: 'fixture chat' }],
+        ...request,
       },
       signal,
     )) {
@@ -137,6 +162,42 @@ describe('External ACP text chat', () => {
     return output;
   }
 
+  it('decodes a split managed call, rejects unoffered tools and returns the actual result to the model', async () => {
+    const tools = [
+      { name: 'team_get_status', description: 'Team status', inputSchema: { type: 'object' } },
+    ];
+    expect(await execute('tool-call', undefined, { tools })).toMatchObject([
+      { type: 'resolution' },
+      { type: 'tool_call', name: 'team_get_status', input: {} },
+      { type: 'completed', stopReason: 'tool_calls' },
+    ]);
+    const rejected = await execute('tool-absent', undefined, { tools });
+    expect(rejected.some((e) => e.type === 'tool_call')).toBe(false);
+    expect(rejected.at(-1)).toMatchObject({
+      type: 'error',
+      error: { providerCode: 'invalid_tool_request' },
+    });
+    expect(
+      (
+        await execute('tool-result', undefined, {
+          tools,
+          messages: [
+            {
+              role: 'assistant',
+              content: '',
+              toolCalls: [{ callId: 'call-1', name: 'team_get_status', input: {} }],
+            },
+            {
+              role: 'tool',
+              toolCallId: 'call-1',
+              toolName: 'team_get_status',
+              content: 'actual status',
+            },
+          ],
+        })
+      )[0],
+    ).toEqual({ type: 'output_delta', text: 'used actual result' });
+  });
   it('cancels reverse permission requests and discards frames from other sessions', async () => {
     expect(await execute('success')).toEqual([
       { type: 'output_delta', text: 'expected' },

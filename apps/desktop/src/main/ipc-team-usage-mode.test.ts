@@ -550,6 +550,17 @@ describe('teamUsageOfferAvailable', () => {
     ).toBe(true);
   });
 
+  it.each(['opencode', 'antigravity', 'cursor'])(
+    'offers the %s CLI Leader its Team tools',
+    (id) => {
+      const selection = cli('codex', 'builtin:' + id + '-cli', id);
+      expect(teamUsageOfferAvailable({ ...ready, ...selection })).toBe(true);
+      expect(
+        teamUsageOfferAvailable({ ...ready, ...selection, workspaceRepositoryReady: false }),
+      ).toBe(false);
+    },
+  );
+
   it('answers false instead of throwing on a malformed selection', () => {
     expect(
       teamUsageOfferAvailable({

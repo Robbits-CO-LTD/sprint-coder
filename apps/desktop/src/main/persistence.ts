@@ -1,3 +1,4 @@
+import { isExternalAcpConnection } from './external-acp-profile';
 import Database from 'better-sqlite3';
 import { goalTurnGuidance, parseGoalConclusion, goalDecision } from './goal-outcome';
 import { goalReportSchema, type GoalReport } from '@sprint-coder/contracts';
@@ -4777,6 +4778,64 @@ const migrations = [
           strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
           'not_required', 'bypass', NULL),
         ('builtin:antigravity-cli', 'antigravity', 'builtin_cli', 'Antigravity', 1,
+          strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+          'not_required', 'bypass', NULL);
+    `,
+  },
+  {
+    version: 110,
+    checksum: 'external-cli-native-skill-bindings-cursor-v110',
+    sql: `
+      ALTER TABLE task_draft_skill_bindings RENAME TO old_task_draft_skill_bindings;
+      ALTER TABLE turn_skill_bindings RENAME TO old_turn_skill_bindings;
+      CREATE TABLE task_draft_skill_bindings (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 6),
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude', 'grok', 'opencode', 'antigravity', 'cursor')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'team')),
+        PRIMARY KEY(task_id, ordinal),
+        UNIQUE(task_id, source, skill_id, digest)
+      );
+
+      CREATE TABLE turn_skill_bindings (
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 6),
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude', 'grok', 'opencode', 'antigravity', 'cursor')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'team')),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        content TEXT NOT NULL,
+        package_path TEXT NOT NULL,
+        activation_policy TEXT NOT NULL DEFAULT 'manual' CHECK (activation_policy IN ('manual', 'auto-allowed')),
+        compatibility_json TEXT,
+        arguments_text TEXT,
+        PRIMARY KEY(turn_id, ordinal),
+        UNIQUE(turn_id, source, skill_id, digest)
+      );
+
+      INSERT INTO task_draft_skill_bindings SELECT * FROM old_task_draft_skill_bindings;
+      INSERT INTO turn_skill_bindings SELECT * FROM old_turn_skill_bindings;
+      DROP TABLE old_task_draft_skill_bindings;
+      DROP TABLE old_turn_skill_bindings;
+      CREATE INDEX turn_skill_bindings_turn_idx ON turn_skill_bindings(turn_id, ordinal);
+      UPDATE agents AS a SET (connection_id, requested_provider, requested_model) = (
+        SELECT connection_id, requested_provider, requested_model FROM tasks WHERE id = a.task_id
+      ) WHERE a.kind = 'leader' AND a.task_id IN (
+        SELECT id FROM tasks WHERE connection_id IN ('builtin:antigravity-cli', 'builtin:opencode-cli')
+      );
+      UPDATE agent_threads AS th SET (connection_id, requested_provider, requested_model) = (
+        SELECT connection_id, requested_provider, requested_model FROM agents WHERE thread_id = th.id AND kind = 'leader'
+      ) WHERE th.id IN (
+        SELECT thread_id FROM agents WHERE kind = 'leader' AND connection_id IN ('builtin:antigravity-cli', 'builtin:opencode-cli')
+      );
+      INSERT INTO provider_connections (
+        id, provider_id, runtime_kind, display_name, enabled, created_at, updated_at,
+        verification_status, rate_limit_mode, max_concurrent_requests
+      ) VALUES ('builtin:cursor-cli', 'cursor', 'builtin_cli', 'Cursor', 1,
           strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
           'not_required', 'bypass', NULL);
     `,
@@ -9857,7 +9916,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         runtime ?? ({ runtimeKind: this.getRuntime(), model: this.getModel() } as const);
       this.updateAgentModelSelectionInTransaction(
         leader.id,
-        runtime === null
+        runtime === null && !isExternalAcpConnection(parsed.connectionId)
           ? modelSelectionForRuntime(effectiveRuntime.runtimeKind, effectiveRuntime.model)
           : parsed,
         effectiveRuntime.runtimeKind,

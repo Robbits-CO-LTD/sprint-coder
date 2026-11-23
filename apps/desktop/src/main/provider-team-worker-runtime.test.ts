@@ -938,6 +938,78 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     },
   );
 
+  it.each(['opencode', 'antigravity', 'cursor'])(
+    'binds %s workspace calls to the Worker and returns the result before completion',
+    async (providerId) => {
+      const cli: ProviderConnection = {
+        ...connection,
+        id: 'builtin:' + providerId + '-cli',
+        providerId,
+        runtimeKind: 'builtin_cli',
+      };
+      const registry = new MainProviderRegistry();
+      const runtime: ProviderRuntime = {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        async *execute(_connection, request) {
+          if (request.messages.at(-1)?.role === 'tool') {
+            expect(request.messages.at(-1)?.content).toContain('saga-1');
+            yield { type: 'output_delta', text: '完了' };
+          } else {
+            expect(request.tools?.map((tool) => tool.name)).toEqual(['create_file']);
+            yield {
+              type: 'tool_call',
+              name: 'create_file',
+              callId: 'write-1',
+              input: { path: 'note.txt' },
+            };
+          }
+          yield { type: 'completed', stopReason: 'end_turn' };
+        },
+      };
+      registry.register({ runtimeKind: 'builtin_cli', providerId, runtime });
+      const invoke = vi.fn(async () => ({
+        state: 'committed',
+        sagaId: 'saga-1',
+        path: 'note.txt',
+        kind: 'add',
+      }));
+      const close = vi.fn();
+      const executeManagerTool = vi.fn();
+      const adapter = controlledProviderAdapter(runtime, {
+        registry,
+        getConnection: () => cli,
+        executeManagerTool,
+        openCliWorkspace: async () => ({
+          tools: [
+            { name: 'create_file', description: 'Create file', inputSchema: { type: 'object' } },
+          ],
+          writable: true,
+          invoke,
+          close,
+        }),
+      });
+      const worker = {
+        ...providerWorker(),
+        writeCapable: true,
+        modelSelection: {
+          connectionId: cli.id,
+          requestedProvider: providerId,
+          requestedModel: 'sample',
+        },
+      };
+      await adapter.execute({
+        worker,
+        envelope,
+        accessMode: 'workspace-write',
+        content: 'Write a note',
+      });
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(executeManagerTool).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledOnce();
+    },
+  );
   it('lets an external API Manager execute coordinator-bound Team tools and continue', async () => {
     const requests: unknown[] = [];
     const release = vi.fn(async () => undefined);

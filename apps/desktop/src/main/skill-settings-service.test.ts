@@ -33,6 +33,58 @@ describe('Skill activation source boundary', () => {
   );
 });
 
+describe('CLI Skill and Sprint Coder Skill selection', () => {
+  it('loads flat and grouped OpenCode Skills without including sibling files', async () => {
+    const root = await home();
+    const dir = join(root, '.config', 'opencode', 'skills');
+    await mkdir(join(dir, 'group', 'nested'), { recursive: true });
+    for (const file of ['flat.md', 'group/nested/SKILL.md'])
+      await writeFile(join(dir, file), '---\nname: Review\ndescription: Review\n---\nInstructions');
+    const service = new SkillSettingsService({ homePath: root });
+    const picks = (await service.listCatalog('opencode')).items.map(({ ref, kind }) => ({
+      ref,
+      kind,
+    }));
+    expect(picks.map(({ ref }) => ref.skillId).sort()).toEqual(['flat', 'nested']);
+    expect(await service.resolveSelections(picks, undefined, 'opencode')).toHaveLength(2);
+  });
+  it.each([
+    ['opencode', '.opencode'],
+    ['antigravity', '.agents'],
+    ['grok', '.grok'],
+    ['cursor', '.cursor'],
+  ] as const)('selects and pins both sources for %s', async (cli, directory) => {
+    const root = await home();
+    const workspace = join(root, 'workspace');
+    const native = join(workspace, directory, 'skills', 'review');
+    await mkdir(native, { recursive: true });
+    const content = '---\nname: review\ndescription: Review a change\n---\n';
+    await writeFile(join(native, 'SKILL.md'), content + 'CLI instructions');
+    const service = new SkillSettingsService({ homePath: root });
+    await service.installGithubSkill(
+      'review',
+      [{ path: 'SKILL.md', content: content + 'Sprint Coder instructions' }],
+      () => {},
+    );
+    const catalog = await service.listCatalog(cli, [workspace]);
+    const selections = catalog.items
+      .filter(({ ref }) => ref.skillId === 'review')
+      .map(({ ref, kind }) => ({ ref, kind }));
+    expect(selections.map(({ ref }) => ref.source)).toEqual(['created', cli]);
+    const result = await service.resolveSelections(selections, undefined, cli, [workspace]);
+    expect(result.map(({ content }) => content)).toEqual([
+      expect.stringContaining('Sprint Coder instructions'),
+      expect.stringContaining('CLI instructions'),
+    ]);
+    await expect(
+      service.resolveSelections(selections, undefined, 'provider', [workspace]),
+    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+    await writeFile(join(native, 'SKILL.md'), content + 'changed');
+    await expect(
+      service.resolveSelections(selections, undefined, cli, [workspace]),
+    ).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
+  });
+});
 describe('GitHub Skill installation', () => {
   it('does not publish a package if the grant expires during staging', async () => {
     const root = await home();

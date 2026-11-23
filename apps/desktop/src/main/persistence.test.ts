@@ -864,6 +864,64 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('preserves a saved draft and used Skill when applying v110', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('saved selections');
+      const selection = {
+        connectionId: 'builtin:antigravity-cli',
+        requestedProvider: 'antigravity',
+        requestedModel: 'gemini-test',
+      };
+      persistence.setTaskModelSelection(task.id, selection);
+      expect(persistence.getTaskLeader(task.id).modelSelection).toEqual(selection);
+      const turn = persistence.startTurn(task.id, 'saved selections');
+      persistence.close();
+      const before = new Database(path);
+      before
+        .prepare('INSERT INTO task_draft_skill_bindings VALUES (?, 1, ?, ?, ?, ?)')
+        .run(task.id, 'created', 'test', 'digest', 'chat');
+      before
+        .prepare('INSERT INTO turn_skill_bindings VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(
+          turn.turnId,
+          'created',
+          'test',
+          'digest',
+          'chat',
+          'Test',
+          'description',
+          'instructions',
+          'skills/test',
+          'manual',
+          null,
+          'args',
+        );
+      before.exec(
+        "DELETE FROM schema_migrations WHERE version = 110; DELETE FROM provider_connections WHERE id = 'builtin:cursor-cli'",
+      );
+      before
+        .prepare(
+          "UPDATE agents SET connection_id = 'builtin:codex-cli', requested_provider = 'openai' WHERE kind = 'leader'",
+        )
+        .run();
+      before
+        .prepare(
+          "UPDATE agent_threads SET connection_id = 'builtin:codex-cli', requested_provider = 'openai'",
+        )
+        .run();
+      const draft = before.prepare('SELECT * FROM task_draft_skill_bindings').all();
+      const used = before.prepare('SELECT * FROM turn_skill_bindings').all();
+      before.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTaskLeader(task.id).modelSelection).toEqual(selection);
+      reopened.close();
+      const after = new Database(path);
+      expect(after.prepare('SELECT * FROM task_draft_skill_bindings').all()).toEqual(draft);
+      expect(after.prepare('SELECT * FROM turn_skill_bindings').all()).toEqual(used);
+      expect(after.pragma('foreign_key_check')).toEqual([]);
+      after.close();
+    });
+
     it('seeds stable built-in CLI connections and restores them from SQLite', () => {
       const { persistence, path } = createPersistence();
 
@@ -882,6 +940,12 @@ if (runsWithElectronAbi)
           displayName: 'Antigravity',
           enabled: true,
           secretReference: null,
+        }),
+        expect.objectContaining({
+          id: 'builtin:cursor-cli',
+          providerId: 'cursor',
+          runtimeKind: 'builtin_cli',
+          enabled: true,
         }),
         expect.objectContaining({
           id: 'builtin:codex-cli',
@@ -923,6 +987,7 @@ if (runsWithElectronAbi)
       expect(reopened.listProviderConnections().map(({ id }) => id)).toEqual([
         'builtin:claude-cli',
         'builtin:antigravity-cli',
+        'builtin:cursor-cli',
         'builtin:codex-cli',
         'builtin:opencode-cli',
         'builtin:grok-cli',
@@ -12204,6 +12269,7 @@ if (runsWithElectronAbi)
         { version: 107 },
         { version: 108 },
         { version: 109 },
+        { version: 110 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],

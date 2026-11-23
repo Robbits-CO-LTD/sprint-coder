@@ -365,8 +365,9 @@ export function connectionKindLabel(connection: ProviderConnection): string {
     if (connection.providerId === 'anthropic') return 'Claude CLI（組み込み）';
     if (connection.providerId === 'openai') return 'Codex CLI（組み込み）';
     if (connection.providerId === 'xai') return 'Grok CLI（組み込み）';
-    if (connection.providerId === 'opencode') return 'OpenCode CLI · テキストチャット';
-    if (connection.providerId === 'antigravity') return 'Antigravity CLI · テキストチャット';
+    if (connection.providerId === 'opencode') return 'OpenCode CLI · チャット・Team';
+    if (connection.providerId === 'cursor') return 'Cursor CLI · チャット・Team';
+    if (connection.providerId === 'antigravity') return 'Antigravity CLI · チャット・Team';
     return '組み込みCLI';
   }
   if (connection.runtimeKind === 'mock') return 'モックProvider';
@@ -605,9 +606,12 @@ export function ProviderConnectionCard({
   const limitHintId = `${limitInputId}-hint`;
   const detailsId = `settings-connection-details-${connection.id}`;
   const [expanded, setExpanded] = useState(false);
-  const cliChat =
-    connection.id === 'builtin:opencode-cli' || connection.id === 'builtin:antigravity-cli';
-  const agy = connection.id === 'builtin:antigravity-cli';
+  const cliChat = [
+    'builtin:opencode-cli',
+    'builtin:antigravity-cli',
+    'builtin:cursor-cli',
+  ].includes(connection.id);
+  const login = cliChat && connection.id !== 'builtin:opencode-cli';
   const hasDetails = cliChat || isExternalConnection(connection);
   return (
     <li
@@ -722,8 +726,8 @@ export function ProviderConnectionCard({
             <p className="settings-hint">
               {cliChat
                 ? (connection.verification.message ??
-                  (agy
-                    ? '公式の agy CLI をインストールし、必要に応じて Google にログインします。'
+                  (login
+                    ? '公式CLIをインストールし、必要に応じてログインします。'
                     : '公式の OpenCode CLI をインストールして接続を確認します。'))
                 : '保存済みの認証情報で接続状態を確認します。'}
             </p>
@@ -731,13 +735,15 @@ export function ProviderConnectionCard({
               type="button"
               className="settings-secondary-button"
               aria-label={
-                agy ? 'Antigravity にログイン・接続確認' : `${connection.displayName}の検証を再実行`
+                login
+                  ? connection.displayName + ' にログイン・接続確認'
+                  : `${connection.displayName}の検証を再実行`
               }
               disabled={disabled || verifying}
               onClick={() => onRetry(connection)}
             >
               <RefreshCw size={13} />
-              {verifying ? '検証中' : agy ? 'ログイン・接続確認' : '接続を再検証'}
+              {verifying ? '検証中' : login ? 'ログイン・接続確認' : '接続を再検証'}
             </button>
           </div>
         </div>

@@ -68,9 +68,11 @@ const SECRET_FILE_NAMES = new Set([
 ]);
 
 export type SkillProvider = 'claude' | 'agents';
-export type SkillSource = 'builtin' | 'created' | SkillProvider;
+export type { SkillSource } from '@sprint-coder/contracts';
+import type { SkillSource } from '@sprint-coder/contracts';
 export type SkillKind = 'chat' | 'team';
 export type SkillCandidate = Readonly<{
+  openCodeFormat?: 'directory' | 'markdown';
   provider: SkillProvider;
   sourceRoot: string;
   sourcePath: string;
@@ -889,6 +891,7 @@ export class SkillStore {
   async nativeCandidates(
     source: SkillProvider,
     roots: readonly string[],
+    openCode = false,
   ): Promise<SkillCandidate[]> {
     const found = new Map<string, SkillCandidate>();
     for (const root of new Set(roots)) {
@@ -901,6 +904,11 @@ export class SkillStore {
       const base = await realpath(dirname(dirname(root))).catch(() => null);
       if (!base) continue;
       const canonical = join(base, basename(dirname(root)), basename(root));
+      if (openCode) {
+        for (const entry of await discoverOpenCodeSkills(canonical))
+          if (!found.has(entry.skillId)) found.set(entry.skillId, entry);
+        continue;
+      }
       const entries = await this.scanSources(
         source === 'claude' ? { claudePath: canonical } : { agentsPath: canonical },
       ).catch((error: NodeJS.ErrnoException) => {
@@ -918,6 +926,7 @@ export class SkillStore {
   async readNative(
     candidate: SkillCandidate,
     expectedDigest?: string,
+    source: Exclude<SkillSource, 'builtin' | 'created'> = candidate.provider,
   ): Promise<ResolvedSkillPackage> {
     if (!issuedCandidates.has(candidate) || !candidate.valid)
       throw new SkillStoreError('INVALID_SKILL', 'Invalid native Skill candidate');
@@ -931,7 +940,12 @@ export class SkillStore {
       snapshot.files.some((item) => containsSkillCredential(item.bytes.toString('utf8')))
     )
       throw new SkillStoreError('INVALID_SKILL', 'Native Skill is not eligible for dispatch');
-    const runtime = candidate.provider === 'claude' ? 'claude' : 'codex';
+    const runtime =
+      source === 'agents'
+        ? 'codex'
+        : source === 'grok' || source === 'claude'
+          ? source
+          : 'provider';
     const support = snapshot.compatibility.runtimeSupport[runtime];
     if (
       runtime === 'codex' &&
@@ -939,7 +953,7 @@ export class SkillStore {
     )
       throw new SkillStoreError('INVALID_SKILL', 'Codex Skill name is not a CLI identifier');
     const runtimeName = runtime === 'codex' ? snapshot.name : candidate.skillId;
-    const packagePath = this.revisionPath(candidate.provider, runtimeName, snapshot.digest);
+    const packagePath = this.revisionPath(source, runtimeName, snapshot.digest);
     if (expectedDigest !== undefined) {
       if (support === 'blocked')
         throw new SkillStoreError('INVALID_SKILL', 'Incompatible native Skill');
@@ -961,7 +975,7 @@ export class SkillStore {
       }
     }
     return {
-      source: candidate.provider,
+      source,
       skillId: candidate.skillId,
       kind: 'chat',
       digest: snapshot.digest,
@@ -1171,6 +1185,50 @@ async function writePackageFiles(
   await syncDirectoryTree(staging);
 }
 
+async function discoverOpenCodeSkills(root: string): Promise<SkillCandidate[]> {
+  const found: SkillCandidate[] = [];
+  let inspected = 0;
+  async function visit(dir: string, depth: number) {
+    if (depth > 6 || inspected >= MAX_FILES || (await realpath(dir).catch(() => null)) !== dir)
+      return;
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (++inspected > MAX_FILES) break;
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.isSymbolicLink())
+        continue;
+      const path = join(dir, entry.name);
+      const flat = depth === 0 && entry.isFile() && entry.name.endsWith('.md');
+      if (!flat) {
+        if (!entry.isDirectory()) continue;
+        if (!(await lstat(join(path, 'SKILL.md')).catch(() => null))?.isFile()) {
+          await visit(path, depth + 1);
+          continue;
+        }
+      }
+      const skillId = flat ? entry.name.slice(0, -3) : entry.name;
+      if (
+        !SKILL_ID.test(skillId) ||
+        !isWindowsSafePathSegment(skillId) ||
+        RESERVED_NAMES.has(skillId.toLowerCase())
+      )
+        continue;
+      const candidate: SkillCandidate = Object.freeze({
+        provider: 'agents',
+        sourceRoot: root,
+        sourcePath: path,
+        skillId,
+        valid: true,
+        problems: [],
+        openCodeFormat: flat ? 'markdown' : 'directory',
+      });
+      issuedCandidates.add(candidate);
+      found.push(candidate);
+    }
+  }
+  await visit(root, 0);
+  return found;
+}
+
 async function readSnapshot(candidate: SkillCandidate): Promise<Snapshot> {
   const snapshot = await readRawSnapshot(candidate);
   const skillFile = snapshot.files.find((file) => file.path === 'SKILL.md');
@@ -1189,18 +1247,24 @@ async function readRawSnapshot(
   if (
     canonicalRoot !== candidate.sourceRoot ||
     canonicalSource === '' ||
-    dirname(canonicalSource) !== canonicalRoot ||
-    basename(canonicalSource) !== candidate.skillId
+    canonicalSource !== candidate.sourcePath ||
+    (candidate.openCodeFormat
+      ? !canonicalSource.startsWith(canonicalRoot + sep)
+      : dirname(canonicalSource) !== canonicalRoot) ||
+    basename(canonicalSource) !==
+      (candidate.openCodeFormat === 'markdown' ? candidate.skillId + '.md' : candidate.skillId)
   )
     throw new SkillStoreError('UNSAFE_SOURCE', 'Skill source escaped or changed identity');
   const sourceStats = await lstat(canonicalSource);
-  if (!sourceStats.isDirectory() || sourceStats.isSymbolicLink())
+  const flat = candidate.openCodeFormat === 'markdown';
+  if ((flat ? !sourceStats.isFile() : !sourceStats.isDirectory()) || sourceStats.isSymbolicLink())
     throw new SkillStoreError('UNSAFE_SOURCE', 'Skill source must be a real directory');
 
   const files: { path: string; bytes: Buffer }[] = [];
   const warnings: string[] = [];
   let totalBytes = 0;
-  await walk(canonicalSource, '', 0);
+  if (flat) await readOne(canonicalSource, 'SKILL.md');
+  else await walk(canonicalSource, '', 0);
   files.sort((left, right) => left.path.localeCompare(right.path));
   const digest = createHash('sha256');
   for (const file of files) {
@@ -1228,38 +1292,7 @@ async function readRawSnapshot(
         await walk(absolutePath, relativePath, depth + 1);
         continue;
       }
-      if (files.length >= MAX_FILES)
-        throw new SkillStoreError('INVALID_SKILL', 'Skill contains too many files');
-      if (before.size > BigInt(MAX_FILE_BYTES))
-        throw new SkillStoreError('INVALID_SKILL', `Skill file is too large: ${relativePath}`);
-      const handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-      let bytes: Buffer;
-      try {
-        const opened = await handle.stat({ bigint: true });
-        if (
-          !opened.isFile() ||
-          opened.nlink !== 1n ||
-          opened.dev !== before.dev ||
-          opened.ino !== before.ino ||
-          opened.size > BigInt(MAX_FILE_BYTES)
-        )
-          throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
-        bytes = await handle.readFile();
-        const after = await handle.stat({ bigint: true });
-        const pathAfter = await lstat(absolutePath, { bigint: true });
-        try {
-          assertStableSingleLinkFile(before, opened, after, pathAfter, bytes);
-        } catch (error) {
-          if (!(error instanceof UnsafeFileSnapshotError)) throw error;
-          throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
-        }
-      } finally {
-        await handle.close();
-      }
-      totalBytes += bytes.length;
-      if (totalBytes > MAX_TOTAL_BYTES)
-        throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
-      files.push({ path: relativePath, bytes });
+      await readOne(absolutePath, relativePath);
     }
     const directoryAfter = await lstat(directory, { bigint: true });
     try {
@@ -1267,6 +1300,47 @@ async function readRawSnapshot(
     } catch {
       throw new SkillStoreError('SOURCE_CHANGED', 'Skill directory changed identity');
     }
+  }
+  async function readOne(absolutePath: string, relativePath: string) {
+    const before = await lstat(absolutePath, { bigint: true });
+    if (
+      !before.isFile() ||
+      before.isSymbolicLink() ||
+      (await realpath(absolutePath)) !== absolutePath
+    )
+      throw new SkillStoreError('UNSAFE_SOURCE', 'Skill file identity changed');
+    if (files.length >= MAX_FILES)
+      throw new SkillStoreError('INVALID_SKILL', 'Skill contains too many files');
+    if (before.size > BigInt(MAX_FILE_BYTES))
+      throw new SkillStoreError('INVALID_SKILL', `Skill file is too large: ${relativePath}`);
+    const handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let bytes: Buffer;
+    try {
+      const opened = await handle.stat({ bigint: true });
+      if (
+        !opened.isFile() ||
+        opened.nlink !== 1n ||
+        opened.dev !== before.dev ||
+        opened.ino !== before.ino ||
+        opened.size > BigInt(MAX_FILE_BYTES)
+      )
+        throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
+      bytes = await handle.readFile();
+      const after = await handle.stat({ bigint: true });
+      const pathAfter = await lstat(absolutePath, { bigint: true });
+      try {
+        assertStableSingleLinkFile(before, opened, after, pathAfter, bytes);
+      } catch (error) {
+        if (!(error instanceof UnsafeFileSnapshotError)) throw error;
+        throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
+      }
+    } finally {
+      await handle.close();
+    }
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_TOTAL_BYTES)
+      throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
+    files.push({ path: relativePath, bytes });
   }
 }
 

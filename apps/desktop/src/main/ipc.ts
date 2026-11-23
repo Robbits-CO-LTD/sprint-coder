@@ -1,3 +1,4 @@
+import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { ExternalAcpRuntime } from './external-acp-runtime';
 import { EXTERNAL_ACP_AGENTS, isExternalAcpConnection } from './external-acp-profile';
 import {
@@ -912,7 +913,12 @@ export function teamUsageOfferAvailable(
   } catch {
     return false;
   }
-  if (builtin === null && input.modelSelection.connectionId !== null) return false;
+  if (builtin === null && input.modelSelection.connectionId !== null)
+    return EXTERNAL_ACP_AGENTS.some(
+      (agent) =>
+        agent.connectionId === input.modelSelection.connectionId &&
+        agent.providerId === input.modelSelection.requestedProvider,
+    );
   if (
     isRetiredManagedLocal(input.modelSelection.connectionId, input.modelSelection.requestedProvider)
   )
@@ -1421,7 +1427,7 @@ export class IpcRouter {
     for (const agent of EXTERNAL_ACP_AGENTS) {
       const runtime = new ExternalAcpRuntime(
         agent,
-        join(app.getPath('userData'), 'antigravity-cli-home'),
+        join(app.getPath('userData'), agent.providerId + '-cli-home'),
       );
       this.externalAcpRuntimes.push(runtime);
       this.providerRegistry.register({
@@ -1642,6 +1648,50 @@ export class IpcRouter {
           this.persistence.getTeamModelResearchBeforeHiring(),
           this.persistence.getTeamModelSelectionGuidance(),
         ),
+      onCliStopUnconfirmed: (taskId) => {
+        this.quarantinedRuntimeTasks.add(taskId);
+        this.refreshTaskRunningWork(taskId);
+      },
+      openCliWorkspace: async (input, turnId) => {
+        const { worker } = input;
+        const workspace =
+          input.workspaceSet ?? runtimeWorkspaceSetFromLegacyPath(input.workspacePath ?? null);
+        const primary = workspace.roots.find((root) => root.rootId === workspace.primaryRootId);
+        const scope = workerWriteScopeFor(
+          worker.writeCapable && input.accessMode === 'workspace-write',
+          this.persistence.getPermissionPolicy(worker.taskId).preset,
+          primary?.path ?? null,
+        );
+        const writable = scope !== 'read-only';
+        const snapshot = await this.prepareWorkerManagedCatalog(
+          'provider',
+          worker.taskId,
+          turnId,
+          workspace,
+          worker.canDelegate,
+          writable ? 'workspace-write' : 'read-only',
+          input.executionId,
+          input.onApprovalWait,
+          worker.id,
+        );
+        return {
+          writable,
+          tools: providerToolsFromSnapshot(snapshot).filter(({ name }) => name !== 'view_image'),
+          invoke: (call, signal) =>
+            genericManagedRuntimeTools.cliTeam(
+              worker.taskId,
+              turnId,
+              {
+                callId: call.callId,
+                toolName: call.name,
+                arguments: call.input,
+                catalogDigest: snapshot.digest,
+              },
+              signal,
+            ),
+          close: () => this.releaseManagedWorkerTurn(turnId),
+        };
+      },
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
@@ -3544,7 +3594,7 @@ export class IpcRouter {
             input.skills,
             undefined,
             this.skillRuntimeForTask(input.taskId),
-            input.skills.some((s) => s.ref.source === 'agents' || s.ref.source === 'claude')
+            input.skills.some((s) => s.ref.source !== 'builtin' && s.ref.source !== 'created')
               ? this.skillWorkspaceRoots(input.taskId)
               : [],
           )
@@ -6028,10 +6078,15 @@ export class IpcRouter {
     const sealedRuntime = retired || external ? 'provider' : started.runtimeKind;
     // A queued request can outlive the model selection under which its Skills were chosen.
     // Fail this Turn before egress and advance the queue normally.
+    const skillCli =
+      EXTERNAL_ACP_AGENTS.find(
+        (agent) => agent.connectionId === started.modelSelection.connectionId,
+      )?.providerId ?? sealedRuntime;
     const wrongSkillRuntime = started.skills.some(
       ({ selection }) =>
-        (selection.ref.source === 'claude' && sealedRuntime !== 'claude') ||
-        (selection.ref.source === 'agents' && sealedRuntime !== 'codex'),
+        selection.ref.source !== 'builtin' &&
+        selection.ref.source !== 'created' &&
+        selection.ref.source !== (skillCli === 'codex' ? 'agents' : skillCli),
     );
     const refusal = retired
       ? new RetiredManagedLocalError().message
@@ -6498,8 +6553,12 @@ export class IpcRouter {
     }
   }
 
-  private skillRuntimeForTask(taskId: string): 'codex' | 'claude' | 'grok' | 'provider' {
+  private skillRuntimeForTask(taskId: string) {
     const taskSelection = this.persistence.getTaskModelSelection(taskId);
+    const external = EXTERNAL_ACP_AGENTS.find(
+      (agent) => agent.connectionId === taskSelection?.connectionId,
+    );
+    if (external) return external.providerId;
     const builtin = taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
     const runtimeKind = builtin?.runtimeKind ?? this.persistence.getRuntime();
     return taskSelection !== null && builtin === null
@@ -6525,7 +6584,7 @@ export class IpcRouter {
         : [...selections],
       text,
       skillRuntime,
-      selections.some((s) => s.ref.source === 'agents' || s.ref.source === 'claude')
+      selections.some((s) => s.ref.source !== 'builtin' && s.ref.source !== 'created')
         ? this.skillWorkspaceRoots(taskId)
         : [],
     );
@@ -7727,7 +7786,6 @@ export class IpcRouter {
     );
     const result = {
       ...page,
-      items: page.items.filter(({ connectionId }) => !isExternalAcpConnection(connectionId)),
       nextCursor: encodeTeamModelCursor(
         { catalogId: this.modelCatalog.instanceId, revision: page.revision, conditionDigest },
         page.nextCursor,
@@ -7754,8 +7812,6 @@ export class IpcRouter {
       selection.requestedModel === null
     )
       throw new Error('Team Worker model selection must identify a Connection and model');
-    if (isExternalAcpConnection(selection.connectionId))
-      throw new Error('この CLI 接続は通常チャット専用です。');
     if (
       process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1' &&
       (selection.connectionId !== BUILTIN_CODEX_CONNECTION_ID ||
@@ -7933,7 +7989,7 @@ export class IpcRouter {
         review?.signal,
         review,
       );
-    if (isExternalAcpConnection(request.modelSelection.connectionId)) return null;
+    if (!review && isExternalAcpConnection(request.modelSelection.connectionId)) return null;
     if (request.modelSelection.connectionId)
       return this.generateProviderText(
         request,
@@ -8396,14 +8452,12 @@ export class IpcRouter {
     if (started.event.type !== 'turn.accepted')
       throw new Error('Provider Turn did not start from an accepted event');
     const userMessageId = started.event.userMessage.id;
-    const chatOnly = isExternalAcpConnection(connectionId);
-    const memoryTurn = !chatOnly && this.persistence.getTask(taskId).projectId !== null;
-    const skillCreatorTurn =
-      !chatOnly &&
-      started.skills.some(
-        ({ selection }) =>
-          selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
-      );
+    const externalCli = isExternalAcpConnection(connectionId);
+    const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
+    const skillCreatorTurn = started.skills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
+    );
     const controller = new AbortController();
     const providerStartedAtMs = Date.now();
     this.providerAbortByTurn.set(started.turnId, controller);
@@ -8416,11 +8470,10 @@ export class IpcRouter {
     let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
     const streamBudget = new ProviderStreamBudget();
     try {
-      if (chatOnly && teamTurn) throw new Error('この CLI 接続は通常チャット専用です。');
       await this.ensureProviderEndpointConsent(
         this.persistence.getProviderConnection(connectionId),
       );
-      const connection = chatOnly
+      const connection = externalCli
         ? this.persistence.getProviderConnection(connectionId)
         : await this.providerVerification.requireVerifiedForExecution(
             connectionId,
@@ -8461,19 +8514,17 @@ export class IpcRouter {
       messages.unshift(...projectContextProviderMessages(context.projectItems));
       if (memoryTurn) messages.unshift({ role: 'system', content: PROJECT_MEMORY_MCP_GUIDANCE });
       const selectedModel = this.modelCatalog.find(connectionId, modelId);
-      const workspaceToolsEligible =
-        !chatOnly &&
-        providerWorkspaceToolsEligible(
-          teamTurn,
-          started.workspaceSet.roots.length,
-          selectedModel?.toolCalling.value,
-        );
+      const workspaceToolsEligible = providerWorkspaceToolsEligible(
+        teamTurn,
+        started.workspaceSet.roots.length,
+        selectedModel?.toolCalling.value,
+      );
       const managedToolsEligible =
         workspaceToolsEligible ||
         teamTurn ||
         memoryTurn ||
         skillCreatorTurn ||
-        (!chatOnly && autoSkills.length > 0);
+        autoSkills.length > 0;
       workspaceToolSnapshot = managedToolsEligible
         ? this.managedCodingHarness.startTurn(
             {
@@ -8501,15 +8552,13 @@ export class IpcRouter {
           role: 'system',
           content: workspaceToolsEligible
             ? workspaceGuidance
-            : !chatOnly &&
-                started.workspaceSet.roots.length === 0 &&
-                selectedModel?.toolCalling.value !== false
+            : started.workspaceSet.roots.length === 0 && selectedModel?.toolCalling.value !== false
               ? `このTurnには作業フォルダーがありません。${WORKSPACE_REQUEST_GUIDANCE}`
               : PROVIDER_NO_TOOL_GUIDANCE,
         });
-      if (!teamTurn && !chatOnly && selectedModel?.toolCalling.value !== false)
+      if (!teamTurn && selectedModel?.toolCalling.value !== false)
         messages.unshift({ role: 'system', content: SKILL_REQUEST_GUIDANCE });
-      if (!chatOnly && autoSkills.length > 0)
+      if (autoSkills.length > 0)
         messages.unshift({
           role: 'system',
           content:
@@ -8762,7 +8811,7 @@ export class IpcRouter {
           if (roundCompleted) break;
         }
         if (roundError !== undefined) {
-          if (chatOnly && roundError.providerCode === 'stop_unconfirmed')
+          if (externalCli && roundError.providerCode === 'stop_unconfirmed')
             this.quarantinedRuntimeTasks.add(taskId);
           if (
             shouldRetryEmptyOllamaToolRound({
@@ -8821,7 +8870,7 @@ export class IpcRouter {
           if (cause === null) throw new Error('Provider execution was canceled');
           throw new ProviderTurnFailureError(
             cause,
-            chatOnly ? roundError.message : providerFailureMessage(roundError.providerCode),
+            externalCli ? roundError.message : providerFailureMessage(roundError.providerCode),
           );
         }
         if (!roundCompleted)
@@ -9058,7 +9107,7 @@ export class IpcRouter {
               ? error.executionId
               : (this.providerExecutionIdByTurn.get(started.turnId) ?? started.turnId),
           );
-          if (chatOnly) await cancellation.catch(() => this.quarantinedRuntimeTasks.add(taskId));
+          if (externalCli) await cancellation.catch(() => this.quarantinedRuntimeTasks.add(taskId));
           else void cancellation.catch(() => undefined);
         } else controller.abort();
         await this.finishProviderFailureWithDiagnostic({

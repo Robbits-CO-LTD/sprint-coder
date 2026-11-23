@@ -1,3 +1,4 @@
+import { providerSkillGroups, skillRuntimeForConnection } from './skill-runtime';
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent, RefObject } from 'react';
 import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
@@ -374,7 +375,10 @@ export function Composer({ taskId }: { taskId: string }) {
     [skillIndex, slashQuery],
   );
   const teamStarted = currentTeam?.workers.some(({ kind }) => kind === 'worker') ?? false;
-  const skillRuntime = runtime.kind === 'mock' ? 'provider' : runtime.kind;
+  const connection = useAppStore((s) =>
+    s.modelPicker.taskId === taskId ? s.modelPicker.selection?.connectionId : null,
+  );
+  const skillRuntime = skillRuntimeForConnection(connection, runtime.kind);
   const autoSkillCount = skillCatalog.filter(
     (item) =>
       item.enabled &&
@@ -436,9 +440,11 @@ export function Composer({ taskId }: { taskId: string }) {
                 ? ('Codex Skills' as const)
                 : skill.ref.source === 'claude'
                   ? ('Claude Code Skills' as const)
-                  : skill.kind === 'team'
-                    ? ('Team Skills' as const)
-                    : ('Chat Skills' as const),
+                  : skill.ref.source !== 'created'
+                    ? providerSkillGroups[skill.ref.source]
+                    : skill.kind === 'team'
+                      ? ('Team Skills' as const)
+                      : ('Chat Skills' as const),
           command: `${skillOnly ? '$' : '/'}${skill.ref.skillId}`,
           label: skill.name,
           description: skill.description,
