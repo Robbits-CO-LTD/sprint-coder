@@ -1991,6 +1991,29 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     ).resolves.toMatchObject({ outcome: 'already_integrated' });
   });
 
+  it('revalidates an integrated deletion when an ignored file has been regenerated', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const agentId = 'worker-remove';
+    const worker = await manager.create({ agentId, repoPath });
+    await unlink(join(worker.path, 'README.md'));
+    const { workerHead } = await manager.finalizeChanges({
+      agentId,
+      repoPath,
+      baseHead: head,
+      commitMessage: 'Remove the tracked artifact',
+    });
+    const input = { repoPath, baseHead: head, workerHead };
+    const { integratedHead } = await manager.integrate(input);
+    await writeFile(join(repoPath, '.git', 'info', 'exclude'), 'README.md\n');
+    await writeFile(join(repoPath, 'README.md'), 'regenerated artifact\n');
+
+    await expect(manager.revalidateIntegration({ ...input, integratedHead })).resolves.toEqual({
+      integratedHead,
+      outcome: 'already_integrated',
+    });
+    expect(await readFile(join(repoPath, 'README.md'), 'utf8')).toBe('regenerated artifact\n');
+  });
+
   it.each(['modified', 'deleted', 'reverted'] as const)(
     'finds an empty equivalent commit before later %s content without reapplying it (issue #913)',
     async (variant) => {

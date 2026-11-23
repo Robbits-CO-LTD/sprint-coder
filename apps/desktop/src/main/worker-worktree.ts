@@ -1456,7 +1456,7 @@ export class WorkerWorktreeManager {
         'base_changed',
         'Git operation is already in progress in a workspace repository',
       );
-    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead });
+    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead }, 'integrate');
     const baseIsAncestor =
       currentHead === baseHead ||
       (await this.tryRunGit(repoPath, ['merge-base', '--is-ancestor', baseHead, currentHead])) !==
@@ -1522,7 +1522,10 @@ export class WorkerWorktreeManager {
     return { integratedHead, outcome: 'integrated' };
   }
 
-  private async assertIntegrationWorkspace(input: IntegrateWorktreeInput): Promise<void> {
+  private async assertIntegrationWorkspace(
+    input: IntegrateWorktreeInput,
+    mode: 'integrate' | 'revalidate',
+  ): Promise<void> {
     const { stdout } = await this.runGit(
       input.repoPath,
       [
@@ -1530,7 +1533,7 @@ export class WorkerWorktreeManager {
         '--porcelain=v1',
         '-z',
         '--untracked-files=all',
-        '--ignored=matching',
+        ...(mode === 'integrate' ? ['--ignored=matching'] : []),
         '--ignore-submodules=none',
       ],
       'integration_failed',
@@ -1542,8 +1545,8 @@ export class WorkerWorktreeManager {
       'base_changed',
       'Workspace has changes outside the isolated Worker worktree',
     );
-    // Git can overwrite an ignored file during cherry-pick. Treat ignored files like
-    // untracked files for overlap checks, while leaving tracked and staged changes alone.
+    // Only cherry-pick can overwrite ignored files. A read-only verification leaves
+    // regenerated artifacts outside the sealed commit alone.
     if (
       !stdout.endsWith('\0') ||
       changes.some((change) => !change.startsWith('?? ') && !change.startsWith('!! '))
@@ -1580,7 +1583,7 @@ export class WorkerWorktreeManager {
     const currentHead = (
       await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
     ).stdout.trim();
-    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead });
+    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead }, 'revalidate');
     if (
       currentHead !== integratedHead &&
       (await this.tryRunGit(repoPath, [
