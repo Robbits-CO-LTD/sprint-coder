@@ -83,7 +83,7 @@ type SkillCreationRequest = {
   prompt: string;
   builtinSkillId: 'skill-creator';
 };
-type SkillCreationHandler = (request?: SkillCreationRequest) => void;
+type SkillCreationHandler = (request?: SkillCreationRequest) => Promise<void>;
 
 /** The left-hand list, in order. It is the nav and the page switcher's source of truth, so a section
  * can never exist in one and not the other. `label` is both the nav row and the section's heading;
@@ -164,6 +164,14 @@ export function SettingsDialog({
     typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.getRuntime === 'function';
 
   async function beginSkillCreation(request?: SkillCreationRequest): Promise<void> {
+    const api = window.sprintCoder?.skills;
+    if (typeof api?.list !== 'function') throw new Error('Skill catalog unavailable');
+    const catalog = await api.list();
+    const builtinSkillId = request?.builtinSkillId ?? 'skill-creator';
+    const creator = catalog.items.find(
+      ({ ref, enabled }) => ref.source === 'builtin' && ref.skillId === builtinSkillId && enabled,
+    );
+    if (creator === undefined) throw new Error('Built-in Skill unavailable');
     let state = useAppStore.getState();
     if (request === undefined || state.selectedTaskId === null) {
       // Always a new Task: the skill selection and the prompt below are written into it, and an
@@ -173,13 +181,7 @@ export function SettingsDialog({
       state = useAppStore.getState();
     }
     const taskId = state.selectedTaskId;
-    if (taskId === null || typeof window.sprintCoder?.skills?.list !== 'function') return;
-    const catalog = await window.sprintCoder.skills.list();
-    const builtinSkillId = request?.builtinSkillId ?? 'skill-creator';
-    const creator = catalog.items.find(
-      ({ ref, enabled }) => ref.source === 'builtin' && ref.skillId === builtinSkillId && enabled,
-    );
-    if (creator === undefined) return;
+    if (taskId === null) return;
     await state.setSkillSelection(taskId, [{ kind: creator.kind, ref: creator.ref }]);
     state.setDraft(
       taskId,
@@ -216,14 +218,14 @@ export function SettingsDialog({
           open={open}
           supported={supported}
           onClose={onClose}
-          onCreateSkill={(request) => void beginSkillCreation(request)}
+          onCreateSkill={beginSkillCreation}
         />
       ) : (
         <LegacyBody
           open={open}
           supported={supported}
           onClose={onClose}
-          onCreateSkill={(request) => void beginSkillCreation(request)}
+          onCreateSkill={beginSkillCreation}
         />
       )}
     </dialog>
