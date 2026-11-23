@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IpcRouter } from './ipc';
 import type { StartedTurn } from './persistence';
-import { GITHUB_ISSUE_INPUT_EXAMPLE, parseGithubIssueInput } from '../github-issue-request';
+import { GITHUB_ISSUE_INPUT_EXAMPLE, parseGithubActionInput } from '../github-issue-request';
 import type * as GithubIssueModule from './github-issue';
 import { githubLoginEnvironment } from './github-issue';
 import { IPC_CHANNELS } from '@sprint-coder/contracts';
@@ -32,8 +32,8 @@ vi.mock('./github-issue', async (importOriginal) => {
   const actual = await importOriginal<typeof GithubIssueModule>();
   return {
     ...actual,
-    createGithubIssue: (...args: Parameters<typeof actual.createGithubIssue>) =>
-      actual.createGithubIssue(args[0], args[1], args[2], { readToken: login, fetch: request }),
+    writeGithubContent: (...args: Parameters<typeof actual.writeGithubContent>) =>
+      actual.writeGithubContent(args[0], args[1], args[2], { readToken: login, fetch: request }),
   };
 });
 
@@ -153,7 +153,7 @@ describe('GitHub Issue request in chat', () => {
   it('rejects missing or whitespace-only issue bodies', async () => {
     for (const body of ['', ' \t\n　']) {
       const text = input.replace(/本文:[\s\S]*$/u, `本文:${body}`);
-      expect(parseGithubIssueInput(text)).toEqual({ kind: 'incomplete' });
+      expect(parseGithubActionInput(text)).toEqual({ kind: 'incomplete', action: 'issue' });
       await harness(text).start();
     }
     expect(showMessageBox).not.toHaveBeenCalled();
@@ -193,12 +193,19 @@ describe('GitHub Issue request in chat', () => {
       'GitHubでIssueを起票する方法は？',
       'Issueの起票内容を考えて',
       'Issueを起票してくださいという文章を添削して',
+      'この文章にコメントして',
+      '.github/workflows/ci.yml にコメントして',
+      'src/issue-list.ts にコメントして',
     ]) {
-      expect(parseGithubIssueInput(text)).toBeNull();
+      expect(parseGithubActionInput(text)).toBeNull();
     }
-    expect(parseGithubIssueInput(GITHUB_ISSUE_INPUT_EXAMPLE)).toEqual({ kind: 'incomplete' });
-    expect(parseGithubIssueInput('GitHub CLIで Issue を起票して')).toEqual({ kind: 'incomplete' });
-    expect(parseGithubIssueInput(input.replace('github.com', 'example.com'))).toEqual({
+    expect(parseGithubActionInput(GITHUB_ISSUE_INPUT_EXAMPLE)).toMatchObject({
+      kind: 'incomplete',
+    });
+    expect(parseGithubActionInput('GitHub CLIで Issue を起票して')).toMatchObject({
+      kind: 'incomplete',
+    });
+    expect(parseGithubActionInput(input.replace('github.com', 'example.com'))).toMatchObject({
       kind: 'incomplete',
     });
   });
@@ -324,5 +331,177 @@ describe('GitHub Issue request in chat', () => {
       expect.stringContaining('二重投稿'),
     );
     expect(JSON.stringify(h.appendDelta.mock.calls)).not.toContain('sensitive request details');
+  });
+});
+
+const commentInput =
+  'https://github.com/team/repo/issues/42 にコメントして\n本文: Windowsでも再現しました。';
+const pullInput =
+  'https://github.com/team/repo にPRを作成して\n元ブランチ: fix/settings\n先ブランチ: main\nタイトル: 設定の修正\n本文: 設定画面を修正しました。';
+
+describe('GitHub comments and pull requests', () => {
+  it.each(['#issuecomment-123456', '?view=compact#issuecomment-123456'])(
+    'uses the containing Issue when its link ends in %s',
+    (suffix) => {
+      const linked = commentInput.replace('/issues/42', '/issues/42' + suffix);
+      expect(parseGithubActionInput(linked)).toEqual(parseGithubActionInput(commentInput));
+      expect(parseGithubActionInput(linked)?.kind).toBe('create');
+    },
+  );
+
+  it('still explains how to complete an explicit Issue comment request', () => {
+    for (const text of [
+      'https://github.com/team/repo/issues/42 にコメントして',
+      'GitHubのIssueにコメントして',
+      'GitHubにコメントして',
+      'Issueにコメントを投稿してください',
+    ]) {
+      expect(parseGithubActionInput(text)).toEqual({ kind: 'incomplete', action: 'comment' });
+    }
+  });
+
+  it('shows the destination and body, checks the Issue, then posts the exact comment', async () => {
+    const issue = `${endpoint}/issues/42`;
+    showMessageBox.mockResolvedValue({ response: 1 });
+    request
+      .mockResolvedValueOnce(new Response(JSON.stringify({ number: 42, repository_url: endpoint })))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 11, issue_url: issue }), { status: 201 }),
+      );
+    const h = harness(commentInput);
+    await h.startViaIpc();
+    expect(showMessageBox.mock.calls[0]?.[1].detail).toContain(
+      'https://github.com/team/repo/issues/42\n\n本文:\nWindowsでも再現しました。',
+    );
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      issue,
+      expect.objectContaining({ method: 'GET', redirect: 'error' }),
+    );
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      `${issue}/comments`,
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ body: 'Windowsでも再現しました。' }),
+      }),
+    );
+    expect(h.finish).toHaveBeenCalledExactlyOnceWith(
+      'task-1',
+      'turn-1',
+      'completed',
+      expect.stringContaining('/issues/42#issuecomment-11'),
+    );
+  });
+
+  it('does not post a comment to a pull request', async () => {
+    showMessageBox.mockResolvedValue({ response: 1 });
+    request.mockResolvedValueOnce(
+      new Response(JSON.stringify({ number: 42, repository_url: endpoint, pull_request: {} })),
+    );
+    const h = harness(commentInput);
+    await h.start();
+    expect(request).toHaveBeenCalledOnce();
+    expect(h.finish).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      'failed',
+      expect.stringContaining('投稿していません'),
+    );
+  });
+
+  it('rechecks the Task authority after reading the Issue and skips the write if it changed', async () => {
+    showMessageBox.mockResolvedValue({ response: 1 });
+    const h = harness(commentInput);
+    request.mockImplementationOnce(async () => {
+      h.changePolicy();
+      return new Response(JSON.stringify({ number: 42, repository_url: endpoint }));
+    });
+    await h.start();
+    expect(request).toHaveBeenCalledOnce();
+    expect(h.finish).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      'failed',
+      expect.stringContaining('投稿していません'),
+    );
+  });
+
+  it('shows the repository and branch direction, then creates one PR', async () => {
+    showMessageBox.mockResolvedValue({ response: 1 });
+    request.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          number: 19,
+          head: { ref: 'fix/settings', repo: { full_name: 'team/repo' } },
+          base: { ref: 'main', repo: { full_name: 'team/repo' } },
+        }),
+        { status: 201 },
+      ),
+    );
+    const h = harness(pullInput);
+    await h.startViaIpc();
+    expect(showMessageBox.mock.calls[0]?.[1].detail).toContain(
+      '元ブランチ: fix/settings\n\n先ブランチ: main',
+    );
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      `${endpoint}/pulls`,
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          title: '設定の修正',
+          body: '設定画面を修正しました。',
+          head: 'fix/settings',
+          base: 'main',
+        }),
+      }),
+    );
+    expect(h.finish).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      'completed',
+      expect.stringContaining('/pull/19'),
+    );
+  });
+
+  it.each([commentInput, pullInput])(
+    'does not access GitHub when approval is canceled',
+    async (text) => {
+      showMessageBox.mockResolvedValue({ response: 0 });
+      await harness(text).start();
+      expect(login).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects cross-repository PR branch syntax before approval', async () => {
+    await harness(pullInput.replace('fix/settings', 'other:fix/settings')).start();
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('only attempts one PR write for concurrent delivery and an uncertain response', async () => {
+    let approve!: (result: { response: number }) => void;
+    showMessageBox.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          approve = resolve;
+        }),
+    );
+    request.mockRejectedValue(new Error('timeout'));
+    const h = harness(pullInput);
+    const pending = h.start();
+    await h.start();
+    expect(showMessageBox).toHaveBeenCalledOnce();
+    expect(request).not.toHaveBeenCalled();
+    approve({ response: 1 });
+    await pending;
+    expect(request).toHaveBeenCalledOnce();
+    expect(h.finish).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      'failed',
+      expect.stringContaining('PR一覧'),
+    );
   });
 });

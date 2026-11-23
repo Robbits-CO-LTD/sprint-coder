@@ -16,7 +16,7 @@ import { ModelPickerV2 } from '../ModelPickerV2';
 import { isModelPickerV2Active } from '../../lib/model-picker-parity';
 import { requestOpenProviderSettings } from '../../lib/settings-navigation';
 import { IMAGEGEN_PREFIX } from './imagegen';
-import { GITHUB_ISSUE_INPUT_EXAMPLE, parseGithubIssueInput } from '../../../github-issue-request';
+import { GITHUB_INPUT_EXAMPLES, parseGithubActionInput } from '../../../github-issue-request';
 import type { ComposerMenuItem } from './ComposerMenu';
 import { SlashCommandMenu, type SlashMenuItem } from './SlashCommandMenu';
 import {
@@ -517,7 +517,7 @@ export function Composer({ taskId }: { taskId: string }) {
     wasSendingRef.current = sending;
   }, [sending]);
 
-  const githubIssue = !goalRequested && !imageRequested ? parseGithubIssueInput(sendText) : null;
+  const githubIssue = !goalRequested && !imageRequested ? parseGithubActionInput(sendText) : null;
   const githubIssueHasExtras =
     githubIssue !== null && (draftAttachments.length > 0 || selectedSkills.length > 0);
   const sendBlocked =
@@ -967,7 +967,7 @@ export function Composer({ taskId }: { taskId: string }) {
             <div className="composer-ai-connection">
               <p role="status">
                 {githubIssueHasExtras
-                  ? 'Issueを起票するときは、画像やSkillを外してください。'
+                  ? 'GitHubに投稿するときは、画像やSkillを外してください。'
                   : '送信先と内容を確認し、承認した場合にだけGitHubに投稿します。'}
               </p>
               {githubIssue.kind === 'incomplete' && (
@@ -975,11 +975,11 @@ export function Composer({ taskId }: { taskId: string }) {
                   type="button"
                   className="cmp-chip"
                   onClick={() => {
-                    setDraft(taskId, GITHUB_ISSUE_INPUT_EXAMPLE);
+                    setDraft(taskId, GITHUB_INPUT_EXAMPLES[githubIssue.action]);
                     textareaRef.current?.focus();
                   }}
                 >
-                  起票の入力例を使う
+                  入力例を使う
                 </button>
               )}
             </div>
