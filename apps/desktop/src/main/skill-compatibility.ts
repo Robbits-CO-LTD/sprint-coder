@@ -1,7 +1,15 @@
 import type { SkillCompatibilityReport, SkillProfile } from '@sprint-coder/contracts';
 import { parseDocument, stringify } from 'yaml';
+import remarkParse from 'remark-parse';
+import { unified } from 'unified';
 
 const MAX_FRONTMATTER_BYTES = 64 * 1024;
+const markdownParser = unified().use(remarkParse);
+type MarkdownNode = {
+  type: string;
+  position?: ReturnType<typeof markdownParser.parse>['position'];
+  children?: readonly MarkdownNode[];
+};
 const STANDARD_FIELDS = new Set([
   'name',
   'description',
@@ -125,7 +133,7 @@ function buildCompatibility(
   if (hasCodexMetadata) features.add('codex:openai-metadata');
   if (hasPackageResources) features.add('package:resources');
   const hasArguments = /\$(?:ARGUMENTS(?:\[\d+\])?|\d+)\b/u.test(body);
-  const hasFileReferences = /(^|[\s(])@[.\w/-]+/mu.test(body);
+  const hasFileReferences = /(^|[\s(])@[.\w/-]+/mu.test(withoutMarkdownExamples(body));
   const hasDynamicCommand = /^\s*!`[^`\r\n]+`\s*$/mu.test(body);
   if (hasArguments) features.add('claude:arguments');
   if (hasFileReferences) features.add('claude:file-reference');
@@ -196,6 +204,30 @@ function buildCompatibility(
       blockers.length > 0 || Object.values(runtimeSupport).some((support) => support === 'blocked'),
     nativeModeConsentRequired: profile === 'claude-native' && !claudeBlocked,
   };
+}
+
+function withoutMarkdownExamples(body: string): string {
+  if (!body.includes('@')) return body;
+  const nodes: MarkdownNode[] = [markdownParser.parse(body)];
+  const ranges: { start: number; end: number }[] = [];
+  while (nodes.length > 0) {
+    const node = nodes.pop()!;
+    if (node.type === 'code' || node.type === 'inlineCode' || node.type === 'blockquote') {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start !== undefined && end !== undefined) ranges.push({ start, end });
+    } else if (node.children !== undefined) {
+      nodes.push(...node.children);
+    }
+  }
+  let cursor = 0;
+  const segments = [];
+  for (const { start, end } of ranges.sort((a, b) => a.start - b.start)) {
+    segments.push(body.slice(cursor, start), ' ');
+    cursor = end;
+  }
+  segments.push(body.slice(cursor));
+  return segments.join('');
 }
 
 function validateCodexMetadata(

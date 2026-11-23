@@ -351,17 +351,22 @@ export class SkillStore {
     }
   }
 
+  async assertCreatedSkillNameAvailable(skillId: string): Promise<void> {
+    assertSkillId(skillId);
+    if (await pathExists(join(this.rootPath, 'created', skillId)))
+      throw new SkillStoreError('NAME_EXISTS', 'A created Skill with this name already exists');
+  }
+
   async installCreatedSkill(
     skillId: string,
     files: readonly CreatedSkillFile[],
     beforeCommit?: () => void,
   ): Promise<SelectableSkill> {
     const validated = this.validateCreatedSkill(skillId, files);
+    await this.assertCreatedSkillNameAvailable(skillId);
 
     const createdRoot = join(this.rootPath, 'created');
     const destination = join(createdRoot, skillId);
-    if (await pathExists(destination))
-      throw new SkillStoreError('NAME_EXISTS', 'A created Skill with this name already exists');
     const staging = join(createdRoot, `.staging-${randomUUID()}`);
     const paths = new Set<string>();
     let totalBytes = 0;
