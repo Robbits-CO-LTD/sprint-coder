@@ -6214,7 +6214,7 @@ export class IpcRouter {
           type: 'question',
           title: 'GitHub Issueの投稿を確認',
           message: 'この内容でGitHubにIssueを1件投稿しますか？',
-          detail: `送信先: https://github.com/${request.repository}\n\nタイトル: ${request.title}\n\n本文:\n${request.body || '（空欄）'}`,
+          detail: `送信先: https://github.com/${request.repository}\n\nタイトル: ${request.title}\n\n本文:\n${request.body}`,
           buttons: ['投稿しない', 'この内容で投稿する'],
           defaultId: 0,
           cancelId: 0,

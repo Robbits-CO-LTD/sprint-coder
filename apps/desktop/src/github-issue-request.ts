@@ -7,7 +7,7 @@ export const GITHUB_ISSUE_INPUT_EXAMPLE = [
 ].join('\n');
 
 export const GITHUB_ISSUE_INPUT_HELP = [
-  'GitHubに送る前に、投稿先・タイトル・本文を指定してください。タイトルは120文字以内、本文は8行・500文字以内です。',
+  'GitHubに送る前に、投稿先・タイトル・本文を入力してください。タイトルは120文字以内、本文は8行・500文字以内です。',
   '',
   '```text',
   GITHUB_ISSUE_INPUT_EXAMPLE,
@@ -49,6 +49,7 @@ export function parseGithubIssueInput(
   if (
     title.length === 0 ||
     title.length > 120 ||
+    body.trim().length === 0 ||
     body.length > 500 ||
     body.split('\n').length > 8 ||
     containsHiddenControls(title) ||

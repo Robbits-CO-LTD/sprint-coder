@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { parseGithubIssueRepository, type GithubIssueRequest } from '../github-issue-request';
 import { environmentValue } from '../runtime-host/cli-command-resolution';
-import { resolveBareExecutable } from './command-runner';
+import { buildControlledEnvironment, resolveBareExecutable } from './command-runner';
 
 const run = promisify(execFile);
 const issueResult = z.object({
@@ -15,22 +15,32 @@ const issueResult = z.object({
 
 export class GithubIssueError extends Error {}
 
+export function githubLoginEnvironment(
+  platform: NodeJS.Platform = process.platform,
+  source: Readonly<NodeJS.ProcessEnv> = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
+  if (platform !== 'win32') env.PATH = buildControlledEnvironment(platform, {}).PATH;
+  const loginKeys = [
+    'HOME',
+    'GH_CONFIG_DIR',
+    'XDG_CONFIG_HOME',
+    ...(platform === 'win32'
+      ? ['SYSTEMROOT', 'WINDIR', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH']
+      : []),
+    ...(platform === 'linux' ? ['DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR'] : []),
+  ];
+  for (const key of loginKeys) {
+    const value = environmentValue(source, key, platform);
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 async function githubLoginToken(signal: AbortSignal): Promise<string> {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  const overrides = new Set([
-    'GH_TOKEN',
-    'GITHUB_TOKEN',
-    'GH_ENTERPRISE_TOKEN',
-    'GITHUB_ENTERPRISE_TOKEN',
-    'GH_DEBUG',
-    'GH_PROMPT_DISABLED',
-    'GH_NO_UPDATE_NOTIFIER',
-  ]);
-  for (const key of Object.keys(env)) if (overrides.has(key.toUpperCase())) delete env[key];
-  env.GH_PROMPT_DISABLED = '1';
-  env.GH_NO_UPDATE_NOTIFIER = '1';
+  const env = githubLoginEnvironment();
   const paths = [
-    environmentValue(env, 'PATH') ?? '',
+    environmentValue(process.env, 'PATH') ?? '',
     ...(process.platform === 'darwin' ? ['/opt/homebrew/bin', '/usr/local/bin'] : []),
   ];
   // Win32's bare-executable lookup tries the working directory before PATH.

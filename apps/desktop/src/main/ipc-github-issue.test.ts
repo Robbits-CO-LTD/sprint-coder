@@ -3,6 +3,7 @@ import { IpcRouter } from './ipc';
 import type { StartedTurn } from './persistence';
 import { GITHUB_ISSUE_INPUT_EXAMPLE, parseGithubIssueInput } from '../github-issue-request';
 import type * as GithubIssueModule from './github-issue';
+import { githubLoginEnvironment } from './github-issue';
 import { IPC_CHANNELS } from '@sprint-coder/contracts';
 
 const { showMessageBox, login, request } = vi.hoisted(() => ({
@@ -149,6 +150,44 @@ beforeEach(() => {
 });
 
 describe('GitHub Issue request in chat', () => {
+  it('rejects missing or whitespace-only issue bodies', async () => {
+    for (const body of ['', ' \t\n　']) {
+      const text = input.replace(/本文:[\s\S]*$/u, `本文:${body}`);
+      expect(parseGithubIssueInput(text)).toEqual({ kind: 'incomplete' });
+      await harness(text).start();
+    }
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(login).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('keeps only CLI login and OS session environment keys', () => {
+    const source = {
+      HOME: '/home/example',
+      GH_CONFIG_DIR: '/home/example/github',
+      XDG_CONFIG_HOME: '/home/example/.config',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      GH_TOKEN: 'secret',
+      OPENAI_API_KEY: 'secret',
+      SSH_AUTH_SOCK: '/tmp/ssh.sock',
+      NODE_OPTIONS: '--require=hook',
+    };
+    expect(githubLoginEnvironment('linux', source)).toEqual({
+      HOME: source.HOME,
+      GH_CONFIG_DIR: source.GH_CONFIG_DIR,
+      XDG_CONFIG_HOME: source.XDG_CONFIG_HOME,
+      DBUS_SESSION_BUS_ADDRESS: source.DBUS_SESSION_BUS_ADDRESS,
+      XDG_RUNTIME_DIR: source.XDG_RUNTIME_DIR,
+      PATH: expect.any(String),
+      GH_PROMPT_DISABLED: '1',
+      GH_NO_UPDATE_NOTIFIER: '1',
+    });
+    expect(
+      githubLoginEnvironment('win32', { AppData: 'C:\\Profile', gh_config_dir: 'C:\\GitHub' }),
+    ).toMatchObject({ APPDATA: 'C:\\Profile', GH_CONFIG_DIR: 'C:\\GitHub' });
+  });
+
   it('leaves ordinary discussions alone and keeps the input example inert', () => {
     for (const text of [
       'GitHubでIssueを起票する方法は？',
