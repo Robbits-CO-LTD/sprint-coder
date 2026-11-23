@@ -9,8 +9,8 @@ import {
   type GithubSkillRequest,
   type SkillReviewer,
 } from './github-skill-import';
-import { createGithubIssue, GithubIssueError } from './github-issue';
-import { GITHUB_ISSUE_INPUT_HELP, parseGithubIssueInput } from '../github-issue-request';
+import { writeGithubContent, GithubIssueError } from './github-issue';
+import { githubInputHelp, parseGithubActionInput } from '../github-issue-request';
 import { SKILL_REQUEST_GUIDANCE } from '../chat-continuation';
 import { projectFolderIdentity } from './project-folder-identity';
 import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
@@ -4328,7 +4328,7 @@ export class IpcRouter {
       turnStartInputSchema,
       turnStartResultSchema,
       async (input, event, envelope) => {
-        const githubIssue = parseGithubIssueInput(input.text);
+        const githubIssue = parseGithubActionInput(input.text);
         let skills: PersistedTurnSkill[] = [];
         if (githubIssue === null) {
           const selection = this.persistence.getTaskModelSelection(input.taskId);
@@ -4340,7 +4340,7 @@ export class IpcRouter {
           );
         } else if (input.skills.length > 0 || input.attachmentIds.length > 0) {
           throw new GithubIssueError(
-            'Issueを起票するときは、画像やSkillを外して文章だけを送ってください。',
+            'GitHubに投稿するときは、画像やSkillを外して文章だけを送ってください。',
           );
         }
         let attachmentCapability: ImageAttachmentCapabilityBinding | undefined;
@@ -6210,9 +6210,9 @@ export class IpcRouter {
     }
   }
 
-  private async runGithubIssue(
+  private async runGithubWrite(
     started: StartedTurn,
-    input: NonNullable<ReturnType<typeof parseGithubIssueInput>>,
+    input: NonNullable<ReturnType<typeof parseGithubActionInput>>,
   ): Promise<void> {
     const {
       turnId,
@@ -6227,13 +6227,17 @@ export class IpcRouter {
       !controller.signal.aborted &&
       !this.canceledRuntimeTurns.has(turnId) &&
       this.persistence.getActiveTurnId(taskId) === turnId;
-    let message = GITHUB_ISSUE_INPUT_HELP;
+    const action = input.kind === 'create' ? input.request.action : input.action;
+    const label =
+      action === 'comment' ? 'Issueコメント' : action === 'pull' ? 'プルリクエスト' : 'Issue';
+    let message = githubInputHelp(action);
     let state: 'completed' | 'failed' = 'completed';
     try {
       for (const stage of ['understanding', 'planning', 'executing'] as const)
         this.publish(this.persistence.changeStage(taskId, turnId, stage));
       if (input.kind === 'create') {
         const request = input.request;
+        const destination = `https://github.com/${request.repository}${request.action === 'comment' ? `/issues/${request.issueNumber}` : ''}`;
         const epoch = this.persistence.getPermissionPolicy(taskId).policyEpoch;
         const canPost = () => {
           if (!active() || this.persistence.getTask(taskId).localOnly) return false;
@@ -6244,14 +6248,21 @@ export class IpcRouter {
         };
         if (!canPost())
           throw new GithubIssueError(
-            'このタスクでは外部送信が許可されていません。Issueは送信していません。',
+            'このタスクでは外部送信が許可されていません。GitHubには送信していません。',
           );
         const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]);
         const answer = await dialog.showMessageBox(this.window, {
           type: 'question',
-          title: 'GitHub Issueの投稿を確認',
-          message: 'この内容でGitHubにIssueを1件投稿しますか？',
-          detail: `送信先: https://github.com/${request.repository}\n\nタイトル: ${request.title}\n\n本文:\n${request.body}`,
+          title: `GitHub ${label}の投稿を確認`,
+          message: `この内容でGitHubに${label}を1件投稿しますか？`,
+          detail: [
+            `送信先: ${destination}`,
+            ...(request.action === 'pull'
+              ? [`元ブランチ: ${request.head}`, `先ブランチ: ${request.base}`]
+              : []),
+            ...(request.action === 'comment' ? [] : [`タイトル: ${request.title}`]),
+            `本文:\n${request.body}`,
+          ].join('\n\n'),
           buttons: ['投稿しない', 'この内容で投稿する'],
           defaultId: 0,
           cancelId: 0,
@@ -6260,14 +6271,14 @@ export class IpcRouter {
         });
         if (!active()) return;
         if (signal.aborted || answer.response !== 1) {
-          message = 'GitHub Issueの投稿を取り消しました。';
+          message = `GitHub ${label}の投稿を取り消しました。`;
         } else {
           if (!canPost())
             throw new GithubIssueError(
-              'タスクの状態や権限が変わりました。Issueは送信していません。',
+              'タスクの状態や権限が変わりました。GitHubには送信していません。',
             );
-          const url = await createGithubIssue(request, controller.signal, canPost);
-          message = `GitHub Issueを作成しました。\n\n[作成したIssue](${url})`;
+          const url = await writeGithubContent(request, controller.signal, canPost);
+          message = `GitHubに${label}を投稿しました。\n\n[投稿結果](${url})`;
         }
       }
     } catch (error) {
@@ -6275,7 +6286,7 @@ export class IpcRouter {
       message =
         error instanceof GithubIssueError
           ? error.message
-          : 'GitHub Issueの処理を完了できませんでした。再送する前にIssue一覧を確認してください。';
+          : 'GitHubの処理を完了できませんでした。再送する前に送信先のページを確認してください。';
     } finally {
       this.githubActions.delete(turnId);
     }
@@ -6295,13 +6306,17 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
-    const githubIssue = userChatInput ? parseGithubIssueInput(started.text) : null;
+    const githubIssue = userChatInput ? parseGithubActionInput(started.text) : null;
     if (githubIssue !== null) {
-      await this.runGithubIssue(
+      await this.runGithubWrite(
         started,
         started.skills.length === 0 && !this.attachmentCapabilityByTurn.has(started.turnId)
           ? githubIssue
-          : { kind: 'incomplete' },
+          : {
+              kind: 'incomplete',
+              action:
+                githubIssue.kind === 'create' ? githubIssue.request.action : githubIssue.action,
+            },
       );
       return;
     }
