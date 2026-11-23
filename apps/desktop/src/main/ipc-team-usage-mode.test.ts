@@ -82,6 +82,7 @@ function createHarness(
   const codex = host();
   const persistence = {
     getActiveTurnId: () => 'turn-1',
+    getStoredRuntime: () => 'mock',
     getTask: () => ({ id: 'task-1', projectId: options.projectId ?? null }),
     getPermissionPolicy: () => ({ preset: 'ask', policyEpoch: 1 }),
     getEffort: () => 'high',
@@ -738,7 +739,7 @@ describe('the Workspace check before a Turn may be offered Team (issue #1241)', 
         getActiveTurnId: () => null,
         getTask: () => ({ goal: 'Finish the page' }),
       },
-      reconcileTaskBuiltinModel: vi.fn(async () => undefined),
+      assertChatAiConnected: vi.fn(async () => undefined),
       resolveTurnSkills: vi.fn(async () => []),
       skillSettings: { resolveSelections: vi.fn(async () => []) },
       runMutation,

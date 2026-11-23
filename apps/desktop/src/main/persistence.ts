@@ -1,6 +1,7 @@
 import { isExternalAcpConnection } from './external-acp-profile';
 import Database from 'better-sqlite3';
 import { goalTurnGuidance, parseGoalConclusion, goalDecision } from './goal-outcome';
+import { goalResumeText } from './goal-resume';
 import { goalReportSchema, type GoalReport } from '@sprint-coder/contracts';
 import { secureLogger } from './secure-logger';
 import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
@@ -14680,8 +14681,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (current.goal === null || current.goal_status === null)
         throw new Error('Task does not have a Goal');
       this.transitionGoal(taskId, 'active');
-      // Keep the stored Goal's first Markdown block separate from the continuation directive.
-      const text = `Goalを続けてください:\n\n${current.goal}`;
+      const text = goalResumeText(current.goal);
       const started = this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
       return { task: this.getTask(taskId), started };
     })();

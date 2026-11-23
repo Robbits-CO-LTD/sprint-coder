@@ -3496,6 +3496,7 @@ export type ResolvedCliCommand = z.infer<typeof resolvedCliCommandSchema>;
 export const runtimeSettingsSchema = z
   .object({
     kind: runtimeKindSchema,
+    aiConnectionRequired: z.literal(true).optional(),
     codexAvailable: z.boolean(),
     codexReadiness: runtimeReadinessSchema,
     // Additive parallel availability field for the Claude CLI runtime (Slice 3.4). Existing

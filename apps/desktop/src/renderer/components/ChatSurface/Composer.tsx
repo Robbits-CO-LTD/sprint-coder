@@ -14,6 +14,7 @@ import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Square, Target, Trash, X
 import { ComposerMenu } from './ComposerMenu';
 import { ModelPickerV2 } from '../ModelPickerV2';
 import { isModelPickerV2Active } from '../../lib/model-picker-parity';
+import { requestOpenProviderSettings } from '../../lib/settings-navigation';
 import { IMAGEGEN_PREFIX } from './imagegen';
 import type { ComposerMenuItem } from './ComposerMenu';
 import { SlashCommandMenu, type SlashMenuItem } from './SlashCommandMenu';
@@ -279,6 +280,7 @@ export function Composer({ taskId }: { taskId: string }) {
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
   const runtime = useAppStore((s) => s.runtime);
+  const aiConnectionRequired = runtime.aiConnectionRequired === true;
   const currentTeam = useAppStore((s) => s.teamByTask[taskId]);
   const skillCatalog = useAppStore((s) => s.skillCatalog);
   const skillCatalogRevision = useAppStore((s) => s.skillCatalogRevision);
@@ -502,6 +504,7 @@ export function Composer({ taskId }: { taskId: string }) {
   }, [sending]);
 
   const sendBlocked =
+    aiConnectionRequired ||
     composing ||
     permissionChanging ||
     attachmentBlocked ||
@@ -902,6 +905,17 @@ export function Composer({ taskId }: { taskId: string }) {
             shadow rather than stacking two framed boxes on top of each other. */}
         <div className="composer-panel">
           <ContextBar taskId={taskId} />
+          {aiConnectionRequired && (
+            <div className="composer-ai-connection">
+              <div role="status">
+                <strong>AI がつながっていません</strong>
+                <p>CLI を導入してログインするか、API キーを追加してください。</p>
+              </div>
+              <button type="button" className="cmp-chip" onClick={requestOpenProviderSettings}>
+                接続を設定
+              </button>
+            </div>
+          )}
           {permissionChanging && (
             <div className="composer-permission-pending" role="status">
               {PERMISSION_CHANGE_PENDING_MESSAGE}

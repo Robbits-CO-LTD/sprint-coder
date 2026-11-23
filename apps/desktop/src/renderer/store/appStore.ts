@@ -74,6 +74,7 @@ export type WorkspaceInfo = { path: string; name: string };
 
 export type RuntimeState = {
   kind: RuntimeKind;
+  aiConnectionRequired?: true | undefined;
   codexAvailable: boolean;
   codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
   claudeAvailable: boolean;

@@ -46,7 +46,11 @@ const newWork = [
   [IPC_CHANNELS.goalsResume, { skills: [] }],
 ] as const;
 
-function fixture(acknowledged = false, objective = '既存の目標', builtinsReady = true) {
+function fixture(
+  acknowledged = false,
+  objective = '既存の目標',
+  { builtinsReady = true, mockChosen = true } = {},
+) {
   const policies = new Map<string, PermissionSettings>();
   const operations = new Map<string, { hash: string; value: unknown }>();
   const confirmations: Array<{ signal: AbortSignal; respond: (response: number) => void }> = [];
@@ -165,6 +169,7 @@ function fixture(acknowledged = false, objective = '既存の目標', builtinsRe
       },
       getTaskModelSelection: () => null,
       getRuntime: () => 'mock',
+      getStoredRuntime: () => (mockChosen ? 'mock' : null),
       setAccessPreset,
       startTurn,
       startGoalTurn,
@@ -245,7 +250,7 @@ describe('built-in Skill preparation', () => {
     });
     const open = vi.spyOn(SkillStore, 'open').mockResolvedValue(store);
     const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
-    const f = fixture(false, 'チームで進めてください。', false);
+    const f = fixture(false, 'チームで進めてください。', { builtinsReady: false });
     const first = f.invoke(IPC_CHANNELS.skillsList, {});
     await flush();
     const second = f.invoke(IPC_CHANNELS.skillsList, {});
@@ -278,6 +283,23 @@ describe('built-in Skill preparation', () => {
 });
 
 describe('Turn text through the registered IPC handler', () => {
+  it('refuses an implicit Mock before accepting a message in an unconnected task', async () => {
+    vi.stubEnv('SPRINT_CODER_RUNTIME_ADOPT', '1');
+    try {
+      const f = fixture(false, undefined, { mockChosen: false });
+      expect(await f.send()).toMatchObject({
+        ok: false,
+        error: {
+          code: 'RUNTIME_UNAVAILABLE',
+          userMessage: expect.stringContaining('AI がつながっていません'),
+        },
+      });
+      expect(f.startTurn).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each([
     ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
     ['担当を雇ってください。', true],
@@ -310,7 +332,9 @@ describe.each(['start', 'resume'] as const)(
   (operation) => {
     it.each([
       ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+      ['> 担当を雇ってください。\n\nこの例文を添削してください。\n', false],
       ['担当を雇ってください。', true],
+      ['チームで進めてください。\n', true],
     ] as const)(
       'seals Team only for actual Goal hiring instructions',
       async (objective, hiring) => {

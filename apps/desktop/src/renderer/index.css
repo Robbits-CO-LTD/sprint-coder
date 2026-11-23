@@ -2799,6 +2799,23 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-size: 12px;
   line-height: 1.5;
 }
+.composer-ai-connection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 8px 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.composer-ai-connection strong {
+  color: var(--text-primary);
+}
+.composer-ai-connection p {
+  margin: 2px 0 0;
+}
 .permission-menu {
   min-width: 290px;
 }
