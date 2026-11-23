@@ -7,6 +7,66 @@ import { SkillSettingsSection } from './SkillSettingsSection';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('shows export success, cancellation and failure without exposing the destination', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const item = {
+    ref: { source: 'created', skillId: 'review', digest: 'a'.repeat(64) },
+    name: 'Review',
+    kind: 'chat',
+    enabled: true,
+    activationPolicy: 'manual',
+  };
+  const exportCreated = vi
+    .fn()
+    .mockResolvedValueOnce('C:/private/destination')
+    .mockResolvedValueOnce(null)
+    .mockRejectedValueOnce(
+      Object.assign(new Error('書き出し先に同名のフォルダーがあります。'), {
+        code: 'OPERATION_CONFLICT',
+      }),
+    )
+    .mockRejectedValueOnce(
+      Object.assign(new Error('C:/private/destination'), { code: 'OPERATION_CONFLICT' }),
+    );
+  Object.defineProperty(window, 'sprintCoder', {
+    configurable: true,
+    value: {
+      skills: {
+        list: vi.fn().mockResolvedValue({ items: [item] }),
+        listDrafts: vi.fn().mockResolvedValue([]),
+        exportCreated,
+      },
+    },
+  });
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<SkillSettingsSection active />));
+    const button = [...container.querySelectorAll('button')].find(
+      (element) => element.textContent === 'Export',
+    )!;
+    await act(async () => button.click());
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Reviewを書き出しました。',
+    );
+    await act(async () => button.click());
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      '書き出しをキャンセルしました。',
+    );
+    await act(async () => button.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      '書き出し先に同名のフォルダーがあります。',
+    );
+    await act(async () => button.click());
+    expect(container.querySelector('[role="status"]')?.textContent?.trim() ?? '').toBe('');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('対象が変更');
+    expect(container.textContent).not.toContain('C:/private/destination');
+  } finally {
+    await act(async () => root.unmount());
+    Reflect.deleteProperty(window, 'sprintCoder');
+  }
+});
+
 it('explains a failed AI-assisted Skill creation and lets the user retry', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const create = vi
@@ -126,7 +186,10 @@ it.each([false, true])(
 it('waits for an explicit reload after a failed initial request', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   // Only the first request rejects; a buggy automatic retry therefore terminates deterministically.
-  const list = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ items: [] });
+  const list = vi
+    .fn()
+    .mockRejectedValueOnce(Object.assign(new Error('private folder'), { code: 'FORBIDDEN' }))
+    .mockResolvedValue({ items: [] });
   Object.defineProperty(window, 'sprintCoder', {
     configurable: true,
     value: {
@@ -139,6 +202,8 @@ it('waits for an explicit reload after a failed initial request', async () => {
     await act(async () => root.render(<SkillSettingsSection active />));
     expect(list).toHaveBeenCalledTimes(1);
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('再読み込み');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('権限');
+    expect(container.textContent).not.toContain('private folder');
     const reload = [...container.querySelectorAll('button')].find((button) =>
       button.textContent?.includes('再読み込み'),
     );
@@ -146,6 +211,9 @@ it('waits for an explicit reload after a failed initial request', async () => {
     await act(async () => reload?.click());
     expect(list).toHaveBeenCalledTimes(2);
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    const status = container.querySelector('[role="status"]')!;
+    expect(status.textContent).toContain('読み込みました');
+    expect(status.classList.contains('sr-only')).toBe(false);
   } finally {
     await act(async () => root.unmount());
     Reflect.deleteProperty(window, 'sprintCoder');

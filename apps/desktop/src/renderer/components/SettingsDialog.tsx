@@ -12,7 +12,7 @@ import {
 } from '../lib/runtime-labels';
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
 import { ADD_TOGGLE_ID, ProviderSettingsSection } from './ProviderSettingsSection';
-import { SkillSettingsSection } from './SkillSettingsSection';
+import { SkillSettingsSection, type SkillCreationFailure } from './SkillSettingsSection';
 import { AssistantPreferencesSettings } from './AssistantPreferencesSettings';
 import { TeamUsageModeSetting } from './TeamUsageModeSetting';
 import { SetupReplayGroup } from './SetupReplayGroup';
@@ -83,7 +83,9 @@ type SkillCreationRequest = {
   prompt: string;
   builtinSkillId: 'skill-creator';
 };
-type SkillCreationHandler = (request?: SkillCreationRequest) => Promise<void>;
+type SkillCreationHandler = (
+  request?: SkillCreationRequest,
+) => Promise<SkillCreationFailure | undefined>;
 
 /** The left-hand list, in order. It is the nav and the page switcher's source of truth, so a section
  * can never exist in one and not the other. `label` is both the nav row and the section's heading;
@@ -163,25 +165,26 @@ export function SettingsDialog({
   const supported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.getRuntime === 'function';
 
-  async function beginSkillCreation(request?: SkillCreationRequest): Promise<void> {
+  const beginSkillCreation: SkillCreationHandler = async (request) => {
     const api = window.sprintCoder?.skills;
-    if (typeof api?.list !== 'function') throw new Error('Skill catalog unavailable');
-    const catalog = await api.list();
+    if (typeof api?.list !== 'function') return 'catalog-unavailable';
+    const catalog = await api.list().catch(() => null);
+    if (catalog === null) return 'catalog-unavailable';
     const builtinSkillId = request?.builtinSkillId ?? 'skill-creator';
     const creator = catalog.items.find(
       ({ ref, enabled }) => ref.source === 'builtin' && ref.skillId === builtinSkillId && enabled,
     );
-    if (creator === undefined) throw new Error('Built-in Skill unavailable');
+    if (creator === undefined) return 'builtin-unavailable';
     let state = useAppStore.getState();
     if (request === undefined || state.selectedTaskId === null) {
       // Always a new Task: the skill selection and the prompt below are written into it, and an
       // unstarted Task may already hold the user's own draft.
-      const created = await createTask(undefined, { reuseUnstarted: false });
-      if (created === null) return;
+      const created = await createTask(undefined, { reuseUnstarted: false }).catch(() => null);
+      if (created === null) return 'task-unavailable';
       state = useAppStore.getState();
     }
     const taskId = state.selectedTaskId;
-    if (taskId === null) return;
+    if (taskId === null) return 'task-unavailable';
     await state.setSkillSelection(taskId, [{ kind: creator.kind, ref: creator.ref }]);
     state.setDraft(
       taskId,
@@ -189,7 +192,8 @@ export function SettingsDialog({
         '作りたいSkillを説明してください。Chat SkillかTeam Skillかも指定できます。',
     );
     onClose();
-  }
+    return undefined;
+  };
 
   return (
     <dialog

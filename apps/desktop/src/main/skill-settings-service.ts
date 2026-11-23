@@ -24,6 +24,7 @@ import { buildSkillCatalogContext, SkillCatalogContextError } from './skill-cata
 import { createPortableSkillFile } from './skill-compatibility';
 import { expandSkillArguments } from '../runtime-host/skill-arguments';
 import { clipPublicMessage, formatZodIssues } from './zod-issue-message';
+import { SKILL_CONFLICT_REASONS } from '../skill-feedback';
 
 type SkillRuntime = 'codex' | 'claude' | 'grok' | 'provider';
 export type SkillCli = Exclude<SkillRef['source'], 'builtin' | 'created' | 'agents'> | 'codex';
@@ -515,7 +516,13 @@ export class SkillSettingsService {
 export class SkillSettingsError extends Error {
   constructor(
     readonly code:
-      'NOT_FOUND' | 'INVALID_SKILL' | 'PREVIEW_EXPIRED' | 'PREVIEW_LIMIT' | 'SOURCE_CHANGED',
+      | 'NOT_FOUND'
+      | 'INVALID_SKILL'
+      | 'PREVIEW_EXPIRED'
+      | 'PREVIEW_LIMIT'
+      | 'SOURCE_CHANGED'
+      | 'FORBIDDEN'
+      | 'CONFLICT',
     message: string,
   ) {
     super(message);
@@ -527,13 +534,29 @@ export function skillSettingsPublicError(error: unknown): SkillSettingsError {
   if (error instanceof SkillSettingsError) return error;
   if (error instanceof SkillStoreError) {
     if (error.code === 'SOURCE_CHANGED')
-      return new SkillSettingsError('SOURCE_CHANGED', 'Skillがプレビュー後に変更されました');
+      return new SkillSettingsError('SOURCE_CHANGED', '確認後にSkillが変更されました。');
+    if (error.code === 'NOT_FOUND')
+      return new SkillSettingsError('NOT_FOUND', 'Skillが見つかりません。');
+    if (error.code === 'UNSAFE_SOURCE')
+      return new SkillSettingsError('FORBIDDEN', 'Skillの保存場所に安全にアクセスできません。');
+    if (error.code === 'NAME_EXISTS')
+      return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.nameExists);
+    if (error.code === 'AUTO_SELECTION_LIMIT')
+      return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.autoSelectionLimit);
+    if (error.code === 'EXPORT_EXISTS')
+      return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.exportExists);
     if (error.code === 'CONFLICT')
-      return new SkillSettingsError('INVALID_SKILL', '同名のSkillが既に存在します');
+      return new SkillSettingsError(
+        'CONFLICT',
+        '現在の状態ではSkillの操作を完了できませんでした。',
+      );
     if (error.code === 'INVALID_SKILL' && error.publicDetail !== undefined)
       return new SkillSettingsError('INVALID_SKILL', clipPublicMessage(error.publicDetail));
     return new SkillSettingsError('INVALID_SKILL', 'Skillを安全に読み込めません');
   }
+  const code = error instanceof Error && 'code' in error ? error.code : undefined;
+  if (code === 'EACCES' || code === 'EPERM')
+    return new SkillSettingsError('FORBIDDEN', 'Skillを操作する権限がありません。');
   return new SkillSettingsError('INVALID_SKILL', 'Skillの読み込みに失敗しました');
 }
 
