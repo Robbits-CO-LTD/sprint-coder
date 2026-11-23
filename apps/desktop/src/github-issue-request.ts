@@ -92,7 +92,9 @@ export function parseGithubActionInput(
   const issue = issueLine.exec(namedLine);
   const pull = pullLine.exec(namedLine);
   const comment = commentLine.exec(namedLine);
-  const issueTarget = issueTargetPattern.exec(comment?.[1]?.trim() ?? '');
+  // A copied GitHub link can point at a comment or carry query parameters on the same Issue.
+  const issuePath = comment?.[1]?.trim().split(/[?#]/u, 1)[0] ?? '';
+  const issueTarget = issueTargetPattern.exec(issuePath);
   // File paths may include “github” or “issue”; only an Issue URL or explicit intent opts in.
   if (!issue && !pull && (!comment || (!issueTarget && !explicitCommentLine.test(namedLine))))
     return null;

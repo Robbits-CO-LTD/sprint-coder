@@ -340,6 +340,15 @@ const pullInput =
   'https://github.com/team/repo にPRを作成して\n元ブランチ: fix/settings\n先ブランチ: main\nタイトル: 設定の修正\n本文: 設定画面を修正しました。';
 
 describe('GitHub comments and pull requests', () => {
+  it.each(['#issuecomment-123456', '?view=compact#issuecomment-123456'])(
+    'uses the containing Issue when its link ends in %s',
+    (suffix) => {
+      const linked = commentInput.replace('/issues/42', '/issues/42' + suffix);
+      expect(parseGithubActionInput(linked)).toEqual(parseGithubActionInput(commentInput));
+      expect(parseGithubActionInput(linked)?.kind).toBe('create');
+    },
+  );
+
   it('still explains how to complete an explicit Issue comment request', () => {
     for (const text of [
       'https://github.com/team/repo/issues/42 にコメントして',
