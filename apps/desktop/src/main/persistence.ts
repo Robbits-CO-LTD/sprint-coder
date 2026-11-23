@@ -181,6 +181,8 @@ import {
   type TeamUsageMode,
   type TeamUsageTotals,
   type TurnEvent,
+  type TurnFailureReason,
+  turnFailureReasonSchema,
   type TurnSnapshot,
   type TurnSkillSelection,
   type TurnStage,
@@ -5996,6 +5998,7 @@ export interface PersistenceClient {
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
+    failureReason?: TurnFailureReason,
   ): { event: TurnEvent; task: TaskSummary | null };
   recordRuntimeFailureDiagnostic(
     taskId: string,
@@ -14718,12 +14721,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
+    failureReason?: TurnFailureReason,
   ): { event: TurnEvent; task: TaskSummary | null } {
     // Opened before the transaction and closed after it commits: the shared locks the observation
     // sessions hold have to outlive the decision they justify.
     const observation = state === 'completed' ? this.openSealedObservation(taskId, turnId) : null;
     try {
-      return this.completeAndFinishGoalInTransaction(taskId, turnId, state, finalText, observation);
+      return this.completeAndFinishGoalInTransaction(
+        taskId,
+        turnId,
+        state,
+        finalText,
+        observation,
+        failureReason,
+      );
     } finally {
       observation?.close();
     }
@@ -14735,6 +14746,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText: string | undefined,
     observation: TurnSealedObservation | null,
+    failureReason?: TurnFailureReason,
   ): { event: TurnEvent; task: TaskSummary | null } {
     return this.db.transaction(() => {
       const current = this.getTaskRow(taskId);
@@ -14749,6 +14761,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         finalText,
         observation ?? undefined,
         ownsGoal,
+        failureReason,
       );
       if (!ownsGoal) return { event, task: null };
       const now = new Date();
@@ -20166,6 +20179,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ORDER BY t.created_at DESC, t.rowid DESC LIMIT 4096`,
       )
       .all(taskId) as Array<{ id: string }>;
+    const failureRows = this.db
+      .prepare(
+        `SELECT turn_id, json_extract(payload_json, '$.failureReason') AS reason
+         FROM turn_events
+         WHERE task_id = ? AND type = 'turn.completed'
+           AND json_extract(payload_json, '$.failureReason') IS NOT NULL
+         ORDER BY seq DESC LIMIT 4096`,
+      )
+      .all(taskId) as Array<{ turn_id: string; reason: unknown }>;
+    const turnFailures = failureRows.flatMap(({ turn_id, reason }) => {
+      const parsed = turnFailureReasonSchema.safeParse(reason);
+      return parsed.success ? [{ turnId: turn_id, reason: parsed.data }] : [];
+    });
     const activatedSkills = this.db
       .prepare(
         `SELECT c.turn_id, c.source, c.skill_id, c.digest, c.name
@@ -20202,6 +20228,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             },
       interruptedTurnIds: interruptedTurns.map(({ id }) => id),
       canceledTurnIds: canceledTurns.map(({ id }) => id),
+      turnFailures,
       // Read in the same call as lastSeq, so the rows and counts cover exactly the decisions up
       // to it and a subscription that resumes after lastSeq neither misses nor repeats one
       // (issue #863).
@@ -22290,6 +22317,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     finalText?: string,
     observation?: TurnSealedObservation,
     goalTurn = false,
+    failureReason?: TurnFailureReason,
   ): { event: TurnEvent; goalReport: GoalReport | null } {
     const turn = this.getTurn(taskId, turnId);
     if (state === 'completed') {
@@ -22334,18 +22362,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
       row.content = conclusion.text;
     }
     const diff = this.getDisplayTurnDiff(taskId, turnId);
-    const event = this.appendEvent(
-      row === undefined
-        ? { type: 'turn.completed', taskId, turnId, state, diff: [...diff] }
-        : {
-            type: 'turn.completed',
-            taskId,
-            turnId,
-            state,
-            message: toMessage(row),
-            diff: [...diff],
-          },
-    );
+    const event = this.appendEvent({
+      type: 'turn.completed',
+      taskId,
+      turnId,
+      state,
+      diff: [...diff],
+      ...(row === undefined ? {} : { message: toMessage(row) }),
+      ...(state === 'failed' && failureReason !== undefined ? { failureReason } : {}),
+    });
     return { event, goalReport: conclusion?.report ?? null };
   }
 

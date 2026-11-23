@@ -1022,7 +1022,7 @@ class CodexTurnFailedError extends Error {
       );
     else if (tag === 'unauthorized' || httpStatus === 401 || httpStatus === 403)
       this.publicFailure = publicError(
-        'RUNTIME_FAILED',
+        'RUNTIME_CLI_AUTH_REQUIRED',
         'Codexの認証を確認して、再度ログインしてください。',
         false,
       );

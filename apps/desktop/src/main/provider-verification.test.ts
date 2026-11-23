@@ -169,6 +169,35 @@ describe('ProviderVerificationService', () => {
     expect(service.getConnection(connection.id).verification.status).toBe('verification_expired');
   });
 
+  it.each([
+    ['invalid_credentials', 'api_credentials'],
+    ['unavailable', 'api_network'],
+  ] as const)('keeps the safe preflight failure reason for %s', async (status, failureReason) => {
+    const connection = externalConnection();
+    const runtime = new DeterministicMockProviderRuntime();
+    vi.spyOn(runtime, 'verify').mockResolvedValue({
+      status,
+      verifiedAt: new Date(0).toISOString(),
+      expiresAt: new Date(0).toISOString(),
+      message: null,
+    });
+    const registry = new MainProviderRegistry();
+    registry.register({ runtimeKind: 'official_api', providerId: null, runtime });
+    const service = new ProviderVerificationService(
+      {
+        getProviderConnection: () => connection,
+        updateProviderConnectionVerification: (_id, verification) => ({
+          ...connection,
+          verification,
+        }),
+      },
+      registry,
+    );
+    await expect(service.requireVerifiedForExecution(connection.id)).rejects.toMatchObject({
+      failureReason,
+    });
+  });
+
   it('blocks on preflight timeout without classifying it as invalid credentials', async () => {
     let connection = externalConnection();
     const repository = {
@@ -190,9 +219,10 @@ describe('ProviderVerificationService', () => {
     registry.register({ runtimeKind: 'official_api', providerId: null, runtime: hangingRuntime });
     const service = new ProviderVerificationService(repository, registry, () => new Date(), 100, 1);
 
-    await expect(service.requireVerifiedForExecution(connection.id)).rejects.toThrow(
-      'Provider connection verification timed out',
-    );
+    await expect(service.requireVerifiedForExecution(connection.id)).rejects.toMatchObject({
+      failureReason: 'api_timeout',
+      message: 'Provider connection verification timed out',
+    });
     expect(connection.verification).toMatchObject({
       status: 'unavailable',
       expiresAt: null,

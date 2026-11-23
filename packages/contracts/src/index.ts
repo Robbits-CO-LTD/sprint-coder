@@ -2546,6 +2546,17 @@ export const commandOutputPageSchema = z
 export type CommandOutputPage = z.infer<typeof commandOutputPageSchema>;
 
 const turnEventBase = { taskId: idSchema, turnId: idSchema, seq: z.number().int().positive() };
+export const turnFailureReasonSchema = z.enum([
+  'api_credentials',
+  'api_network',
+  'api_timeout',
+  'cli_missing',
+  'cli_credentials',
+  'cli_stop_unconfirmed',
+  'cli_failed',
+]);
+export type TurnFailureReason = z.infer<typeof turnFailureReasonSchema>;
+
 export const turnEventSchema = z.discriminatedUnion('type', [
   z
     .object({ type: z.literal('turn.accepted'), ...turnEventBase, userMessage: chatMessageSchema })
@@ -2648,6 +2659,7 @@ export const turnEventSchema = z.discriminatedUnion('type', [
       ...turnEventBase,
       state: z.enum(['completed', 'canceled', 'failed', 'interrupted']),
       message: chatMessageSchema.optional(),
+      failureReason: turnFailureReasonSchema.optional(),
       diff: z.array(turnDiffEntrySchema),
       // Additive, optional: the concrete model id the Claude CLI actually resolved for this turn
       // (from the stream-json `system/init` event's `model` field, captured by
@@ -2754,6 +2766,10 @@ export const turnSnapshotSchema = z
      * in the history only when its Turn is not one of these: the stop already says why it went.
      */
     canceledTurnIds: z.array(idSchema).max(4_096).default([]),
+    turnFailures: z
+      .array(z.object({ turnId: idSchema, reason: turnFailureReasonSchema }).strict())
+      .max(4_096)
+      .optional(),
     /**
      * The Task's kept Auto decision rows — the newest 200 denials and the newest 200 others, oldest
      * first — up to `lastSeq` (issue #863). Read in the same call as the counts below and
@@ -2801,6 +2817,7 @@ export const publicErrorCodeSchema = z.enum([
   'INVALID_REQUEST',
   'RUNTIME_UNAVAILABLE',
   'RUNTIME_CLI_MISSING',
+  'RUNTIME_CLI_AUTH_REQUIRED',
   'RUNTIME_RATE_LIMIT',
   'RUNTIME_BILLING_REQUIRED',
   'RUNTIME_FAILED',

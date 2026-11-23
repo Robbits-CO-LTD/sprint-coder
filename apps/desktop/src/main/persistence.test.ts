@@ -1624,6 +1624,34 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('reopens failure history from bounded Turn metadata without creating assistant content', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const failed = persistence.startTurn(task.id, 'request with a known failure');
+      const { event } = persistence.completeTurnAndFinishGoal(
+        task.id,
+        failed.turnId,
+        'failed',
+        undefined,
+        'api_credentials',
+      );
+      const old = persistence.startTurn(task.id, 'request with an unknown failure');
+      persistence.completeTurnAndFinishGoal(task.id, old.turnId, 'failed');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      try {
+        expect(event).toMatchObject({ state: 'failed', failureReason: 'api_credentials' });
+        expect(event).not.toHaveProperty('message');
+        expect(reopened.snapshot(task.id).turnFailures).toEqual([
+          { turnId: failed.turnId, reason: 'api_credentials' },
+        ]);
+        expect(reopened.listMessages(task.id).every(({ author }) => author === 'user')).toBe(true);
+      } finally {
+        reopened.close();
+      }
+    });
+
     it('stores Codex work updates separately from the final user-facing conclusion', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();
