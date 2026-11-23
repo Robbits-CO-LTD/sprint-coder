@@ -349,7 +349,8 @@ export class SkillSettingsService {
   async createDraft(input: SkillDraftCreateInput): Promise<SkillDraft> {
     if (this.drafts.size >= 64)
       throw new SkillSettingsError('PREVIEW_LIMIT', 'Skill Draft数の上限に達しました');
-    const validation = (await this.getStore()).validateCreatedSkill(input.skillId, input.files);
+    const store = await this.getStore();
+    const validation = store.validateCreatedSkill(input.skillId, input.files);
     if (validation.kind !== input.kind)
       throw new SkillSettingsError(
         'INVALID_SKILL',
@@ -357,6 +358,8 @@ export class SkillSettingsService {
           ? 'Team Skillにはteam/blueprint.jsonが必要です'
           : 'Chat SkillへTeam Blueprintを含めることはできません',
       );
+    assertDraftCompatibility(validation.compatibility);
+    await store.assertCreatedSkillNameAvailable(validation.skillId);
     const now = new Date(this.now()).toISOString();
     const draft: SkillDraft = {
       id: randomUUID(),
@@ -369,7 +372,7 @@ export class SkillSettingsService {
       createdAt: now,
       updatedAt: now,
     };
-    await (await this.getStore()).saveCreatedDraft(draft);
+    await store.saveCreatedDraft(draft);
     this.drafts.set(draft.id, draft);
     return draft;
   }
@@ -382,8 +385,7 @@ export class SkillSettingsService {
     if (draft.digest !== expectedDigest)
       throw new SkillSettingsError('SOURCE_CHANGED', 'Skill Draftが確認後に変更されました');
     const validation = (await this.getStore()).validateCreatedSkill(draft.skillId, draft.files);
-    if (validation.compatibility.requiresConversion)
-      throw new SkillSettingsError('INVALID_SKILL', 'Skill DraftはPortable版への変換が必要です');
+    assertDraftCompatibility(validation.compatibility);
     const installed = await (await this.getStore()).installCreatedSkill(draft.skillId, draft.files);
     await (await this.getStore()).removeCreatedDraft(draftId);
     this.drafts.delete(draftId);
@@ -512,6 +514,20 @@ export class SkillSettingsService {
   private now(): number {
     return this.input.now?.() ?? Date.now();
   }
+}
+
+function assertDraftCompatibility(compatibility: SkillCompatibilityReport): void {
+  if (!compatibility.requiresConversion) return;
+  let message =
+    'SkillをPortable版に直してください。利用するモデルの専用機能を共通の手順に置き換えてください。';
+  if (compatibility.blockers.some((blocker) => blocker.startsWith('未対応のfrontmatter field:')))
+    message =
+      'SKILL.mdの先頭に未対応の項目があります。versionやauthorなどはmetadataに入れてください。';
+  else if (compatibility.features.includes('claude:dynamic-command'))
+    message = 'SKILL.mdの動的なコマンド指定を、通常の手順に書き換えてください。';
+  else if (compatibility.features.includes('claude:file-reference'))
+    message = 'SKILL.mdの@によるファイル参照を、ファイルを読む通常の手順に書き換えてください。';
+  throw new SkillSettingsError('INVALID_SKILL', message);
 }
 
 export class SkillSettingsError extends Error {
