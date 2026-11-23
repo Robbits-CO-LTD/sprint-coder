@@ -4927,7 +4927,10 @@ if (runsWithElectronAbi)
 
       // A Workspace the user left dirty is still refused.
       writeFileSync(readme, 'user edit\n');
-      await expect(assign()).rejects.toThrow(/clean/u);
+      await expect(assign()).rejects.toMatchObject({
+        code: 'workspace_dirty',
+        message: teamWorkspaceRepositoryMessage('workspace_dirty'),
+      });
       writeFileSync(readme, 'base\n');
 
       // Another Worker's integration holds the parent checkout mid cherry-pick.
@@ -13078,6 +13081,54 @@ if (runsWithElectronAbi)
           code: 'workspace_not_git',
           message: teamWorkspaceRepositoryMessage('workspace_not_git'),
         });
+
+        const stepKeys = ['write', 'review'];
+        const plan: GraphMissionPlan = {
+          mode: 'graph',
+          objective: 'Write a file',
+          doneCriteria: ['File written'],
+          steps: stepKeys.map((key) => ({
+            key,
+            nodeId: key,
+            workerId: randomUUID(),
+            objective: key,
+            doneCriteria: ['File written'],
+            access: key === 'write' ? 'workspace-write' : 'read-only',
+            dependsOn: key === 'write' ? [] : ['write'],
+            writeClaims: [],
+            resourceClaims: [],
+          })),
+        };
+        const document = nextGraphDocument(
+          task.id,
+          {
+            schema_version: 2,
+            diagram_type: 'workflow',
+            meta: { title: 'Write a file' },
+            lanes: [{ id: 'work', label: 'Work' }],
+            nodes: stepKeys.map((id, col) => ({
+              id,
+              col,
+              lane: 'work',
+              label: id,
+              type: 'backend',
+            })),
+            edges: [{ id: 'next', from: 'write', to: 'review' }],
+          },
+          null,
+          [],
+          [],
+          plan,
+        );
+        persistence.saveGraphDocument(document, 0);
+        const prepare = vi.fn(async () => {
+          throw new Error('The workspace should have been refused');
+        });
+        await expect(coordinator.startGraphMission(task.id, prepare)).rejects.toMatchObject({
+          code: 'workspace_not_git',
+          message: teamWorkspaceRepositoryMessage('workspace_not_git'),
+        });
+        expect(prepare).not.toHaveBeenCalled();
 
         // A read-only Worker needs no worktree, so it is hired as before.
         const reader = await hire(coordinator, task.id, false);

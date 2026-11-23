@@ -7,6 +7,33 @@ import { SkillSettingsSection } from './SkillSettingsSection';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('explains a failed AI-assisted Skill creation and lets the user retry', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const create = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('private path'))
+    .mockResolvedValue(undefined);
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<SkillSettingsSection active={false} onCreateWithAi={create} />),
+    );
+    const button = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'AIでSkillを作成',
+    )!;
+    await act(async () => button.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('再起動');
+    expect(container.textContent).not.toContain('private path');
+    expect(button.disabled).toBe(false);
+    await act(async () => button.click());
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 it.each([false, true])(
   'keeps draft review local through native toggles and reload (strict=%s)',
   async (strict) => {

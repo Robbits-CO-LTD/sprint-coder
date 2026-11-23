@@ -222,8 +222,12 @@ function ProjectEditorDialogOpen({
         </div>
         {loading ? (
           <p role="status">フォルダを読み込み中…</p>
-        ) : folders.length === 0 ? (
-          <p className="project-folders-empty">フォルダなしでもProjectを作成できます。</p>
+        ) : loadFailed ? null : folders.length === 0 ? (
+          <p className="project-folders-empty">
+            {project === null || project.folderCount > 0
+              ? 'フォルダー未設定の間は、このProjectのTaskでファイルの読み書きやコマンドの実行はできません。'
+              : 'フォルダー未設定です。'}
+          </p>
         ) : (
           <ol className="project-folder-list">
             {folders.map((folder, index) => (
