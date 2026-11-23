@@ -129,6 +129,33 @@ describe('the sidebar with nothing to list', () => {
 });
 
 describe('creating a Task from the sidebar', () => {
+  it('keeps creating Tasks when the selected Project has not loaded', async () => {
+    useAppStore.setState({
+      tasks: [{ ...task, projectId: 'unknown-project' }],
+      selectedTaskId: task.id,
+      projectLoadState: 'error',
+    });
+    const createTask = await renderSidebar();
+    const key = container.querySelector<HTMLButtonElement>(
+      '[data-testid="sidebar-new-task-button"]',
+    )!;
+    await act(async () => key.click());
+    expect(createTask).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(key.hasAttribute('aria-describedby')).toBe(true);
+  });
+
+  it('does not show the no-folder note when the reusable Task has a workspace', async () => {
+    useAppStore.setState({
+      tasks: [{ ...task, hasConversation: false, workspacePath: '/workspace' }],
+      selectedTaskId: task.id,
+    });
+    await renderSidebar();
+    const key = container.querySelector<HTMLButtonElement>(
+      '[data-testid="sidebar-new-task-button"]',
+    )!;
+    expect(key.hasAttribute('aria-describedby')).toBe(false);
+  });
+
   it.each([
     { projectId: 'project-1', archived: false, expectedProjectId: 'project-1' },
     { projectId: 'project-1', archived: true, expectedProjectId: undefined },

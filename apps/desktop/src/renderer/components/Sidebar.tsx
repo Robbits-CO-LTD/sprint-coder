@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { taskHasRunningWork, taskRunningWorkArchiveRefusal } from '@sprint-coder/contracts';
-import { useAppStore } from '../store/appStore';
+import { showUnassignedTaskWorkspaceNote, useAppStore } from '../store/appStore';
 import {
   projectSidebarProjection,
   taskFallbackProjection,
@@ -101,10 +101,12 @@ export function Sidebar({
   const pendingFocusRef = useRef<PendingFocus | null>(null);
 
   const selectedProjectId = tasks.find((task) => task.id === selectedTaskId)?.projectId;
-  const selectedProjectArchived = projects.some(
-    (project) => project.id === selectedProjectId && project.archived,
+  const newTaskProjectId = projects.find(
+    (project) => project.id === selectedProjectId && !project.archived,
+  )?.id;
+  const showWorkspaceNote = useAppStore(
+    (state) => newTaskProjectId === undefined && showUnassignedTaskWorkspaceNote(state),
   );
-  const newTaskProjectId = selectedProjectArchived ? undefined : (selectedProjectId ?? undefined);
 
   const projection = useMemo(
     () => projectSidebarProjection(projects, tasks, query, selectedTaskId),
@@ -316,12 +318,12 @@ export function Sidebar({
           type="button"
           className="sb-new"
           data-testid="sidebar-new-task-button"
-          aria-describedby={newTaskProjectId === undefined ? newTaskWorkspaceNoteId : undefined}
+          aria-describedby={showWorkspaceNote ? newTaskWorkspaceNoteId : undefined}
           onClick={() => void createTask(newTaskProjectId)}
         >
           <Plus size={15} /> 新規タスク
         </button>
-        {newTaskProjectId === undefined && (
+        {showWorkspaceNote && (
           <p className="sb-new-hint" id={newTaskWorkspaceNoteId}>
             新しく作るタスクには作業フォルダーがありません。
           </p>
