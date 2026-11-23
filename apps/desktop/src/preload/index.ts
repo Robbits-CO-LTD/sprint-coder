@@ -237,6 +237,8 @@ async function invokeEnvelope<TInput, TOutput>(
   ) as CommandResult<TOutput>;
   if (result.requestId !== requestId) throw new Error('IPC response correlation failed');
   if (!result.ok) {
+    // Electron copies Error.message across contextBridge but drops custom fields such as code.
+    if (channel.startsWith('sprint-coder:skills:')) return Promise.reject(result.error);
     const error = new Error(result.error.userMessage);
     (error as Error & { code?: string }).code = result.error.code;
     throw error;

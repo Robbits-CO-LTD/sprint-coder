@@ -139,6 +139,77 @@ async function choose(testId: string) {
 }
 
 describe('SetupWizard', () => {
+  it('shows CLI detection, official guidance, and the result of checking again', async () => {
+    const previous = useAppStore.getState();
+    const settings = fullBridge();
+    let finishDetection!: () => void;
+    const refreshRuntimeDetection = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDetection = resolve;
+        }),
+    );
+    const absentRuntime = {
+      ...previous.runtime,
+      kind: 'mock' as const,
+      codexAvailable: false,
+      codexReadiness: 'unavailable' as const,
+      claudeAvailable: false,
+      claudeReadiness: 'unavailable' as const,
+      grokAvailable: false,
+      grokReadiness: 'unavailable' as const,
+      modelFallbackNotice: null,
+    };
+    const getRuntime = vi.fn().mockResolvedValue(absentRuntime);
+    installBridge({ ...settings, getRuntime, refreshRuntimeDetection });
+    useAppStore.setState({ runtimeDetectionStatus: 'checking' });
+    try {
+      await render();
+      await press('setup-start');
+      const list = q('.setup-runtime-list')!;
+      expect(list.textContent).toContain('確認中');
+      expect(list.textContent).not.toContain('未検出');
+      await act(async () => {
+        await useAppStore.getState().loadRuntime();
+      });
+      expect(list.textContent).toContain('未検出');
+      for (const guidance of [
+        'https://learn.chatgpt.com/docs/codex/cli',
+        'codex login',
+        'https://code.claude.com/docs/en/quickstart',
+        'claude auth login',
+        'https://docs.x.ai/build/overview',
+        'grok login',
+      ])
+        expect(list.textContent).toContain(guidance);
+
+      getRuntime.mockResolvedValue({
+        ...absentRuntime,
+        kind: 'codex',
+        codexAvailable: true,
+        codexReadiness: 'ready',
+      });
+      const check = [...container.querySelectorAll('button')].find(
+        ({ textContent }) => textContent === 'CLIをもう一度確かめる',
+      )!;
+      await act(async () => check.click());
+      expect(refreshRuntimeDetection).toHaveBeenCalledOnce();
+      expect(check.disabled).toBe(true);
+      expect(list.getAttribute('aria-busy')).toBe('true');
+      expect(list.textContent).not.toContain('未検出');
+      await act(async () => finishDetection());
+      expect(list.textContent).toContain('接続済み');
+      expect(check.disabled).toBe(false);
+    } finally {
+      await act(async () =>
+        useAppStore.setState({
+          runtime: previous.runtime,
+          runtimeDetectionStatus: previous.runtimeDetectionStatus,
+        }),
+      );
+    }
+  });
+
   it('walks every step forward and back, and focuses each heading', async () => {
     fullBridge();
     await render();

@@ -10,6 +10,7 @@ import { useAppStore } from '../store/appStore';
 import { providerStorageGuidance } from '../../provider-storage-guidance';
 import { ChevronDown, Eye, EyeOff, Plus, RefreshCw, X } from './icons';
 import { ModelAuthorIcon } from './ModelAuthorIcon';
+import { CLI_CHECKING_LABEL, CLI_RECHECK_LABEL } from '../lib/runtime-labels';
 
 // Plaintext credentials remain here only until Main accepts them into Secret Storage.
 // Raw provider errors and secret references are never rendered.
@@ -40,15 +41,6 @@ async function loadConnections(api: ProvidersApi): Promise<ProviderConnectionVie
 async function loadProfiles(api: ProvidersApi): Promise<ProviderProfile[]> {
   if (typeof api.listProfiles !== 'function') return [];
   return api.listProfiles();
-}
-
-/** Detects the built-in CLIs again (issue #581), then reloads the runtime state that the model
- * list and the CLI status read. A Main/Preload without that IPC keeps the list-only reload. */
-async function redetectCliRuntimes(): Promise<void> {
-  const settings = window.sprintCoder?.settings;
-  if (typeof settings?.refreshRuntimeDetection !== 'function') return;
-  await settings.refreshRuntimeDetection();
-  await useAppStore.getState().loadRuntime();
 }
 
 /** The runtime check keeps an older Main/Preload usable: it offers no control rather than a save
@@ -92,11 +84,11 @@ export const VERIFICATION_TONE: Record<ProviderVerificationStatus, string> = {
   unavailable: 'danger',
 };
 
-export const LIST_ERROR = '接続一覧を取得できませんでした。再読み込みしてください。';
+export const LIST_ERROR = '接続一覧を取得できませんでした。もう一度お試しください。';
 export const CREATE_ERROR = '接続を追加できませんでした。入力内容を確認してください。';
 export const VERIFY_ERROR = '検証を実行できませんでした。時間をおいて再試行してください。';
 export const CLI_REDETECT_ERROR =
-  '組み込みCLIの検出をやり直せませんでした。時間をおいて再読み込みしてください。';
+  '組み込みCLIを確認できませんでした。時間をおいてもう一度お試しください。';
 // A Profile listing failure is not fatal: the fixed Providers below still work, so this is a
 // warning beside the picker rather than the section's error alert.
 export const PROFILE_LIST_WARNING =
@@ -1110,6 +1102,10 @@ export function ProviderAddConnectionForm({
 }
 
 export function ProviderSettingsSection({ active }: { active: boolean }) {
+  const checkingCli = useAppStore((state) => state.runtimeDetectionStatus === 'checking');
+  const canRedetectCli =
+    typeof window !== 'undefined' &&
+    typeof window.sprintCoder?.settings?.refreshRuntimeDetection === 'function';
   const [connections, setConnections] = useState<ProviderConnectionView[] | null>(null);
   const [profiles, setProfiles] = useState<readonly ProviderProfile[]>([]);
   const [profilesFailed, setProfilesFailed] = useState(false);
@@ -1180,7 +1176,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     const [connectionResult, profileResult, detectionResult] = await Promise.allSettled([
       loadConnections(api),
       loadProfiles(api),
-      redetectCli ? redetectCliRuntimes() : Promise.resolve(),
+      redetectCli ? useAppStore.getState().refreshRuntimeDetection() : Promise.resolve(),
     ]);
     // A response from a superseded reload — or one that lands after this section is gone — is
     // dropped whole, so it can never overwrite the newer state that replaced it.
@@ -1357,10 +1353,10 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
             type="button"
             className="settings-secondary-button"
             onClick={() => void refresh(true)}
-            disabled={busy || !supported}
+            disabled={busy || !supported || (canRedetectCli && checkingCli)}
           >
             <RefreshCw size={13} />
-            再読み込み
+            {canRedetectCli ? (checkingCli ? CLI_CHECKING_LABEL : CLI_RECHECK_LABEL) : '再読み込み'}
           </button>
         </div>
       </div>

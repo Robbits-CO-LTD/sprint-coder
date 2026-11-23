@@ -247,7 +247,7 @@ export class RuntimeHostClient {
     const rawContextFragments = (prepared?.fragments ?? []).map(toRuntimeContextFragment);
     // Main may hand us already-sealed payload bytes after its provider-egress gate. In that case
     // the canonical guidance is already inside those bytes and must not be sampled a second time.
-    // Team Workers and compatibility callers use this fallback immediately before serialization.
+    // Compatibility callers without sealed bytes keep synchronous dispatch and use root rules only.
     const contextFragments =
       serializedPayload === undefined
         ? injectPromptGuidance(

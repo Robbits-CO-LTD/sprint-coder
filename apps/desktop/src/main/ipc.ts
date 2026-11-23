@@ -291,7 +291,11 @@ import {
 } from './image-attachment-capability';
 import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
-import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
+import {
+  capturePromptWorkspace,
+  compilePromptGuidance,
+  injectPromptGuidance,
+} from './prompt-context';
 import type {
   PersistedTurnSkill,
   ImageAttachmentAcceptanceSelection,
@@ -715,6 +719,7 @@ import {
 import {
   TEAM_OFFER_WORKSPACE_CHECK_TIMEOUT_MS,
   TeamOfferWorkspaceGate,
+  TeamWorkspaceRepositoryError,
 } from './team-workspace-repository';
 import {
   BUILTIN_TEAM_SKILL_AUDIT,
@@ -2773,7 +2778,9 @@ export class IpcRouter {
         ).value,
     );
     this.handle(IPC_CHANNELS.skillsListDrafts, emptyPayloadSchema, z.array(skillDraftSchema), () =>
-      this.skillSettings.listDrafts(),
+      this.skillSettings
+        .listDrafts()
+        .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
       IPC_CHANNELS.skillsCreateDraft,
@@ -2794,7 +2801,9 @@ export class IpcRouter {
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(IPC_CHANNELS.skillsDiscardDraft, skillDraftIdInputSchema, z.undefined(), (input) =>
-      this.skillSettings.discardDraft(input.draftId),
+      this.skillSettings
+        .discardDraft(input.draftId)
+        .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
       IPC_CHANNELS.skillsRemoveCreated,
@@ -6267,6 +6276,17 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
+    const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
+    const promptWorkspace =
+      external || started.runtimeKind === 'mock'
+        ? undefined
+        : await capturePromptWorkspace(runtimeWorkspaceSet);
+    if (
+      promptWorkspace !== undefined &&
+      (this.canceledRuntimeTurns.has(started.turnId) ||
+        this.persistence.getActiveTurnId(taskId) !== started.turnId)
+    )
+      return;
     if (this.turnStreamingResources.begin(taskId, started.turnId) === undefined) return;
     const importRequest = userChatInput
       ? githubSkillRequest(
@@ -6469,7 +6489,6 @@ export class IpcRouter {
         'INVALID_SKILL',
         `${blockedSkill.name}は選択中のRuntimeで実行できません。Portable版へ変換してください。`,
       );
-    const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
     const toolCatalogSnapshot = this.managedCodingHarness.startTurn(
       {
         taskId,
@@ -6544,6 +6563,7 @@ export class IpcRouter {
           .map(toRuntimeContextFragment),
         compilePromptGuidance({
           workspace: runtimeWorkspaceSet,
+          ...promptWorkspace,
           toolCatalog: toolCatalogSnapshot,
           // What the agent may do through the managed tools, which under Ask is more than the
           // CLI's own read-only scope: each write and command waits on its card (issue #826).
@@ -10948,6 +10968,8 @@ async function projectFolderHealth(
 }
 
 export function toPublicError(error: unknown): PublicError {
+  if (error instanceof TeamWorkspaceRepositoryError)
+    return { code: 'INVALID_REQUEST', userMessage: error.message, retryable: false };
   if (error instanceof RetiredManagedLocalError)
     return { code: 'RUNTIME_UNAVAILABLE', userMessage: error.message, retryable: false };
   if (error instanceof ImageAttachmentValidationError)
@@ -11145,11 +11167,15 @@ export function toPublicError(error: unknown): PublicError {
   if (error instanceof SkillSettingsError)
     return {
       code:
-        error.code === 'PREVIEW_EXPIRED'
+        error.code === 'PREVIEW_EXPIRED' ||
+        error.code === 'SOURCE_CHANGED' ||
+        error.code === 'CONFLICT'
           ? 'OPERATION_CONFLICT'
           : error.code === 'NOT_FOUND'
             ? 'NOT_FOUND'
-            : 'INVALID_REQUEST',
+            : error.code === 'FORBIDDEN'
+              ? 'FORBIDDEN'
+              : 'INVALID_REQUEST',
       userMessage: clipPublicMessage(error.message),
       retryable: error.code === 'PREVIEW_EXPIRED' || error.code === 'SOURCE_CHANGED',
     };

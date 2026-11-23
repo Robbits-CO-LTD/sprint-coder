@@ -34,7 +34,11 @@ import {
   type RuntimeToolRequest,
   type RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
-import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
+import {
+  capturePromptWorkspace,
+  compilePromptGuidance,
+  injectPromptGuidance,
+} from './prompt-context';
 import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
 import type { ApprovalWaitObserver } from './tool-broker';
 import { workerWriteLimitNotice, workspaceWriteLimitsFromTools } from './workspace-write-limits';
@@ -531,6 +535,8 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         writeLimitNotice,
         this.deps.writeApprovalRequiredFor?.(taskId) === true,
       );
+      const promptWorkspace = await capturePromptWorkspace(normalizedWorkspace);
+      input.signal?.throwIfAborted();
       teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
       if (input.worker.canDelegate === true && teamMcp === undefined)
         throw new Error('Manager Team MCP is unavailable');
@@ -552,6 +558,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           })),
         compilePromptGuidance({
           workspace: normalizedWorkspace,
+          ...promptWorkspace,
           toolCatalog: promptToolCatalog,
           writeScope,
           agent: {

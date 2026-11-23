@@ -268,8 +268,12 @@ export const gitExecFile: SafeGitExec = (file, args, invocationOptions) =>
       if (settled || !inputFinished || completed === undefined) return;
       settled = true;
       const error = completed.error ?? inputError;
-      if (error !== null) reject(error);
-      else resolve({ stdout: completed.stdout, stderr: completed.stderr });
+      if (error !== null) {
+        // Callers can classify a Git failure without adding subprocess output to structured logs.
+        if (!('stderr' in error))
+          Object.defineProperty(error, 'stderr', { value: completed.stderr });
+        reject(error);
+      } else resolve({ stdout: completed.stdout, stderr: completed.stderr });
     };
     const child = execFile(
       file,

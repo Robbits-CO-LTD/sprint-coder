@@ -46,3 +46,17 @@ describe('external local Provider bridge after Managed Local retirement', () => 
     expect(typeof api.providers.createProfileConnection).toBe('function');
   });
 });
+
+it('preserves the validated Skill error as plain data across the isolated renderer bridge', async () => {
+  const error = {
+    code: 'OPERATION_CONFLICT',
+    userMessage: '書き出し先に同名のフォルダーがあります。',
+    retryable: false,
+  };
+  bridge.invoke.mockImplementation(async (_channel: string, envelope: { requestId: string }) => ({
+    ok: false,
+    requestId: envelope.requestId,
+    error,
+  }));
+  await expect(api.skills.list()).rejects.toStrictEqual(error);
+});

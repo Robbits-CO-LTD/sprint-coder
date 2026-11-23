@@ -8,6 +8,7 @@ import { writeAccessPresetDefault } from '../lib/access-preset-preference';
 import { setSoundEffectsEnabled } from '../lib/ui-sound';
 import { SettingsDialog } from './SettingsDialog';
 import { ADD_TOGGLE_ID, LIST_ERROR } from './ProviderSettingsSection';
+import { TaskBoundaryProvider } from './TaskBoundary';
 
 const initial = useAppStore.getInitialState();
 let container: HTMLDivElement;
@@ -66,6 +67,44 @@ afterEach(async () => {
   delete document.documentElement.dataset.theme;
   useAppStore.setState(initial, true);
   vi.unstubAllGlobals();
+});
+
+it.each([
+  { cause: 'catalog', message: 'Skill一覧を取得できませんでした' },
+  { cause: 'builtin', message: 'Skill作成に必要な組み込みSkillを読み込めませんでした' },
+  { cause: 'task', message: '新しいTaskを作れませんでした' },
+])('explains AI-assisted Skill creation failure for $cause', async ({ cause, message }) => {
+  useAppStore.setState({ settingsWorkspaceV2: false });
+  const creator = { ref: { source: 'builtin', skillId: 'skill-creator' }, enabled: true };
+  const list = vi
+    .fn()
+    .mockResolvedValueOnce({ items: [] })
+    .mockImplementation(async () => {
+      if (cause === 'catalog') throw new Error('private catalog location');
+      return { items: cause === 'builtin' ? [] : [creator] };
+    });
+  Object.defineProperty(window.sprintCoder, 'skills', {
+    value: { list, listDrafts: vi.fn().mockResolvedValue([]) },
+  });
+  const createTask = vi.fn().mockResolvedValue(null);
+  const onClose = vi.fn();
+  await act(async () =>
+    root.render(
+      <TaskBoundaryProvider value={{ createTask, selectTask: async () => false }}>
+        <SettingsDialog open onClose={onClose} />
+      </TaskBoundaryProvider>,
+    ),
+  );
+  const button = [...container.querySelectorAll('button')].find(
+    (element) => element.textContent === 'AIでSkillを作成',
+  )!;
+  await act(async () => button.click());
+  expect(container.querySelector('.settings-skills [role="alert"]')?.textContent).toContain(
+    message,
+  );
+  expect(container.textContent).not.toContain('private catalog location');
+  expect(createTask).toHaveBeenCalledTimes(cause === 'task' ? 1 : 0);
+  expect(onClose).not.toHaveBeenCalled();
 });
 
 it.each([

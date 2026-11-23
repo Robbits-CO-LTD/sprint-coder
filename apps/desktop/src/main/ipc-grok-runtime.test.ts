@@ -10,6 +10,7 @@ import {
 } from './ipc';
 import { createEmptyToolCatalogSnapshot, MANAGED_EXEC_COMMAND_TOOL } from './default-tools';
 import * as editBaseline from './edit-baseline';
+import * as promptContext from './prompt-context';
 import { ModelCatalogService } from './model-catalog-service';
 import type { StartedTurn } from './persistence';
 import type { RuntimeHostClient } from './runtime-host';
@@ -274,6 +275,39 @@ describe('Grok CLI Main routing', () => {
     expect(grok.start).not.toHaveBeenCalled();
   });
 
+  it('allocates no streaming lease or runtime after cancellation during Git discovery', async () => {
+    const { router, grok, resources } = createHarness();
+    let finish!: () => void;
+    const wait = new Promise<Awaited<ReturnType<typeof promptContext.capturePromptWorkspace>>>(
+      (resolve) => {
+        finish = () => resolve({ vcs: [], workspaceRules: [] });
+      },
+    );
+    let announce!: () => void;
+    const discovered = new Promise<void>((resolve) => {
+      announce = resolve;
+    });
+    const capture = vi.spyOn(promptContext, 'capturePromptWorkspace').mockImplementation(() => {
+      announce();
+      return wait;
+    });
+    const canceled = new Set<string>();
+    Object.assign(router, { canceledRuntimeTurns: canceled });
+    try {
+      const pending = router.startSelectedRuntime(started);
+      await discovered;
+      expect(resources.size).toBe(0);
+      canceled.add(started.turnId);
+      finish();
+      await pending;
+      expect(resources.size).toBe(0);
+      expect(grok.start).not.toHaveBeenCalled();
+    } finally {
+      finish();
+      capture.mockRestore();
+    }
+  });
+
   it('begins an external Provider lease before dispatch without starting workspace watchers', async () => {
     const { router, resources } = createHarness();
     const startWorkspaceWatch = vi.fn();
@@ -531,6 +565,38 @@ describe('Grok CLI Main routing', () => {
     persistence.getStoredRuntime.mockReturnValue('mock');
     await router.adoptInstalledRuntime();
     expect(persistence.setRuntime).not.toHaveBeenCalled();
+  });
+
+  it('starts using the newly ready CLI for an existing unconnected Task after rechecking', async () => {
+    vi.stubEnv('SPRINT_CODER_RUNTIME_ADOPT', '1');
+    const { router, handlers, codex, claude, grok, persistence } = createHarness();
+    const missing = { available: false, readiness: 'unavailable', models: [] };
+    codex.probe.mockResolvedValue(missing);
+    claude.probe.mockResolvedValue(missing);
+    grok.probe.mockResolvedValue(missing);
+    persistence.getRuntime.mockReturnValue('mock');
+    persistence.setRuntime.mockImplementation((kind: RuntimeKind) => {
+      persistence.getRuntime.mockReturnValue(kind);
+      persistence.getStoredRuntime.mockReturnValue(kind);
+    });
+    router.register();
+    const readRuntime = handlers.get(IPC_CHANNELS.settingsGetRuntime)!;
+    expect(await readRuntime({ taskId: 'task-grok' })).toMatchObject({
+      kind: 'mock',
+      aiConnectionRequired: true,
+    });
+    grok.refreshCapabilityProbe.mockImplementation(async () => {
+      grok.probe.mockResolvedValue({
+        available: true,
+        readiness: 'ready',
+        models: [{ id: 'grok-test', displayName: 'grok-test' }],
+      });
+    });
+    await handlers.get(IPC_CHANNELS.settingsRefreshRuntimeDetection)!({});
+    const connected = await readRuntime({ taskId: 'task-grok' });
+    expect(connected).toMatchObject({ kind: 'grok', grokReadiness: 'ready' });
+    expect(connected).not.toHaveProperty('aiConnectionRequired');
+    await expect(router.assertChatAiConnected(null)).resolves.toBeUndefined();
   });
 
   it('includes xAI Grok subscription models in both the catalog and Team candidates', async () => {
