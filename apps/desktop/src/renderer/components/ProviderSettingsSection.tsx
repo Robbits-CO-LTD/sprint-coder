@@ -7,6 +7,7 @@ import type {
   ProviderVerificationStatus,
 } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
+import { providerStorageGuidance } from '../../provider-storage-guidance';
 import { ChevronDown, Eye, EyeOff, Plus, RefreshCw, X } from './icons';
 import { ModelAuthorIcon } from './ModelAuthorIcon';
 
@@ -460,8 +461,11 @@ export function hasOptionalProviderFields(state: {
 }
 
 export function providerCreateErrorMessage(error: unknown): string {
-  if (String(error).includes('OSの安全な保管領域を利用できません'))
-    return '接続を追加できませんでした。OSの安全な保管領域を利用できません。macOSのログインキーチェーンを確認してから再試行してください。';
+  const errorText = String(error);
+  const guidance = Object.values(providerStorageGuidance).find((message) =>
+    errorText.includes(message),
+  );
+  if (guidance !== undefined) return `接続を追加できませんでした。${guidance}`;
   if (error !== null && typeof error === 'object') {
     const record = error as { code?: unknown };
     if (typeof record.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(record.code))
