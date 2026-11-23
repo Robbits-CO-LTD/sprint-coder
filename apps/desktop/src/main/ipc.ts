@@ -1697,26 +1697,27 @@ export class IpcRouter {
         if (!connectionId || !modelId) throw new InvalidModelError('provider');
         const connection = this.persistence.getProviderConnection(connectionId);
         const binding = () => {
-          const run = this.managedWorkerTurn.get(turnId)?.executionBinding;
+          const active = this.managedWorkerTurn.get(turnId);
           if (
-            !run ||
-            run.agentId !== worker.id ||
+            active?.workerId !== worker.id ||
+            active.taskId !== worker.taskId ||
             desktopControlWorker(worker.taskId, worker.id) === undefined
           )
             return null;
-          const current = this.persistence.getTeamExecution(run.executionId);
-          if (
-            current.assigneeAgentId !== worker.id ||
-            digestCanonical(current.modelSelection) !== digestCanonical(run.modelSelection)
-          )
-            return null;
-          return this.cliScreenshotBinding(
-            worker.taskId,
-            turnId,
-            connection,
-            modelId,
-            current.modelSelection,
-          );
+          const run = active.executionBinding;
+          let selection: ModelSelection | null;
+          if (run) {
+            const current = this.persistence.getTeamExecution(run.executionId);
+            if (
+              current.assigneeAgentId !== worker.id ||
+              digestCanonical(current.modelSelection) !== digestCanonical(run.modelSelection)
+            )
+              return null;
+            selection = current.modelSelection;
+          } else {
+            selection = this.directWorkerSelection(worker.taskId, worker.id);
+          }
+          return this.cliScreenshotBinding(worker.taskId, turnId, connection, modelId, selection);
         };
         return {
           writable,
@@ -7484,7 +7485,15 @@ export class IpcRouter {
     // (`registerCommandRunnerTool`). With the cursors off or without the mark, the catalog is as
     // it was.
     const desktopControl =
-      agentId !== undefined && desktopControlWorker(taskId, agentId) !== undefined;
+      agentId !== undefined &&
+      desktopControlWorker(taskId, agentId) !== undefined &&
+      (kind !== 'provider' ||
+        isExternalAcpConnection(
+          (execution === undefined
+            ? this.directWorkerSelection(taskId, agentId)
+            : execution.modelSelection
+          )?.connectionId ?? null,
+        ));
     const allowed = new Set([
       'update_plan',
       ...(workspace.roots.length === 0 ? [] : readable),
@@ -7522,6 +7531,18 @@ export class IpcRouter {
       ...(onApprovalWait === undefined ? {} : { onApprovalWait }),
     });
     return snapshot;
+  }
+
+  private directWorkerSelection(taskId: string, workerId: string): ModelSelection | null {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (!team) return null;
+    return (
+      this.persistence
+        .getTeamSnapshot(team.id)
+        .agents.find(
+          (agent) => agent.id === workerId && agent.kind === 'worker' && agent.taskId === taskId,
+        )?.modelSelection ?? null
+    );
   }
 
   /** Worker tools share their parent's broker Turn. Their model is bound to the individual call. */
