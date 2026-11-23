@@ -695,11 +695,26 @@ export function evaluatePermissionPolicy(input: {
         : evaluation('deny', policy.reviewerDecision.reason, policy.policyEpoch, trace),
       policy.reviewerDecision,
     );
-  if (policy.reviewerDecision !== undefined)
+  if (policy.reviewerDecision !== undefined) {
+    const workspaceReadTimedOut =
+      policy.reviewerDecision.decision === 'timeout' &&
+      request.capability === 'workspace.read' &&
+      request.operation === 'read' &&
+      request.resource.kind === 'workspace-path' &&
+      request.resource.classification === 'workspace' &&
+      request.risk !== 'high';
     return withReviewerAudit(
-      evaluation('deny', `reviewer_${policy.reviewerDecision.decision}`, policy.policyEpoch, trace),
+      workspaceReadTimedOut
+        ? evaluation('approval_required', 'reviewer_escalated_timeout', policy.policyEpoch, trace)
+        : evaluation(
+            'deny',
+            `reviewer_${policy.reviewerDecision.decision}`,
+            policy.policyEpoch,
+            trace,
+          ),
       policy.reviewerDecision,
     );
+  }
   return evaluation(
     'approval_required',
     policy.approvalReason ?? 'auto_reviewer_required',

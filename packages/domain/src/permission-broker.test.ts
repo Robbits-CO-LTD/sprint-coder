@@ -438,6 +438,46 @@ describe('PermissionBroker policy evaluation', () => {
     expect(result).toMatchObject({ decision: 'deny', reason: expected });
   });
 
+  it('asks the person when automatic review of a workspace read times out', () => {
+    const request: PermissionRequest = {
+      ...workspaceWriteRequest,
+      capability: 'workspace.read',
+      operation: 'read',
+    };
+    const { decisionNonce: _nonce, ...facts } = reviewerAllow(request);
+    const policy = {
+      ...basePolicy(),
+      approvalPolicy: 'auto' as const,
+      reviewerDecision: { ...facts, decision: 'timeout' as const },
+    };
+
+    const result = evaluatePermissionPolicy({ request, policy, now: NOW });
+    expect(result).toMatchObject({
+      decision: 'approval_required',
+      reason: 'reviewer_escalated_timeout',
+      reviewerAudit: { decision: 'timeout' },
+    });
+    expect(result.permit).toBeUndefined();
+
+    expect(
+      evaluatePermissionPolicy({
+        request,
+        policy: {
+          ...policy,
+          projectDeny: [
+            {
+              capability: 'workspace.read',
+              resourceSet: { kind: 'all' },
+              operations: ['read'],
+              auditReason: 'project_deny',
+            },
+          ],
+        },
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'project_deny' });
+  });
+
   it('lets a hard deny win before a reviewer deny could reach the person', () => {
     const { decisionNonce: _nonce, ...facts } = reviewerAllow();
     const result = evaluatePermissionPolicy({
