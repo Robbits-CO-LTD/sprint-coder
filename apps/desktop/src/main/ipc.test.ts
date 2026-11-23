@@ -3764,6 +3764,7 @@ describe('Main image attachment dispatch boundary', () => {
         'codex',
       );
       const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      let directConnection = 'builtin:opencode-cli';
       Object.assign(router, {
         managedWorkerTurn: new Map(),
         managedWorkerCall: new Map(),
@@ -3771,6 +3772,16 @@ describe('Main image attachment dispatch boundary', () => {
         persistence: {
           getActiveTurnId: () => 'turn-parent',
           getTeamByTask: () => ({ id: 'team-1' }),
+          getTeamSnapshot: () => ({
+            agents: [
+              {
+                id: 'worker-1',
+                kind: 'worker',
+                taskId: 'task-1',
+                modelSelection: { connectionId: directConnection },
+              },
+            ],
+          }),
           getTeamExecution: (id: string) => ({
             id,
             teamId: 'team-1',
@@ -3814,6 +3825,9 @@ describe('Main image attachment dispatch boundary', () => {
         ]);
         expect(await tools('provider', 'external-cli', 'worker-1')).toContain('exec_command');
         expect(await tools('provider', 'external-cli', 'worker-2')).not.toContain('exec_command');
+        expect(await tools('provider', undefined, 'worker-1')).toContain('exec_command');
+        directConnection = 'custom-api';
+        expect(await tools('provider', undefined, 'worker-1')).not.toContain('exec_command');
         // Not for an API Worker, an unmarked Worker, or an execution assigned to someone else.
         expect(await tools('provider', 'execution-1', 'worker-1')).not.toContain('exec_command');
         expect(await tools('codex', undefined, 'worker-2')).not.toContain('exec_command');
