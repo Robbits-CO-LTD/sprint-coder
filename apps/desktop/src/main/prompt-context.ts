@@ -6,12 +6,15 @@ import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeContextFragment, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { resolveDesktopControlCommand } from './desktop-control';
 import { digestCanonical } from './context-compiler';
-import { safeGitExecFileSync } from './safe-git';
+import { gitExecFile, safeGitExec, safeGitExecFile } from './safe-git';
 import { SKILL_REQUEST_GUIDANCE, WORKSPACE_REQUEST_GUIDANCE } from '../chat-continuation';
 
 export const PROMPT_CONTEXT_VERSION = 1;
 const MAX_WORKSPACE_RULE_BYTES = 24 * 1024;
 const MAX_WORKSPACE_RULE_TOTAL_BYTES = 32 * 1024;
+const PROMPT_GIT_OPTIONS = { timeout: 2_000, maxBuffer: 64 * 1024 };
+
+type VcsFailure = 'not_git_repository' | 'git_not_found' | 'git_unavailable';
 
 export type PromptAgent = Readonly<{
   role: 'primary' | 'subagent';
@@ -42,7 +45,12 @@ export type PromptEnvironment = Readonly<{
     path: string;
     role: 'primary' | 'secondary';
   }>[];
-  vcs: readonly Readonly<{ root: string; branch: string | null; changes: readonly string[] }>[];
+  vcs: readonly Readonly<{
+    root: string;
+    branch: string | null;
+    changes: readonly string[];
+    failure?: VcsFailure;
+  }>[];
 }>;
 
 export type CanonicalPromptContext = Readonly<{
@@ -168,11 +176,12 @@ export function compilePromptGuidance(input: {
         input.workspace.roots.find(({ rootId }) => rootId === input.workspace.primaryRootId)
           ?.path ?? null,
       workspaceRoots,
-      vcs: [...(input.vcs ?? captureVcsSnapshot(input.workspace))].sort((left, right) =>
-        left.root.localeCompare(right.root),
-      ),
+      vcs: [
+        ...(input.vcs ??
+          input.workspace.roots.map(({ path }) => unavailableVcs(path, 'git_unavailable'))),
+      ].sort((left, right) => left.root.localeCompare(right.root)),
     },
-    workspaceRules: [...(input.workspaceRules ?? discoverWorkspaceRules(input.workspace))].sort(
+    workspaceRules: [...(input.workspaceRules ?? readWorkspaceRules(input.workspace))].sort(
       (left, right) => left.depth - right.depth || left.path.localeCompare(right.path),
     ),
     tools,
@@ -232,13 +241,16 @@ export function injectPromptGuidance(
   );
 }
 
-export function discoverWorkspaceRules(workspace: RuntimeWorkspaceSet): PromptWorkspaceRule[] {
+function readWorkspaceRules(
+  workspace: RuntimeWorkspaceSet,
+  candidates?: ReadonlyMap<string, readonly string[]>,
+): PromptWorkspaceRule[] {
   const rules: PromptWorkspaceRule[] = [];
   let totalBytes = 0;
   for (const root of [...workspace.roots].sort((left, right) =>
     left.path.localeCompare(right.path),
   )) {
-    for (const path of workspaceRuleCandidates(root.path)) {
+    for (const path of candidates?.get(root.path) ?? [join(root.path, 'AGENTS.md')]) {
       try {
         const stat = lstatSync(path);
         if (!stat.isFile() || stat.size > MAX_WORKSPACE_RULE_BYTES) continue;
@@ -266,47 +278,87 @@ export function discoverWorkspaceRules(workspace: RuntimeWorkspaceSet): PromptWo
   return rules;
 }
 
-function workspaceRuleCandidates(root: string): string[] {
+async function workspaceRuleCandidates(root: string): Promise<string[]> {
   const candidates = new Set([join(root, 'AGENTS.md')]);
-  try {
-    const output = safeGitExecFileSync(
-      root,
-      ['ls-files', '--cached', '--others', '--exclude-standard', '--', 'AGENTS.md', '**/AGENTS.md'],
-      { timeout: 2_000, maxBuffer: 64 * 1024 },
-    );
+  const output = await safeGitExecFile(
+    root,
+    ['ls-files', '--cached', '--others', '--exclude-standard', '--', 'AGENTS.md', '**/AGENTS.md'],
+    PROMPT_GIT_OPTIONS,
+  );
+  // A non-Git Workspace still receives its root AGENTS.md when present.
+  if (output !== null) {
     for (const item of output.split(/\r?\n/u).filter(Boolean).slice(0, 64)) {
       const path = resolve(root, item);
       const nested = relative(root, path);
       if (nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested))
         candidates.add(path);
     }
-  } catch {
-    // A non-Git Workspace still receives its root AGENTS.md when present.
   }
   return [...candidates].sort();
 }
 
-export function captureVcsSnapshot(workspace: RuntimeWorkspaceSet): PromptEnvironment['vcs'] {
-  return workspace.roots.map((root) => {
+export async function discoverWorkspaceRules(
+  workspace: RuntimeWorkspaceSet,
+): Promise<PromptWorkspaceRule[]> {
+  const candidates = new Map<string, readonly string[]>();
+  for (const { path } of workspace.roots) candidates.set(path, await workspaceRuleCandidates(path));
+  return readWorkspaceRules(workspace, candidates);
+}
+
+export async function capturePromptWorkspace(workspace: RuntimeWorkspaceSet) {
+  const [vcs, workspaceRules] = await Promise.all([
+    captureVcsSnapshot(workspace),
+    discoverWorkspaceRules(workspace),
+  ]);
+  return { vcs, workspaceRules };
+}
+
+function unavailableVcs(root: string, failure: VcsFailure): PromptEnvironment['vcs'][number] {
+  return { root, branch: null, changes: [], failure };
+}
+
+function classifyVcsFailure(error: unknown): VcsFailure {
+  if (error instanceof Error && 'code' in error) {
+    if (error.code === 'ENOENT') return 'git_not_found';
+    if (
+      error.code === 128 &&
+      'stderr' in error &&
+      typeof error.stderr === 'string' &&
+      /^fatal: not a git repository(?:\s|$)/u.test(error.stderr)
+    )
+      return 'not_git_repository';
+  }
+  return 'git_unavailable';
+}
+
+export async function captureVcsSnapshot(
+  workspace: RuntimeWorkspaceSet,
+): Promise<PromptEnvironment['vcs']> {
+  const snapshots: PromptEnvironment['vcs'][number][] = [];
+  for (const root of workspace.roots) {
     try {
-      const branch = safeGitExecFileSync(root.path, ['branch', '--show-current'], {
-        timeout: 2_000,
-        maxBuffer: 64 * 1024,
-      }).trim();
-      const status = safeGitExecFileSync(
+      const { stdout: branch } = await safeGitExec(
+        gitExecFile,
+        root.path,
+        ['branch', '--show-current'],
+        PROMPT_GIT_OPTIONS,
+      );
+      const { stdout: status } = await safeGitExec(
+        gitExecFile,
         root.path,
         ['status', '--short', '--untracked-files=normal'],
-        { timeout: 2_000, maxBuffer: 64 * 1024 },
+        PROMPT_GIT_OPTIONS,
       );
-      return {
+      snapshots.push({
         root: root.path,
-        branch: branch === '' ? null : branch,
+        branch: branch.trim() || null,
         changes: status.split(/\r?\n/u).filter(Boolean).slice(0, 100),
-      };
-    } catch {
-      return { root: root.path, branch: null, changes: [] };
+      });
+    } catch (error) {
+      snapshots.push(unavailableVcs(root.path, classifyVcsFailure(error)));
     }
-  });
+  }
+  return snapshots;
 }
 
 function renderPromptGuidance(context: CanonicalPromptContext): string {

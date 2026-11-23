@@ -46,6 +46,7 @@ vi.mock('./prompt-context', async (importOriginal) => {
   const actual = await importOriginal<typeof PromptContextModule>();
   return {
     ...actual,
+    capturePromptWorkspace: async () => ({ vcs: [], workspaceRules: [] }),
     compilePromptGuidance: (...args: Parameters<typeof actual.compilePromptGuidance>) => {
       if (promptContextMock.compileFailure !== null)
         throw new Error(promptContextMock.compileFailure);

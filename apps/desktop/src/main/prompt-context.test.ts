@@ -1,14 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import {
   compilePromptGuidance,
+  captureVcsSnapshot,
   discoverWorkspaceRules,
   injectPromptGuidance,
   type PromptWorkspaceRule,
 } from './prompt-context';
+import * as safeGit from './safe-git';
 
 const workspace: RuntimeWorkspaceSet = {
   primaryRootId: 'root',
@@ -17,9 +22,9 @@ const workspace: RuntimeWorkspaceSet = {
 };
 
 describe('prompt context compiler', () => {
-  it('discovers the repository AGENTS.md as a scoped workspace rule', () => {
+  it('discovers the repository AGENTS.md as a scoped workspace rule', async () => {
     const root = resolve(fileURLToPath(new URL('../../../../', import.meta.url)));
-    const rules = discoverWorkspaceRules({
+    const rules = await discoverWorkspaceRules({
       primaryRootId: 'repo',
       digest: 'repo',
       roots: [{ rootId: 'repo', path: root, label: 'repo', role: 'primary' }],
@@ -29,6 +34,44 @@ describe('prompt context compiler', () => {
         expect.objectContaining({ path: join(root, 'AGENTS.md'), scope: root, depth: 0 }),
       ]),
     );
+  });
+
+  it('reports non-Git folders separately from a clean Git checkout', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-vcs-'));
+    const repo = join(root, 'repo');
+    try {
+      execFileSync('git', ['init', '--quiet', '--initial-branch=main', repo]);
+      const vcs = await captureVcsSnapshot({
+        ...workspace,
+        roots: [
+          { ...workspace.roots[0]!, path: root },
+          { rootId: 'repo', path: repo, label: 'repo', role: 'secondary' },
+        ],
+      });
+      expect(vcs[0]).toEqual({ root, branch: null, changes: [], failure: 'not_git_repository' });
+      expect(vcs[1]).toEqual({ root: repo, branch: 'main', changes: [] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['git_not_found', { code: 'ENOENT' }],
+    ['git_unavailable', { code: null, killed: true }],
+    ['git_unavailable', { code: 128, stderr: 'fatal: detected dubious ownership at private-path' }],
+  ])('reports %s without putting Git diagnostics in the prompt', async (failure, details) => {
+    const git = vi
+      .spyOn(safeGit, 'gitExecFile')
+      .mockRejectedValue(Object.assign(new Error('private-path'), details));
+    try {
+      const vcs = await captureVcsSnapshot(workspace);
+      expect(vcs).toEqual([{ root: '/work/repo', branch: null, changes: [], failure }]);
+      const compiled = compilePromptGuidance({ workspace, toolCatalog: catalog([]), vcs });
+      expect(compiled.content).toContain(failure);
+      expect(compiled.content).not.toContain('private-path');
+    } finally {
+      git.mockRestore();
+    }
   });
 
   it('is deterministic and applies deeper workspace rules later', () => {
@@ -458,6 +501,7 @@ describe('prompt context compiler', () => {
     const mac = compilePromptGuidance({
       ...base,
       platform: 'darwin',
+      shell: '/bin/zsh',
       desktopControlCommand: command,
     });
     const windows = compilePromptGuidance({
