@@ -6,6 +6,7 @@ import { CLI_REDETECT_ERROR, ProviderSettingsSection } from './ProviderSettingsS
 import { useAppStore } from '../store/appStore';
 
 afterEach(() => {
+  useAppStore.setState({ runtimeDetectionStatus: 'checking' });
   vi.unstubAllGlobals();
   Reflect.deleteProperty(window, 'sprintCoder');
 });
@@ -32,6 +33,7 @@ function runtimeSettings(grokReadiness: 'ready' | 'unavailable') {
 
 async function renderSection(refreshRuntimeDetection: () => Promise<void>) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  useAppStore.setState({ runtimeDetectionStatus: 'ready' });
   const listConnections = vi.fn().mockResolvedValue([]);
   const getRuntime = vi.fn().mockResolvedValue(runtimeSettings('unavailable'));
   Object.defineProperty(window, 'sprintCoder', {
@@ -45,7 +47,7 @@ async function renderSection(refreshRuntimeDetection: () => Promise<void>) {
   const root = createRoot(container);
   await act(async () => root.render(<ProviderSettingsSection active />));
   const reload = [...container.querySelectorAll('button')].find((button) =>
-    button.textContent?.includes('再読み込み'),
+    button.textContent?.includes('CLIをもう一度確かめる'),
   )!;
   return {
     container,
@@ -77,6 +79,7 @@ it('detects the CLIs again from the reload button, and only from it (issue #581)
     // The runtime state is read only after the new detection has settled.
     expect(view.getRuntime).not.toHaveBeenCalled();
     expect(view.reload.disabled).toBe(true);
+    expect(view.reload.textContent).toContain('確認中');
 
     await act(async () => finishDetection());
     expect(view.getRuntime).toHaveBeenCalledOnce();
@@ -97,6 +100,30 @@ it('says so when the CLIs could not be detected again, while keeping the Connect
     );
     expect(view.getRuntime).not.toHaveBeenCalled();
     expect(view.reload.disabled).toBe(false);
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+it('keeps the fresh detection result when an earlier read returns late', async () => {
+  const view = await renderSection(async () => undefined);
+  try {
+    let finishEarlierRead!: (runtime: ReturnType<typeof runtimeSettings>) => void;
+    view.getRuntime.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishEarlierRead = resolve;
+        }),
+    );
+    const earlierRead = useAppStore.getState().loadRuntime();
+    view.getRuntime.mockResolvedValue(runtimeSettings('ready'));
+    await act(async () => view.reload.click());
+    expect(useAppStore.getState().runtime.grokReadiness).toBe('ready');
+    await act(async () => {
+      finishEarlierRead(runtimeSettings('unavailable'));
+      await earlierRead;
+    });
+    expect(useAppStore.getState().runtime.grokReadiness).toBe('ready');
   } finally {
     await act(async () => view.root.unmount());
   }

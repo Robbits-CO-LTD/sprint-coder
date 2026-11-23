@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { Check, X } from './icons';
 import {
+  CLI_CHECKING_LABEL,
   EFFORT_DESC,
   EFFORT_LABEL,
   EFFORT_LEVELS,
@@ -621,19 +622,34 @@ function AccessDefaultGroup() {
 
 function CliDetectionGroup() {
   const runtime = useAppStore((s) => s.runtime);
+  const detectionStatus = useAppStore((s) => s.runtimeDetectionStatus);
   return (
     <div className="settings-group">
       <span className="settings-field-label">CLI検出状況</span>
-      <ul className="settings-status">
+      <ul className="settings-status" aria-busy={detectionStatus === 'checking'}>
         {(['codex', 'claude', 'grok'] as const).map((kind) => {
           const { available, reason } = availabilityOf(kind, runtime);
           return (
             <li key={kind} data-testid={`settings-cli-${kind}`}>
-              <span className={available ? 'settings-ok' : 'settings-missing'}>
-                {available ? <Check size={14} /> : <X size={14} />}
+              <span
+                className={
+                  detectionStatus === 'ready'
+                    ? available
+                      ? 'settings-ok'
+                      : 'settings-missing'
+                    : undefined
+                }
+              >
+                {detectionStatus === 'ready' && (available ? <Check size={14} /> : <X size={14} />)}
               </span>
               <span>{RUNTIME_LABEL[kind]}</span>
-              <span className="settings-hint">{reason ?? (available ? '利用可能' : '未検出')}</span>
+              <span className="settings-hint">
+                {detectionStatus === 'checking'
+                  ? CLI_CHECKING_LABEL
+                  : detectionStatus === 'failed'
+                    ? '確認できませんでした'
+                    : (reason ?? (available ? '利用可能' : '未検出'))}
+              </span>
             </li>
           );
         })}

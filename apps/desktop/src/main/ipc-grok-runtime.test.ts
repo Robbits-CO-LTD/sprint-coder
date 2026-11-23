@@ -533,6 +533,38 @@ describe('Grok CLI Main routing', () => {
     expect(persistence.setRuntime).not.toHaveBeenCalled();
   });
 
+  it('starts using the newly ready CLI for an existing unconnected Task after rechecking', async () => {
+    vi.stubEnv('SPRINT_CODER_RUNTIME_ADOPT', '1');
+    const { router, handlers, codex, claude, grok, persistence } = createHarness();
+    const missing = { available: false, readiness: 'unavailable', models: [] };
+    codex.probe.mockResolvedValue(missing);
+    claude.probe.mockResolvedValue(missing);
+    grok.probe.mockResolvedValue(missing);
+    persistence.getRuntime.mockReturnValue('mock');
+    persistence.setRuntime.mockImplementation((kind: RuntimeKind) => {
+      persistence.getRuntime.mockReturnValue(kind);
+      persistence.getStoredRuntime.mockReturnValue(kind);
+    });
+    router.register();
+    const readRuntime = handlers.get(IPC_CHANNELS.settingsGetRuntime)!;
+    expect(await readRuntime({ taskId: 'task-grok' })).toMatchObject({
+      kind: 'mock',
+      aiConnectionRequired: true,
+    });
+    grok.refreshCapabilityProbe.mockImplementation(async () => {
+      grok.probe.mockResolvedValue({
+        available: true,
+        readiness: 'ready',
+        models: [{ id: 'grok-test', displayName: 'grok-test' }],
+      });
+    });
+    await handlers.get(IPC_CHANNELS.settingsRefreshRuntimeDetection)!({});
+    const connected = await readRuntime({ taskId: 'task-grok' });
+    expect(connected).toMatchObject({ kind: 'grok', grokReadiness: 'ready' });
+    expect(connected).not.toHaveProperty('aiConnectionRequired');
+    await expect(router.assertChatAiConnected(null)).resolves.toBeUndefined();
+  });
+
   it('includes xAI Grok subscription models in both the catalog and Team candidates', async () => {
     const { router } = createHarness();
     await router.refreshModelCatalog();
