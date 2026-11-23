@@ -3692,6 +3692,19 @@ export const modelCatalogQueryResultSchema = z
       .nullable(),
     selection: modelSelectionSchema,
     multiProviderModelPickerV2: z.boolean(),
+    unavailableSubscriptions: z
+      .array(
+        z
+          .object({
+            connectionId: connectionIdSchema,
+            displayName: z.string().min(1).max(100),
+            reason: z.enum(['cli_not_found', 'login_required', 'unavailable']),
+            hasModels: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(3)
+      .optional(),
   })
   .strict();
 export type ModelCatalogQueryResult = z.infer<typeof modelCatalogQueryResultSchema>;

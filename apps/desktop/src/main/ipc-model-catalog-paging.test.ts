@@ -86,7 +86,7 @@ function makeRouter({
     handlers.set(channel, handler);
   const profiles = new MainProviderProfileRegistry();
   for (const profile of LOCAL_PROVIDER_PROFILES) profiles.register(profile);
-  const probe = vi.fn(async () => ({ available: false, readiness: 'missing', models: [] }));
+  const probe = vi.fn(async () => ({ available: false, readiness: 'unavailable', models: [] }));
   let flakyCalls = 0;
   const listModels = vi.fn(async (connection: ProviderConnection) => {
     if (connection.id === stableConnection.id) return models(stableConnection, stableCount);
@@ -172,6 +172,44 @@ const listing = {
 } satisfies Omit<ModelCatalogQueryInput, 'cursor' | 'limit'>;
 
 describe('#906: models catalog query rebuilds the catalog only for a first page', () => {
+  it('reports missing and signed-out subscriptions even when the CLIs return no model names', async () => {
+    const { query, probe } = makeRouter();
+    probe.mockResolvedValueOnce({
+      available: true,
+      readiness: 'authentication_required',
+      models: [],
+    });
+    const result = await query({
+      ...listing,
+      connectionIds: [],
+      accessTypes: ['subscription'],
+      availableOnly: false,
+      cursor: null,
+      limit: 50,
+    });
+    expect(result.items).toEqual([]);
+    expect(result.unavailableSubscriptions).toEqual([
+      {
+        connectionId: 'builtin:codex-cli',
+        displayName: 'Codex CLI',
+        reason: 'login_required',
+        hasModels: false,
+      },
+      {
+        connectionId: 'builtin:claude-cli',
+        displayName: 'Claude Code',
+        reason: 'cli_not_found',
+        hasModels: false,
+      },
+      {
+        connectionId: 'builtin:grok-cli',
+        displayName: 'Grok CLI',
+        reason: 'cli_not_found',
+        hasModels: false,
+      },
+    ]);
+  });
+
   it('answers a continuation page from the catalog the first page built, without re-probing', async () => {
     const { query, probe, listModels } = makeRouter();
 

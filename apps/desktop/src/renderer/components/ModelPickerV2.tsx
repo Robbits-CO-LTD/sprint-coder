@@ -69,7 +69,17 @@ export const MODEL_ACCESS_OPTIONS: readonly { id: ModelCatalogAccessType; label:
 ];
 export const DEFAULT_ACCESS_TYPE: ModelCatalogAccessType = 'subscription';
 
+type UnavailableSubscription = NonNullable<
+  ModelCatalogQueryResult['unavailableSubscriptions']
+>[number];
+const unavailableLabels: Record<UnavailableSubscription['reason'], string> = {
+  cli_not_found: 'CLI が見つかりません',
+  login_required: 'ログインが必要です',
+  unavailable: '現在利用できません',
+};
+
 type CatalogPage = {
+  unavailableSubscriptions?: UnavailableSubscription[];
   revision: number;
   total: number;
   items: ProviderModel[];
@@ -233,7 +243,7 @@ export function catalogQuery(args: {
     providerIds: [],
     accessTypes: [args.accessType],
     capabilities: [],
-    availableOnly: true,
+    availableOnly: false,
     cursor: args.cursor,
     limit: PAGE_LIMIT,
   };
@@ -447,6 +457,9 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
           revision: result.revision,
           total: result.total,
           items: replace ? [...result.items] : [...current.items, ...result.items],
+          unavailableSubscriptions: replace
+            ? (result.unavailableSubscriptions ?? [])
+            : (current.unavailableSubscriptions ?? []),
           nextCursor: result.nextCursor,
         }));
         setFailed(false);
@@ -623,6 +636,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   }, [open]);
 
   function choose(model: ProviderModel) {
+    if (!model.available) return;
     setChosen({
       connectionId: model.connectionId,
       requestedModel: model.modelId,
@@ -787,6 +801,13 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               {page.items.slice(range.startIndex, range.endIndex).map((model, offset) => {
                 const index = range.startIndex + offset;
                 const selected = isSelected(model, selection);
+                const reason = model.available
+                  ? null
+                  : unavailableLabels[
+                      page.unavailableSubscriptions?.find(
+                        (entry) => entry.connectionId === model.connectionId,
+                      )?.reason ?? 'unavailable'
+                    ];
                 const author = model.modelAuthor?.value;
                 // Grouping is drawn *inside* the row — a rail column that names its band where the
                 // band starts, and a hairline above that row. No header entry, because a header would
@@ -800,7 +821,8 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                     id={optionId(index)}
                     role="option"
                     aria-selected={selected}
-                    aria-label={`${modelAuthorDisplayName(author)} ${model.displayName}、${providerLabel(model)}経由、接続 ${connectionLabel(model)}`}
+                    aria-disabled={!model.available}
+                    aria-label={`${modelAuthorDisplayName(author)} ${model.displayName}、${providerLabel(model)}経由、接続 ${connectionLabel(model)}${reason === null ? '' : '、' + reason}`}
                     data-testid={`model-picker-v2-option-${model.modelId}`}
                     className={`mpv2-row${selected ? ' selected' : ''}${
                       index === activeIndex ? ' active' : ''
@@ -836,7 +858,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                         {/* Keep the user-editable account name too: two keys for one gateway are
                           distinct selections even when they expose the same model id. */}
                         <span className="mpv2-conn">接続: {connectionLabel(model)}</span>
-                        <span className="mpv2-meta">{describeModel(model)}</span>
+                        <span className="mpv2-meta">{reason ?? describeModel(model)}</span>
                       </span>
                     </span>
                   </div>
@@ -864,26 +886,42 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             >
               {searching ? <span className="sr-only">{countMessage}</span> : countMessage}
             </div>
-            {page.items.length === 0 && !loading && text === query && (
-              <div className="mpv2-empty">
-                {failed ? (
-                  'モデル一覧を取得できませんでした'
-                ) : accessType === 'local' && query === '' ? (
-                  <button
-                    type="button"
-                    className="settings-secondary-button"
-                    onClick={() => {
-                      close(true);
-                      requestOpenProviderSettings();
-                    }}
-                  >
-                    プロバイダー接続を追加
-                  </button>
-                ) : (
-                  '一致するモデルがありません'
-                )}
-              </div>
-            )}
+            {!loading &&
+              text === query &&
+              !failed &&
+              query === '' &&
+              page.unavailableSubscriptions
+                ?.filter(({ hasModels }) => !hasModels)
+                .map(({ connectionId, displayName, reason }) => (
+                  <div className="mpv2-empty" key={connectionId}>
+                    {displayName} — {unavailableLabels[reason]}
+                  </div>
+                ))}
+            {!loading &&
+              text === query &&
+              (page.items.length === 0 || Boolean(page.unavailableSubscriptions?.length)) && (
+                <div className="mpv2-empty">
+                  {failed ? (
+                    'モデル一覧を取得できませんでした'
+                  ) : (
+                    <>
+                      {page.items.length === 0 &&
+                        (query !== '' || !page.unavailableSubscriptions?.length) &&
+                        '一致するモデルがありません '}
+                      <button
+                        type="button"
+                        className="settings-secondary-button"
+                        onClick={() => {
+                          close(true);
+                          requestOpenProviderSettings();
+                        }}
+                      >
+                        {accessType === 'local' ? 'プロバイダー接続を追加' : '接続設定を開く'}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             {nextPageFailure !== null && (
               <div className="mpv2-more">
                 <span role="status">続きを読み込めませんでした</span>{' '}
