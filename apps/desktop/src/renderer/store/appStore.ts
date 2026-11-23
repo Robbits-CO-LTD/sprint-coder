@@ -7,6 +7,7 @@ import type {
   SkillCatalogItem,
   SkillDraft,
   TurnSkillSelection,
+  TurnFailureReason,
 } from '@sprint-coder/contracts';
 import type {
   AccessPreset,
@@ -229,6 +230,7 @@ type AppState = {
    * live `turn.completed` (issue #1285). Their withdrawn cards are not marked in the history.
    */
   canceledTurnIdsByTask: Record<string, readonly string[]>;
+  turnFailuresByTask: Record<string, Readonly<Record<string, TurnFailureReason>>>;
   /** Images generated per task, oldest first (issue #11). Metadata only — bytes are fetched by the
    * card that displays them, so switching tasks never drags base64 through the store. */
   imagesByTask: Record<string, GeneratedImage[]>;
@@ -1038,8 +1040,17 @@ export function handleTurnEvent(
     }
     case 'turn.completed': {
       apply((state) => {
+        const turnFailureUpdate =
+          ev.state === 'failed' && ev.failureReason !== undefined
+            ? {
+                turnFailuresByTask: {
+                  ...state.turnFailuresByTask,
+                  [taskId]: { ...state.turnFailuresByTask[taskId], [ev.turnId]: ev.failureReason },
+                },
+              }
+            : {};
         const turn = state.turnByTask[taskId];
-        if (!turn || turn.turnId !== ev.turnId) return {};
+        if (!turn || turn.turnId !== ev.turnId) return turnFailureUpdate;
         const existing = state.messagesByTask[taskId] ?? [];
         let nextMessages = existing;
         if (ev.message) {
@@ -1058,6 +1069,7 @@ export function handleTurnEvent(
           nextMessages = [...existing.filter((m) => m.id !== partial.id), partial];
         }
         return {
+          ...turnFailureUpdate,
           messagesByTask: { ...state.messagesByTask, [taskId]: nextMessages },
           ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
           turnDiffByTask: {
@@ -1397,6 +1409,7 @@ export const useAppStore = create<AppState>((set, get) => {
     turnDiffByTask: {},
     interruptedTurnIdsByTask: {},
     canceledTurnIdsByTask: {},
+    turnFailuresByTask: {},
     imagesByTask: {},
     fileChangesByTask: {},
     liveEditTaskId: null,
@@ -2094,6 +2107,12 @@ export const useAppStore = create<AppState>((set, get) => {
           canceledTurnIdsByTask: {
             ...state.canceledTurnIdsByTask,
             [taskId]: snapshot.canceledTurnIds ?? [],
+          },
+          turnFailuresByTask: {
+            ...state.turnFailuresByTask,
+            [taskId]: Object.fromEntries(
+              (snapshot.turnFailures ?? []).map(({ turnId, reason }) => [turnId, reason]),
+            ),
           },
         }));
       }

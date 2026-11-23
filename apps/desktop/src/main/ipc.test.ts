@@ -451,6 +451,8 @@ describe('Main runtime failure diagnostics', () => {
         'task-protocol',
         'turn-protocol',
         'failed',
+        undefined,
+        'cli_failed',
       );
       log.mockRestore();
     },
@@ -573,6 +575,8 @@ describe('Main runtime failure diagnostics', () => {
         'task-protocol',
         'turn-protocol',
         'failed',
+        undefined,
+        'cli_failed',
       );
       expect(effect).not.toHaveBeenCalled();
       await managed.dispose();
@@ -6919,6 +6923,8 @@ describe('Provider Team completion and model errors', () => {
       'task-provider-failure',
       'turn-provider-failure',
       'failed',
+      undefined,
+      'api_network',
     );
 
     recordRuntimeFailureDiagnostic.mockClear();
@@ -6937,6 +6943,8 @@ describe('Provider Team completion and model errors', () => {
       'task-provider-failure',
       'turn-provider-failure',
       'failed',
+      undefined,
+      'api_network',
     );
   });
 

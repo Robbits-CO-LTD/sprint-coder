@@ -957,7 +957,7 @@ function grokPublicError(error: unknown): PublicError {
     };
   if (error instanceof GrokRpcError && error.category === 'authentication')
     return {
-      code: 'RUNTIME_FAILED',
+      code: 'RUNTIME_CLI_AUTH_REQUIRED',
       userMessage: 'Grok CLIのログインが必要です。ターミナルで grok login を実行してください。',
       retryable: false,
     };

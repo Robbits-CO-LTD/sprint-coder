@@ -2761,6 +2761,7 @@ body.is-resizing-sidebar iframe {
     flex-wrap: wrap;
   }
 }
+.turn-failure-marker,
 .turn-interrupted-marker {
   display: flex;
   align-self: flex-start;
@@ -2771,6 +2772,11 @@ body.is-resizing-sidebar iframe {
   color: var(--text-secondary);
   font-size: 12px;
 }
+.turn-failure-marker {
+  align-items: center;
+  flex-wrap: wrap;
+}
+.turn-failure-marker strong,
 .turn-interrupted-marker strong {
   color: var(--text-primary);
   font-weight: 600;

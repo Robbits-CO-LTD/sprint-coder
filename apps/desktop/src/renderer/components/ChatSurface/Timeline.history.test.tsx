@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, TeamDetail, TurnDiff } from '../../types/sprint-coder';
 import { useAppStore } from '../../store/appStore';
+import { OPEN_PROVIDER_SETTINGS_EVENT } from '../../lib/settings-navigation';
 import { Timeline } from './Timeline';
 
 const initial = useAppStore.getState();
@@ -27,15 +28,51 @@ afterEach(() => {
 
 // The store is read through useSyncExternalStore, whose server snapshot is the initial state, so
 // the Timeline is mounted in jsdom rather than rendered to static markup.
-async function render(): Promise<string> {
+async function render(interact?: (container: HTMLElement) => void): Promise<string> {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const container = document.createElement('div');
   const root = createRoot(container);
   await act(async () => root.render(<Timeline taskId="task-1" />));
-  const html = container.innerHTML;
-  await act(async () => root.unmount());
-  return html;
+  try {
+    interact?.(container);
+    return container.innerHTML;
+  } finally {
+    await act(async () => root.unmount());
+  }
 }
+
+it('places fixed API and CLI failure guidance on the matching historical Turns', async () => {
+  useAppStore.setState({
+    messagesByTask: {
+      'task-1': [
+        message({ id: 'a', turnId: 'api' }),
+        message({ id: 'ap', turnId: 'api', author: 'assistant', content: '途中の回答' }),
+        message({ id: 'b', turnId: 'cli' }),
+        message({ id: 'c', turnId: 'old' }),
+      ],
+    },
+    turnFailuresByTask: { 'task-1': { api: 'api_credentials', cli: 'cli_missing' } },
+  });
+  const openSettings = vi.fn();
+  window.addEventListener(OPEN_PROVIDER_SETTINGS_EVENT, openSettings, { once: true });
+  let html: string;
+  try {
+    html = await render((container) => {
+      const action = container.querySelector<HTMLButtonElement>(
+        '[data-testid="turn-failure-marker"] button',
+      );
+      expect(action).not.toBeNull();
+      action?.click();
+    });
+    expect(openSettings).toHaveBeenCalledOnce();
+  } finally {
+    window.removeEventListener(OPEN_PROVIDER_SETTINGS_EVENT, openSettings);
+  }
+  expect(html.match(/data-testid="turn-failure-marker"/gu)).toHaveLength(2);
+  expect(html.indexOf('途中の回答')).toBeLessThan(html.indexOf('APIキーを確認できませんでした'));
+  expect(html.match(/接続設定を開く/gu)).toHaveLength(1);
+  expect(html).toContain('CLIをインストールして');
+});
 
 describe('Timeline history (issue #842)', () => {
   it('shows the tools-disabled resend notice only for the affected request', async () => {

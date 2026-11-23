@@ -1,4 +1,4 @@
-import type { ProviderConnection } from '@sprint-coder/contracts';
+import type { ProviderConnection, TurnFailureReason } from '@sprint-coder/contracts';
 import type { ProviderRegistry } from './provider-runtime';
 
 export const DEFAULT_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -12,7 +12,17 @@ export interface ProviderVerificationRepository {
   ): ProviderConnection;
 }
 
-export class ProviderVerificationRequiredError extends Error {}
+export class ProviderVerificationRequiredError extends Error {
+  constructor(
+    message: string,
+    readonly failureReason: Extract<
+      TurnFailureReason,
+      'api_credentials' | 'api_network' | 'api_timeout'
+    >,
+  ) {
+    super(message);
+  }
+}
 export class ProviderVerificationTimeoutError extends Error {}
 
 export class ProviderVerificationService {
@@ -45,10 +55,15 @@ export class ProviderVerificationService {
     const connection = this.getConnection(connectionId);
     if (connection.verification.status === 'not_required') return connection;
     if (connection.verification.status === 'verified') return connection;
-    const refreshed = await this.verify(connection, signal);
+    const { connection: refreshed, timedOut } = await this.runVerification(connection, signal);
     if (refreshed.verification.status !== 'verified')
       throw new ProviderVerificationRequiredError(
         refreshed.verification.message ?? 'Provider connection verification failed',
+        refreshed.verification.status === 'invalid_credentials'
+          ? 'api_credentials'
+          : timedOut
+            ? 'api_timeout'
+            : 'api_network',
       );
     return refreshed;
   }
@@ -57,7 +72,14 @@ export class ProviderVerificationService {
     connection: ProviderConnection,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<ProviderConnection> {
-    if (connection.runtimeKind === 'builtin_cli') return connection;
+    return (await this.runVerification(connection, signal)).connection;
+  }
+
+  private async runVerification(
+    connection: ProviderConnection,
+    signal: AbortSignal,
+  ): Promise<{ connection: ProviderConnection; timedOut: boolean }> {
+    if (connection.runtimeKind === 'builtin_cli') return { connection, timedOut: false };
     const runtime = this.registry.resolve(connection);
     const controller = new AbortController();
     const abort = (): void => controller.abort();
@@ -66,12 +88,12 @@ export class ProviderVerificationService {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
-        controller.abort();
         reject(
           new ProviderVerificationTimeoutError(
             'Provider connection verification did not complete before the preflight timeout',
           ),
         );
+        controller.abort();
       }, this.preflightTimeoutMs);
     });
     try {
@@ -93,15 +115,24 @@ export class ProviderVerificationService {
               expiresAt: null,
               message: result.message,
             };
-      return this.repository.updateProviderConnectionVerification(connection.id, verification);
+      return {
+        connection: this.repository.updateProviderConnectionVerification(
+          connection.id,
+          verification,
+        ),
+        timedOut: false,
+      };
     } catch (error) {
       if (!(error instanceof ProviderVerificationTimeoutError)) throw error;
-      return this.repository.updateProviderConnectionVerification(connection.id, {
-        status: 'unavailable',
-        verifiedAt: this.now().toISOString(),
-        expiresAt: null,
-        message: 'Provider connection verification timed out',
-      });
+      return {
+        connection: this.repository.updateProviderConnectionVerification(connection.id, {
+          status: 'unavailable',
+          verifiedAt: this.now().toISOString(),
+          expiresAt: null,
+          message: 'Provider connection verification timed out',
+        }),
+        timedOut: true,
+      };
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       signal.removeEventListener('abort', abort);

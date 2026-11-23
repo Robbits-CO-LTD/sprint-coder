@@ -70,8 +70,41 @@ describe('a Leader Turn that fails after a desktop operation', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(finishAndAdvance).toHaveBeenCalledOnce();
-    expect(finishAndAdvance).toHaveBeenCalledWith('task-leader', 'turn-leader', 'failed');
+    expect(finishAndAdvance).toHaveBeenCalledWith(
+      'task-leader',
+      'turn-leader',
+      'failed',
+      undefined,
+      'cli_failed',
+    );
     for (const client of Object.values(runtimes)) expect(client.start).not.toHaveBeenCalled();
     log.mockRestore();
   });
+});
+
+it.each([
+  ['RUNTIME_CLI_MISSING', 'cli_missing'],
+  ['RUNTIME_CLI_AUTH_REQUIRED', 'cli_credentials'],
+  ['RUNTIME_STOP_UNCONFIRMED', 'cli_stop_unconfirmed'],
+] as const)('uses a fixed history reason for %s', async (code, failureReason) => {
+  const { probe, finishAndAdvance } = createLeaderTurn('codex');
+  const log = vi.spyOn(secureLogger, 'error').mockImplementation(() => undefined);
+  try {
+    probe.handleRuntimeFailure('codex', 'task-leader', 'turn-leader', {
+      code,
+      userMessage: 'raw-placeholder',
+      retryable: false,
+    });
+    await vi.waitFor(() =>
+      expect(finishAndAdvance).toHaveBeenCalledExactlyOnceWith(
+        'task-leader',
+        'turn-leader',
+        'failed',
+        undefined,
+        failureReason,
+      ),
+    );
+  } finally {
+    log.mockRestore();
+  }
 });

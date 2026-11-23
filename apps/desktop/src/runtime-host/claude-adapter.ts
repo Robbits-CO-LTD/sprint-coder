@@ -572,7 +572,7 @@ export function claudeOutputErrorToPublicError(error: unknown): PublicError {
   }
   if (error instanceof ClaudeAuthenticationError)
     return publicError(
-      'RUNTIME_FAILED',
+      'RUNTIME_CLI_AUTH_REQUIRED',
       'Claude Codeへのログインが必要です。ターミナルでclaudeを起動し、/loginを実行してください。',
       false,
     );

@@ -30,7 +30,7 @@ vi.mock('./owned-cli-process', async (importOriginal) => {
 it.each([
   ['usageLimitExceeded', 'RUNTIME_RATE_LIMIT', false],
   ['rateLimitExceeded', 'RUNTIME_RATE_LIMIT', false],
-  ['unauthorized', 'RUNTIME_FAILED', false],
+  ['unauthorized', 'RUNTIME_CLI_AUTH_REQUIRED', false],
   ['serverOverloaded', 'RUNTIME_UNAVAILABLE', true],
   [{ httpConnectionFailed: { httpStatusCode: 503 } }, 'RUNTIME_UNAVAILABLE', true],
 ] as const)('classifies a failed Codex Turn with %j', async (codexErrorInfo, code, retryable) => {

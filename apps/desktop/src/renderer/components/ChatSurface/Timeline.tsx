@@ -1,3 +1,4 @@
+import type { TurnFailureReason } from '@sprint-coder/contracts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ApprovalSummary,
@@ -41,9 +42,24 @@ import {
 import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png';
 import { GraphTaskContext } from '../GraphTaskContext';
 import { InlineGraphCard } from '../InlineGraphCard';
+import { requestOpenProviderSettings } from '../../lib/settings-navigation';
 import { hasKnownGraphAnchor } from '../../lib/graph-anchor';
 import { taskHasEffectiveWorkspaceRoot } from '../../lib/effective-workspace-root';
 import { WorkspaceFolderButton } from './WorkspaceFolderButton';
+
+const TURN_FAILURE_TEXT: Record<TurnFailureReason, string> = {
+  api_credentials: 'APIキーを確認できませんでした。接続設定からAPIキーを見直してください。',
+  api_network:
+    'APIに接続できませんでした。ネットワークと接続設定を確認して、もう一度お試しください。',
+  api_timeout: 'APIから時間内に応答がありませんでした。少し待ってから、もう一度お試しください。',
+  cli_missing: '選択したCLIが見つかりません。CLIをインストールして、もう一度お試しください。',
+  cli_credentials:
+    '選択したCLIにログインできませんでした。ターミナルでCLIにログインして、もう一度お試しください。',
+  cli_stop_unconfirmed:
+    'CLIが止まったか確認できませんでした。アプリを再起動してから、もう一度お試しください。',
+  cli_failed:
+    '選択したCLIで処理を完了できませんでした。CLIの動作を確認して、もう一度お試しください。',
+};
 
 const WORKSPACE_SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const CHAT_SUGGESTIONS = [
@@ -83,6 +99,7 @@ export function Timeline({
     useAppStore((s) => s.interruptedTurnIdsByTask[taskId]) ?? NO_INTERRUPTED_TURNS;
   const canceledTurnIds =
     useAppStore((s) => s.canceledTurnIdsByTask[taskId]) ?? NO_INTERRUPTED_TURNS;
+  const turnFailures = useAppStore((s) => s.turnFailuresByTask[taskId]);
   const images = useAppStore((s) => s.imagesByTask[taskId]) ?? NO_IMAGES;
   const fileChanges = useAppStore((s) => s.fileChangesByTask[taskId]) ?? NO_FILE_CHANGES;
   const graphVersions = useAppStore((s) => s.graphVersionsByTask[taskId]);
@@ -167,6 +184,21 @@ export function Timeline({
     for (const messageId of lastReply.values()) markers.set(messageId, 'reply');
     return markers;
   }, [interruptedTurnIds, messages]);
+
+  const failureMarkerByMessage = useMemo(() => {
+    const markers = new Map<string, TurnFailureReason>();
+    if (turnFailures === undefined) return markers;
+    const lastMessageByTurn = new Map<string, string>();
+    for (const message of messages) {
+      if (message.turnId !== null && Object.hasOwn(turnFailures, message.turnId))
+        lastMessageByTurn.set(message.turnId, message.id);
+    }
+    for (const [turnId, messageId] of lastMessageByTurn) {
+      const reason = turnFailures[turnId];
+      if (reason !== undefined) markers.set(messageId, reason);
+    }
+    return markers;
+  }, [messages, turnFailures]);
 
   // The cards a Turn left unanswered (issue #1285), under the Turn's last reply — or its last
   // request when nothing was written — so they read after what the Turn said, not above it. A
@@ -464,6 +496,7 @@ export function Timeline({
               turn?.turnId !== message.turnId
                 ? (interruptedMarkerByMessage.get(message.id) ?? null)
                 : null;
+            const failure = failureMarkerByMessage.get(message.id);
             return (
               <div key={message.id} style={{ display: 'contents' }}>
                 <MessageBubble
@@ -478,6 +511,25 @@ export function Timeline({
                       接続先がツール付きの送信を受け付けなかったため、ツールなしで再送しました。
                     </p>
                   )}
+                {failure !== undefined && (
+                  <div
+                    className="turn-failure-marker"
+                    role="note"
+                    data-testid="turn-failure-marker"
+                  >
+                    <strong>失敗</strong>
+                    <span>{TURN_FAILURE_TEXT[failure]}</span>
+                    {failure === 'api_credentials' && (
+                      <button
+                        type="button"
+                        className="cmp-chip"
+                        onClick={requestOpenProviderSettings}
+                      >
+                        接続設定を開く
+                      </button>
+                    )}
+                  </div>
+                )}
                 {interruptedMarker !== null && (
                   <p
                     className="turn-interrupted-marker"

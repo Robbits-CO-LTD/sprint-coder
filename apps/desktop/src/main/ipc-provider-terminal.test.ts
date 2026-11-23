@@ -1,6 +1,7 @@
 import { TurnStreamingResources } from './turn-streaming-resources';
 import { expect, it, vi } from 'vitest';
 import { IpcRouter } from './ipc';
+import { ProviderVerificationRequiredError } from './provider-verification';
 
 vi.mock('electron', () => ({
   app: { isPackaged: false },
@@ -18,9 +19,17 @@ vi.mock('electron', () => ({
   globalShortcut: {},
 }));
 
-it.each([false, true])(
-  'releases the completed Provider stream (reasoning lease: %s)',
-  async (reasoning) => {
+it.each([
+  { reasoning: false },
+  { reasoning: true },
+  { reasoning: false, verificationFailure: 'api_credentials' },
+  { reasoning: false, verificationFailure: 'api_network' },
+  { reasoning: false, verificationFailure: 'api_timeout' },
+] as const)(
+  'settles the Provider Turn ($reasoning, $verificationFailure)',
+  async ({ reasoning, ...options }) => {
+    const verificationFailure =
+      'verificationFailure' in options ? options.verificationFailure : undefined;
     const taskId = 'task-658';
     const turnId = 'turn-658';
     const userMessageId = 'message-658';
@@ -70,6 +79,7 @@ it.each([false, true])(
         }
       })(),
     );
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
     const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(fakeRouter, {
       turnStreamingResources: resources,
@@ -80,7 +90,16 @@ it.each([false, true])(
       turnMessageIds: new Map(),
       managedWorkerTurn: new Map(),
       managedWorkerCall: new Map(),
-      providerVerification: { requireVerifiedForExecution: vi.fn().mockResolvedValue(connection) },
+      providerVerification: {
+        requireVerifiedForExecution:
+          verificationFailure === undefined
+            ? vi.fn().mockResolvedValue(connection)
+            : vi
+                .fn()
+                .mockRejectedValue(
+                  new ProviderVerificationRequiredError('raw-placeholder', verificationFailure),
+                ),
+      },
       providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
       modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: false } })) },
       permissionBroker: {
@@ -100,7 +119,7 @@ it.each([false, true])(
         getActiveTurnId: () => turnId,
         readTurnWorkspaceSetForTask: () => null,
         changeStage: vi.fn(() => ({ type: 'stage.changed' })),
-        appendDelta: vi.fn(() => ({ type: 'message.delta' })),
+        appendDelta,
       },
       mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
       publish: vi.fn(),
@@ -165,6 +184,18 @@ it.each([false, true])(
     } finally {
       clearTimeout(timer);
       resources.dispose();
+    }
+    if (verificationFailure !== undefined) {
+      expect(execute).not.toHaveBeenCalled();
+      expect(fakeRouter.finishAndAdvance).toHaveBeenCalledExactlyOnceWith(
+        taskId,
+        turnId,
+        'failed',
+        undefined,
+        verificationFailure,
+      );
+      expect(appendDelta).not.toHaveBeenCalled();
+      return;
     }
     expect(execute).toHaveBeenCalledOnce();
     expect(readAfterCompleted).toBe(false);

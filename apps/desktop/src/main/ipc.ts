@@ -261,6 +261,7 @@ import {
   type TaskRunningWork,
   type TaskSummary,
   type TurnEvent,
+  type TurnFailureReason,
   type TurnSkillSelection,
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
@@ -824,7 +825,10 @@ import {
   type ProviderSafeFailureCause,
 } from './provider-failure-diagnostic';
 import { UpdateInstallMutationGate } from './update-install-mutation-gate';
-import { ProviderVerificationService } from './provider-verification';
+import {
+  ProviderVerificationRequiredError,
+  ProviderVerificationService,
+} from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
 import { OrcaRouterProviderClient } from './orcarouter-provider-client';
@@ -5460,6 +5464,7 @@ export class IpcRouter {
     turnId: string,
     state: 'completed' | 'failed',
     finalText?: string,
+    failureReason?: TurnFailureReason,
   ): void {
     const pendingTaskTitle = this.pendingTaskTitles.get(turnId);
     this.pendingTaskTitles.delete(turnId);
@@ -5492,7 +5497,7 @@ export class IpcRouter {
         resolvedProvider: resolvedProvider ?? null,
         resolvedModel,
       });
-    const settled = this.settleTurnCompletion(taskId, turnId, state, finalText);
+    const settled = this.settleTurnCompletion(taskId, turnId, state, finalText, failureReason);
     // Back to idle on a clean finish. A Runtime failure already pushed its own `failed` status with
     // the reason attached (see handleRuntimeFailure) and must not be overwritten by an idle here;
     // a completion the gate refused has pushed nothing yet, so it states its own reason.
@@ -5576,6 +5581,7 @@ export class IpcRouter {
     turnId: string,
     state: 'completed' | 'failed',
     finalText?: string,
+    failureReason?: TurnFailureReason,
   ): {
     state: 'completed' | 'failed';
     completion: ReturnType<PersistenceClient['completeTurnAndFinishGoal']>;
@@ -5597,7 +5603,16 @@ export class IpcRouter {
     try {
       return {
         state,
-        completion: this.persistence.completeTurnAndFinishGoal(taskId, turnId, state, finalText),
+        completion:
+          failureReason === undefined
+            ? this.persistence.completeTurnAndFinishGoal(taskId, turnId, state, finalText)
+            : this.persistence.completeTurnAndFinishGoal(
+                taskId,
+                turnId,
+                state,
+                finalText,
+                failureReason,
+              ),
         refusal: null,
       };
     } catch (error) {
@@ -9193,7 +9208,9 @@ export class IpcRouter {
           if (cause === null) throw new Error('Provider execution was canceled');
           throw new ProviderTurnFailureError(
             cause,
-            externalCli ? roundError.message : providerFailureMessage(roundError.providerCode),
+            externalCli
+              ? externalCliFailureDetail(roundError.providerCode)
+              : providerFailureMessage(roundError.providerCode),
           );
         }
         if (!roundCompleted)
@@ -9415,6 +9432,7 @@ export class IpcRouter {
           provider: diagnosticProvider,
           cause: error.cause,
           userMessage: error.userMessage,
+          cliFailure: externalCli,
         });
         return;
       }
@@ -9450,7 +9468,8 @@ export class IpcRouter {
                   diagnosticProvider?.providerId === 'ollama' ? 'completed' : 'not_required',
                   false,
                 ),
-          ...(error instanceof ProviderStreamTimeoutError
+          cliFailure: externalCli,
+          ...(error instanceof ProviderStreamTimeoutError && !externalCli
             ? { userMessage: error.userMessage }
             : {}),
         });
@@ -9459,7 +9478,11 @@ export class IpcRouter {
       if (controller.signal.aborted || this.turnRuntimes.get(started.turnId) !== 'provider') return;
       await this.mailbox.run(taskId, () => {
         if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-        this.finishAndAdvance(taskId, started.turnId, 'failed');
+        if (error instanceof ProviderVerificationRequiredError)
+          this.finishAndAdvance(taskId, started.turnId, 'failed', undefined, error.failureReason);
+        else if (externalCli)
+          this.finishAndAdvance(taskId, started.turnId, 'failed', undefined, 'cli_failed');
+        else this.finishAndAdvance(taskId, started.turnId, 'failed');
       });
     } finally {
       await modelLease?.release();
@@ -9481,6 +9504,7 @@ export class IpcRouter {
     provider: Readonly<{ providerId: string; profileId: string }> | undefined;
     cause: ProviderSafeFailureCause;
     userMessage?: string | undefined;
+    cliFailure?: boolean;
   }): Promise<void> {
     await this.mailbox.run(input.taskId, () => {
       if (
@@ -9551,7 +9575,19 @@ export class IpcRouter {
       } catch {
         // Preserve terminalization even if the logging sink itself fails.
       }
-      this.finishAndAdvance(input.taskId, input.turnId, 'failed');
+      const failureReason = input.cliFailure
+        ? cliTurnFailureReason(
+            input.cause.providerCode === 'cli_missing'
+              ? 'RUNTIME_CLI_MISSING'
+              : input.cause.providerCode === 'stop_unconfirmed'
+                ? 'RUNTIME_STOP_UNCONFIRMED'
+                : input.cause.category === 'credentials'
+                  ? 'RUNTIME_CLI_AUTH_REQUIRED'
+                  : 'RUNTIME_FAILED',
+          )
+        : apiTurnFailureReason(input.cause.category);
+      if (failureReason === undefined) this.finishAndAdvance(input.taskId, input.turnId, 'failed');
+      else this.finishAndAdvance(input.taskId, input.turnId, 'failed', undefined, failureReason);
     });
   }
 
@@ -9969,9 +10005,7 @@ export class IpcRouter {
           .catch(() => undefined);
         await this.releaseTurnAttachmentCustody(turnId);
       }
-      // The reason used to be dropped here, so the renderer saw a Turn end in `failed` with no way
-      // to tell "the model refused" from "the CLI is gone" (issue #9). Pushed on the transient
-      // status channel rather than folded into the persisted Turn event.
+      // The footer can show the runtime's public detail. The history stores only its fixed reason.
       let diagnosticId: string | null = null;
       const effectiveDiagnostic = resolveRuntimeFailureDiagnostic({
         errorCode: error.code,
@@ -10033,7 +10067,7 @@ export class IpcRouter {
         errorCode: error.code,
         userMessage: error.userMessage,
       });
-      this.finishAndAdvance(taskId, turnId, 'failed');
+      this.finishAndAdvance(taskId, turnId, 'failed', undefined, cliTurnFailureReason(error.code));
     });
   }
 
@@ -11255,4 +11289,36 @@ function turnLogCategory(started: StartedTurn): 'chat' | 'team' {
 
 function shouldSealBuiltinTeamSkill(text: string, skills: readonly PersistedTurnSkill[]): boolean {
   return isTeamScenarioInput(text) || skills.some(({ selection }) => selection.kind === 'team');
+}
+
+function externalCliFailureDetail(code: string | null): string | undefined {
+  switch (code) {
+    case 'images_unsupported':
+      return 'この接続は画像入力に対応していません。';
+    case 'free_limit':
+      return 'OpenCode の無料利用上限に達しました。別の無料モデルを選ぶか、上限が回復してから再試行してください。';
+    case 'model_not_available':
+    case 'model_not_confirmed':
+      return 'CLI で選択モデルを確認できませんでした。';
+    case 'unexpected_native_tool':
+      return 'CLI 独自のツールを使用したため、処理を停止しました。';
+    default:
+      return undefined;
+  }
+}
+
+function cliTurnFailureReason(code: PublicError['code']): TurnFailureReason {
+  if (code === 'RUNTIME_CLI_MISSING') return 'cli_missing';
+  if (code === 'RUNTIME_CLI_AUTH_REQUIRED') return 'cli_credentials';
+  if (code === 'RUNTIME_STOP_UNCONFIRMED') return 'cli_stop_unconfirmed';
+  return 'cli_failed';
+}
+
+function apiTurnFailureReason(
+  category: ProviderSafeFailureCause['category'],
+): TurnFailureReason | undefined {
+  if (category === 'credentials') return 'api_credentials';
+  if (category === 'network') return 'api_network';
+  if (category === 'timeout') return 'api_timeout';
+  return undefined;
 }

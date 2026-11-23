@@ -249,6 +249,32 @@ describe('Task Turn subscription projection boundary', () => {
     });
   });
 
+  it('preserves old failure reasons and applies a live Turn completion', async () => {
+    const h = harness([
+      Promise.resolve({
+        ...snapshot(2),
+        turnFailures: [{ turnId: 'old-turn', reason: 'api_timeout' }],
+      }),
+    ]);
+    await useAppStore.getState().selectTask('task-a');
+    expect(useAppStore.getState().turnFailuresByTask['task-a']).toEqual({
+      'old-turn': 'api_timeout',
+    });
+    h.subscriptions[0]!.listener({
+      type: 'turn.completed',
+      taskId: 'task-a',
+      turnId: 'turn-a',
+      seq: 3,
+      state: 'failed',
+      failureReason: 'cli_credentials',
+      diff: [],
+    });
+    expect(useAppStore.getState().turnFailuresByTask['task-a']).toEqual({
+      'old-turn': 'api_timeout',
+      'turn-a': 'cli_credentials',
+    });
+  });
+
   it('keeps a card withdrawn unanswered in the history, and records a stopped Turn (issue #1285)', async () => {
     const h = harness([Promise.resolve({ ...snapshot(2), canceledTurnIds: ['old-turn'] })]);
     await useAppStore.getState().selectTask('task-a');
