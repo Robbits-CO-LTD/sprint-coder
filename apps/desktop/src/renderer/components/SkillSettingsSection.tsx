@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SkillCatalogItem, SkillDraft } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
-import { SKILL_CONFLICT_REASONS } from '../../skill-feedback';
+import { skillActionFailure } from '../../skill-feedback';
 
 export type SkillCreationFailure =
   'catalog-unavailable' | 'builtin-unavailable' | 'task-unavailable';
@@ -12,29 +12,6 @@ const creationFailureMessages: Record<SkillCreationFailure, string> = {
     'Skill作成に必要な組み込みSkillを読み込めませんでした。もう一度試し、解消しない場合はアプリを再起動してください。',
   'task-unavailable': '新しいTaskを作れませんでした。もう一度試してください。',
 };
-
-function skillSettingsFailure(action: string, error: unknown, fallback: string): string {
-  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
-  switch (code) {
-    case 'NOT_FOUND':
-      return `${action}。対象が見つかりません。再読み込みしてください。`;
-    case 'OPERATION_CONFLICT': {
-      const reason =
-        error instanceof Error
-          ? Object.values(SKILL_CONFLICT_REASONS).find((message) => message === error.message)
-          : undefined;
-      return reason === undefined
-        ? `${action}。対象が変更されたか、操作の条件を満たしていません。再読み込みしてください。`
-        : `${action}。${reason}`;
-    }
-    case 'FORBIDDEN':
-      return `${action}。アクセス権限や保存場所を確認してください。${fallback}`;
-    case 'INVALID_REQUEST':
-      return `${action}。対象や設定内容を確認してください。${fallback}`;
-    default:
-      return `${action}。${fallback}`;
-  }
-}
 
 export function SkillSettingsSection({
   active,
@@ -80,7 +57,7 @@ export function SkillSettingsSection({
     } catch (error) {
       setLoadFailed(true);
       setError(
-        skillSettingsFailure(
+        skillActionFailure(
           'Skill一覧を取得できませんでした',
           error,
           '再読み込みし、解消しない場合はアプリを再起動してください。',
@@ -128,7 +105,7 @@ export function SkillSettingsSection({
       setStatus(`${item.name}を${item.enabled ? '無効' : '有効'}にしました。`);
     } catch (error) {
       setError(
-        skillSettingsFailure('Skillの状態を変更できませんでした', error, '再試行してください。'),
+        skillActionFailure('Skillの状態を変更できませんでした', error, '再試行してください。'),
       );
     }
   }
@@ -149,11 +126,7 @@ export function SkillSettingsSection({
       setStatus(`${item.name}の自動選択を${next === 'auto-allowed' ? '有効' : '無効'}にしました。`);
     } catch (error) {
       setError(
-        skillSettingsFailure(
-          'Skillの自動選択を変更できませんでした',
-          error,
-          '再試行してください。',
-        ),
+        skillActionFailure('Skillの自動選択を変更できませんでした', error, '再試行してください。'),
       );
     }
   }
@@ -172,7 +145,7 @@ export function SkillSettingsSection({
       setPendingRemoval(null);
       setStatus(`${item.name}を削除しました。`);
     } catch (error) {
-      setError(skillSettingsFailure('Skillを削除できませんでした', error, '再試行してください。'));
+      setError(skillActionFailure('Skillを削除できませんでした', error, '再試行してください。'));
     }
   }
   async function exportCreated(item: SkillCatalogItem, format: 'original' | 'portable') {
@@ -186,7 +159,7 @@ export function SkillSettingsSection({
       );
     } catch (error) {
       setError(
-        skillSettingsFailure(
+        skillActionFailure(
           'Skillを書き出せませんでした',
           error,
           '書き出し先を確認して再試行してください。',
@@ -204,7 +177,7 @@ export function SkillSettingsSection({
       setStatus(`${draft.name}をインストールしました。`);
     } catch (error) {
       setError(
-        skillSettingsFailure(
+        skillActionFailure(
           'Skillをインストールできませんでした',
           error,
           '下書きの内容を確認して再試行してください。',
@@ -222,7 +195,7 @@ export function SkillSettingsSection({
       setStatus(`${draft.name}の下書きを破棄しました。`);
     } catch (error) {
       setError(
-        skillSettingsFailure('Skillの下書きを破棄できませんでした', error, '再試行してください。'),
+        skillActionFailure('Skillの下書きを破棄できませんでした', error, '再試行してください。'),
       );
     }
   }

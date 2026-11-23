@@ -2818,38 +2818,32 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async installSkillDraft(taskId: string, draft: SkillDraft) {
-      if (typeof window.sprintCoder?.skills?.installDraft !== 'function') return;
-      try {
-        await window.sprintCoder.skills.installDraft(draft.id, draft.digest, true);
-        set((state) => ({
-          skillDraftsByTask: {
-            ...state.skillDraftsByTask,
-            [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
-              ({ draft: item }) => item.id !== draft.id,
-            ),
-          },
-        }));
-        await get().loadSkills();
-      } catch (err) {
-        set({ error: describeError(err) });
-      }
+      if (typeof window.sprintCoder?.skills?.installDraft !== 'function')
+        throw new Error('Skill draft workflow is unavailable');
+      await window.sprintCoder.skills.installDraft(draft.id, draft.digest, true);
+      set((state) => ({
+        skillDraftsByTask: {
+          ...state.skillDraftsByTask,
+          [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
+            ({ draft: item }) => item.id !== draft.id,
+          ),
+        },
+      }));
+      await get().loadSkills();
     },
 
     async discardSkillDraft(taskId: string, draftId: string) {
-      if (typeof window.sprintCoder?.skills?.discardDraft !== 'function') return;
-      try {
-        await window.sprintCoder.skills.discardDraft(draftId);
-        set((state) => ({
-          skillDraftsByTask: {
-            ...state.skillDraftsByTask,
-            [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
-              ({ draft }) => draft.id !== draftId,
-            ),
-          },
-        }));
-      } catch (err) {
-        set({ error: describeError(err) });
-      }
+      if (typeof window.sprintCoder?.skills?.discardDraft !== 'function')
+        throw new Error('Skill draft workflow is unavailable');
+      await window.sprintCoder.skills.discardDraft(draftId);
+      set((state) => ({
+        skillDraftsByTask: {
+          ...state.skillDraftsByTask,
+          [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
+            ({ draft }) => draft.id !== draftId,
+          ),
+        },
+      }));
     },
 
     async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
