@@ -9,6 +9,19 @@ const skillSources = new Set<string>(skillSourceSchema.options);
 
 export type SkillMention = { start: number; end: number; selection: TurnSkillSelection };
 
+export function isSkillCreator({ ref }: TurnSkillSelection): boolean {
+  return ref.source === 'builtin' && ref.skillId === 'skill-creator';
+}
+
+export function removeSkillCreatorMention(text: string, selections: readonly TurnSkillSelection[]) {
+  const mentions = skillMentions(text, selections).filter(({ selection }) =>
+    isSkillCreator(selection),
+  );
+  for (const mention of mentions.reverse())
+    text = text.slice(0, mention.start) + text.slice(mention.end);
+  return text;
+}
+
 export function mentionText(ref: SkillRef, refs: readonly SkillRef[]): string {
   const ambiguous = refs.some(
     (other) => other.skillId === ref.skillId && other.source !== ref.source,
@@ -18,20 +31,52 @@ export function mentionText(ref: SkillRef, refs: readonly SkillRef[]): string {
 
 /** Match only the alias at the edit position. A space completes a name shared with a longer ID. */
 export function typedSkillAlias(text: string, caret: number, catalog: readonly SkillCatalogItem[]) {
-  // IDs are at most 128 ASCII characters. Include the trigger, boundary and optional space.
-  const start = Math.max(0, caret - 131);
-  const match = /(?:^|\s)&([A-Za-z0-9][A-Za-z0-9._-]{0,127})(\s?)$/u.exec(text.slice(start, caret));
+  const start = Math.max(0, caret - 150);
+  const match = /(?:^|\s)([&$])(?:([a-z-]+):)?([A-Za-z0-9][A-Za-z0-9._-]{0,127})(\s?)$/u.exec(
+    text.slice(start, caret),
+  );
   if (!match) return null;
-  const id = match[1]!;
-  const terminated = Boolean(match[2]);
-  const trigger = caret - id.length - (terminated ? 2 : 1);
+  const [, marker, source, id, space] = match;
+  if (id === undefined || (source !== undefined && !skillSources.has(source))) return null;
+  const terminated = Boolean(space);
+  if (marker === '$' && !terminated) return null;
+  const length = 1 + (source === undefined ? 0 : source.length + 1) + id.length;
+  const trigger = caret - length - (terminated ? 1 : 0);
   if (trigger > 0 && !/\s/u.test(text[trigger - 1]!)) return null;
   if (!terminated && /[A-Za-z0-9._-]/.test(text[caret] ?? '')) return null;
-  const exact = catalog.filter(({ ref }) => ref.skillId === id);
+  const exact = catalog.filter(
+    ({ ref }) => ref.skillId === id && (source === undefined || ref.source === source),
+  );
   if (exact.length !== 1) return null;
   if (!terminated && catalog.some(({ ref }) => ref.skillId !== id && ref.skillId.startsWith(id)))
     return null;
-  return { skill: exact[0]!, trigger };
+  return { skill: exact[0]!, trigger, length };
+}
+
+export function hasUnselectedSkillMention(
+  text: string,
+  selections: readonly TurnSkillSelection[],
+  catalog: readonly SkillCatalogItem[],
+): boolean {
+  const selectedPositions = new Set(skillMentions(text, selections).map(({ start }) => start));
+  for (const match of text.matchAll(
+    /(^|\s)[$&](?:([a-z-]+):)?([A-Za-z0-9][A-Za-z0-9._-]{0,127})(?=$|\s|[,。！？])/gu,
+  )) {
+    const position = match.index + match[1]!.length;
+    const source = match[2];
+    const id = match[3]!;
+    if (selectedPositions.has(position)) continue;
+    if (
+      catalog.some(
+        ({ ref }) =>
+          (source === undefined || ref.source === source) &&
+          (id === ref.skillId ||
+            (id.startsWith(ref.skillId) && /^[._-]+$/u.test(id.slice(ref.skillId.length)))),
+      )
+    )
+      return true;
+  }
+  return false;
 }
 
 /** Text alone never activates a Skill: a mention needs its Task's pinned selection. */

@@ -39,6 +39,10 @@ import type {
   TurnEvent,
 } from '../types/sprint-coder';
 import { STAGE_LABEL } from '../lib/stages';
+import {
+  isSkillCreator,
+  removeSkillCreatorMention,
+} from '../components/ChatSurface/skill-mentions';
 import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import { applyFileEditFrame, clearFileEdits } from '../lib/file-edit-buffer';
 import {
@@ -479,18 +483,27 @@ async function restoreSkillSelection(
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
   get: () => AppState,
 ) {
+  const previous = get().skillSelectionByTask[taskId];
+  const revision = get().skillSelectionRevisionByTask[taskId];
   if (
     !window.sprintCoder ||
     typeof window.sprintCoder.skills?.getDraftSelection !== 'function' ||
-    get().skillSelectionByTask[taskId] !== undefined
+    (previous !== undefined && !previous.some(isSkillCreator))
   )
     return;
   try {
     const skills = await window.sprintCoder.skills.getDraftSelection(taskId);
-    if (get().selectedTaskId === taskId && get().skillSelectionByTask[taskId] === undefined)
-      apply((state) => ({
-        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: skills },
-      }));
+    if (get().selectedTaskId !== taskId || get().skillSelectionRevisionByTask[taskId] !== revision)
+      return;
+    const text = get().draftByTask[taskId] ?? '';
+    const updated =
+      previous?.some(isSkillCreator) && !skills.some(isSkillCreator)
+        ? removeSkillCreatorMention(text, previous)
+        : text;
+    apply((state) => ({
+      skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: skills },
+    }));
+    if (updated !== text) get().setDraft(taskId, updated);
   } catch {
     // A missing optional API must not block the composer.
   }
@@ -959,17 +972,46 @@ export function handleTurnEvent(
       break;
     }
     case 'skill.draft.created': {
-      apply((state) => ({
-        skillDraftsByTask: {
-          ...state.skillDraftsByTask,
-          [taskId]: [
-            ...(state.skillDraftsByTask[taskId] ?? []).filter(
-              ({ draft }) => draft.id !== ev.draft.id,
-            ),
-            { turnId: ev.turnId, draft: ev.draft },
-          ],
-        },
-      }));
+      let updatedDraft: string | undefined;
+      apply((state) => {
+        const selections = state.skillSelectionByTask[taskId] ?? [];
+        const text = state.draftByTask[taskId] ?? '';
+        const nextText = removeSkillCreatorMention(text, selections);
+        if (nextText !== text) updatedDraft = nextText;
+        return {
+          ...(selections.some(isSkillCreator)
+            ? {
+                skillSelectionByTask: {
+                  ...state.skillSelectionByTask,
+                  [taskId]: selections.filter((item) => !isSkillCreator(item)),
+                },
+                skillSelectionRevisionByTask: {
+                  ...state.skillSelectionRevisionByTask,
+                  [taskId]: (state.skillSelectionRevisionByTask[taskId] ?? 0) + 1,
+                },
+              }
+            : {}),
+          ...(updatedDraft === undefined
+            ? {}
+            : {
+                draftByTask: { ...state.draftByTask, [taskId]: updatedDraft },
+                draftRevisionByTask: {
+                  ...state.draftRevisionByTask,
+                  [taskId]: (state.draftRevisionByTask[taskId] ?? 0) + 1,
+                },
+              }),
+          skillDraftsByTask: {
+            ...state.skillDraftsByTask,
+            [taskId]: [
+              ...(state.skillDraftsByTask[taskId] ?? []).filter(
+                ({ draft }) => draft.id !== ev.draft.id,
+              ),
+              { turnId: ev.turnId, draft: ev.draft },
+            ],
+          },
+        };
+      });
+      if (updatedDraft !== undefined) persistDraftDebounced(taskId, updatedDraft);
       break;
     }
     case 'skill.activated': {
@@ -2340,11 +2382,12 @@ export const useAppStore = create<AppState>((set, get) => {
           objective,
           skills: selectedSkills,
         });
+        const retainedSkills = (get().skillSelectionByTask[taskId] ?? []).filter(isSkillCreator);
         set((state) => ({
           tasks: state.tasks.map((task) => (task.id === taskId ? result.task : task)),
-          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: retainedSkills },
         }));
-        persistSkillDraftSelection(taskId, []);
+        persistSkillDraftSelection(taskId, retainedSkills);
         return true;
       } catch (err) {
         set({ error: describeError(err) });
@@ -2370,11 +2413,12 @@ export const useAppStore = create<AppState>((set, get) => {
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.resume(taskId, selectedSkills);
+        const retainedSkills = (get().skillSelectionByTask[taskId] ?? []).filter(isSkillCreator);
         set((state) => ({
           tasks: state.tasks.map((task) => (task.id === taskId ? result.task : task)),
-          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: retainedSkills },
         }));
-        persistSkillDraftSelection(taskId, []);
+        persistSkillDraftSelection(taskId, retainedSkills);
       } catch (err) {
         set({ error: describeError(err) });
       }
@@ -2893,7 +2937,9 @@ export const useAppStore = create<AppState>((set, get) => {
         return '画像の準備が完了してから送信してください';
       if (notifyPendingPermissionChange(get(), taskId)) return null;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      const retainedSkills = selectedSkills.filter(isSkillCreator);
       const selectedAttachmentIds = [...attachmentIds];
+      const selectionRevision = (get().skillSelectionRevisionByTask[taskId] ?? 0) + 1;
       const draftsById = new Map(
         (get().draftAttachmentsByTask[taskId] ?? []).map((attachment) => [
           attachment.id,
@@ -2933,10 +2979,14 @@ export const useAppStore = create<AppState>((set, get) => {
           ...state.goalDraftRecoveryRevisionByTask,
           [taskId]: undefined,
         },
-        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+        skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: retainedSkills },
+        skillSelectionRevisionByTask: {
+          ...state.skillSelectionRevisionByTask,
+          [taskId]: selectionRevision,
+        },
       }));
       persistDraftDebounced(taskId, '');
-      persistSkillDraftSelection(taskId, []);
+      persistSkillDraftSelection(taskId, retainedSkills);
 
       try {
         const result = await window.sprintCoder.turns.start({
@@ -2989,8 +3039,10 @@ export const useAppStore = create<AppState>((set, get) => {
         const code = errorCode(err);
         const message = code === 'TURN_ACTIVE' ? null : describeError(err);
         let restoredDraft = false;
+        let restoredSkills = false;
         set((state) => {
           restoredDraft = (state.draftByTask[taskId] ?? '') === '';
+          restoredSkills = state.skillSelectionRevisionByTask[taskId] === selectionRevision;
           return {
             messagesByTask: {
               ...state.messagesByTask,
@@ -3001,15 +3053,14 @@ export const useAppStore = create<AppState>((set, get) => {
             draftByTask: restoredDraft
               ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
-            skillSelectionByTask: {
-              ...state.skillSelectionByTask,
-              [taskId]: selectedSkills,
-            },
+            skillSelectionByTask: restoredSkills
+              ? { ...state.skillSelectionByTask, [taskId]: selectedSkills }
+              : state.skillSelectionByTask,
             error: message,
           };
         });
         if (restoredDraft) persistDraftDebounced(taskId, text);
-        persistSkillDraftSelection(taskId, selectedSkills);
+        if (restoredSkills) persistSkillDraftSelection(taskId, selectedSkills);
         if (selectedAttachmentIds.length > 0) void get().refreshDraftAttachments(taskId);
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
@@ -3028,6 +3079,7 @@ export const useAppStore = create<AppState>((set, get) => {
         return false;
       if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      const retainedSkills = selectedSkills.filter(isSkillCreator);
       let selectionRevision = 0;
       let draftRevision = 0;
       set((state) => {
@@ -3040,7 +3092,7 @@ export const useAppStore = create<AppState>((set, get) => {
             ...state.goalDraftRecoveryRevisionByTask,
             [taskId]: undefined,
           },
-          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: retainedSkills },
           skillSelectionRevisionByTask: {
             ...state.skillSelectionRevisionByTask,
             [taskId]: selectionRevision,
@@ -3048,7 +3100,7 @@ export const useAppStore = create<AppState>((set, get) => {
         };
       });
       persistDraftDebounced(taskId, '');
-      persistSkillDraftSelection(taskId, []);
+      persistSkillDraftSelection(taskId, retainedSkills);
       try {
         await window.sprintCoder.turns.queue({ taskId, text, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
@@ -3143,6 +3195,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (notifyPendingPermissionChange(get(), taskId))
         return { completed: false, draftRestored: false };
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
+      const retainedSkills = selectedSkills.filter(isSkillCreator);
       const activeTurn = get().turnByTask[taskId];
       let selectionRevision = 0;
       let draftRevision = 0;
@@ -3156,7 +3209,7 @@ export const useAppStore = create<AppState>((set, get) => {
             ...state.goalDraftRecoveryRevisionByTask,
             [taskId]: undefined,
           },
-          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
+          skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: retainedSkills },
           skillSelectionRevisionByTask: {
             ...state.skillSelectionRevisionByTask,
             [taskId]: selectionRevision,
@@ -3171,7 +3224,7 @@ export const useAppStore = create<AppState>((set, get) => {
         };
       });
       persistDraftDebounced(taskId, '');
-      persistSkillDraftSelection(taskId, []);
+      persistSkillDraftSelection(taskId, retainedSkills);
       try {
         await window.sprintCoder.turns.stopAndSend({
           taskId,

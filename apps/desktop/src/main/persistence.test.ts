@@ -1837,6 +1837,39 @@ if (runsWithElectronAbi)
       },
     );
 
+    it('clears only the built-in Skill creator selection when its draft is recorded', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('Skill creation');
+      const creator = {
+        kind: 'chat' as const,
+        ref: { source: 'builtin' as const, skillId: 'skill-creator', digest: 'a'.repeat(64) },
+      };
+      const other = {
+        kind: 'chat' as const,
+        ref: { source: 'created' as const, skillId: 'review', digest: 'b'.repeat(64) },
+      };
+      try {
+        const turn = persistence.startTurn(task.id, 'Create a Skill');
+        persistence.setDraftSkillSelections(task.id, [creator, other]);
+        const at = '2026-10-18T00:00:00.000Z';
+        const event = persistence.recordSkillDraft(task.id, turn.turnId, {
+          id: 'draft-1',
+          skillId: 'review',
+          name: 'Review',
+          description: 'Review',
+          kind: 'chat',
+          digest: 'c'.repeat(64),
+          files: [{ path: 'SKILL.md', content: '# Review' }],
+          createdAt: at,
+          updatedAt: at,
+        });
+        expect(event.type).toBe('skill.draft.created');
+        expect(persistence.getDraftSkillSelections(task.id)).toEqual([other]);
+      } finally {
+        persistence.close();
+      }
+    });
+
     it('persists the tools-disabled retry notice only for the affected Task', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('Retry notice');

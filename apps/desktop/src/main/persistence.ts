@@ -19871,8 +19871,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent {
-    this.getTurn(taskId, turnId);
-    return this.appendEvent({ type: 'skill.draft.created', taskId, turnId, draft });
+    return this.db.transaction(() => {
+      this.getTurn(taskId, turnId);
+      this.db
+        .prepare(
+          "DELETE FROM task_draft_skill_bindings WHERE task_id = ? AND source = 'builtin' AND skill_id = 'skill-creator'",
+        )
+        .run(taskId);
+      return this.appendEvent({ type: 'skill.draft.created', taskId, turnId, draft });
+    })();
   }
 
   recordTurnToolsDisabled(taskId: string, turnId: string): TurnEvent {
