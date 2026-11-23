@@ -98,6 +98,41 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
 }
 
 describe('executeTeamTool routing', () => {
+  it('passes the caller cancellation signal into Worker hire admission', async () => {
+    const coordinator = fakeCoordinator();
+    const controller = new AbortController();
+    await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_hire_worker',
+      { agentKind: 'worker', role: 'Worker', objective: 'Complete the task' },
+      { signal: controller.signal },
+    );
+    expect(coordinator.hireWorker).toHaveBeenCalledWith(expect.any(Object), null, {
+      delayMs: expect.any(Number),
+      signal: controller.signal,
+    });
+  });
+
+  it('propagates a canceled Worker hire to the dispatch owner', async () => {
+    const controller = new AbortController();
+    const coordinator = fakeCoordinator({
+      hireWorker: vi.fn(async () => {
+        controller.abort();
+        throw controller.signal.reason;
+      }),
+    });
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_hire_worker',
+        { agentKind: 'worker', role: 'Worker', objective: 'Complete the task' },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(controller.signal.reason);
+  });
+
   it('awaits the completed direct dispatch before returning the Leader tool result', async () => {
     const delivered = await fakeCoordinator().sendToWorker({
       taskId: 'task-1',
@@ -148,6 +183,7 @@ describe('executeTeamTool routing', () => {
         writeCapable: false,
       },
       null,
+      { delayMs: expect.any(Number) },
     );
     expect(result).toMatchObject({
       ok: true,
@@ -175,6 +211,7 @@ describe('executeTeamTool routing', () => {
       expect(coordinator.hireWorker).toHaveBeenCalledWith(
         expect.objectContaining({ writeCapable: writeCapable ?? false }),
         expect.any(Object),
+        { delayMs: expect.any(Number) },
       );
       expect(result).toMatchObject({ ok: true, writeCapable: writeCapable ?? false });
     },
@@ -200,6 +237,7 @@ describe('executeTeamTool routing', () => {
     expect(coordinator.hireWorker).toHaveBeenCalledWith(
       expect.objectContaining({ writeCapable: true }),
       null,
+      { delayMs: expect.any(Number) },
     );
   });
 
@@ -318,6 +356,7 @@ describe('executeTeamTool routing', () => {
         modelSelectionReason: 'catalogのtoolCalling情報を確認した',
       }),
       null,
+      { delayMs: expect.any(Number) },
     );
   });
 
@@ -669,6 +708,7 @@ describe('executeTeamTool routing', () => {
       },
       'manager-1',
       managerPolicy,
+      { delayMs: expect.any(Number) },
     );
 
     await executeTeamTool(
