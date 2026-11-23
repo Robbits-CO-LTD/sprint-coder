@@ -190,6 +190,7 @@ describe('RuntimeHostClient Grok capability', () => {
         ...(legacy ? {} : { grokAvailable: false, grokReadiness: 'unavailable', grokModels: [] }),
       });
       await expect(client.probe()).resolves.toEqual({
+        ...(legacy ? {} : { cliNotDetected: true }),
         available: false,
         readiness: 'unavailable',
         models: [],

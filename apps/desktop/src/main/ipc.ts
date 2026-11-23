@@ -7833,7 +7833,7 @@ export class IpcRouter {
         reason:
           capability.readiness === 'authentication_required'
             ? 'login_required'
-            : capability.readiness === 'unavailable' && !capability.available
+            : capability.cliNotDetected === true
               ? 'cli_not_found'
               : 'unavailable',
         hasModels: capability.models.length > 0,

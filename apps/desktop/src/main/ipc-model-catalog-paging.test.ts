@@ -8,6 +8,7 @@ import {
   type TeamModelRestriction,
 } from '@sprint-coder/contracts';
 import { IpcRouter } from './ipc';
+import type { RuntimeCapabilityReport } from './runtime-host';
 import { ModelCatalogService } from './model-catalog-service';
 import { MainProviderProfileRegistry } from './provider-profile';
 import { LOCAL_PROVIDER_PROFILES } from './bundled-provider-profiles';
@@ -86,7 +87,11 @@ function makeRouter({
     handlers.set(channel, handler);
   const profiles = new MainProviderProfileRegistry();
   for (const profile of LOCAL_PROVIDER_PROFILES) profiles.register(profile);
-  const probe = vi.fn(async () => ({ available: false, readiness: 'unavailable', models: [] }));
+  const probe = vi.fn(async (): Promise<RuntimeCapabilityReport> => ({
+    available: false,
+    readiness: 'unavailable',
+    models: [],
+  }));
   let flakyCalls = 0;
   const listModels = vi.fn(async (connection: ProviderConnection) => {
     if (connection.id === stableConnection.id) return models(stableConnection, stableCount);
@@ -174,11 +179,18 @@ const listing = {
 describe('#906: models catalog query rebuilds the catalog only for a first page', () => {
   it('reports missing and signed-out subscriptions even when the CLIs return no model names', async () => {
     const { query, probe } = makeRouter();
-    probe.mockResolvedValueOnce({
-      available: true,
-      readiness: 'authentication_required',
-      models: [],
-    });
+    probe
+      .mockResolvedValueOnce({
+        available: true,
+        readiness: 'authentication_required',
+        models: [],
+      })
+      .mockResolvedValueOnce({
+        available: false,
+        readiness: 'unavailable',
+        models: [],
+        cliNotDetected: true,
+      });
     const result = await query({
       ...listing,
       connectionIds: [],
@@ -204,7 +216,7 @@ describe('#906: models catalog query rebuilds the catalog only for a first page'
       {
         connectionId: 'builtin:grok-cli',
         displayName: 'Grok CLI',
-        reason: 'cli_not_found',
+        reason: 'unavailable',
         hasModels: false,
       },
     ]);

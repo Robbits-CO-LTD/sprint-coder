@@ -707,7 +707,7 @@ it('explains unavailable subscriptions and blocks both mouse and keyboard select
   const option = container.querySelector<HTMLElement>('[role="option"]')!;
   expect(option.getAttribute('aria-disabled')).toBe('true');
   expect(option.textContent).toContain('ログインが必要です');
-  expect(container.textContent).toContain('Grok CLI — CLI が見つかりません');
+  expect(container.textContent).toContain('Grok CLI — CLI を検出できませんでした');
   expect(container.textContent).toContain('接続設定を開く');
   await act(async () => option.click());
   await act(async () =>

@@ -73,7 +73,7 @@ type UnavailableSubscription = NonNullable<
   ModelCatalogQueryResult['unavailableSubscriptions']
 >[number];
 const unavailableLabels: Record<UnavailableSubscription['reason'], string> = {
-  cli_not_found: 'CLI が見つかりません',
+  cli_not_found: 'CLI を検出できませんでした',
   login_required: 'ログインが必要です',
   unavailable: '現在利用できません',
 };
