@@ -7053,6 +7053,111 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.each(['team stop', 'turn abort'] as const)(
+      'does not register or start a paced Worker after %s',
+      async (interruption) => {
+        const persistence = createPersistence();
+        try {
+          const task = persistence.createTask('stop during Worker pacing');
+          const runtime = new TestWorkerRuntime();
+          const startWorker = vi.spyOn(runtime, 'start');
+          const coordinator = new TeamCoordinator(persistence, runtime);
+          const request = {
+            taskId: task.id,
+            role: 'Worker',
+            objective: 'Complete the assigned task',
+            contextInheritancePolicy: 'summary' as const,
+            writeCapable: false,
+          };
+          await coordinator.hireWorker(request);
+          const controller = new AbortController();
+          const pending = coordinator
+            .hireWorker(request, null, {
+              delayMs: 25,
+              signal: controller.signal,
+            })
+            .catch((error: unknown) => error);
+
+          if (interruption === 'team stop') {
+            await coordinator.stopAll(task.id);
+            expect(await pending).toBeInstanceOf(TeamHireRevokedError);
+          } else {
+            controller.abort();
+            expect(await pending).toMatchObject({ name: 'AbortError' });
+          }
+          expect(startWorker).toHaveBeenCalledTimes(1);
+          expect(
+            coordinator.get(task.id)?.workers.filter(({ kind }) => kind === 'worker'),
+          ).toHaveLength(1);
+        } finally {
+          persistence.close();
+        }
+      },
+    );
+
+    it('rejects a pending hire when Stop all arrives during model validation', async () => {
+      const persistence = createPersistence();
+      try {
+        const task = persistence.createTask('stop during Worker model check');
+        const runtime = new TestWorkerRuntime();
+        const startWorker = vi.spyOn(runtime, 'start');
+        let releaseValidation!: () => void;
+        let enterValidation!: () => void;
+        const entered = new Promise<void>((resolve) => (enterValidation = resolve));
+        const validation = new Promise<void>((resolve) => (releaseValidation = resolve));
+        const coordinator = new TeamCoordinator(
+          persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          async () => {
+            enterValidation();
+            await validation;
+          },
+        );
+        const request = {
+          taskId: task.id,
+          role: 'Worker',
+          objective: 'Complete the assigned task',
+          contextInheritancePolicy: 'summary' as const,
+          writeCapable: false,
+        };
+        const ready = await coordinator.hireWorker(request);
+        const pending = coordinator
+          .hireWorker({
+            ...request,
+            modelSelection: {
+              connectionId: 'builtin:codex-cli',
+              requestedProvider: 'openai',
+              requestedModel: 'gpt-5.6-sol',
+            },
+          })
+          .catch((error: unknown) => error);
+        await entered;
+
+        const stopped = coordinator.stopAll(task.id);
+        releaseValidation();
+
+        const [result, detail] = await Promise.all([pending, stopped]);
+        expect(result).toBeInstanceOf(TeamHireRevokedError);
+        expect(
+          detail.workers
+            .filter(({ kind }) => kind === 'worker')
+            .map(({ id, state }) => ({ id, state })),
+        ).toEqual([{ id: ready.id, state: 'stopped' }]);
+        expect(startWorker).toHaveBeenCalledTimes(1);
+        expect(
+          persistence
+            .listTeamV2Activity(detail.team.id)
+            .filter(({ type }) => type === 'worker_hired'),
+        ).toHaveLength(1);
+      } finally {
+        persistence.close();
+      }
+    });
+
     it('allows an explicitly identified Manager to hire a child within persisted policy', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Manager delegation');

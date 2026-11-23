@@ -828,6 +828,7 @@ export class TeamMcpBridge {
                 request.tool,
                 request.args,
                 {
+                  signal: registration.turnAbort.signal,
                   ...(registration.requesterAgentId === undefined
                     ? {}
                     : { requesterAgentId: registration.requesterAgentId }),

@@ -467,10 +467,6 @@ function readOnlyDelegationError(): TeamDelegationError {
 // deciding anything"). Each hire pauses briefly so the spawn choreography paces like a leader
 // working through its plan. Overridable for tests (SPRINT_CODER_TEAM_PACING_MS=0).
 const HIRE_PACING_MS = Number(process.env['SPRINT_CODER_TEAM_PACING_MS'] ?? 1200);
-const pacing = (): Promise<void> =>
-  HIRE_PACING_MS <= 0
-    ? Promise.resolve()
-    : new Promise((resolve) => setTimeout(resolve, HIRE_PACING_MS));
 
 export type TeamToolName =
   | 'team_list_models'
@@ -978,8 +974,11 @@ export async function executeTeamTool(
             'Web research evidence for this exact model must be recorded before hiring the Worker',
           ),
         );
-      await pacing();
       try {
+        const admission = {
+          delayMs: HIRE_PACING_MS,
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        };
         const hireInput = {
           taskId,
           role: request.role,
@@ -1006,6 +1005,7 @@ export async function executeTeamTool(
                       ...request.managerPolicy,
                       maxDirectChildren: request.managerPolicy.maxDirectChildren ?? null,
                     },
+                admission,
               )
             : await coordinator.hireWorkerAs(
                 hireInput,
@@ -1016,6 +1016,7 @@ export async function executeTeamTool(
                       ...request.managerPolicy,
                       maxDirectChildren: request.managerPolicy.maxDirectChildren ?? null,
                     },
+                admission,
               );
         return {
           ok: true,
@@ -1415,8 +1416,9 @@ export function registerTeamTools(
   broker.registerImplementation({
     toolId: TEAM_HIRE_WORKER_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: (input, context) =>
+    execute: (input, context, control) =>
       executeTeamTool(coordinator, context.taskId, 'team_hire_worker', input, {
+        ...(control.signal === undefined ? {} : { signal: control.signal }),
         ...(options.listModelCandidates === undefined
           ? {}
           : { listModelCandidates: options.listModelCandidates }),

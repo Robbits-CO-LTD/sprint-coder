@@ -99,6 +99,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     worker: AgentRecord;
     name: string;
     input: unknown;
+    signal: AbortSignal;
     reportCursor: {
       read(): number;
       advance(seq: number): void;
@@ -520,6 +521,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
                 worker: input.worker,
                 name: toolCall.name,
                 input: toolCall.input,
+                signal: controller.signal,
                 reportCursor,
                 modelCatalogAudit,
                 ...(input.executionId === undefined ? {} : { executionId: input.executionId }),

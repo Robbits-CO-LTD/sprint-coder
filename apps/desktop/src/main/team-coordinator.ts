@@ -1,3 +1,4 @@
+import { setTimeout as wait } from 'node:timers/promises';
 import { assertNotRetiredManagedLocal } from './retired-managed-local';
 import { previewGraphSource } from './graph-source-preview';
 import { reviewGraphWorkspace } from './graph-workspace-review';
@@ -1212,22 +1213,25 @@ export class TeamCoordinator {
   async hireWorker(
     input: TeamHireWorkerInput,
     childManagerPolicy: ManagerHirePolicy | null = null,
+    admission?: { delayMs: number; signal?: AbortSignal },
   ): Promise<WorkerSummary> {
-    return this.hireWorkerWithAuthority(input, null, childManagerPolicy);
+    return this.hireWorkerWithAuthority(input, null, childManagerPolicy, admission);
   }
 
   async hireWorkerAs(
     input: TeamHireWorkerInput,
     requesterAgentId: string,
     childManagerPolicy: ManagerHirePolicy | null = null,
+    admission?: { delayMs: number; signal?: AbortSignal },
   ): Promise<WorkerSummary> {
-    return this.hireWorkerWithAuthority(input, requesterAgentId, childManagerPolicy);
+    return this.hireWorkerWithAuthority(input, requesterAgentId, childManagerPolicy, admission);
   }
 
   private async hireWorkerWithAuthority(
     input: TeamHireWorkerInput,
     requesterAgentId: string | null,
     childManagerPolicy: ManagerHirePolicy | null,
+    admission?: { delayMs: number; signal?: AbortSignal },
   ): Promise<WorkerSummary> {
     // A Worker that writes can only work when its assignment's Workspace check passes. Refuse before
     // anything is created — no Team, no idle Worker — with a reason the Leader can pass on (issue
@@ -1239,6 +1243,13 @@ export class TeamCoordinator {
     // lands while it runs must still win: the hire notes the Task's hire revision first and, once in
     // the queue, refuses if a stop (Stop all, the Leader's Turn stopped, the Task archived) moved it.
     const revision = this.hireRevision(input.taskId);
+    const requireCurrentHire = () => {
+      admission?.signal?.throwIfAborted();
+      if (this.hireRevision(input.taskId) !== revision) throw new TeamHireRevokedError();
+    };
+    if (admission !== undefined && admission.delayMs > 0)
+      await wait(admission.delayMs, undefined, { signal: admission.signal });
+    requireCurrentHire();
     if (input.writeCapable && this.worktreeManager !== undefined)
       await this.requireWorkspaceWriteReady(input.taskId).catch((error: unknown) => {
         if (error instanceof TeamWorkspaceRepositoryError)
@@ -1246,7 +1257,7 @@ export class TeamCoordinator {
         throw error;
       });
     return this.enqueue(input.taskId, async () => {
-      if (this.hireRevision(input.taskId) !== revision) throw new TeamHireRevokedError();
+      requireCurrentHire();
       let team = this.persistence.getTeamByTask(input.taskId);
       if (team === null) {
         team = this.persistence.promoteTaskToTeam(input.taskId);
@@ -1291,8 +1302,11 @@ export class TeamCoordinator {
         this.assertBlueprintHire(blueprint, before, requester, input, childManagerPolicy);
         team = this.persistence.getTeam(team.id);
       }
-      if (input.modelSelection !== undefined)
+      if (input.modelSelection !== undefined) {
         await this.validateModelSelection?.(input.modelSelection, input.taskId);
+        // Stop revokes hires immediately, even while they hold the Team queue for model validation.
+        requireCurrentHire();
+      }
       if (team.state === 'draft') team = this.persistence.transitionTeamState(team.id, 'forming');
       if (!['forming', 'active', 'paused', 'completed', 'failed'].includes(team.state))
         throw new Error('Team does not accept new workers');

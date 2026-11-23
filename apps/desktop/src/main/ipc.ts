@@ -1780,8 +1780,17 @@ export class IpcRouter {
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
-      executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit, executionId }) =>
+      executeManagerTool: ({
+        worker,
+        name,
+        input,
+        signal,
+        reportCursor,
+        modelCatalogAudit,
+        executionId,
+      }) =>
         executeTeamTool(this.teamCoordinator, worker.taskId, name, input, {
+          signal,
           requesterAgentId: worker.id,
           accessCeiling:
             executionId === undefined
