@@ -154,7 +154,10 @@ describe('Grok settings and Team display', () => {
     'shows Grok diagnostics and CLI defaults without Claude effort controls in %s',
     async (Body) => {
       bridge();
-      useAppStore.setState({ runtime: grokRuntime({ grokReadiness: 'authentication_required' }) });
+      useAppStore.setState({
+        runtimeDetectionStatus: 'ready',
+        runtime: grokRuntime({ grokReadiness: 'authentication_required' }),
+      });
       await render(<Body open={false} supported onClose={() => {}} />);
       const detection = container.querySelector('[data-testid="settings-cli-grok"]');
       expect(detection?.textContent).toContain('Grok CLI');

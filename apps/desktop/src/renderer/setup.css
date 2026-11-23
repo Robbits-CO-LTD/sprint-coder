@@ -1575,9 +1575,9 @@
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
-  gap: 14px;
+  gap: 0 14px;
   min-height: 56px;
-  padding: 0 18px;
+  padding: 8px 18px;
   border: 1px solid var(--su-line);
   border-radius: 14px;
   background: var(--su-fill);
@@ -1596,6 +1596,29 @@
   font-size: 14px;
   line-height: 1.4;
   text-align: right;
+}
+
+.setup-runtime-guide {
+  grid-column: 2 / -1;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding-bottom: 3px;
+  color: var(--su-ink-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.setup-runtime-guide code {
+  color: var(--su-ink);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.setup-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /* A mark with a shape of its own for each state (never colour alone). */
