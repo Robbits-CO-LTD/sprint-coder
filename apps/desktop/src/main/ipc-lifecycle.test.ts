@@ -100,6 +100,9 @@ it.each([false, true])(
     const stop = vi.fn();
     lease.pushReasoning('safe tail\nraw carry');
     lease.replaceWatchers(() => [{ stop }]);
+    const importAbort = new AbortController();
+    const resourcesAtImportAbort = vi.fn(() => resources.size);
+    importAbort.signal.addEventListener('abort', resourcesAtImportAbort);
     const providerAbort = new AbortController();
     providerAbort.signal.addEventListener('abort', () => {
       expect(resources.size).toBe(0);
@@ -123,6 +126,7 @@ it.each([false, true])(
         },
       },
       turnStreamingResources: resources,
+      githubSkillImports: new Map([['turn-import', importAbort]]),
       policyCleanupsByTask: policyCleanups,
       taskTitleProviderAborts: { abortAll: vi.fn() },
       fullAccessConfirmation,
@@ -164,6 +168,7 @@ it.each([false, true])(
     );
     // The fence and safe-tail cleanup precede abort callbacks and the first awaited subsystem.
     expect(resources.size).toBe(0);
+    expect(resourcesAtImportAbort.mock.results).toContainEqual({ type: 'return', value: 0 });
     expect(stop).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledExactlyOnceWith('task-stream', 'turn-stream', {
       text: 'safe tail\n',
