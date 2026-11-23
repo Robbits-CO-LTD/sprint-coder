@@ -114,6 +114,25 @@ describe('executeTeamTool routing', () => {
     });
   });
 
+  it('propagates a canceled Worker hire to the dispatch owner', async () => {
+    const controller = new AbortController();
+    const coordinator = fakeCoordinator({
+      hireWorker: vi.fn(async () => {
+        controller.abort();
+        throw controller.signal.reason;
+      }),
+    });
+    await expect(
+      executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_hire_worker',
+        { agentKind: 'worker', role: 'Worker', objective: 'Complete the task' },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(controller.signal.reason);
+  });
+
   it('awaits the completed direct dispatch before returning the Leader tool result', async () => {
     const delivered = await fakeCoordinator().sendToWorker({
       taskId: 'task-1',

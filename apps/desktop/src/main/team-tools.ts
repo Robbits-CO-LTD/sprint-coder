@@ -1043,6 +1043,7 @@ export async function executeTeamTool(
             : {}),
         };
       } catch (error) {
+        options.signal?.throwIfAborted();
         return teamToolError(error);
       }
     }
