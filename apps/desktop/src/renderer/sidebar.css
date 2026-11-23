@@ -24,7 +24,14 @@
 
 .sb-new-row {
   display: flex;
+  flex-direction: column;
   padding-top: 2px;
+}
+.sb-new-hint {
+  margin: 0 8px 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
 }
 /* The panel's one raised control: a matte key with a hairline edge. Neutral on purpose — the
    selected row's rail is the only brand mark in the column. */

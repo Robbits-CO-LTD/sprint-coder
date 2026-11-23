@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { taskHasRunningWork, taskRunningWorkArchiveRefusal } from '@sprint-coder/contracts';
-import { useAppStore } from '../store/appStore';
+import { showUnassignedTaskWorkspaceNote, useAppStore } from '../store/appStore';
 import {
   projectSidebarProjection,
   taskFallbackProjection,
@@ -86,6 +86,7 @@ export function Sidebar({
   const setArchived = useAppStore((s) => s.setArchived);
   const refreshTaskRunningWork = useAppStore((s) => s.refreshTaskRunningWork);
   const { selectTask, createTask } = useTaskBoundary();
+  const newTaskWorkspaceNoteId = useId();
   const [query, setQuery] = useState('');
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const [archivedProjectsExpanded, setArchivedProjectsExpanded] = useState(false);
@@ -98,6 +99,14 @@ export function Sidebar({
   const [archiveNotice, setArchiveNotice] = useState<ArchiveNotice | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const pendingFocusRef = useRef<PendingFocus | null>(null);
+
+  const selectedProjectId = tasks.find((task) => task.id === selectedTaskId)?.projectId;
+  const newTaskProjectId = projects.find(
+    (project) => project.id === selectedProjectId && !project.archived,
+  )?.id;
+  const showWorkspaceNote = useAppStore(
+    (state) => newTaskProjectId === undefined && showUnassignedTaskWorkspaceNote(state),
+  );
 
   const projection = useMemo(
     () => projectSidebarProjection(projects, tasks, query, selectedTaskId),
@@ -309,10 +318,16 @@ export function Sidebar({
           type="button"
           className="sb-new"
           data-testid="sidebar-new-task-button"
-          onClick={() => void createTask()}
+          aria-describedby={showWorkspaceNote ? newTaskWorkspaceNoteId : undefined}
+          onClick={() => void createTask(newTaskProjectId)}
         >
           <Plus size={15} /> 新規タスク
         </button>
+        {showWorkspaceNote && (
+          <p className="sb-new-hint" id={newTaskWorkspaceNoteId}>
+            新しく作るタスクには作業フォルダーがありません。
+          </p>
+        )}
       </div>
       <div className="sb-search">
         <Search size={14} />

@@ -100,8 +100,11 @@ describe('the sidebar with nothing to list', () => {
       '[data-testid="sidebar-new-task-button"]',
     )!;
     expect(key.textContent).toBe(' 新規タスク');
+    expect(document.getElementById(key.getAttribute('aria-describedby') ?? '')?.textContent).toBe(
+      '新しく作るタスクには作業フォルダーがありません。',
+    );
     await act(async () => key.click());
-    expect(createTask).toHaveBeenCalledExactlyOnceWith();
+    expect(createTask).toHaveBeenCalledExactlyOnceWith(undefined);
   });
 
   it('tells a search that found nothing from an empty history, and clears the search', async () => {
@@ -123,6 +126,70 @@ describe('the sidebar with nothing to list', () => {
     expect(input.value).toBe('');
     expect(container.querySelector('[data-task-id="task-1"]')).not.toBeNull();
   });
+});
+
+describe('creating a Task from the sidebar', () => {
+  it('keeps creating Tasks when the selected Project has not loaded', async () => {
+    useAppStore.setState({
+      tasks: [{ ...task, projectId: 'unknown-project' }],
+      selectedTaskId: task.id,
+      projectLoadState: 'error',
+    });
+    const createTask = await renderSidebar();
+    const key = container.querySelector<HTMLButtonElement>(
+      '[data-testid="sidebar-new-task-button"]',
+    )!;
+    await act(async () => key.click());
+    expect(createTask).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(key.hasAttribute('aria-describedby')).toBe(true);
+  });
+
+  it('does not show the no-folder note when the reusable Task has a workspace', async () => {
+    useAppStore.setState({
+      tasks: [{ ...task, hasConversation: false, workspacePath: '/workspace' }],
+      selectedTaskId: task.id,
+    });
+    await renderSidebar();
+    const key = container.querySelector<HTMLButtonElement>(
+      '[data-testid="sidebar-new-task-button"]',
+    )!;
+    expect(key.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  it.each([
+    { projectId: 'project-1', archived: false, expectedProjectId: 'project-1' },
+    { projectId: 'project-1', archived: true, expectedProjectId: undefined },
+    { projectId: null, archived: false, expectedProjectId: undefined },
+  ])(
+    'uses the selected Task’s active Project ($projectId, archived: $archived)',
+    async ({ projectId, archived, expectedProjectId }) => {
+      useAppStore.setState({
+        tasks: [{ ...task, projectId }],
+        selectedTaskId: task.id,
+        projects: [
+          {
+            id: 'project-1',
+            name: 'Project Alpha',
+            revision: 1,
+            taskCount: 1,
+            archived,
+            folderCount: 0,
+            primaryFolder: null,
+            lastActivityAt: task.createdAt,
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+          },
+        ],
+      });
+      const createTask = await renderSidebar();
+      const key = container.querySelector<HTMLButtonElement>(
+        '[data-testid="sidebar-new-task-button"]',
+      )!;
+      await act(async () => key.click());
+      expect(createTask).toHaveBeenCalledExactlyOnceWith(expectedProjectId);
+      expect(key.hasAttribute('aria-describedby')).toBe(expectedProjectId === undefined);
+    },
+  );
 });
 
 describe('the Project menu', () => {

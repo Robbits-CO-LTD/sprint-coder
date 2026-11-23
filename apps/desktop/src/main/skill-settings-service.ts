@@ -498,7 +498,8 @@ export class SkillSettingsService {
     await operation;
   }
 
-  private async getStore(): Promise<SkillStore> {
+  // Opening a store cleans orphaned staging directories. All live operations share this handle.
+  async getStore(): Promise<SkillStore> {
     this.store ??= SkillStore.open({
       rootPath: join(this.input.homePath, '.sprintcoder', 'skills'),
     }).catch((error: unknown) => {

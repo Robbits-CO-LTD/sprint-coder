@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { storageGuidanceForPlatform } from '../../provider-storage-guidance';
 import {
   ADD_CONNECTION_CLOSE_LABEL,
   ADD_CONNECTION_LABEL,
@@ -358,6 +359,21 @@ describe('createConnection', () => {
 });
 
 describe('providerCreateErrorMessage', () => {
+  it.each([
+    ['win32', 'Windows'],
+    ['darwin', 'キーチェーン'],
+    ['linux', 'キーリング'],
+  ])(
+    'renders the storage guidance for %s without including raw error details',
+    (platform, hint) => {
+      const publicMessage = storageGuidanceForPlatform(platform);
+      expect(publicMessage).toContain(hint);
+      expect(providerCreateErrorMessage(new Error(`${publicMessage} private diagnostic`))).toBe(
+        `接続を追加できませんでした。${publicMessage}`,
+      );
+    },
+  );
+
   it('shows the allowlisted secure-storage guidance without exposing arbitrary Main details', () => {
     const error = Object.assign(
       new Error(
