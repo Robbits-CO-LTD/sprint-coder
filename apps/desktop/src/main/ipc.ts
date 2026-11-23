@@ -9,7 +9,7 @@ import {
   type GithubSkillRequest,
   type SkillReviewer,
 } from './github-skill-import';
-import { SKILL_REQUEST_GUIDANCE, WORKSPACE_REQUEST_GUIDANCE } from '../chat-continuation';
+import { SKILL_REQUEST_GUIDANCE } from '../chat-continuation';
 import { projectFolderIdentity } from './project-folder-identity';
 import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
 import {
@@ -106,6 +106,7 @@ import {
   permissionSettingsSchema,
   modelCatalogQueryInputSchema,
   modelCatalogQueryResultSchema,
+  type ModelCatalogQueryResult,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
   type ModelSelection,
@@ -769,9 +770,9 @@ import {
 import type { RuntimeManagedToolDefinition, RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-service';
 import {
-  PROVIDER_NO_TOOL_GUIDANCE,
+  PROVIDER_TOOL_RETRY_GUIDANCE,
+  providerTurnToolGuidance,
   PROVIDER_WORKSPACE_GUIDANCE,
-  providerWorkspaceGuidance,
   ManagedCodingHarness,
   providerDisclosureAuthorizationFacts,
   teamResultReadAuthorizationFacts,
@@ -2754,12 +2755,33 @@ export class IpcRouter {
       skillCatalogSchema,
       async ({ taskId }) => {
         await this.ensureBuiltinSkills();
-        return this.skillSettings
+        const catalog = await this.skillSettings
           .listCatalog(
             taskId === undefined ? undefined : this.skillRuntimeForTask(taskId),
             taskId === undefined ? [] : this.skillWorkspaceRoots(taskId),
           )
           .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        if (taskId === undefined || this.skillDraftAvailable(taskId)) return catalog;
+        return {
+          ...catalog,
+          revision: digestCanonical([catalog.revision, 'skill-draft-unavailable']),
+          items: catalog.items.map((item) =>
+            item.ref.source === 'builtin' && item.ref.skillId === 'skill-creator'
+              ? {
+                  ...item,
+                  compatibility: {
+                    ...item.compatibility,
+                    runtimeSupport: {
+                      codex: 'blocked' as const,
+                      claude: 'blocked' as const,
+                      grok: 'blocked' as const,
+                      provider: 'blocked' as const,
+                    },
+                  },
+                }
+              : item,
+          ),
+        };
       },
     );
     this.handle(
@@ -2857,8 +2879,10 @@ export class IpcRouter {
         // here would re-probe every Provider per page, and a Provider that flickers between
         // success and failure would move the revision under the cursor on every page (#906).
         // Revision 0 means no catalog has been built yet in this process, so it is built once.
-        if (input.cursor === null || this.modelCatalog.revision === 0)
-          await this.refreshModelCatalog();
+        const unavailableSubscriptions =
+          input.cursor === null || this.modelCatalog.revision === 0
+            ? await this.refreshModelCatalog()
+            : undefined;
         const result = this.modelCatalog.query(input);
         const runtimeKind = this.persistence.getRuntime();
         const selection =
@@ -2866,7 +2890,11 @@ export class IpcRouter {
           modelSelectionForRuntime(runtimeKind, this.persistence.getModel());
         return {
           ...result,
+          items: [...result.items],
           selection,
+          ...(input.accessTypes.includes('subscription') && unavailableSubscriptions !== undefined
+            ? { unavailableSubscriptions }
+            : {}),
           multiProviderModelPickerV2:
             multiProviderModelPickerV2Enabled() ||
             this.externalAcpCatalogAvailable ||
@@ -6718,12 +6746,34 @@ export class IpcRouter {
     return this.persistence.getEffectiveWorkspaceSet(taskId)?.roots.map((root) => root.path) ?? [];
   }
 
+  private skillDraftAvailable(taskId: string): boolean {
+    const selection = this.persistence.getTaskModelSelection(taskId);
+    const nativeSkillDrafts = process.env['SPRINT_CODER_LEADER_MCP'] !== '0';
+    if (selection?.connectionId == null)
+      return this.persistence.getRuntime() !== 'mock' && nativeSkillDrafts;
+    if (isExternalAcpConnection(selection.connectionId)) return true;
+    if (builtinRuntimeForModelSelection(selection) !== null) return nativeSkillDrafts;
+    return (
+      selection.requestedModel !== null &&
+      this.modelCatalog.find(selection.connectionId, selection.requestedModel)?.toolCalling
+        .value !== false
+    );
+  }
+
   private async resolveTurnSkills(
     taskId: string,
     text: string | undefined,
     selections: readonly TurnSkillSelection[],
   ): Promise<PersistedTurnSkill[]> {
     const skillRuntime = this.skillRuntimeForTask(taskId);
+    if (
+      selections.some(({ ref }) => ref.source === 'builtin' && ref.skillId === 'skill-creator') &&
+      !this.skillDraftAvailable(taskId)
+    )
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        'この接続ではSkillを作れません。ツールに対応するモデルを選んでください。',
+      );
     const requested =
       skillRuntime === 'codex' && text !== undefined
         ? bindBuiltinImagegenSkillForTurn(text, skillRuntime, selections)
@@ -7795,7 +7845,9 @@ export class IpcRouter {
     }
   }
 
-  private async refreshModelCatalog(): Promise<void> {
+  private async refreshModelCatalog(): Promise<
+    NonNullable<ModelCatalogQueryResult['unavailableSubscriptions']>
+  > {
     const [codexCapability, claudeCapability, grokCapability] = await Promise.all([
       this.codexRuntime.probe(),
       this.claudeRuntime.probe(),
@@ -7842,33 +7894,39 @@ export class IpcRouter {
     this.externalAcpCatalogAvailable = externalModels.some(({ connectionId }) =>
       isExternalAcpConnection(connectionId),
     );
+    const builtinConnections = [
+      {
+        kind: 'codex',
+        displayName: 'Codex CLI',
+        providerId: 'openai',
+        capability: codexCapability,
+      },
+      {
+        kind: 'claude',
+        displayName: 'Claude Code',
+        providerId: 'anthropic',
+        capability: claudeCapability,
+      },
+      { kind: 'grok', displayName: 'Grok CLI', providerId: 'xai', capability: grokCapability },
+    ] as const;
+    const subscriptions = builtinConnections.map(({ kind, ...entry }) => ({
+      ...entry,
+      connectionId: `builtin:${kind}-cli`,
+      available:
+        entry.capability.readiness === 'ready' && this.teamRuntimeAvailability.isAvailable(kind),
+    }));
     this.modelCatalog.replaceCatalog(
       [
-        ...providerModelsForBuiltin(
-          'builtin:codex-cli',
-          'Codex CLI',
-          'openai',
-          codexCapability.models,
-          codexCapability.readiness === 'ready' &&
-            this.teamRuntimeAvailability.isAvailable('codex'),
-          checkedAt,
-        ),
-        ...providerModelsForBuiltin(
-          'builtin:claude-cli',
-          'Claude Code',
-          'anthropic',
-          claudeCapability.models,
-          claudeCapability.readiness === 'ready' &&
-            this.teamRuntimeAvailability.isAvailable('claude'),
-          checkedAt,
-        ),
-        ...providerModelsForBuiltin(
-          'builtin:grok-cli',
-          'Grok CLI',
-          'xai',
-          grokCapability.models,
-          grokCapability.readiness === 'ready' && this.teamRuntimeAvailability.isAvailable('grok'),
-          checkedAt,
+        ...subscriptions.flatMap(
+          ({ connectionId, displayName, providerId, capability, available }) =>
+            providerModelsForBuiltin(
+              connectionId,
+              displayName,
+              providerId,
+              capability.models,
+              available,
+              checkedAt,
+            ),
         ),
         ...externalModels,
       ],
@@ -7885,6 +7943,19 @@ export class IpcRouter {
         ),
       ]),
     );
+    return subscriptions
+      .filter(({ available }) => !available)
+      .map(({ connectionId, displayName, capability }) => ({
+        connectionId,
+        displayName,
+        reason:
+          capability.readiness === 'authentication_required'
+            ? 'login_required'
+            : capability.cliNotDetected === true
+              ? 'cli_not_found'
+              : 'unavailable',
+        hasModels: capability.models.length > 0,
+      }));
   }
 
   private async captureProviderImageAttachmentCapability(
@@ -8747,19 +8818,25 @@ export class IpcRouter {
         providerImageDispatch?.inlineImages,
       );
       messages.unshift(...projectContextProviderMessages(context.projectItems));
-      if (memoryTurn) messages.unshift({ role: 'system', content: PROJECT_MEMORY_MCP_GUIDANCE });
       const selectedModel = this.modelCatalog.find(connectionId, modelId);
+      const toolCalling = externalCli ? true : selectedModel?.toolCalling.value;
+      if (skillCreatorTurn && toolCalling === false)
+        throw new SkillSettingsError(
+          'INVALID_SKILL',
+          'この接続ではSkillを作れません。ツールに対応するモデルを選んでください。',
+        );
       const workspaceToolsEligible = providerWorkspaceToolsEligible(
         teamTurn,
         started.workspaceSet.roots.length,
-        selectedModel?.toolCalling.value,
+        toolCalling,
       );
       const managedToolsEligible =
-        workspaceToolsEligible ||
-        teamTurn ||
-        memoryTurn ||
-        skillCreatorTurn ||
-        autoSkills.length > 0;
+        toolCalling !== false &&
+        (workspaceToolsEligible ||
+          teamTurn ||
+          memoryTurn ||
+          skillCreatorTurn ||
+          autoSkills.length > 0);
       workspaceToolSnapshot = managedToolsEligible
         ? this.managedCodingHarness.startTurn(
             {
@@ -8778,22 +8855,9 @@ export class IpcRouter {
             },
           )
         : undefined;
-      const workspaceGuidance = providerWorkspaceGuidance(
-        process.platform,
-        started.workspaceSet.roots,
-      );
-      if (!teamTurn)
-        messages.unshift({
-          role: 'system',
-          content: workspaceToolsEligible
-            ? workspaceGuidance
-            : started.workspaceSet.roots.length === 0 && selectedModel?.toolCalling.value !== false
-              ? `このTurnには作業フォルダーがありません。${WORKSPACE_REQUEST_GUIDANCE}`
-              : PROVIDER_NO_TOOL_GUIDANCE,
-        });
-      if (!teamTurn && selectedModel?.toolCalling.value !== false)
+      if (!teamTurn && toolCalling !== false)
         messages.unshift({ role: 'system', content: SKILL_REQUEST_GUIDANCE });
-      if (autoSkills.length > 0)
+      if (toolCalling !== false && autoSkills.length > 0)
         messages.unshift({
           role: 'system',
           content:
@@ -8804,6 +8868,15 @@ export class IpcRouter {
           ? []
           : providerToolsFromSnapshot(workspaceToolSnapshot)),
       ]);
+      if (roundTools.some((tool) => tool.name === 'project_memory_remember'))
+        messages.unshift({ role: 'system', content: PROJECT_MEMORY_MCP_GUIDANCE });
+      const workspaceGuidance = providerTurnToolGuidance({
+        platform: process.platform,
+        roots: started.workspaceSet.roots,
+        toolCalling,
+        tools: roundTools,
+      });
+      messages.unshift({ role: 'system', content: workspaceGuidance });
       if (externalCli && roundTools.some((tool) => tool.name === 'exec_command')) {
         const command = resolveDesktopControlCommand();
         if (command)
@@ -9099,23 +9172,32 @@ export class IpcRouter {
           }
           const canRetryWithoutWorkspaceTools = shouldRetryProviderWithoutTools({
             ordinal,
-            workspaceToolsBound: workspaceToolSnapshot !== undefined,
-            toolCalling: selectedModel?.toolCalling.value,
+            workspaceToolsBound: roundTools.length > 0,
+            toolCalling,
             errorCategory: roundError.category,
             providerCode: roundError.providerCode,
             toolCallCount: roundToolCalls.length,
             outputLength: roundOutput.join('').length,
           });
           if (canRetryWithoutWorkspaceTools) {
+            await this.mailbox.run(taskId, () => {
+              if (
+                this.turnRuntimes.get(started.turnId) === 'provider' &&
+                !controller.signal.aborted
+              )
+                this.publish(this.persistence.recordTurnToolsDisabled(taskId, started.turnId));
+            });
             roundTools = Object.freeze([]);
             const guidanceIndex = messages.findIndex(
               ({ role, content }) => role === 'system' && content === workspaceGuidance,
             );
             if (guidanceIndex >= 0)
-              messages[guidanceIndex] = { role: 'system', content: PROVIDER_NO_TOOL_GUIDANCE };
-            else messages.unshift({ role: 'system', content: PROVIDER_NO_TOOL_GUIDANCE });
+              messages[guidanceIndex] = { role: 'system', content: PROVIDER_TOOL_RETRY_GUIDANCE };
             for (let index = messages.length - 1; index >= 0; index -= 1)
-              if (messages[index]?.content === PROJECT_MEMORY_MCP_GUIDANCE)
+              if (
+                messages[index]?.content === PROJECT_MEMORY_MCP_GUIDANCE ||
+                messages[index]?.content === SKILL_REQUEST_GUIDANCE
+              )
                 messages.splice(index, 1);
             continue;
           }

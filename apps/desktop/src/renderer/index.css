@@ -2820,11 +2820,15 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer-permission-chip[data-access-preset='full'] {
   color: var(--warning);
 }
-.composer-permission-pending {
+.composer-permission-pending,
+.composer-skill-hint {
   padding: 6px 14px;
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
+}
+.composer-skill-hint {
+  margin: 0;
 }
 .composer-ai-connection {
   display: flex;
@@ -3478,6 +3482,12 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 0 10px;
   border-radius: var(--r-sm);
   cursor: pointer;
+}
+.mpv2-row[aria-disabled='true'] {
+  cursor: default;
+}
+.mpv2-row[aria-disabled='true'] .mpv2-title {
+  color: var(--text-muted);
 }
 .mpv2-row.active {
   background: var(--bg-hover);

@@ -75,6 +75,22 @@ it('places fixed API and CLI failure guidance on the matching historical Turns',
 });
 
 describe('Timeline history (issue #842)', () => {
+  it('shows the tools-disabled resend notice only for the affected request', async () => {
+    useAppStore.setState({
+      messagesByTask: {
+        'task-1': [
+          message({ id: 'u1', turnId: 'turn-1', content: '先の依頼' }),
+          message({ id: 'u2', turnId: 'turn-2', content: '再送した依頼' }),
+          message({ id: 'a2', turnId: 'turn-2', author: 'assistant', content: '回答' }),
+        ],
+      },
+      toolsDisabledTurnIdsByTask: { 'task-1': ['turn-2'] },
+    });
+    const html = await render();
+    const notices = html.match(/ツールなしで再送しました/gu) ?? [];
+    expect(notices).toHaveLength(1);
+    expect(html.indexOf('ツールなしで再送しました')).toBeGreaterThan(html.indexOf('再送した依頼'));
+  });
   it('marks a Turn a restart interrupted under its partial reply, and leaves finished Turns alone', async () => {
     useAppStore.setState({
       messagesByTask: {

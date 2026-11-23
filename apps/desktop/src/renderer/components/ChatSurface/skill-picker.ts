@@ -8,8 +8,11 @@ export function skillUnavailable(
   reuseSelected = false,
 ): string | undefined {
   if (!skill.enabled) return 'このSkillは無効です';
-  if (skill.compatibility.runtimeSupport[runtime] === 'blocked')
+  if (skill.compatibility.runtimeSupport[runtime] === 'blocked') {
+    if (skill.ref.source === 'builtin' && skill.ref.skillId === 'skill-creator')
+      return 'この接続ではSkillを作れません';
     return 'このRuntimeではPortable版への変換が必要です';
+  }
   if (
     selections.some(
       ({ ref }) => ref.source === skill.ref.source && ref.skillId === skill.ref.skillId,

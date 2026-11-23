@@ -105,6 +105,7 @@ export function Timeline({
   const graphVersions = useAppStore((s) => s.graphVersionsByTask[taskId]);
   const liveFileEdits = useLiveFileEdits();
   const skillDrafts = useAppStore((s) => s.skillDraftsByTask[taskId]) ?? NO_SKILL_DRAFTS;
+  const toolsDisabledTurnIds = useAppStore((s) => s.toolsDisabledTurnIdsByTask[taskId]);
   const installSkillDraft = useAppStore((s) => s.installSkillDraft);
   const discardSkillDraft = useAppStore((s) => s.discardSkillDraft);
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
@@ -503,6 +504,13 @@ export function Timeline({
                   content={message.content}
                   attachments={message.attachments}
                 />
+                {message.author === 'user' &&
+                  message.turnId !== null &&
+                  toolsDisabledTurnIds?.includes(message.turnId) && (
+                    <p className="sys-notice" role="status">
+                      接続先がツール付きの送信を受け付けなかったため、ツールなしで再送しました。
+                    </p>
+                  )}
                 {failure !== undefined && (
                   <div
                     className="turn-failure-marker"
@@ -577,8 +585,8 @@ export function Timeline({
                   <SkillDraftCard
                     key={draft.id}
                     draft={draft}
-                    onInstall={() => void installSkillDraft(taskId, draft)}
-                    onDiscard={() => void discardSkillDraft(taskId, draft.id)}
+                    onInstall={() => installSkillDraft(taskId, draft)}
+                    onDiscard={() => discardSkillDraft(taskId, draft.id)}
                   />
                 ))}
                 {imageRequestUnfulfilled && <MissingGeneratedImageNotice />}

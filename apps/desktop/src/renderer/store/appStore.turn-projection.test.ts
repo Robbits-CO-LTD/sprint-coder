@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TurnEvent, TurnSnapshot } from '../types/sprint-coder';
-import { useAppStore } from './appStore';
+import { handleTurnEvent, useAppStore } from './appStore';
 
 const createdAt = '2026-10-20T01:02:03.000Z';
 const startedAt = Date.parse(createdAt);
@@ -71,12 +71,63 @@ describe('Task Turn subscription projection boundary', () => {
       queuedByTask: {},
       lastSeqByTask: {},
       messagesByTask: {},
+      draftByTask: {},
+      skillSelectionByTask: {},
       pendingOptimisticIdByTask: {},
       draftAttachmentsByTask: {},
       sendingByTask: {},
       error: null,
     }),
   );
+
+  it('keeps only Skill creator on follow-up messages and clears it when the draft arrives', async () => {
+    const creator = {
+      kind: 'chat' as const,
+      ref: { source: 'builtin' as const, skillId: 'skill-creator', digest: 'a'.repeat(64) },
+    };
+    const ordinary = {
+      kind: 'chat' as const,
+      ref: { source: 'created' as const, skillId: 'review', digest: 'b'.repeat(64) },
+    };
+    const start = vi.fn().mockResolvedValue({});
+    const selection = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('window', {
+      sprintCoder: { tasks: {}, turns: { start }, skills: { setDraftSelection: selection } },
+    });
+    useAppStore.setState({
+      skillSelectionByTask: { 'task-a': [creator, ordinary] },
+      draftByTask: { 'task-a': '' },
+    });
+    await useAppStore.getState().startTurn('task-a', 'Skill作成を始める');
+    await useAppStore.getState().startTurn('task-a', 'レビューに使います');
+    expect(start.mock.calls.map(([call]) => call.skills)).toEqual([[creator, ordinary], [creator]]);
+    expect(selection).toHaveBeenLastCalledWith('task-a', [creator]);
+    useAppStore.setState({ draftByTask: { 'task-a': '次の質問 $skill-creator' } });
+    handleTurnEvent(
+      'task-a',
+      {
+        type: 'skill.draft.created',
+        taskId: 'task-a',
+        turnId: 'turn-a',
+        seq: 1,
+        draft: {
+          id: 'draft-a',
+          skillId: 'review',
+          name: 'Review',
+          kind: 'chat',
+          description: 'Review',
+          digest: 'c'.repeat(64),
+          files: [{ path: 'SKILL.md', content: '# Review' }],
+          createdAt,
+          updatedAt: createdAt,
+        },
+      },
+      useAppStore.setState,
+    );
+    expect(useAppStore.getState().skillSelectionByTask['task-a']).toEqual([]);
+    expect(useAppStore.getState().draftByTask['task-a']).toBe('次の質問 ');
+    expect(useAppStore.getState().skillDraftsByTask['task-a']).toHaveLength(1);
+  });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();

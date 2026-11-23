@@ -6386,6 +6386,7 @@ export interface PersistenceClient {
     event: TurnEvent;
   }>;
   recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent;
+  recordTurnToolsDisabled(taskId: string, turnId: string): TurnEvent;
   getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity;
   recordTurnResolution(
     taskId: string,
@@ -19883,8 +19884,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent {
+    return this.db.transaction(() => {
+      this.getTurn(taskId, turnId);
+      this.db
+        .prepare(
+          "DELETE FROM task_draft_skill_bindings WHERE task_id = ? AND source = 'builtin' AND skill_id = 'skill-creator'",
+        )
+        .run(taskId);
+      return this.appendEvent({ type: 'skill.draft.created', taskId, turnId, draft });
+    })();
+  }
+
+  recordTurnToolsDisabled(taskId: string, turnId: string): TurnEvent {
     this.getTurn(taskId, turnId);
-    return this.appendEvent({ type: 'skill.draft.created', taskId, turnId, draft });
+    return this.appendEvent({ type: 'turn.tools_disabled', taskId, turnId });
   }
 
   recordTurnResolution(
@@ -20208,9 +20221,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
       digest: string;
       name: string;
     }>;
+    const toolsDisabledTurns = this.db
+      .prepare(
+        "SELECT turn_id FROM turn_events WHERE task_id = ? AND type = 'turn.tools_disabled' ORDER BY seq DESC LIMIT 4096",
+      )
+      .all(taskId) as Array<{ turn_id: string }>;
     return turnSnapshotSchema.parse({
       lastSeq,
       activeTurn,
+      ...(toolsDisabledTurns.length === 0
+        ? {}
+        : { toolsDisabledTurnIds: toolsDisabledTurns.map(({ turn_id }) => turn_id) }),
       queued: this.listQueued(taskId),
       contextUsage,
       pendingApprovals: this.listPendingApprovals(taskId).map(toApprovalSummary),

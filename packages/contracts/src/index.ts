@@ -2562,6 +2562,7 @@ export const turnEventSchema = z.discriminatedUnion('type', [
     .object({ type: z.literal('turn.accepted'), ...turnEventBase, userMessage: chatMessageSchema })
     .strict(),
   z.object({ type: z.literal('stage.changed'), ...turnEventBase, stage: turnStageSchema }).strict(),
+  z.object({ type: z.literal('turn.tools_disabled'), ...turnEventBase }).strict(),
   z
     .object({
       type: z.literal('message.delta'),
@@ -2744,6 +2745,7 @@ export const turnSnapshotSchema = z
       .nullable(),
     queued: z.array(queuedInputSchema),
     contextUsage: contextUsageSchema,
+    toolsDisabledTurnIds: z.array(idSchema).max(4_096).optional(),
     pendingApprovals: z.array(approvalSummarySchema).default([]),
     activatedSkills: z
       .array(
@@ -3709,6 +3711,19 @@ export const modelCatalogQueryResultSchema = z
       .nullable(),
     selection: modelSelectionSchema,
     multiProviderModelPickerV2: z.boolean(),
+    unavailableSubscriptions: z
+      .array(
+        z
+          .object({
+            connectionId: connectionIdSchema,
+            displayName: z.string().min(1).max(100),
+            reason: z.enum(['cli_not_found', 'login_required', 'unavailable']),
+            hasModels: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(3)
+      .optional(),
   })
   .strict();
 export type ModelCatalogQueryResult = z.infer<typeof modelCatalogQueryResultSchema>;

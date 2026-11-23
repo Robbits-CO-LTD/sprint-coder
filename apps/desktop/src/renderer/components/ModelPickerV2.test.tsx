@@ -88,7 +88,7 @@ describe('catalogQuery', () => {
     expect(query.connectionIds).toEqual([]);
     expect(query.providerIds).toEqual([]);
     expect(query.capabilities).toEqual([]);
-    expect(query.availableOnly).toBe(true);
+    expect(query.availableOnly).toBe(false);
   });
 
   it('produces a query Main will accept', () => {
