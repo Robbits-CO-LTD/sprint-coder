@@ -2947,7 +2947,7 @@ describe('Main image attachment dispatch boundary', () => {
       const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
       Object.assign(router, {
         managedWorkerTurn: new Map(),
-        githubSkillImports: new Map(),
+        githubActions: new Map(),
         approvalCoordinator: { turnEnded },
         // Every Turn ending reaches the approval coordinator through `notifyTurnEnded`.
         managedCodingHarness: {
@@ -3035,7 +3035,7 @@ describe('Main image attachment dispatch boundary', () => {
           ['worker-b', { taskId: 'task-1', parentTurnId, released: new AbortController() }],
         ]),
         persistence: { getActiveTurnId: () => null },
-        githubSkillImports: new Map(),
+        githubActions: new Map(),
         approvalCoordinator: { turnEnded },
         managedCodingHarness: { finishTurn },
       });
@@ -3068,7 +3068,7 @@ describe('Main image attachment dispatch boundary', () => {
       const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
       Object.assign(router, {
         managedWorkerTurn: new Map(),
-        githubSkillImports: new Map(),
+        githubActions: new Map(),
         approvalCoordinator: { turnEnded: vi.fn() },
         managedCodingHarness: {
           broker: { getTurnSnapshot: () => started.get(missionTurnId) },
@@ -9152,7 +9152,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       runtimeDiagnosticContextByTurn: new Map(),
       pendingProjectMemoriesByTurn: new Map(),
       managedWorkerTurn: new Map(),
-      githubSkillImports: new Map(),
+      githubActions: new Map(),
       approvalCoordinator: { turnEnded: vi.fn() },
       pushRuntimeStatus,
       publish,

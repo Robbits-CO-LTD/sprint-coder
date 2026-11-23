@@ -6,6 +6,7 @@ import type { PermissionSettings } from '@sprint-coder/contracts';
 import { Composer } from './Composer';
 import { PERMISSION_CHANGE_PENDING_MESSAGE, useAppStore } from '../../store/appStore';
 import { OPEN_PROVIDER_SETTINGS_EVENT } from '../../lib/settings-navigation';
+import { GITHUB_ISSUE_INPUT_EXAMPLE } from '../../../github-issue-request';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -54,6 +55,45 @@ it('keeps an unconnected draft editable, blocks sending and opens connection set
     window.removeEventListener(OPEN_PROVIDER_SETTINGS_EVENT, open);
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+it('offers the GitHub Issue example and accepts an explicit request without an AI connection', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const taskId = 'github-issue';
+  const start = vi.fn().mockResolvedValue({ turnId: 'turn-issue' });
+  Object.defineProperty(window, 'sprintCoder', {
+    configurable: true,
+    value: { tasks: {}, turns: { start } },
+  });
+  const initial = useAppStore.getInitialState();
+  useAppStore.setState({
+    ...initial,
+    selectedTaskId: taskId,
+    runtime: { ...initial.runtime, aiConnectionRequired: true },
+    draftByTask: { [taskId]: 'GitHubにIssueを起票して' },
+  });
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Composer taskId={taskId} />));
+    const hint = container.querySelector('.composer-ai-connection')!;
+    await act(async () => hint.querySelector('button')!.click());
+    expect(container.querySelector('textarea')?.value).toBe(GITHUB_ISSUE_INPUT_EXAMPLE);
+    expect(start).not.toHaveBeenCalled();
+    const text = GITHUB_ISSUE_INPUT_EXAMPLE.replace('<所有者>/<リポジトリ>', 'team/repo');
+    await act(async () => useAppStore.setState({ draftByTask: { [taskId]: text } }));
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-send-button"]',
+    )!;
+    expect(send.disabled).toBe(false);
+    await act(async () => send.click());
+    expect(start).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ text }));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    useAppStore.setState(initial, true);
   }
 });
 
