@@ -126,7 +126,7 @@ it.each([false, true])(
         },
       },
       turnStreamingResources: resources,
-      githubSkillImports: new Map([['turn-import', importAbort]]),
+      githubActions: new Map([['turn-import', importAbort]]),
       policyCleanupsByTask: policyCleanups,
       taskTitleProviderAborts: { abortAll: vi.fn() },
       fullAccessConfirmation,

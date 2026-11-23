@@ -16,6 +16,7 @@ import { ModelPickerV2 } from '../ModelPickerV2';
 import { isModelPickerV2Active } from '../../lib/model-picker-parity';
 import { requestOpenProviderSettings } from '../../lib/settings-navigation';
 import { IMAGEGEN_PREFIX } from './imagegen';
+import { GITHUB_ISSUE_INPUT_EXAMPLE, parseGithubIssueInput } from '../../../github-issue-request';
 import type { ComposerMenuItem } from './ComposerMenu';
 import { SlashCommandMenu, type SlashMenuItem } from './SlashCommandMenu';
 import {
@@ -503,8 +504,12 @@ export function Composer({ taskId }: { taskId: string }) {
     wasSendingRef.current = sending;
   }, [sending]);
 
+  const githubIssue = !goalRequested && !imageRequested ? parseGithubIssueInput(sendText) : null;
+  const githubIssueHasExtras =
+    githubIssue !== null && (draftAttachments.length > 0 || selectedSkills.length > 0);
   const sendBlocked =
-    aiConnectionRequired ||
+    (aiConnectionRequired && githubIssue === null) ||
+    githubIssueHasExtras ||
     composing ||
     permissionChanging ||
     attachmentBlocked ||
@@ -905,7 +910,7 @@ export function Composer({ taskId }: { taskId: string }) {
             shadow rather than stacking two framed boxes on top of each other. */}
         <div className="composer-panel">
           <ContextBar taskId={taskId} />
-          {aiConnectionRequired && (
+          {aiConnectionRequired && githubIssue === null && (
             <div className="composer-ai-connection">
               <div role="status">
                 <strong>AI がつながっていません</strong>
@@ -914,6 +919,27 @@ export function Composer({ taskId }: { taskId: string }) {
               <button type="button" className="cmp-chip" onClick={requestOpenProviderSettings}>
                 接続を設定
               </button>
+            </div>
+          )}
+          {githubIssue !== null && (
+            <div className="composer-ai-connection">
+              <p role="status">
+                {githubIssueHasExtras
+                  ? 'Issueを起票するときは、画像やSkillを外してください。'
+                  : '送信先と内容を確認し、承認した場合にだけGitHubに投稿します。'}
+              </p>
+              {githubIssue.kind === 'incomplete' && (
+                <button
+                  type="button"
+                  className="cmp-chip"
+                  onClick={() => {
+                    setDraft(taskId, GITHUB_ISSUE_INPUT_EXAMPLE);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  起票の入力例を使う
+                </button>
+              )}
             </div>
           )}
           {permissionChanging && (

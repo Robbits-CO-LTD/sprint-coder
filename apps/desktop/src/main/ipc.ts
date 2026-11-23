@@ -9,6 +9,8 @@ import {
   type GithubSkillRequest,
   type SkillReviewer,
 } from './github-skill-import';
+import { createGithubIssue, GithubIssueError } from './github-issue';
+import { GITHUB_ISSUE_INPUT_HELP, parseGithubIssueInput } from '../github-issue-request';
 import { SKILL_REQUEST_GUIDANCE, WORKSPACE_REQUEST_GUIDANCE } from '../chat-continuation';
 import { projectFolderIdentity } from './project-folder-identity';
 import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
@@ -1161,7 +1163,7 @@ export class IpcRouter {
   >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
-  private readonly githubSkillImports = new Map<string, AbortController>();
+  private readonly githubActions = new Map<string, AbortController>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
   private readonly canceledRuntimeTurns = new Set<string>();
   /** What moves in each Task, as last sent to the window (`refreshTaskRunningWork`). */
@@ -4289,13 +4291,21 @@ export class IpcRouter {
       turnStartInputSchema,
       turnStartResultSchema,
       async (input, event, envelope) => {
-        const selection = this.persistence.getTaskModelSelection(input.taskId);
-        if (selection !== null)
-          assertNotRetiredManagedLocal(selection.connectionId, selection.requestedProvider);
-        await this.assertChatAiConnected(selection);
-        const skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
-          (error) => Promise.reject(skillSettingsPublicError(error)),
-        );
+        const githubIssue = parseGithubIssueInput(input.text);
+        let skills: PersistedTurnSkill[] = [];
+        if (githubIssue === null) {
+          const selection = this.persistence.getTaskModelSelection(input.taskId);
+          if (selection !== null)
+            assertNotRetiredManagedLocal(selection.connectionId, selection.requestedProvider);
+          await this.assertChatAiConnected(selection);
+          skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
+            (error) => Promise.reject(skillSettingsPublicError(error)),
+          );
+        } else if (input.skills.length > 0 || input.attachmentIds.length > 0) {
+          throw new GithubIssueError(
+            'Issueを起票するときは、画像やSkillを外して文章だけを送ってください。',
+          );
+        }
         let attachmentCapability: ImageAttachmentCapabilityBinding | undefined;
         if (input.attachmentIds.length > 0) {
           if (input.attachmentSelectionIdentity === null)
@@ -4779,7 +4789,7 @@ export class IpcRouter {
     turnId: string,
     outcome: Parameters<ApprovalCoordinator['turnEnded']>[2],
   ): void {
-    this.githubSkillImports.get(turnId)?.abort();
+    this.githubActions.get(turnId)?.abort();
     this.approvalCoordinator.turnEnded(taskId, turnId, outcome);
   }
 
@@ -4792,7 +4802,7 @@ export class IpcRouter {
       // A transient final emit must not prevent the existing Runtime and custody teardown.
       streamingFailure = { cause: error };
     }
-    for (const controller of this.githubSkillImports.values()) controller.abort();
+    for (const controller of this.githubActions.values()) controller.abort();
     this.fullAccessConfirmation.dispose();
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
@@ -6046,7 +6056,7 @@ export class IpcRouter {
       event: { taskId },
     } = started;
     const controller = new AbortController();
-    this.githubSkillImports.set(turnId, controller);
+    this.githubActions.set(turnId, controller);
     const active = () =>
       !this.disposed &&
       !controller.signal.aborted &&
@@ -6159,8 +6169,83 @@ export class IpcRouter {
       );
       this.finishAndAdvance(taskId, turnId, 'failed');
     } finally {
-      this.githubSkillImports.delete(turnId);
+      this.githubActions.delete(turnId);
     }
+  }
+
+  private async runGithubIssue(
+    started: StartedTurn,
+    input: NonNullable<ReturnType<typeof parseGithubIssueInput>>,
+  ): Promise<void> {
+    const {
+      turnId,
+      event: { taskId },
+    } = started;
+    if (this.githubActions.has(turnId)) return;
+    const controller = new AbortController();
+    this.githubActions.set(turnId, controller);
+    this.pendingTaskTitles.delete(turnId);
+    const active = () =>
+      !this.disposed &&
+      !controller.signal.aborted &&
+      !this.canceledRuntimeTurns.has(turnId) &&
+      this.persistence.getActiveTurnId(taskId) === turnId;
+    let message = GITHUB_ISSUE_INPUT_HELP;
+    let state: 'completed' | 'failed' = 'completed';
+    try {
+      for (const stage of ['understanding', 'planning', 'executing'] as const)
+        this.publish(this.persistence.changeStage(taskId, turnId, stage));
+      if (input.kind === 'create') {
+        const request = input.request;
+        const epoch = this.persistence.getPermissionPolicy(taskId).policyEpoch;
+        const canPost = () => {
+          if (!active() || this.persistence.getTask(taskId).localOnly) return false;
+          const policy = this.persistence.getPermissionPolicy(taskId);
+          return (
+            policy.policyEpoch === epoch && !policy.revokedCapabilities.includes('network.fetch')
+          );
+        };
+        if (!canPost())
+          throw new GithubIssueError(
+            'このタスクでは外部送信が許可されていません。Issueは送信していません。',
+          );
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]);
+        const answer = await dialog.showMessageBox(this.window, {
+          type: 'question',
+          title: 'GitHub Issueの投稿を確認',
+          message: 'この内容でGitHubにIssueを1件投稿しますか？',
+          detail: `送信先: https://github.com/${request.repository}\n\nタイトル: ${request.title}\n\n本文:\n${request.body || '（空欄）'}`,
+          buttons: ['投稿しない', 'この内容で投稿する'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+          signal,
+        });
+        if (!active()) return;
+        if (signal.aborted || answer.response !== 1) {
+          message = 'GitHub Issueの投稿を取り消しました。';
+        } else {
+          if (!canPost())
+            throw new GithubIssueError(
+              'タスクの状態や権限が変わりました。Issueは送信していません。',
+            );
+          const url = await createGithubIssue(request, controller.signal, canPost);
+          message = `GitHub Issueを作成しました。\n\n[作成したIssue](${url})`;
+        }
+      }
+    } catch (error) {
+      state = 'failed';
+      message =
+        error instanceof GithubIssueError
+          ? error.message
+          : 'GitHub Issueの処理を完了できませんでした。再送する前にIssue一覧を確認してください。';
+    } finally {
+      this.githubActions.delete(turnId);
+    }
+    if (!active()) return;
+    this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing'));
+    this.publish(this.persistence.appendDelta(taskId, turnId, randomUUID(), message));
+    this.finishAndAdvance(taskId, turnId, state, message);
   }
 
   private async startSelectedRuntime(started: StartedTurn, userChatInput: boolean): Promise<void> {
@@ -6173,6 +6258,16 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
+    const githubIssue = userChatInput ? parseGithubIssueInput(started.text) : null;
+    if (githubIssue !== null) {
+      await this.runGithubIssue(
+        started,
+        started.skills.length === 0 && !this.attachmentCapabilityByTurn.has(started.turnId)
+          ? githubIssue
+          : { kind: 'incomplete' },
+      );
+      return;
+    }
     const retired = isRetiredManagedLocal(
       started.modelSelection.connectionId,
       started.modelSelection.requestedProvider,
@@ -10916,7 +11011,7 @@ async function projectFolderHealth(
 export function toPublicError(error: unknown): PublicError {
   if (error instanceof RetiredManagedLocalError)
     return { code: 'RUNTIME_UNAVAILABLE', userMessage: error.message, retryable: false };
-  if (error instanceof ImageAttachmentValidationError)
+  if (error instanceof ImageAttachmentValidationError || error instanceof GithubIssueError)
     return { code: 'INVALID_REQUEST', userMessage: error.message, retryable: false };
   if (error instanceof ImageAttachmentLimitError)
     return {

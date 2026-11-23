@@ -231,7 +231,7 @@ export async function prepareExecutionSpec(
   return spec;
 }
 
-async function resolveBareExecutable(
+export async function resolveBareExecutable(
   executable: string,
   environment: Readonly<Record<string, string>>,
 ): Promise<string> {
