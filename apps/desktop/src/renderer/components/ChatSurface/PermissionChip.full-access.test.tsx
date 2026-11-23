@@ -13,11 +13,11 @@ const taskId = 'full-access-wording';
 let container: HTMLDivElement;
 let root: Root;
 
-async function renderWith(platform: string | undefined) {
+async function renderWith(platform: string | undefined, reviewProjectRules = vi.fn()) {
   Object.defineProperty(window, 'sprintCoder', {
     configurable: true,
     value: {
-      permissions: { set: vi.fn() },
+      permissions: { set: vi.fn(), reviewProjectRules },
       ...(platform === undefined ? {} : { windowControls: { platform } }),
     },
   });
@@ -48,6 +48,19 @@ afterEach(async () => {
   useAppStore.setState(useAppStore.getInitialState(), true);
   Reflect.deleteProperty(window, 'sprintCoder');
   vi.unstubAllGlobals();
+});
+
+it('reviews the rules for the current task and announces the result', async () => {
+  const review = vi.fn().mockResolvedValue('確認した権限ルールを適用しました。');
+  await renderWith('win32', review);
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[data-testid="access-selector"]')!.click(),
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>('[role="menuitem"]')!.click());
+  expect(review).toHaveBeenCalledWith(taskId);
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    '確認した権限ルールを適用しました。',
+  );
 });
 
 describe('full access impact text', () => {

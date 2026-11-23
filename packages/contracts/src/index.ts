@@ -4329,6 +4329,7 @@ export const taskCreateInputSchema = z
     title: z.string().trim().min(1).max(200).optional(),
     localOnly: z.boolean().optional(),
     projectId: idSchema.optional(),
+    initialAccessPreset: z.enum(['auto', 'ask']).optional(),
   })
   .strict();
 export const projectCreateInputSchema = z
@@ -4777,6 +4778,7 @@ export interface SprintCoderApi {
       title?: string;
       localOnly?: boolean;
       projectId?: string;
+      initialAccessPreset?: 'auto' | 'ask';
     }): Promise<TaskSummary>;
     messages(taskId: string): Promise<ChatMessage[]>;
     rename(taskId: string, title: string): Promise<TaskSummary>;
@@ -5040,6 +5042,7 @@ export interface SprintCoderApi {
     ): Promise<ProviderConnection>;
   };
   permissions: {
+    reviewProjectRules(taskId: string): Promise<string>;
     get(taskId: string): Promise<PermissionSettings>;
     set(
       taskId: string,
@@ -5246,6 +5249,7 @@ export const IPC_CHANNELS = {
   providersLowerRateLimits: 'sprint-coder:providers:lower-rate-limits',
   providersSetAutomaticModelRelease: 'sprint-coder:providers:set-automatic-model-release',
   permissionsGet: 'sprint-coder:permissions:get',
+  permissionsReviewProjectRules: 'sprint-coder:permissions:review-project-rules',
   permissionsSet: 'sprint-coder:permissions:set',
   approvalsListPending: 'sprint-coder:approvals:list-pending',
   approvalsListRecent: 'sprint-coder:approvals:list-recent',

@@ -8730,6 +8730,13 @@ if (runsWithElectronAbi)
     it('persists expanded access policy rules and revokes task-scoped grants by epoch', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
+      const automatic = persistence.createTask(undefined, false, undefined, 'auto');
+      expect(persistence.getPermissionPolicy(automatic.id)).toMatchObject({
+        preset: 'auto',
+        policyEpoch: 0,
+        expandedPolicy: { approvalPolicy: 'auto' },
+      });
+      expect(persistence.listPendingPermissionPolicyEpochs()).toEqual([]);
       expect(persistence.getPermissionPolicy(task.id)).toMatchObject({
         preset: 'ask',
         policyEpoch: 0,

@@ -6,7 +6,7 @@ import type { AccessPreset, CommandSandboxCapability } from '../types/sprint-cod
 
 export const ACCESS_PRESET_LABEL: Record<AccessPreset, string> = {
   ask: '確認する',
-  auto: '自動',
+  auto: '自動モード',
   full: 'フル',
 };
 
@@ -22,10 +22,10 @@ export function accessDescription(
 ): string {
   const sandbox = commandSandboxDescription(capability);
   if (preset === 'ask')
-    return `Workspace内のファイルの読み取り・一覧も含め、権限が必要な操作は実行前に確認します（「Task中許可」を選ぶと、このTaskでは同じ操作を確認なしで続けます）。${sandbox}`;
+    return `Workspace内のファイルの読み取り・一覧も含め、許可ルールにない操作は実行前に確認します（「Task中許可」を選ぶと、このTaskでは同じ操作を確認なしで続けます）。${sandbox}`;
   if (preset === 'full')
     return `変更・コマンド・標準入力書き込みと、デスクトップ操作（ほかのアプリの窓を読む・押す・入力する・アプリの起動）を確認なしで実行しますが、credential・アプリ領域・署名鍵の保護と監査は維持されます。この保護はファイル・コマンド・ネットワークの道具に効くもので、デスクトップ操作が開いている窓を読んだり入力したりすることは止めません。${sandbox}`;
-  return `Workspace内のファイルの作成・編集は自動で許可します。コマンドは実行前に確認します。それ以外の操作は自動レビューが安全と判定したものだけ自動で許可し、残りは確認します。${sandbox}`;
+  return `禁止ルールを優先し、Workspace内のファイルの作成・編集は自動で許可します。許可ルールにない読み取りは、選択中のAIが操作の種類とリスクを審査します。未許可のコマンドは実行前に確認します。${sandbox}`;
 }
 
 export function commandSandboxDescription(capability: CommandSandboxCapability | null): string {

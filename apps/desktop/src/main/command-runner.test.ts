@@ -2809,6 +2809,11 @@ describe('desktop control outside the command sandbox', () => {
 const shippedDesktopControl = process.platform === 'win32' ? resolveDesktopControlCommand() : null;
 
 describe.skipIf(shippedDesktopControl === null)('desktop control bound to the sealed bytes', () => {
+  beforeEach(async () => {
+    desktopControlModule.configureDesktopControlStateRoot(join(await workspace(), 'state'));
+  });
+  afterEach(() => desktopControlModule.configureDesktopControlStateRoot(null));
+
   const stdout = (chunks: readonly CommandOutputChunk[]) =>
     chunks
       .filter(({ stream }) => stream === 'stdout')
