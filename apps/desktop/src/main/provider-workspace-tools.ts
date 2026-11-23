@@ -396,6 +396,10 @@ export type ManagedTeamResultReadRequest = Readonly<{
 type WorkspaceToolDeps = Readonly<{
   workspaceFor(taskId: string, turnId: string, callId?: string): EffectiveWorkspaceSet | null;
   rootIdentityFor(turnId: string, rootId: string, callId?: string): string | undefined;
+  workspaceReadFilter?(
+    context: ToolExecutionContext,
+    guard: PathGuard,
+  ): (absolutePath: string) => boolean;
   mutationBindingFor?(
     turnId: string,
     rootId: string,
@@ -577,7 +581,10 @@ export class ManagedCodingHarness {
       implementationKind: 'built-in',
       prepare: (input, context, control) => this.prepare('list', input, context, control.callId),
       resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'read'),
-      execute: async (input) => listWorkspace(input as PreparedWorkspaceInput),
+      execute: async (input, context) => {
+        const prepared = input as PreparedWorkspaceInput;
+        return listWorkspace(prepared, this.deps.workspaceReadFilter?.(context, prepared.guard));
+      },
     });
     registerManagedControlTools(this.broker, deps.recordPlan);
     this.broker.registerImplementation({
@@ -958,6 +965,15 @@ export class ManagedCodingHarness {
     });
     if (teamResultSource !== undefined)
       assertTeamResultPath(teamResultSource, root.path, request.path, guard);
+    if (kind === 'read') {
+      // Disclosure classification itself reads the file before the approval card is prepared.
+      const mayRead = this.deps.workspaceReadFilter?.(context, guard);
+      if (mayRead && (!mayRead(guard.resolvedPath) || !mayRead(resolve(root.path, request.path))))
+        throw new WorkspaceToolRejection(
+          'PROJECT_SETTINGS_DENY',
+          'プロジェクトの権限設定により、このファイルは読めません。',
+        );
+    }
     const disclosure =
       kind === 'read'
         ? disclosureFacts(
@@ -1185,10 +1201,12 @@ export class ManagedCodingHarness {
     assertPreparedWorkspaceInput(input, 'search');
     const request = input.raw as ReturnType<typeof parseSearchInput>;
     await revalidatePathGuard(input.guard);
+    const mayRead = this.deps.workspaceReadFilter?.(context, input.guard);
     const candidates = await collectSearchCandidates(
       input.guard.resolvedPath,
       input.relativePath,
       request.glob,
+      mayRead,
     );
     const matches: { path: string; line: number; text: string }[] = [];
     const root = resolveWorkspaceToolRoot(input.workspace, input.rootId);
@@ -1198,13 +1216,17 @@ export class ManagedCodingHarness {
       throw new Error('Workspace root identity is incomplete');
     const candidateGuard = async (relativePath: string): Promise<PathGuard | null> => {
       try {
-        return await createPathGuard({
+        const guard = await createPathGuard({
           rootId: root.rootId,
           workspacePath: root.path,
           expectedRootIdentityDigest,
           targetPath: relativePath,
           operation: 'read',
         });
+        return !mayRead ||
+          (mayRead(guard.resolvedPath) && mayRead(resolve(root.path, relativePath)))
+          ? guard
+          : null;
       } catch (error) {
         if (error instanceof PathGuardError && error.code === 'IDENTITY_CHANGED') throw error;
         return null;
@@ -1685,7 +1707,10 @@ async function viewWorkspaceImage(input: PreparedWorkspaceInput): Promise<{
   }
 }
 
-async function listWorkspace(input: PreparedWorkspaceInput): Promise<{
+async function listWorkspace(
+  input: PreparedWorkspaceInput,
+  mayRead?: (absolutePath: string) => boolean,
+): Promise<{
   rootId: string;
   rootLabel: string;
   path: string;
@@ -1696,7 +1721,14 @@ async function listWorkspace(input: PreparedWorkspaceInput): Promise<{
   if (input.guard.targetIdentity?.kind !== 'directory')
     throw new WorkspaceToolRejection('NOT_A_DIRECTORY', 'list_workspace target is not a directory');
   await revalidatePathGuard(input.guard);
+  const requestedDirectory = resolve(input.guard.workspacePath, input.guard.originalTargetPath);
   const entries = (await readdir(input.guard.resolvedPath, { withFileTypes: true }))
+    .filter(
+      (entry) =>
+        !mayRead ||
+        (mayRead(join(input.guard.resolvedPath, entry.name)) &&
+          mayRead(join(requestedDirectory, entry.name))),
+    )
     .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)))
     .slice(0, MAX_LIST_ENTRIES + 1);
   await revalidatePathGuard(input.guard);
@@ -1897,6 +1929,7 @@ async function collectSearchCandidates(
   absoluteStart: string,
   relativeStart: string,
   glob?: string,
+  mayRead?: (absolutePath: string) => boolean,
 ): Promise<{ files: string[]; truncated: boolean }> {
   const files: string[] = [];
   const queue: { absolute: string; relative: string; depth: number }[] = [
@@ -1913,6 +1946,7 @@ async function collectSearchCandidates(
     entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
+      if (mayRead && !mayRead(join(current.absolute, entry.name))) continue;
       const relative = current.relative === '' ? entry.name : `${current.relative}/${entry.name}`;
       if (entry.isDirectory()) {
         queue.push({

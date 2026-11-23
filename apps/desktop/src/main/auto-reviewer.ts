@@ -9,7 +9,13 @@ import {
 } from '@sprint-coder/domain';
 
 const MODEL_NAME = 'builtin-deterministic-risk-v1';
-const TEMPLATE_VERSION = '1';
+const TEMPLATE_VERSION = '2';
+export const AUTO_REVIEW_PROMPT = `
+Review the supplied operation classifications as an independent permission reviewer.
+Return exactly ALLOW_ONCE only for a bounded, read-only operation with no external effects.
+Return ASK if the classifications are insufficient, the risk is unclear, or a person should decide.
+Do not use tools. Return the one token with no explanation.
+`.trim();
 const ALLOWED_REASON_CODES = new Set([
   'safe_read_only',
   'provider_egress',
@@ -37,6 +43,10 @@ export type AutoReviewerInput = Readonly<{
 }>;
 
 export type AutoReviewerModel = (input: AutoReviewerInput) => Promise<unknown> | unknown;
+export type SelectedReviewModel = Readonly<{
+  name: string;
+  generate: (facts: string, signal: AbortSignal) => Promise<string | null>;
+}>;
 
 export function autoReviewerInputDigest(input: {
   request: Omit<PermissionRequest, 'reviewerInputDigest'>;
@@ -81,28 +91,34 @@ type ModelDecision = Readonly<{
 }>;
 
 export class AutoReviewer {
-  private readonly model: AutoReviewerModel;
+  private readonly model: AutoReviewerModel | undefined;
   private readonly timeoutMs: number;
   private readonly decisions = new Map<
     string,
     Readonly<{ binding: string; decision: Readonly<ReviewerDecision> }>
   >();
 
-  private constructor(options?: Readonly<{ model?: AutoReviewerModel; timeoutMs?: number }>) {
-    this.model = options?.model ?? deterministicRiskModel;
-    this.timeoutMs = Math.max(1, options?.timeoutMs ?? 2_000);
+  private constructor(
+    options?: Readonly<{ model?: AutoReviewerModel; timeoutMs?: number }>,
+    private readonly selectModel?: (review: ReviewRequest) => SelectedReviewModel | null,
+  ) {
+    this.model = options?.model;
+    this.timeoutMs = Math.max(1, options?.timeoutMs ?? 30_000);
   }
 
-  static createProduction(): AutoReviewer {
-    return new AutoReviewer();
+  static createProduction(
+    selectModel?: (review: ReviewRequest) => SelectedReviewModel | null,
+  ): AutoReviewer {
+    return new AutoReviewer(undefined, selectModel);
   }
 
-  /** Test-only seam. Production callers must use the fixed no-I/O reviewer above. */
+  /** Unit-test seam for timing and response validation. */
   static createForTesting(options: { model: AutoReviewerModel; timeoutMs: number }): AutoReviewer {
     return new AutoReviewer(options);
   }
 
-  async review(review: ReviewRequest): Promise<Readonly<ReviewerDecision>> {
+  async review(review: ReviewRequest, signal?: AbortSignal): Promise<Readonly<ReviewerDecision>> {
+    signal?.throwIfAborted();
     const binding = reviewBinding(review);
     const cached = this.decisions.get(review.reviewRequestId);
     if (cached !== undefined)
@@ -135,8 +151,9 @@ export class AutoReviewer {
         reason: 'high_risk',
       });
     } else {
-      decision = await this.invokeModel(review, input);
+      decision = await this.invokeModel(review, input, signal);
     }
+    signal?.throwIfAborted();
     Object.freeze(decision);
     this.decisions.set(review.reviewRequestId, Object.freeze({ binding, decision }));
     return decision;
@@ -145,21 +162,73 @@ export class AutoReviewer {
   private async invokeModel(
     review: ReviewRequest,
     input: AutoReviewerInput,
+    signal?: AbortSignal,
   ): Promise<Readonly<ReviewerDecision>> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = AbortSignal.timeout(this.timeoutMs);
+    const modelSignal = signal ? AbortSignal.any([deadline, signal]) : deadline;
+    let onAbort: (() => void) | undefined;
+    let modelName = MODEL_NAME;
     try {
+      // A model can narrow this envelope, never expand it. In particular, classifications alone
+      // cannot establish what an arbitrary command would do.
+      const envelope = deterministicRiskModel(input);
+      if (envelope.decision === 'deny')
+        return this.boundDecision(review, { decision: 'deny', reason: envelope.reasonCode });
+      const resource = review.request.resource;
+      if (
+        input.capability !== 'workspace.read' ||
+        resource.kind !== 'workspace-path' ||
+        resource.classification !== 'workspace'
+      )
+        return this.boundDecision(review, { decision: 'deny', reason: 'unsupported_operation' });
+      const selected = this.selectModel?.(review);
+      let response: unknown;
+      if (selected) {
+        modelName = selected.name;
+        const { capability, operation, providerEgress, sandboxProfile, risk, tool } = input;
+        response = selected
+          .generate(
+            JSON.stringify({
+              capability,
+              operation,
+              resource: resource.classification,
+              providerEgress,
+              sandboxProfile,
+              risk,
+              tool,
+            }),
+            modelSignal,
+          )
+          .then((raw) => {
+            if (raw === null) throw new Error('Permission reviewer unavailable');
+            if (raw.trim() === 'ALLOW_ONCE') return envelope;
+            if (raw.trim() === 'ASK')
+              return { schemaVersion: 1, decision: 'deny', reasonCode: 'unsupported_operation' };
+            return null;
+          });
+      } else if (this.model) {
+        response = this.model(input);
+      } else {
+        return this.boundDecision(review, { decision: 'deny', reason: 'unsupported_operation' });
+      }
       const result = await Promise.race([
-        Promise.resolve(this.model(input)),
-        new Promise<symbol>((resolve) => {
-          timer = setTimeout(() => resolve(TIMEOUT), this.timeoutMs);
+        Promise.resolve(response),
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(modelSignal.reason);
+          if (modelSignal.aborted) onAbort();
+          else modelSignal.addEventListener('abort', onAbort, { once: true });
         }),
       ]);
-      if (result === TIMEOUT) return this.boundDecision(review, { decision: 'timeout' });
+      modelSignal.throwIfAborted();
       const parsed = parseModelDecision(result);
       if (parsed === null)
-        return this.boundDecision(review, {
-          decision: 'schema_failure',
-        });
+        return this.boundDecision(
+          review,
+          {
+            decision: 'schema_failure',
+          },
+          modelName,
+        );
       return this.boundDecision(
         review,
         parsed.decision === 'allow_once'
@@ -169,11 +238,14 @@ export class AutoReviewer {
               decisionNonce: randomUUID(),
             }
           : { decision: 'deny', reason: parsed.reasonCode },
+        modelName,
       );
     } catch {
-      return this.boundDecision(review, { decision: 'model_failure' });
+      signal?.throwIfAborted();
+      if (deadline.aborted) return this.boundDecision(review, { decision: 'timeout' }, modelName);
+      return this.boundDecision(review, { decision: 'model_failure' }, modelName);
     } finally {
-      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort) modelSignal.removeEventListener('abort', onAbort);
     }
   }
 
@@ -183,6 +255,7 @@ export class AutoReviewer {
       | Readonly<{ decision: 'allow_once'; reason: string; decisionNonce: string }>
       | Readonly<{ decision: 'deny'; reason: string }>
       | Readonly<{ decision: 'timeout' | 'schema_failure' | 'model_failure' }>,
+    modelName = MODEL_NAME,
   ): ReviewerDecision {
     return {
       reviewRequestId: review.reviewRequestId,
@@ -191,15 +264,13 @@ export class AutoReviewer {
       requestFingerprint: permissionRequestFingerprint(review.request),
       executionSpecDigest: review.request.executionSpecDigest,
       policyEpoch: review.policyEpoch,
-      model: MODEL_NAME,
+      model: modelName,
       templateVersion: TEMPLATE_VERSION,
       inputDigest: review.request.reviewerInputDigest,
       ...outcome,
     };
   }
 }
-
-const TIMEOUT = Symbol('auto-reviewer-timeout');
 
 function buildInput(review: ReviewRequest): AutoReviewerInput {
   const resourceIdentityDigest =

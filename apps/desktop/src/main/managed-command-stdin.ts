@@ -72,6 +72,12 @@ export function createManagedStdinRequest(
       executable: input.command.executable,
       argv: Object.freeze([...input.command.argv]),
       cwd: input.command.cwd,
+      ...(input.command.rootId === undefined
+        ? {}
+        : {
+            rootId: input.command.rootId,
+            trustedExecutableName: input.command.trustedExecutableName,
+          }),
     }),
   });
   // The card text is what the approval event carries, and an event the contract rejects is an

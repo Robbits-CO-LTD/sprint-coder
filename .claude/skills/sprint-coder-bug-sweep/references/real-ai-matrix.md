@@ -33,7 +33,7 @@ lane の bundle id は **`com.github.Electron`**（dev Electron）。`com.electr
 | preset | 表示 | 実 CLI（Claude / Codex の managed harness）で実際に起きること（2026-09-12 実測） |
 |---|---|---|
 | `ask` | 確認する | **すべての tool 呼び出しに承認カード**（`create_directory` / `create_file` / `read_file` / `exec_command` / `list_workspace`。読み取りも含む）。承認すれば書き込みもコマンドも実行される |
-| `auto` | 安全時は自動 | workspace の読み取りと、**Workspace 内のファイルの作成・編集（`create_directory` / `create_file` / `apply_patch`）を自動許可**（監査行 `自動許可 workspace.read preset_auto_safe` / `自動許可 workspace.write preset_auto_safe_edit`、承認カードなし）。`exec_command` とネットワークは自動レビューが判定し、コマンドは **自動拒否**（監査行 `拒否 … high_risk`、承認カードなし）。保護パスへの書き込みは、まとめた `apply_patch` の2つ目以降や rename の書き込み先に含まれる場合も `immutable_protected_resource` で呼び出し全体を拒否。Workspace 外を指す編集は PathGuard が拒否する（`PATH_ESCAPE`、相対の `..` は `RELATIVE_TRAVERSAL`。自動レビューには回らない）。書き込みの自動許可は #526 で変わった期待値で、実 CLI では未測定（2026-09-12 の実測では書き込みも `high_risk` で自動拒否だった）。共通チェックリストでもautoで編集が記録されることを確認する |
+| `auto` | 自動モード | workspace の読み取りと、**Workspace 内のファイルの作成・編集（`create_directory` / `create_file` / `apply_patch`）を自動許可**（監査行 `自動許可 workspace.read preset_auto_safe` / `自動許可 workspace.write preset_auto_safe_edit`、承認カードなし）。`exec_command` とネットワークは自動レビューが判定し、コマンドは **自動拒否**（監査行 `拒否 … high_risk`、承認カードなし）。保護パスへの書き込みは、まとめた `apply_patch` の2つ目以降や rename の書き込み先に含まれる場合も `immutable_protected_resource` で呼び出し全体を拒否。Workspace 外を指す編集は PathGuard が拒否する（`PATH_ESCAPE`、相対の `..` は `RELATIVE_TRAVERSAL`。自動レビューには回らない）。書き込みの自動許可は #526 で変わった期待値で、実 CLI では未測定（2026-09-12 の実測では書き込みも `high_risk` で自動拒否だった）。共通チェックリストでもautoで編集が記録されることを確認する |
 | `full` | フルアクセス | 切り替え時に **native の確認シート**（「フルアクセスを有効化」）。ファイル編集は承認なしで実行される。ただし `exec_command`（`OS sandboxなし`）は **依然として承認カードが出た**（設計かどうか未確定 → OBSERVED として報告） |
 
 この表と逆の期待値を書かない。ファイル編集とコマンド実行を「承認なし」で通したい case は `full` で行い、`ask` では承認カードを Computer Use で操作する。
@@ -56,7 +56,7 @@ Computer Useでは実画面またはアクセシビリティ情報の **role + �
 | 自動判定の監査行 | `拒否` と理由 `high_risk` 等 | `AXStaticText`（approval-audit-row） |
 | ファイル変更カード | relative path と `新規` / `変更` | `AXStaticText` |
 | コマンドカード | `exit 0`、「出力を展開」「出力を折り畳む」 | `AXStaticText` / `AXButton` |
-| Context bar | Access セレクタ（表示: `確認する` / `安全時は自動` / `フルアクセス`）、full 切替の確認「影響を理解してフルアクセスにする」 | `AXButton`（ポップオーバー。§6の操作手順を参照） |
+| Context bar | Access セレクタ（表示: `確認する` / `自動モード` / `フルアクセス`）、full 切替の確認「影響を理解してフルアクセスにする」 | `AXButton`（ポップオーバー。§6の操作手順を参照） |
 | Context bar | モデルピッカー（現在のモデル名を表示） | `AXButton` → 検索 `AXTextField` → 候補 |
 | フッター | 接続状態（failed のとき tone が変わる） | `AXStaticText` |
 | メニューバー | 終了 | アプリメニューから通常終了（dev では app 名が Electron） |
@@ -89,7 +89,7 @@ Computer Useで対象のトリガーを開き、キーボードまたはアク�
 | RA-04 | ask | 承認付きファイル作成 | P2 → `create_directory` / `create_file` の承認カードを「今回のみ許可」 | 各承認後に監査行 `今回のみ許可しました workspace.write`、ファイル変更カード `新規`、Run Card **`完了`**（`失敗` なら FAIL。2026-09-12 に Claude で `RUNTIME_PROTOCOL_ERROR` を観測 → #466） | `auto-file --lines 1` |
 | RA-05 | ask | 承認付きコマンド実行 | P3 → `exec_command`（と付随する `list_workspace` 等）の承認を「今回のみ許可」 | コマンドカード `exit 0`、出力に `SC_REAL_AI_OK:<lane>:<nonce>`、**カードの argv が承認カードの argv と一致**し実行ファイル名が二重にならない（#467）、workspace に余計なファイルが無い | `command` |
 | RA-06 | ask | 拒否 | P4 → 承認カード「拒否」 | 監査行 `拒否しました`、コマンドカード `canceled`、Turn `完了`、AI が拒否を報告、ファイルなし | `deny` |
-| RA-07 | auto | 書き込みの自動許可（#526） | Access を `安全時は自動` → P5b | 承認カードなし、監査行 `自動許可 workspace.write preset_auto_safe_edit`、ファイル変更カード `変更`、2 行ちょうど、Turn `完了` | `auto-file --lines 2` |
+| RA-07 | auto | 書き込みの自動許可（#526） | Access を `自動モード` → P5b | 承認カードなし、監査行 `自動許可 workspace.write preset_auto_safe_edit`、ファイル変更カード `変更`、2 行ちょうど、Turn `完了` | `auto-file --lines 2` |
 | RA-08 | auto | 高リスクコマンドの自動拒否 | P6 | 承認カードなし、監査行 `拒否 shell.execute high_risk`、Turn `完了` | `auto-deny` |
 | RA-09 | full | 承認なしのファイル編集 | Access を `フルアクセス`（native 確認シート）→ P5c → P5b（RA-07 で 2 行になっているので、一度 1 行に戻してから追記し直す） | どちらも承認カードなし、ファイル変更カード `変更`。P5c の後は 1 行、P5b の後は 2 行ちょうど | P5c の後 `auto-file --lines 1`、P5b の後 `auto-file --lines 2` |
 | RA-09b | full | コマンド実行 | P7 | コマンドカード `exit 0`、出力に `SC_FULL_OK:<lane>:<nonce>`（承認カードが出た場合は OBSERVED として記録し「今回のみ許可」で続行） | `full-command` |

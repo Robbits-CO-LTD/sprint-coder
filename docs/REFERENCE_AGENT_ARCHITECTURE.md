@@ -147,7 +147,7 @@ Codexは「実際に可能なこと」をsandbox、「境界を越える際に�
 - ApprovalPolicy: prompt、auto-deny、never promptなどのrouting。
 - ApprovalReviewer: userまたはisolated reviewer agent。
 
-Auto reviewはsandboxを緩めない。sandbox境界で止まったrequestだけを別agentへ評価させる。reviewer入力はimmutable ExecutionSpecとpolicy factsに限定し、transcript/tool outputを指示として渡さない。no-tools/no-network、allow-once限定、high-riskと失敗時deny、prompt/model/input digest監査を不変条件にする。
+自動審査は権限上限と sandbox の検査を通った読み取りだけを対象にする。既存の送信ポリシーに従い、ターンで選択したモデルに Main が確定した操作・対象の分類・リスクを送る。審査用の呼び出しには Workspace やツールを与えず、許可を対象操作の 1 回に限定する。判断保留は人に確認し、モデルの失敗時は実行を拒否する。モデル、テンプレート、入力ダイジェストと判断を監査する。
 
 ### 4.7 Contextのhard cap
 

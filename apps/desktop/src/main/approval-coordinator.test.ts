@@ -279,6 +279,7 @@ function createHarness(input?: {
   evaluatePermission?: (input: {
     capability: Capability;
     request: ToolAuthorizationRequest;
+    signal?: AbortSignal;
   }) =>
     | ToolAuthorizationDecision
     | 'allow'
@@ -1817,7 +1818,8 @@ describe('ApprovalCoordinator cancellation of an aborted call', () => {
       });
       let evaluations = 0;
       const harness = createHarness({
-        evaluatePermission: async () => {
+        evaluatePermission: async ({ signal }) => {
+          expect(signal).toBe(worker.signal);
           evaluations += 1;
           await evaluating;
           return outcome;
