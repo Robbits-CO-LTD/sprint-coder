@@ -697,7 +697,7 @@ class ConflictingWorktreeRuntime extends TestWorkerRuntime {
     if (input.workspacePath === undefined || input.workspacePath === null)
       throw new Error('write step did not receive an isolated worktree');
     writeFileSync(join(input.workspacePath, 'worker-only.txt'), 'preserve worker result\n');
-    writeFileSync(join(this.primaryWorkspace, 'outside.txt'), 'external change\n');
+    writeFileSync(join(this.primaryWorkspace, 'worker-only.txt'), 'external change\n');
     return super.execute(input);
   }
 }
@@ -5864,7 +5864,7 @@ if (runsWithElectronAbi)
       const leaderDraft = join(secondaryRepo, 'leader-draft.md');
       const integrateRepository = manager.integrate.bind(manager);
       const integrate = vi.spyOn(manager, 'integrate').mockImplementation((input) => {
-        if (input.repoPath === secondaryRepo)
+        if (basename(input.repoPath) === basename(secondaryRepo))
           writeFileSync(leaderDraft, 'untracked Leader draft\n');
         return integrateRepository(input);
       });
@@ -6383,7 +6383,7 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 30_000);
 
-    it('preserves both sides and waits for resume when the primary workspace changes', async () => {
+    it('preserves both sides and waits for resume when the primary workspace overlaps the Worker', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Conflicting writable Mission');
       const { workspace, manager } = configureGitWorkspace(persistence, task.id);
@@ -6422,7 +6422,7 @@ if (runsWithElectronAbi)
       );
 
       const worktree = persistence.getTeamMissionWorktree(mission.steps[0]!.executionId);
-      expect(readFileSync(join(workspace, 'outside.txt'), 'utf8')).toBe('external change\n');
+      expect(readFileSync(join(workspace, 'worker-only.txt'), 'utf8')).toBe('external change\n');
       expect(worktree).toMatchObject({
         state: 'quarantined',
         changedFiles: ['worker-only.txt'],
