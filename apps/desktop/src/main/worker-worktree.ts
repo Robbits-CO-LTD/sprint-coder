@@ -228,6 +228,7 @@ const WORKER_GIT_IDENTITY = [
   '-c',
   'user.email=worker@sprint-coder.local',
 ] as const;
+const worktreeRegistrationQueues = new Map<string, Promise<void>>();
 
 export class WorkerWorktreeManager {
   private readonly worktreesRoot: string;
@@ -539,18 +540,8 @@ export class WorkerWorktreeManager {
    * be too long. That directory lives under the COMMON Git directory, which for a repository that is
    * itself a linked worktree is not `<repo>/.git` (there `.git` is a file).
    */
-  private async assertGitAdminPathWithinLimit(
-    repoPath: string,
-    worktreePath: string,
-  ): Promise<void> {
-    const commonDir = (
-      await this.runGit(repoPath, ['rev-parse', '--git-common-dir'], 'create_failed')
-    ).stdout.trim();
-    const gitAdminPath = join(
-      resolve(repoPath, commonDir === '' ? '.git' : commonDir),
-      'worktrees',
-      basename(worktreePath),
-    );
+  private assertGitAdminPathWithinLimit(commonDir: string, worktreePath: string): void {
+    const gitAdminPath = join(commonDir, 'worktrees', basename(worktreePath));
     const reason = checkWorktreePathLengths({
       platform: this.platform,
       worktreePath,
@@ -573,9 +564,41 @@ export class WorkerWorktreeManager {
     const isShort =
       worktreePath === join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
     if (isShort) this.assertWorktreePathWithinLimit(worktreePath);
+    const gitCommonDir = (
+      await this.runGit(repoPath, ['rev-parse', '--git-common-dir'], 'create_failed')
+    ).stdout.trim();
+    const commonDir = await realpath(resolve(repoPath, gitCommonDir || '.git'));
+    if (isShort) this.assertGitAdminPathWithinLimit(commonDir, worktreePath);
+    const registrationKey = this.platform === 'win32' ? commonDir.toLowerCase() : commonDir;
+    // Git can inspect another linked worktree's registration before its commondir is written.
+    // Linked checkouts share that administrative directory even when their repository paths differ.
+    const previous = worktreeRegistrationQueues.get(registrationKey) ?? Promise.resolve();
+    const registration = previous.then(() =>
+      this.registerWorktree(repoPath, worktreeId, worktreePath, baseRef),
+    );
+    const tail = registration.then(
+      () => undefined,
+      () => undefined,
+    );
+    worktreeRegistrationQueues.set(registrationKey, tail);
+    try {
+      await registration;
+    } finally {
+      if (worktreeRegistrationQueues.get(registrationKey) === tail)
+        worktreeRegistrationQueues.delete(registrationKey);
+    }
+    const { stdout } = await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed');
+    return { path: worktreePath, baseHead: stdout.trim() };
+  }
+
+  private async registerWorktree(
+    repoPath: string,
+    worktreeId: string,
+    worktreePath: string,
+    baseRef: string,
+  ): Promise<void> {
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
-    if (isShort) await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
     await this.releaseMissingLegacyRegistration(repoPath, worktreeId, worktreePath);
     await mkdir(this.worktreesRoot, { recursive: true });
     try {
@@ -591,8 +614,6 @@ export class WorkerWorktreeManager {
         throw new WorktreeError('create_failed', gitPathTooLongMessage(), { cause: error });
       throw error;
     }
-    const { stdout } = await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed');
-    return { path: worktreePath, baseHead: stdout.trim() };
   }
 
   async ensureCreated(input: CreateWorktreeInput): Promise<CreateWorktreeResult> {
