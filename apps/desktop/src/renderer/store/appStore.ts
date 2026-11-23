@@ -54,6 +54,7 @@ import {
 } from './command-projection';
 import { accessPresetForNewTask, rememberAccessPreset } from '../lib/access-preset-preference';
 import { findReusableUnstartedTask, type CreateTaskOptions } from '../lib/reusable-task';
+import { hasEffectiveWorkspaceRoot } from '../lib/effective-workspace-root';
 import { playSoundForEvent } from '../lib/ui-sound';
 import {
   applyTaskTurnEvent,
@@ -74,6 +75,7 @@ export type WorkspaceInfo = { path: string; name: string };
 
 export type RuntimeState = {
   kind: RuntimeKind;
+  aiConnectionRequired?: true | undefined;
   codexAvailable: boolean;
   codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
   claudeAvailable: boolean;
@@ -1110,6 +1112,27 @@ function mergeGraphVersions(
   return [...byKey.values()].sort((left, right) => right.renderRevision - left.renderRevision);
 }
 
+function reusableTaskForCreation(state: AppState, projectId: string | null): TaskSummary | null {
+  return findReusableUnstartedTask(
+    state.tasks,
+    projectId,
+    state.selectedTaskId,
+    (id) => state.sendingByTask[id] === true || state.pendingOptimisticIdByTask[id] !== undefined,
+  );
+}
+
+export function showUnassignedTaskWorkspaceNote(state: AppState): boolean {
+  const reusable = reusableTaskForCreation(state, null);
+  return (
+    reusable === null ||
+    !hasEffectiveWorkspaceRoot(
+      state.workspaceByTask[reusable.id],
+      reusable.workspacePath,
+      undefined,
+    )
+  );
+}
+
 export const useAppStore = create<AppState>((set, get) => {
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
   // Snapshot of "the user is still looking at this Task". A late result or error from a Team
@@ -2006,13 +2029,7 @@ export const useAppStore = create<AppState>((set, get) => {
         // Pressing "新規タスク" again must not pile up empty Tasks in the DB: an unstarted Task in
         // the same place is opened as it is. Its draft, title, workspace and access preset stay.
         const state = get();
-        const reusable = findReusableUnstartedTask(
-          state.tasks,
-          projectId ?? null,
-          state.selectedTaskId,
-          (id) =>
-            state.sendingByTask[id] === true || state.pendingOptimisticIdByTask[id] !== undefined,
-        );
+        const reusable = reusableTaskForCreation(state, projectId ?? null);
         if (reusable !== null) {
           if (state.selectedTaskId !== reusable.id) await get().selectTask(reusable.id);
           return reusable;

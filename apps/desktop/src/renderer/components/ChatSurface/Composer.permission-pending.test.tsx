@@ -5,10 +5,56 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type { PermissionSettings } from '@sprint-coder/contracts';
 import { Composer } from './Composer';
 import { PERMISSION_CHANGE_PENDING_MESSAGE, useAppStore } from '../../store/appStore';
+import { OPEN_PROVIDER_SETTINGS_EVENT } from '../../lib/settings-navigation';
 
 afterEach(() => {
   vi.unstubAllGlobals();
   Reflect.deleteProperty(window, 'sprintCoder');
+});
+
+it('keeps an unconnected draft editable, blocks sending and opens connection settings', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const start = vi.fn();
+  const open = vi.fn();
+  const taskId = 'unconnected';
+  Object.defineProperty(window, 'sprintCoder', { configurable: true, value: { turns: { start } } });
+  const initial = useAppStore.getInitialState();
+  useAppStore.setState({
+    ...initial,
+    selectedTaskId: taskId,
+    runtime: { ...initial.runtime, aiConnectionRequired: true },
+    draftByTask: { [taskId]: '下書き' },
+  });
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  window.addEventListener(OPEN_PROVIDER_SETTINGS_EVENT, open);
+  try {
+    await act(async () => root.render(<Composer taskId={taskId} />));
+    const notice = container.querySelector('.composer-ai-connection')!;
+    expect(notice.textContent).toContain('AI がつながっていません');
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-send-button"]',
+    )!;
+    const textarea = container.querySelector('textarea')!;
+    expect(send.disabled).toBe(true);
+    expect(textarea.disabled).toBe(false);
+    await act(async () => {
+      send.click();
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      notice.querySelector('button')!.click();
+    });
+    expect(start).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledOnce();
+    expect(textarea.value).toBe('下書き');
+    await act(async () => useAppStore.setState({ runtime: initial.runtime }));
+    expect(container.querySelector('.composer-ai-connection')).toBeNull();
+    expect(send.disabled).toBe(false);
+  } finally {
+    window.removeEventListener(OPEN_PROVIDER_SETTINGS_EVENT, open);
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 it('shows confirmation pending with the actual preset, preserves input, blocks Enter, and restores controls on cancel', async () => {

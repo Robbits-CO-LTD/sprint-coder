@@ -153,8 +153,8 @@ export function PermissionChip({ taskId }: { taskId: string }) {
             <div className="permission-confirm">
               <span className="runtime-menu-title">フルアクセスの影響</span>
               <span className="runtime-menu-desc">
-                Workspace操作、Shell、Networkなどをpolicy上は許可します。実際の書込み・コマンド実行は
-                安全な実行境界が完成した機能だけ利用でき、コマンド実行と実行中コマンドへの標準入力書き込みは
+                作業フォルダー内のファイル操作とコマンド実行を許可します。コマンドは外部と通信できないため、GitHubへの起票やpush、パッケージのダウンロードには使えません。
+                利用できるコマンドの実行と、実行中のコマンドへの入力は
                 都度の承認なしで実行します。デスクトップ操作（ほかのアプリの窓を読む・押す・入力する、
                 アプリの起動。ログイン済みのブラウザーやメールのアプリも含む）も、確認なしで実行します。
                 窓や画面の画像を撮る操作も含み、撮った画像はこの Task の

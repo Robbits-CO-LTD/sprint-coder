@@ -4,7 +4,7 @@ import './index.css';
 import './themes.css';
 import './sidebar.css';
 import './setup.css';
-import { useAppStore } from './store/appStore';
+import { showUnassignedTaskWorkspaceNote, useAppStore } from './store/appStore';
 import { Sidebar } from './components/Sidebar';
 import { TaskHeader } from './components/TaskHeader';
 import { GraphPanel } from './components/GraphPanel';
@@ -262,6 +262,9 @@ export default function App() {
   }, []);
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
+  const showWorkspaceNote = useAppStore(
+    (state) => selectedTask === null && showUnassignedTaskWorkspaceNote(state),
+  );
   // List mode (Slice 6.1 item 4) is a plain "chat layout + a team panel" — it never touches
   // `surfaceMode`/the Canvas FLIP, so only 'canvas' preference ever drives the morph below.
   const teamCanvasActive = teamViewOpen && teamViewPreference === 'canvas' && selectedTask !== null;
@@ -544,11 +547,19 @@ export default function App() {
                 </button>
                 <h2>Taskを選択してください</h2>
                 <p>左のTask履歴から選ぶか、新しいタスクを作成して会話を始めます。</p>
+                {showWorkspaceNote && (
+                  <p id="empty-state-new-task-workspace">
+                    新しく作るタスクには作業フォルダーがありません。
+                  </p>
+                )}
                 <div className="chips">
                   <button
                     type="button"
                     className="chip"
                     data-testid="empty-state-create-task-button"
+                    aria-describedby={
+                      showWorkspaceNote ? 'empty-state-new-task-workspace' : undefined
+                    }
                     onClick={() => void createTaskFromUi()}
                   >
                     <Plus size={14} /> 新しいタスクを作成
