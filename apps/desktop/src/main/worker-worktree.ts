@@ -1580,12 +1580,7 @@ export class WorkerWorktreeManager {
     const currentHead = (
       await this.runGit(repoPath, ['rev-parse', 'HEAD'], 'integration_failed')
     ).stdout.trim();
-    const status = await this.runGit(repoPath, ['status', '--porcelain'], 'integration_failed');
-    if (status.stdout.trim() !== '')
-      throw new WorktreeError(
-        'base_changed',
-        'Workspace has changes outside the isolated Worker worktree',
-      );
+    await this.assertIntegrationWorkspace({ repoPath, baseHead, workerHead });
     if (
       currentHead !== integratedHead &&
       (await this.tryRunGit(repoPath, [
