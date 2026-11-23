@@ -4810,7 +4810,7 @@ const migrations = [
         description TEXT NOT NULL,
         content TEXT NOT NULL,
         package_path TEXT NOT NULL,
-        activation_policy TEXT NOT NULL DEFAULT 'manual' CHECK (activation_policy IN ('manual', 'auto-allowed')),
+        activation_policy TEXT CHECK (activation_policy IN ('manual', 'auto-allowed')),
         compatibility_json TEXT,
         arguments_text TEXT,
         PRIMARY KEY(turn_id, ordinal),

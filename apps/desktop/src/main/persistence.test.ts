@@ -879,20 +879,20 @@ if (runsWithElectronAbi)
       const before = new Database(path);
       before
         .prepare('INSERT INTO task_draft_skill_bindings VALUES (?, 1, ?, ?, ?, ?)')
-        .run(task.id, 'created', 'test', 'digest', 'chat');
+        .run(task.id, 'created', 'test', 'a'.repeat(64), 'chat');
       before
         .prepare('INSERT INTO turn_skill_bindings VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(
           turn.turnId,
           'created',
           'test',
-          'digest',
+          'a'.repeat(64),
           'chat',
           'Test',
           'description',
           'instructions',
           'skills/test',
-          'manual',
+          null,
           null,
           'args',
         );
@@ -914,6 +914,7 @@ if (runsWithElectronAbi)
       before.close();
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getTaskLeader(task.id).modelSelection).toEqual(selection);
+      expect(reopened.getTurnSkills(task.id, turn.turnId)[0]?.activationPolicy).toBe('manual');
       reopened.close();
       const after = new Database(path);
       expect(after.prepare('SELECT * FROM task_draft_skill_bindings').all()).toEqual(draft);
