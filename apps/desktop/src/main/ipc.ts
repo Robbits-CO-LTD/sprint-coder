@@ -714,6 +714,7 @@ import {
 import {
   TEAM_OFFER_WORKSPACE_CHECK_TIMEOUT_MS,
   TeamOfferWorkspaceGate,
+  TeamWorkspaceRepositoryError,
 } from './team-workspace-repository';
 import {
   BUILTIN_TEAM_SKILL_AUDIT,
@@ -10914,6 +10915,8 @@ async function projectFolderHealth(
 }
 
 export function toPublicError(error: unknown): PublicError {
+  if (error instanceof TeamWorkspaceRepositoryError)
+    return { code: 'INVALID_REQUEST', userMessage: error.message, retryable: false };
   if (error instanceof RetiredManagedLocalError)
     return { code: 'RUNTIME_UNAVAILABLE', userMessage: error.message, retryable: false };
   if (error instanceof ImageAttachmentValidationError)

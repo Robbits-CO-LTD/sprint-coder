@@ -17,6 +17,13 @@ const execFileAsync = promisify(execFile);
 const gitAvailable = spawnSync('git', ['--version']).status === 0;
 const TEST_IDENTITY = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 
+it('guides Team users to install missing Git and restart the app', () => {
+  const message = teamWorkspaceRepositoryMessage('git_unavailable');
+  expect(message).toContain('git');
+  expect(message).toContain('https://git-scm.com/install/');
+  expect(message).toContain('再起動');
+});
+
 describe('TeamOfferWorkspaceGate (issue #1241)', () => {
   function gate(
     options: {
