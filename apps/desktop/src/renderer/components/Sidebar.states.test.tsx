@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Sidebar, TaskActivityIndicator, TaskRow } from './Sidebar';
 import { TaskBoundaryProvider } from './TaskBoundary';
 import { useAppStore } from '../store/appStore';
-import type { ApprovalSummary, TaskSummary } from '../types/sprint-coder';
+import type { ApprovalSummary, ProjectSummary, TaskSummary } from '../types/sprint-coder';
 
 const task: TaskSummary = {
   id: 'task-1',
@@ -123,6 +123,43 @@ describe('the sidebar with nothing to list', () => {
     expect(input.value).toBe('');
     expect(container.querySelector('[data-task-id="task-1"]')).not.toBeNull();
   });
+});
+
+describe('the Project menu', () => {
+  it.each([
+    { projectMultiFolderUx: true, archived: false, label: 'Projectを編集（名前・フォルダ）' },
+    { projectMultiFolderUx: false, archived: false, label: '名前を変更' },
+    { projectMultiFolderUx: true, archived: true, label: '名前を変更' },
+  ])(
+    'offers "$label" (folders: $projectMultiFolderUx, archived: $archived)',
+    async ({ projectMultiFolderUx, archived, label }) => {
+      const previousFlag = useAppStore.getState().projectMultiFolderUx;
+      const project: ProjectSummary = {
+        id: 'project-1',
+        name: 'Project Alpha',
+        revision: 1,
+        taskCount: 0,
+        archived,
+        folderCount: 0,
+        primaryFolder: null,
+        lastActivityAt: task.createdAt,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      };
+      useAppStore.setState({ projects: [project], projectMultiFolderUx });
+      try {
+        await renderSidebar();
+        if (archived) await search(project.name);
+        const menu = container.querySelector(`[id="project-${project.id}"] + .sb-project-actions`);
+        const labels = [...(menu?.querySelectorAll('.sb-menu-popover button') ?? [])].map(
+          (button) => button.textContent,
+        );
+        expect(labels).toEqual([label, archived ? '復元' : 'アーカイブ']);
+      } finally {
+        await act(async () => useAppStore.setState({ projectMultiFolderUx: previousFlag }));
+      }
+    },
+  );
 });
 
 describe('a Task row’s end column', () => {
