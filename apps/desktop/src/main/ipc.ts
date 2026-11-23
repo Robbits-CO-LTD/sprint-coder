@@ -674,6 +674,7 @@ import {
 } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
+import { goalResumeText } from './goal-resume';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
 import {
@@ -3681,10 +3682,7 @@ export class IpcRouter {
             const goal = this.persistence.resumeGoalTurn(
               input.taskId,
               skills,
-              shouldSealBuiltinTeamSkill(
-                goalText === null ? '' : `Goalを続けてください:\n\n${goalText}`,
-                skills,
-              ),
+              shouldSealBuiltinTeamSkill(goalText === null ? '' : goalResumeText(goalText), skills),
             );
             started = goal.started;
             return { task: goal.task, turnId: goal.started.turnId };
