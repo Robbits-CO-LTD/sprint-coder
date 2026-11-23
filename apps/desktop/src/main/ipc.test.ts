@@ -1,4 +1,5 @@
 import { TurnStreamingResources } from './turn-streaming-resources';
+import { SKILL_REQUEST_GUIDANCE } from '../chat-continuation';
 import { RetryableActionRegistry } from './retryable-action';
 import * as desktopControlModule from './desktop-control';
 import { describe, expect, it, vi } from 'vitest';
@@ -8735,6 +8736,15 @@ describe('Ollama empty-round integration', () => {
       emptyRounds: 1,
       calls: 3,
       completes: true,
+      partial: false,
+      images: false,
+      teamTurn: true,
+    },
+    {
+      providerId: 'ollama',
+      emptyRounds: 1,
+      calls: 3,
+      completes: true,
       partial: 'whitespace',
       images: false,
     },
@@ -8779,8 +8789,8 @@ describe('Ollama empty-round integration', () => {
       images: true,
     },
   ])(
-    'bounds recovery without repeating prior tools: $providerId / empty=$emptyRounds / partial=$partial / images=$images',
-    async ({ providerId, emptyRounds, calls, completes, partial, images }) => {
+    'bounds recovery without repeating prior tools: $providerId / empty=$emptyRounds / partial=$partial / images=$images / team=$teamTurn',
+    async ({ providerId, emptyRounds, calls, completes, partial, images, teamTurn = false }) => {
       const taskId = 'empty-recovery-task';
       const turnId = 'empty-recovery-turn';
       const connection = {
@@ -8864,6 +8874,7 @@ describe('Ollama empty-round integration', () => {
           requireVerifiedForExecution: vi.fn().mockResolvedValue(connection),
         },
         providerRegistry: { resolve: () => ({ execute, cancel: vi.fn() }) },
+        acknowledgeRuntimeContext: vi.fn(),
         modelCatalog: { find: () => ({ toolCalling: { value: true } }) },
         permissionBroker: {
           evaluate: () => ({
@@ -8959,9 +8970,18 @@ describe('Ollama empty-round integration', () => {
       const start = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
         started: unknown,
         connectionId: string,
+        teamTurn: boolean,
       ) => Promise<void>;
-      await start.call(router, started, connection.id);
+      await start.call(router, started, connection.id, teamTurn);
       expect(execute).toHaveBeenCalledTimes(calls);
+      const first = execute.mock.calls[0]?.[1] as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(
+        first.messages.some(
+          ({ role, content }) => role === 'system' && content === SKILL_REQUEST_GUIDANCE,
+        ),
+      ).toBe(!teamTurn);
       expect(dispatch).toHaveBeenCalledOnce();
       expect(complete).toHaveBeenCalledTimes(completes ? 1 : 0);
       expect(fail).toHaveBeenCalledTimes(completes ? 0 : 1);

@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { environmentValue } from '../runtime-host/cli-command-resolution';
 import { removeTreeWithoutFollowingLinksSync } from '../runtime-host/link-safe-tree-removal';
 
@@ -53,7 +54,7 @@ export function resolveExternalAcpCli(agent: ExternalAcpAgent): string | undefin
 export function prepareExternalAcpProfile(
   agent: ExternalAcpAgent,
   antigravityHome: string,
-): { cwd: string; env: NodeJS.ProcessEnv; cleanup: () => void } {
+): { cwd: string; env: NodeJS.ProcessEnv; cleanup: () => Promise<void> } {
   const scratch = mkdtempSync(join(tmpdir(), 'sprint-acp-'));
   const cwd = join(scratch, 'chat');
   try {
@@ -140,9 +141,27 @@ export function prepareExternalAcpProfile(
       );
     }
 
-    return { cwd, env, cleanup: () => removeTreeWithoutFollowingLinksSync(scratch) };
+    return { cwd, env, cleanup: () => removeStoppedProfile(scratch) };
   } catch (error) {
     removeTreeWithoutFollowingLinksSync(scratch);
     throw error;
+  }
+}
+
+async function removeStoppedProfile(scratch: string): Promise<void> {
+  // Windows can report an empty Job before releasing its working directory and log handles.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      removeTreeWithoutFollowingLinksSync(scratch);
+      return;
+    } catch (error) {
+      if (
+        process.platform !== 'win32' ||
+        !(error instanceof Error && 'code' in error && error.code === 'EBUSY') ||
+        attempt >= 5
+      )
+        throw error;
+      await delay(100 * (attempt + 1));
+    }
   }
 }

@@ -1,5 +1,6 @@
 import { ExternalAcpRuntime } from './external-acp-runtime';
 import { EXTERNAL_ACP_AGENTS, isExternalAcpConnection } from './external-acp-profile';
+import { SKILL_REQUEST_GUIDANCE, WORKSPACE_REQUEST_GUIDANCE } from '../chat-continuation';
 import { projectFolderIdentity } from './project-folder-identity';
 import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
 import {
@@ -8313,8 +8314,16 @@ export class IpcRouter {
       if (!teamTurn)
         messages.unshift({
           role: 'system',
-          content: workspaceToolsEligible ? workspaceGuidance : PROVIDER_NO_TOOL_GUIDANCE,
+          content: workspaceToolsEligible
+            ? workspaceGuidance
+            : !chatOnly &&
+                started.workspaceSet.roots.length === 0 &&
+                selectedModel?.toolCalling.value !== false
+              ? `このTurnには作業フォルダーがありません。${WORKSPACE_REQUEST_GUIDANCE}`
+              : PROVIDER_NO_TOOL_GUIDANCE,
         });
+      if (!teamTurn && !chatOnly && selectedModel?.toolCalling.value !== false)
+        messages.unshift({ role: 'system', content: SKILL_REQUEST_GUIDANCE });
       if (!chatOnly && autoSkills.length > 0)
         messages.unshift({
           role: 'system',

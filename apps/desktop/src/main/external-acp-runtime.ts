@@ -373,7 +373,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
         () => undefined,
       );
     } catch (error) {
-      profile.cleanup();
+      await profile.cleanup();
       throw error;
     }
     child.stderr.resume();
@@ -391,7 +391,7 @@ export class ExternalAcpRuntime implements ProviderRuntime {
           onStopUnconfirmed?.();
           throw new ExternalAcpError('stop_unconfirmed');
         }
-        profile.cleanup();
+        await profile.cleanup();
       })());
     const abort = () => {
       if (sessionId !== null) rpc.notification('session/cancel', { sessionId });

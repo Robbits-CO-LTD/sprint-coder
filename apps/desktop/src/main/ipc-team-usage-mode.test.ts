@@ -398,6 +398,43 @@ describe('which Leader Turns are given the Team tools', () => {
     toolNames: ['project_memory_remember'],
   };
 
+  it.each([false, true])(
+    'offers Grok shell and file tools with a bound Project folder: %s',
+    async (bound) => {
+      const workspace = startedTurn({}).workspaceSet;
+      const root = {
+        rootId: 'primary-id',
+        role: 'primary' as const,
+        status: 'available' as const,
+        path: process.cwd(),
+        label: 'Project',
+      };
+      const workspaceSet: StartedTurn['workspaceSet'] = {
+        ...workspace,
+        projectId: 'project-1',
+        ...(bound ? { source: 'project', primaryRootId: root.rootId, roots: [root] } : {}),
+      };
+      const catalog = new ManagedCodingHarness({
+        workspaceFor: () => workspaceSet,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => 1,
+        authorizer: () => ({ decision: 'deny', reason: 'catalog only' }),
+        command: { persistence: {} as never, publish: () => undefined },
+      });
+      harnesses.push(catalog);
+      catalog.setCommandSandboxAvailable(true);
+      const h = createHarness({
+        managedCodingHarness: catalog,
+        leaderMcp: ordinaryLeaderMcp,
+        projectId: workspaceSet.projectId,
+      });
+      await h.router.startSelectedRuntime(startedTurn({ ...cli('grok'), workspaceSet }));
+      const offered = names(h.grok.start.mock.calls[0]?.[7]?.managedTools);
+      for (const tool of ['exec_command', 'read_file'])
+        expect(offered.includes(tool), tool).toBe(bound);
+    },
+  );
+
   it.each(['claude', 'grok', 'codex'] as const)(
     'gives a plain %s Turn no Team tool',
     async (kind) => {
