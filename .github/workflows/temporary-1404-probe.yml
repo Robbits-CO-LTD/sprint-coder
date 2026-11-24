@@ -1,0 +1,36 @@
+name: Temporary 1404 macOS command probe
+on:
+  push:
+    branches: [codex/1404-macos-command-probe]
+permissions:
+  contents: read
+jobs:
+  macos-command-probe:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.3
+      - name: Ensure Apple Silicon Homebrew executables are installed
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(/opt/homebrew/bin/brew --prefix)" = /opt/homebrew
+          for formula in gh git; do
+            if [ ! -x "/opt/homebrew/bin/$formula" ]; then
+              /opt/homebrew/bin/brew install "$formula"
+            fi
+            test -x "/opt/homebrew/bin/$formula"
+          done
+          sw_vers -productVersion
+      - uses: ./.github/actions/install-deps
+        with:
+          node-version: 22.23.3
+      - uses: ./.github/actions/prepare-sandbox
+      - name: Probe normal sandboxed command execution
+        working-directory: apps/desktop
+        run: node ../../node_modules/vitest/vitest.mjs run src/main/macos-homebrew-command.probe.test.ts
