@@ -2,6 +2,9 @@ import { TurnStreamingResources } from './turn-streaming-resources';
 import { expect, it, vi } from 'vitest';
 import { IpcRouter } from './ipc';
 import { ProviderVerificationRequiredError } from './provider-verification';
+import { LIST_WORKSPACE_TOOL, SKILL_DRAFT_TOOL } from './provider-workspace-tools';
+import { ToolRegistry } from '@sprint-coder/domain';
+import type { ProviderExecutionRequest } from '@sprint-coder/contracts';
 
 vi.mock('electron', () => ({
   app: { isPackaged: false },
@@ -25,11 +28,22 @@ it.each([
   { reasoning: false, verificationFailure: 'api_credentials' },
   { reasoning: false, verificationFailure: 'api_network' },
   { reasoning: false, verificationFailure: 'api_timeout' },
+  { reasoning: false, rejectTools: 'draft' },
+  { reasoning: false, rejectTools: 'ordinary' },
 ] as const)(
-  'settles the Provider Turn ($reasoning, $verificationFailure)',
+  'settles the Provider Turn ($reasoning, $verificationFailure, $rejectTools)',
   async ({ reasoning, ...options }) => {
     const verificationFailure =
       'verificationFailure' in options ? options.verificationFailure : undefined;
+    const rejectTools = 'rejectTools' in options ? options.rejectTools : undefined;
+    const registry = new ToolRegistry();
+    if (rejectTools !== undefined)
+      registry.register(rejectTools === 'draft' ? SKILL_DRAFT_TOOL : LIST_WORKSPACE_TOOL);
+    const toolSnapshot = registry.createSnapshot({
+      providerId: 'ollama',
+      workspaceId: rejectTools === 'ordinary' ? 'workspace-digest' : null,
+    });
+    const recordTurnToolsDisabled = vi.fn();
     const taskId = 'task-658';
     const turnId = 'turn-658';
     const userMessageId = 'message-658';
@@ -61,9 +75,22 @@ it.each([
     };
     let readAfterCompleted = false;
     let streamClosed = false;
-    const execute = vi.fn(() =>
+    const execute = vi.fn((_connection: unknown, request: ProviderExecutionRequest) =>
       (async function* () {
         try {
+          if (rejectTools !== undefined && request.tools?.length) {
+            yield {
+              type: 'error' as const,
+              error: {
+                category: 'invalid_request' as const,
+                message: 'fixture does not accept tools',
+                retryable: false,
+                retryAfterMs: null,
+                providerCode: null,
+              },
+            };
+            return;
+          }
           if (reasoning) {
             yield { type: 'reasoning_delta' as const, text: 'safe before release\n' };
             resources.release(turnId);
@@ -101,7 +128,10 @@ it.each([
                 ),
       },
       providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
-      modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: false } })) },
+      modelCatalog: {
+        find: vi.fn(() => ({ toolCalling: { value: rejectTools === undefined ? false : null } })),
+      },
+      managedCodingHarness: { startTurn: () => toolSnapshot, finishTurn: vi.fn() },
       permissionBroker: {
         evaluate: vi.fn(() => ({
           decision: 'allow',
@@ -120,6 +150,8 @@ it.each([
         readTurnWorkspaceSetForTask: () => null,
         changeStage: vi.fn(() => ({ type: 'stage.changed' })),
         appendDelta,
+        recordTurnToolsDisabled,
+        recordRuntimeFailureDiagnostic: vi.fn(() => ({ diagnosticId: 'fixture' })),
       },
       mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
       publish: vi.fn(),
@@ -154,14 +186,23 @@ it.each([
     const started = {
       turnId,
       text: 'hello',
-      skills: [],
+      skills:
+        rejectTools === 'draft'
+          ? [{ selection: { ref: { source: 'builtin', skillId: 'skill-creator' } } }]
+          : [],
       event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
       modelSelection: {
         connectionId: connection.id,
         requestedProvider: connection.providerId,
         requestedModel: 'model-658',
       },
-      workspaceSet: { digest: 'workspace-digest', roots: [] },
+      workspaceSet: {
+        digest: 'workspace-digest',
+        roots:
+          rejectTools === 'ordinary'
+            ? [{ rootId: 'root', label: 'fixture', path: '/fixture', role: 'primary' }]
+            : [],
+      },
     };
     const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
       this: typeof fakeRouter,
@@ -195,6 +236,34 @@ it.each([
         verificationFailure,
       );
       expect(appendDelta).not.toHaveBeenCalled();
+      return;
+    }
+    if (rejectTools === 'draft') {
+      expect(execute).toHaveBeenCalledOnce();
+      expect(execute.mock.calls[0]?.[1].tools?.map(({ name }) => name)).toEqual([
+        'skill_draft_create',
+      ]);
+      expect(execute.mock.calls[0]?.[1].messages).toContainEqual(
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('Skillの下書きは、利用できる skill_draft_create'),
+        }),
+      );
+      expect(recordTurnToolsDisabled).not.toHaveBeenCalled();
+      expect(fakeRouter.finishAndAdvance).toHaveBeenCalledWith(taskId, turnId, 'failed');
+      expect(appendDelta).toHaveBeenCalledWith(
+        taskId,
+        turnId,
+        expect.any(String),
+        expect.stringContaining('この接続ではSkillを作れません'),
+      );
+      return;
+    }
+    if (rejectTools === 'ordinary') {
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(execute.mock.calls[0]?.[1].tools?.map(({ name }) => name)).toEqual(['list_workspace']);
+      expect(execute.mock.calls[1]?.[1].tools).toBeUndefined();
+      expect(recordTurnToolsDisabled).toHaveBeenCalledOnce();
       return;
     }
     expect(execute).toHaveBeenCalledOnce();
