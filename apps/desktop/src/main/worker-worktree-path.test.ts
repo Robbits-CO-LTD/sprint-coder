@@ -27,6 +27,12 @@ describe('worker worktree path (issue #855)', () => {
     return r;
   }
 
+  async function repoWithCommonDir(): Promise<string> {
+    const repoPath = await root();
+    await mkdir(join(repoPath, '.git'));
+    return repoPath;
+  }
+
   it('builds a short deterministic directory name instead of the full id', async () => {
     const worktreesRoot = await root();
     const manager = new WorkerWorktreeManager({ worktreesRoot });
@@ -116,6 +122,7 @@ describe('worker worktree path (issue #855)', () => {
   });
 
   it("turns Git's own too-long error into the clear message (no ENAMETOOLONG on Windows)", async () => {
+    const repoPath = await repoWithCommonDir();
     const worktreesRoot = join(await root(), 'g');
     const commands: string[][] = [];
     const manager = new WorkerWorktreeManager({
@@ -134,13 +141,14 @@ describe('worker worktree path (issue #855)', () => {
         };
       },
     });
-    const error = await manager.create({ agentId: 'a4', repoPath: tmpdir() }).catch((e) => e);
+    const error = await manager.create({ agentId: 'a4', repoPath }).catch((e) => e);
     expect(error).toBeInstanceOf(WorktreeError);
     expect(error.message).toMatch(/長すぎる/);
     expect(commands.some((args) => args.includes('worktree') && args.includes('add'))).toBe(true);
   });
 
   it('runs every Git call with LC_ALL=C, so the stderr matched above is always English', async () => {
+    const repoPath = await repoWithCommonDir();
     const worktreesRoot = join(await root(), 'c');
     const envs: (NodeJS.ProcessEnv | undefined)[] = [];
     const commands: string[][] = [];
@@ -154,15 +162,16 @@ describe('worker worktree path (issue #855)', () => {
         envs.push(options?.env);
         commands.push([...args]);
         return {
-          stdout: args.includes('rev-parse')
-            ? `${'c'.repeat(40)}
-`
-            : configProbeStdout(args),
+          stdout: args.includes('--git-common-dir')
+            ? '.git'
+            : args.includes('rev-parse')
+              ? `${'c'.repeat(40)}\n`
+              : configProbeStdout(args),
           stderr: '',
         };
       },
     });
-    await expect(manager.create({ agentId: 'a5', repoPath: tmpdir() })).resolves.toMatchObject({
+    await expect(manager.create({ agentId: 'a5', repoPath })).resolves.toMatchObject({
       baseHead: 'c'.repeat(40),
     });
     expect(commands.some((args) => args.includes('worktree') && args.includes('add'))).toBe(true);
@@ -171,6 +180,7 @@ describe('worker worktree path (issue #855)', () => {
   });
 
   it("keeps Git's original error as the cause of the converted too-long error", async () => {
+    const repoPath = await repoWithCommonDir();
     const worktreesRoot = join(await root(), 'h');
     const original = Object.assign(new Error("fatal: '$GIT_DIR' too big"), {
       code: 128,
@@ -187,7 +197,7 @@ describe('worker worktree path (issue #855)', () => {
         };
       },
     });
-    const error = await manager.create({ agentId: 'a6', repoPath: tmpdir() }).catch((e) => e);
+    const error = await manager.create({ agentId: 'a6', repoPath }).catch((e) => e);
     expect(error.message).toMatch(/長すぎる/);
     // The worktree path passed the check, so no (within-limit) length is quoted.
     expect(error.message).not.toMatch(/文字、上限/);
@@ -196,6 +206,7 @@ describe('worker worktree path (issue #855)', () => {
   });
 
   it('does not call an unrelated worktree add failure too long', async () => {
+    const repoPath = await repoWithCommonDir();
     const worktreesRoot = join(await root(), 'u');
     const commands: string[][] = [];
     const manager = new WorkerWorktreeManager({
@@ -214,7 +225,7 @@ describe('worker worktree path (issue #855)', () => {
         };
       },
     });
-    const error = await manager.create({ agentId: 'a7', repoPath: tmpdir() }).catch((e) => e);
+    const error = await manager.create({ agentId: 'a7', repoPath }).catch((e) => e);
     expect(error).toBeInstanceOf(WorktreeError);
     expect(error.message).not.toMatch(/長すぎる/);
     expect(error.message).toContain('invalid reference: HEAD');
@@ -223,7 +234,9 @@ describe('worker worktree path (issue #855)', () => {
 
   it("checks Git's administration path under the common Git directory of a linked worktree", async () => {
     const worktreesRoot = join(await root(), 'w');
-    const deepCommon = 'C:/' + 'x/'.repeat(120) + '.git';
+    const repoPath = await root();
+    const deepCommon = join(repoPath, 'x'.repeat(190), '.git');
+    await mkdir(deepCommon, { recursive: true });
     const calls: string[][] = [];
     const manager = new WorkerWorktreeManager({
       worktreesRoot,
@@ -236,7 +249,7 @@ describe('worker worktree path (issue #855)', () => {
         };
       },
     });
-    const error = await manager.create({ agentId: 'a2', repoPath: tmpdir() }).catch((e) => e);
+    const error = await manager.create({ agentId: 'a2', repoPath }).catch((e) => e);
     expect(error).toBeInstanceOf(WorktreeError);
     expect(error.message).toMatch(/長すぎる/);
     expect(calls.some((args) => args.includes('--git-common-dir'))).toBe(true);
@@ -269,6 +282,7 @@ describe('worker worktree path (issue #855)', () => {
   });
 
   it('recreates a recorded legacy path longer than the new-creation limit without the length check', async () => {
+    const repoPath = await repoWithCommonDir();
     const worktreesRoot = join(await root(), 'k'.repeat(170));
     const legacy = join(worktreesRoot, `worktree-${UUID}`);
     const calls: string[][] = [];
@@ -278,10 +292,11 @@ describe('worker worktree path (issue #855)', () => {
       execFileImpl: async (_file: string, args: readonly string[]) => {
         calls.push([...args]);
         return {
-          stdout: args.includes('rev-parse')
-            ? `${'b'.repeat(40)}
-`
-            : configProbeStdout(args),
+          stdout: args.includes('--git-common-dir')
+            ? '.git'
+            : args.includes('rev-parse')
+              ? `${'b'.repeat(40)}\n`
+              : configProbeStdout(args),
           stderr: '',
         };
       },
@@ -289,7 +304,7 @@ describe('worker worktree path (issue #855)', () => {
     expect(legacy.length).toBeGreaterThan(200);
     const created = await manager.ensureCreated({
       agentId: UUID,
-      repoPath: tmpdir(),
+      repoPath,
       recordedPath: legacy,
     });
     expect(created.path).toBe(legacy);
