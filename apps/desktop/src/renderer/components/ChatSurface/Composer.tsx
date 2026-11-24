@@ -834,15 +834,22 @@ export function Composer({ taskId }: { taskId: string }) {
     if (skill) selectSkill(skill);
   }
 
-  function editSkillDraft(next: string, caret: number, allowAlias = false) {
+  function editSkillDraft(
+    next: string,
+    caret: number,
+    mode: 'edit' | 'typed' | 'space-key' = 'edit',
+  ): boolean {
+    const existing = new Set(skillMentions(next, selectedSkills).map((m) => m.selection));
+    const retained = selectedSkills.filter((skill) => existing.has(skill));
+    const alias = mode === 'edit' ? null : typedSkillAlias(next, caret, skillCatalog);
+    const available =
+      alias !== null && !skillUnavailable(alias.skill, skillRuntime, retained, teamStarted, true);
+    if (mode === 'space-key' && (!available || next[alias.trigger] !== '$')) return false;
     if (warnedSkillDraft.current?.taskId === taskId && warnedSkillDraft.current.text !== next) {
       warnedSkillDraft.current = null;
       setTurnStartError(null);
     }
-    const existing = new Set(skillMentions(next, selectedSkills).map((m) => m.selection));
-    const retained = selectedSkills.filter((skill) => existing.has(skill));
-    const alias = allowAlias ? typedSkillAlias(next, caret, skillCatalog) : null;
-    if (alias && !skillUnavailable(alias.skill, skillRuntime, retained, teamStarted, true)) {
+    if (available) {
       const { ref, kind } = alias.skill;
       // A draft can still have a pinned, same-name Skill from an earlier catalog.
       const spelling = mentionText(
@@ -865,11 +872,28 @@ export function Composer({ taskId }: { taskId: string }) {
     if (slashTokenAtCursor(next, caret)?.query !== slashQuery) setSlashSelection(0);
     setComposerCursor(caret);
     setDraft(taskId, next);
+    return true;
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (composing || e.nativeEvent.isComposing) return;
-    const { selectionStart, selectionEnd } = e.currentTarget;
+    const { selectionStart, selectionEnd, value } = e.currentTarget;
+    if (
+      e.key === ' ' &&
+      selectionStart === selectionEnd &&
+      !e.shiftKey &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !/[A-Za-z0-9._-]/u.test(value[selectionStart] ?? '')
+    ) {
+      // A physical Space can complete a Skill even when the subsequent input type is not insertText.
+      const spaced = value.slice(0, selectionStart) + ' ' + value.slice(selectionStart);
+      if (editSkillDraft(spaced, selectionStart + 1, 'space-key')) {
+        e.preventDefault();
+        return;
+      }
+    }
     if (
       selectionStart === selectionEnd &&
       !e.metaKey &&
@@ -1105,7 +1129,7 @@ export function Composer({ taskId }: { taskId: string }) {
                   editSkillDraft(
                     event.currentTarget.value,
                     event.currentTarget.selectionStart,
-                    Boolean(event.data) && event.currentTarget.value !== presentedDraft,
+                    event.data && event.currentTarget.value !== presentedDraft ? 'typed' : 'edit',
                   );
                 }}
                 onScroll={(event) => syncMirrorScroll(event.currentTarget)}
@@ -1134,7 +1158,9 @@ export function Composer({ taskId }: { taskId: string }) {
                       nextDraft,
                       nextCursor,
                       e.nativeEvent instanceof InputEvent &&
-                        e.nativeEvent.inputType === 'insertText',
+                        e.nativeEvent.inputType === 'insertText'
+                        ? 'typed'
+                        : 'edit',
                     );
                   }
                 }}

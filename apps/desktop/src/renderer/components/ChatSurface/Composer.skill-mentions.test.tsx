@@ -151,7 +151,7 @@ async function withComposer(
     container: HTMLElement;
     textarea: HTMLTextAreaElement;
     send: ReturnType<typeof vi.fn>;
-    key: (key: string) => Promise<void>;
+    key: (key: string, options?: KeyboardEventInit) => Promise<boolean>;
     showCaret: (offset: number) => Promise<void>;
     change: (value: string, offset: number, inputType?: string) => Promise<void>;
   }) => Promise<void>,
@@ -194,12 +194,15 @@ async function withComposer(
         textarea.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
     };
-    const key = async (key: string) => {
-      await act(async () => {
-        textarea.dispatchEvent(
-          new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }),
-        );
+    const key = async (key: string, options: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+        ...options,
       });
+      await act(async () => textarea.dispatchEvent(event));
+      return event.defaultPrevented;
     };
     const change = async (value: string, offset: number, inputType = 'insertText') => {
       await act(async () => {
@@ -326,6 +329,47 @@ it('selects an exact dollar mention at a typed space and warns before sending an
     expect(container.textContent).toContain('入力した名前のSkillが選択されていません');
     await key('Enter');
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ text: '$outline ', skills: [] }));
+  });
+});
+
+it('uses the Space key to bind an exact Skill even without an insertText event', async () => {
+  await withComposer('', [first], [], async ({ change, key, send, textarea }) => {
+    await change('$outline', '$outline'.length);
+    if (!(await key(' '))) await change('$outline ', '$outline '.length, 'insertReplacementText');
+
+    expect(textarea.value).toBe('$outline ');
+    expect(textarea.selectionStart).toBe('$outline '.length);
+    expect(useAppStore.getState().skillSelectionByTask[taskId]).toEqual([firstSelection]);
+    await key('Enter');
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ skills: [firstSelection] }));
+  });
+});
+
+it('leaves Space to the editor when no complete, unambiguous Skill may be selected', async () => {
+  const longer = item('outline-extra', 'created');
+  const blocked = { ...item('blocked', 'created'), enabled: false };
+  await withComposer('', [first, longer, blocked], [], async ({ change, key, textarea }) => {
+    for (const [value, offset, modifiers] of [
+      ['ordinary', 8, {}],
+      ['$blocked', 8, {}],
+      ['$outline-extra', 8, {}],
+      ['$outline', 8, { isComposing: true }],
+      ['$outline', 8, { shiftKey: true }],
+      ['$outline', 8, { ctrlKey: true }],
+    ] as const) {
+      await change(value, offset);
+      expect(await key(' ', modifiers)).toBe(false);
+      expect(textarea.value).toBe(value);
+      expect(useAppStore.getState().skillSelectionByTask[taskId]).toEqual([]);
+    }
+    await change('$outline', 8);
+    textarea.setSelectionRange(3, 8);
+    expect(await key(' ')).toBe(false);
+  });
+  await withComposer('', [first, item('outline', 'builtin')], [], async ({ change, key }) => {
+    await change('$outline', 8);
+    expect(await key(' ')).toBe(false);
+    expect(useAppStore.getState().skillSelectionByTask[taskId]).toEqual([]);
   });
 });
 
