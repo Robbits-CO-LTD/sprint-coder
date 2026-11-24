@@ -217,4 +217,10 @@ it('recognizes only an explicit request for one repository, branch and full comm
     kind: 'incomplete',
   });
   expect(parseGithubPushInput('GitHub pushの使い方を教えて')).toBeNull();
+  expect(parseGithubPushInput('push して')).toEqual({ kind: 'incomplete' });
+  expect(parseGithubPushInput('GitHubにpushして')).toEqual({ kind: 'incomplete' });
+  expect(parseGithubPushInput('「push して」')).toBeNull();
+  expect(parseGithubPushInput('> GitHubにpushして')).toBeNull();
+  expect(parseGithubPushInput('push して\nこの文を英訳して')).toBeNull();
+  expect(parseGithubPushInput('push してと言われました')).toBeNull();
 });

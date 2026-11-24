@@ -16,7 +16,11 @@ import { ModelPickerV2 } from '../ModelPickerV2';
 import { isModelPickerV2Active } from '../../lib/model-picker-parity';
 import { requestOpenProviderSettings } from '../../lib/settings-navigation';
 import { IMAGEGEN_PREFIX } from './imagegen';
-import { GITHUB_INPUT_EXAMPLES, parseGithubActionInput } from '../../../github-issue-request';
+import {
+  GITHUB_INPUT_EXAMPLES,
+  GITHUB_PUSH_INPUT_EXAMPLE,
+  parseGithubChatInput,
+} from '../../../github-issue-request';
 import type { ComposerMenuItem } from './ComposerMenu';
 import { SlashCommandMenu, type SlashMenuItem } from './SlashCommandMenu';
 import {
@@ -517,12 +521,18 @@ export function Composer({ taskId }: { taskId: string }) {
     wasSendingRef.current = sending;
   }, [sending]);
 
-  const githubIssue = !goalRequested && !imageRequested ? parseGithubActionInput(sendText) : null;
-  const githubIssueHasExtras =
-    githubIssue !== null && (draftAttachments.length > 0 || selectedSkills.length > 0);
+  const githubAction = !goalRequested && !imageRequested ? parseGithubChatInput(sendText) : null;
+  const githubActionHasExtras =
+    githubAction !== null && (draftAttachments.length > 0 || selectedSkills.length > 0);
+  const githubExample =
+    githubAction?.input.kind === 'incomplete'
+      ? githubAction.operation === 'push'
+        ? GITHUB_PUSH_INPUT_EXAMPLE
+        : GITHUB_INPUT_EXAMPLES[githubAction.input.action]
+      : null;
   const sendBlocked =
-    (aiConnectionRequired && githubIssue === null) ||
-    githubIssueHasExtras ||
+    (aiConnectionRequired && githubAction === null) ||
+    githubActionHasExtras ||
     composing ||
     permissionChanging ||
     attachmentBlocked ||
@@ -976,7 +986,7 @@ export function Composer({ taskId }: { taskId: string }) {
                 : '選択したSkillはこの送信だけで使います。'}
             </p>
           )}
-          {aiConnectionRequired && githubIssue === null && (
+          {aiConnectionRequired && githubAction === null && (
             <div className="composer-ai-connection">
               <div role="status">
                 <strong>AI がつながっていません</strong>
@@ -987,19 +997,19 @@ export function Composer({ taskId }: { taskId: string }) {
               </button>
             </div>
           )}
-          {githubIssue !== null && (
+          {githubAction !== null && (
             <div className="composer-ai-connection">
               <p role="status">
-                {githubIssueHasExtras
-                  ? 'GitHubに投稿するときは、画像やSkillを外してください。'
-                  : '送信先と内容を確認し、承認した場合にだけGitHubに投稿します。'}
+                {githubActionHasExtras
+                  ? 'GitHubに送るときは、画像やSkillを外してください。'
+                  : '送信先と内容を確認し、承認した場合にだけGitHubに送ります。'}
               </p>
-              {githubIssue.kind === 'incomplete' && (
+              {githubExample !== null && (
                 <button
                   type="button"
                   className="cmp-chip"
                   onClick={() => {
-                    setDraft(taskId, GITHUB_INPUT_EXAMPLES[githubIssue.action]);
+                    setDraft(taskId, githubExample);
                     textareaRef.current?.focus();
                   }}
                 >

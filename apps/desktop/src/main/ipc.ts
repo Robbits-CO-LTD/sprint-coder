@@ -16,8 +16,9 @@ import { APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS } from './approval-display-ch
 import {
   GITHUB_PUSH_INPUT_EXAMPLE,
   githubInputHelp,
-  parseGithubActionInput,
-  parseGithubPushInput,
+  parseGithubChatInput,
+  type parseGithubActionInput,
+  type parseGithubPushInput,
 } from '../github-issue-request';
 import { SKILL_REQUEST_GUIDANCE } from '../chat-continuation';
 import { projectFolderIdentity } from './project-folder-identity';
@@ -4351,7 +4352,7 @@ export class IpcRouter {
       turnStartInputSchema,
       turnStartResultSchema,
       async (input, event, envelope) => {
-        const githubAction = parseGithubPushInput(input.text) ?? parseGithubActionInput(input.text);
+        const githubAction = parseGithubChatInput(input.text);
         let skills: PersistedTurnSkill[] = [];
         if (githubAction === null) {
           const selection = this.persistence.getTaskModelSelection(input.taskId);
@@ -6517,18 +6518,18 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
-    const githubPush = userChatInput ? parseGithubPushInput(started.text) : null;
-    if (githubPush !== null) {
+    const githubAction = userChatInput ? parseGithubChatInput(started.text) : null;
+    if (githubAction?.operation === 'push') {
       await this.runGithubPush(
         started,
         started.skills.length === 0 && !this.attachmentCapabilityByTurn.has(started.turnId)
-          ? githubPush
+          ? githubAction.input
           : { kind: 'incomplete' },
       );
       return;
     }
-    const githubIssue = userChatInput ? parseGithubActionInput(started.text) : null;
-    if (githubIssue !== null) {
+    if (githubAction?.operation === 'write') {
+      const githubIssue = githubAction.input;
       await this.runGithubWrite(
         started,
         started.skills.length === 0 && !this.attachmentCapabilityByTurn.has(started.turnId)

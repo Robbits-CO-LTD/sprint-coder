@@ -4,6 +4,7 @@ import type { StartedTurn } from './persistence';
 import {
   GITHUB_INPUT_EXAMPLES,
   GITHUB_ISSUE_INPUT_EXAMPLE,
+  GITHUB_PUSH_INPUT_EXAMPLE,
   githubInputHelp,
   parseGithubActionInput,
 } from '../github-issue-request';
@@ -735,6 +736,25 @@ describe('GitHub comments and pull requests', () => {
 });
 
 describe('Local commit push in normal chat', () => {
+  it.each(['push して', 'GitHubにpushして'])(
+    'shows the existing push example for %s with no approval or side effects',
+    async (text) => {
+      const h = harness(text);
+      await h.registerIpc().start();
+      expect(h.finish).toHaveBeenCalledWith(
+        'task-1',
+        'turn-1',
+        'completed',
+        expect.stringContaining(GITHUB_PUSH_INPUT_EXAMPLE),
+      );
+      expect(h.prepareLocalGithubPush).not.toHaveBeenCalled();
+      expect(showMessageBox).not.toHaveBeenCalled();
+      expect(login).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+    },
+  );
+
   const commitOid = 'a'.repeat(40);
   const parent = 'b'.repeat(40);
   const requestText =
