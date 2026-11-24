@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IpcRouter } from './ipc';
 import type { StartedTurn } from './persistence';
-import { GITHUB_ISSUE_INPUT_EXAMPLE, parseGithubActionInput } from '../github-issue-request';
+import {
+  GITHUB_INPUT_EXAMPLES,
+  GITHUB_ISSUE_INPUT_EXAMPLE,
+  githubInputHelp,
+  parseGithubActionInput,
+} from '../github-issue-request';
 import type * as GithubIssueModule from './github-issue';
 import { githubLoginEnvironment } from './github-issue';
 import { IPC_CHANNELS } from '@sprint-coder/contracts';
@@ -480,6 +485,70 @@ describe('GitHub Issue request in chat', () => {
       expect.stringContaining('二重投稿'),
     );
     expect(JSON.stringify(h.appendDelta.mock.calls)).not.toContain('sensitive request details');
+  });
+});
+
+describe('GitHub input help', () => {
+  it.each(['issue', 'comment', 'pull'] as const)(
+    'documents valid %s input and body limits',
+    (action) => {
+      const example = GITHUB_INPUT_EXAMPLES[action].replace('<所有者>/<リポジトリ>', 'team/repo');
+      const help = githubInputHelp(action);
+      const [, lines, length] = /本文は(\d+)行・(\d+)文字以内/u.exec(help) ?? [];
+      expect(lines).toBeDefined();
+      expect(length).toBeDefined();
+      expect(help).toContain(GITHUB_INPUT_EXAMPLES[action]);
+      expect(parseGithubActionInput(example)).toMatchObject({
+        kind: 'create',
+        request: { action },
+      });
+      for (const [body, kind] of [
+        ['あ'.repeat(Number(length)), 'create'],
+        ['あ'.repeat(Number(length) + 1), 'incomplete'],
+        [Array<string>(Number(lines)).fill('あ').join('\n'), 'create'],
+        [
+          Array<string>(Number(lines) + 1)
+            .fill('あ')
+            .join('\n'),
+          'incomplete',
+        ],
+      ] as const) {
+        expect(parseGithubActionInput(example.replace(/本文: .*$/u, '本文: ' + body))?.kind).toBe(
+          kind,
+        );
+      }
+    },
+  );
+
+  it.each(['issue', 'pull'] as const)('uses the documented title limit for %s', (action) => {
+    const example = GITHUB_INPUT_EXAMPLES[action].replace('<所有者>/<リポジトリ>', 'team/repo');
+    const [, length] = /タイトルは(\d+)文字以内/u.exec(githubInputHelp(action)) ?? [];
+    expect(length).toBeDefined();
+    const withTitle = (titleLength: number) =>
+      parseGithubActionInput(
+        example.replace(/タイトル: .*$/mu, 'タイトル: ' + 'あ'.repeat(titleLength)),
+      );
+    expect(withTitle(Number(length))?.kind).toBe('create');
+    expect(withTitle(Number(length) + 1)?.kind).toBe('incomplete');
+  });
+
+  it('shows comment-only instructions in chat without opening approval or contacting GitHub', async () => {
+    const withTitle = commentInput.replace('本文:', 'タイトル: 再現報告\n本文:');
+    expect(parseGithubActionInput(withTitle)).toEqual({ kind: 'incomplete', action: 'comment' });
+
+    const h = harness(withTitle);
+    await h.registerIpc().start();
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(login).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(h.finish).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      'completed',
+      githubInputHelp('comment'),
+    );
+    expect(githubInputHelp('comment')).toContain('GitHub IssueのURL');
+    expect(githubInputHelp('comment')).not.toContain('タイトル');
   });
 });
 

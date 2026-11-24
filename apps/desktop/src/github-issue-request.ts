@@ -19,9 +19,16 @@ export const GITHUB_INPUT_EXAMPLES: Record<GithubAction, string> = {
   pull: 'https://github.com/<所有者>/<リポジトリ> に PR を作成して\n元ブランチ: fix-settings\n先ブランチ: main\nタイトル: 設定画面の修正\n本文: 設定を開くと固まる不具合を直しました。',
 };
 
+const MAX_TITLE_LENGTH = 120;
+const MAX_BODY_LENGTH = 500;
+const MAX_BODY_LINES = 8;
+
 export function githubInputHelp(action: GithubAction): string {
   return [
-    'GitHubへの送信先と本文を入力してください。タイトルは120文字以内、本文は8行・500文字以内です。',
+    action === 'comment'
+      ? 'コメント先のGitHub IssueのURLと本文を入力してください。'
+      : `GitHubへの送信先、タイトル、本文を入力してください。タイトルは${MAX_TITLE_LENGTH}文字以内です。`,
+    `本文は${MAX_BODY_LINES}行・${MAX_BODY_LENGTH}文字以内です。`,
     ...(action === 'pull'
       ? ['元と先は、同じリポジトリのGitHub上にある別々のブランチを指定してください。']
       : []),
@@ -118,7 +125,7 @@ export function parseGithubActionInput(
   if (
     !repository ||
     !title ||
-    title.length > 120 ||
+    title.length > MAX_TITLE_LENGTH ||
     containsHiddenControls(title) ||
     !validBody(body)
   )
@@ -134,8 +141,8 @@ function validBody(body: string | undefined): body is string {
   return (
     body !== undefined &&
     body.trim().length > 0 &&
-    body.length <= 500 &&
-    body.split('\n').length <= 8 &&
+    body.length <= MAX_BODY_LENGTH &&
+    body.split('\n').length <= MAX_BODY_LINES &&
     !containsHiddenControls(body)
   );
 }
