@@ -11,7 +11,7 @@ describe('<SkillDraftCard />', () => {
     ['OPERATION_CONFLICT', '同名のSkillが既に存在します。', '同名のSkillが既に存在します。'],
     ['OPERATION_CONFLICT', 'C:/private/path', '操作の条件を満たしていません'],
   ])(
-    'shows a safe %s error on the card and lets the user retry discard',
+    'shows a safe %s error on the card and lets the user retry discard (case %#)',
     async (code, userMessage, reason) => {
       vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
       const discard = vi
