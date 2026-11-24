@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
+  turnStartInputSchema,
   type ModelSelection,
   type ProviderConnection,
 } from '@sprint-coder/contracts';
@@ -153,7 +154,13 @@ describe('retired Managed Local execution boundary', () => {
       reconcileTaskBuiltinModel: reconcile,
     });
     router.register();
-    const error = await handlers.get(IPC_CHANNELS.turnsStart)!({ taskId: 'retired-task' }).catch(
+    const input = turnStartInputSchema.parse({
+      taskId: 'retired-task',
+      text: 'Continue',
+      attachmentIds: [],
+      attachmentSelectionIdentity: null,
+    });
+    const error = await handlers.get(IPC_CHANNELS.turnsStart)!(input).catch(
       (error: unknown) => error,
     );
     expect(error).toBeInstanceOf(RetiredManagedLocalError);
