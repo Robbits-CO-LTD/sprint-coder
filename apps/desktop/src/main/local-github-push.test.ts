@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, rmdir, link, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
@@ -16,7 +15,8 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const base = await mkdtemp(join(tmpdir(), 'sc-push-read-'));
+  // Windows' default temporary directory is under AppData, a protected workspace location.
+  const base = await mkdtemp(join(process.cwd(), '.sc-push-read-'));
   temporary.push(base);
   const root = join(base, 'root');
   await mkdir(root);

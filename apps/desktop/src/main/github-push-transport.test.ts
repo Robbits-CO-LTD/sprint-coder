@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pushApprovedGithubCommit, GithubPushResultUnknown } from './github-push-transport';
@@ -22,7 +21,8 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const base = await mkdtemp(join(tmpdir(), 'sc-push-protocol-'));
+  // Use a real, unprotected workspace even when Windows TEMP is under AppData.
+  const base = await mkdtemp(join(process.cwd(), '.sc-push-protocol-'));
   temporary.push(base);
   const local = join(base, 'local');
   const remote = join(base, 'remote');
