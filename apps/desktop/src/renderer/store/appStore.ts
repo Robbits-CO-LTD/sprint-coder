@@ -209,6 +209,7 @@ type AppState = {
   // Same ownership invariant as drafts; includes asynchronous selection-persistence rollback.
   skillSelectionRevisionByTask: Record<string, number | undefined>;
   skillDraftsByTask: Record<string, { turnId: string; draft: SkillDraft }[]>;
+  pendingSkillDraftIds: ReadonlySet<string>;
   toolsDisabledTurnIdsByTask: Record<string, string[]>;
   activatedSkillsByTask: Record<
     string,
@@ -1225,6 +1226,22 @@ function withoutSkillDraft(
   return updated;
 }
 export const useAppStore = create<AppState>((set, get) => {
+  async function mutateSkillDraft(draftId: string, action: () => Promise<unknown>): Promise<void> {
+    if (get().pendingSkillDraftIds.has(draftId))
+      throw new Error('Skill draft operation is pending');
+    set((state) => ({ pendingSkillDraftIds: new Set(state.pendingSkillDraftIds).add(draftId) }));
+    try {
+      await action();
+      set((state) => ({ skillDraftsByTask: withoutSkillDraft(state.skillDraftsByTask, draftId) }));
+    } finally {
+      set((state) => {
+        const pendingSkillDraftIds = new Set(state.pendingSkillDraftIds);
+        pendingSkillDraftIds.delete(draftId);
+        return { pendingSkillDraftIds };
+      });
+    }
+  }
+
   let runtimeRefresh: Promise<void> | null = null;
   let runtimeDetectionGeneration = 0;
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
@@ -1430,6 +1447,7 @@ export const useAppStore = create<AppState>((set, get) => {
     skillSelectionByTask: {},
     skillSelectionRevisionByTask: {},
     skillDraftsByTask: {},
+    pendingSkillDraftIds: new Set(),
     toolsDisabledTurnIdsByTask: {},
     activatedSkillsByTask: {},
     workspaceByTask: {},
@@ -3013,22 +3031,18 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async installSkillDraft(draft: SkillDraft) {
-      if (typeof window.sprintCoder?.skills?.installDraft !== 'function')
+      const skills = window.sprintCoder?.skills;
+      if (typeof skills?.installDraft !== 'function')
         throw new Error('Skill draft workflow is unavailable');
-      await window.sprintCoder.skills.installDraft(draft.id, draft.digest, true);
-      set((state) => ({
-        skillDraftsByTask: withoutSkillDraft(state.skillDraftsByTask, draft.id),
-      }));
+      await mutateSkillDraft(draft.id, () => skills.installDraft(draft.id, draft.digest, true));
       await get().loadSkills();
     },
 
     async discardSkillDraft(draftId: string) {
-      if (typeof window.sprintCoder?.skills?.discardDraft !== 'function')
+      const skills = window.sprintCoder?.skills;
+      if (typeof skills?.discardDraft !== 'function')
         throw new Error('Skill draft workflow is unavailable');
-      await window.sprintCoder.skills.discardDraft(draftId);
-      set((state) => ({
-        skillDraftsByTask: withoutSkillDraft(state.skillDraftsByTask, draftId),
-      }));
+      await mutateSkillDraft(draftId, () => skills.discardDraft(draftId));
     },
 
     async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
