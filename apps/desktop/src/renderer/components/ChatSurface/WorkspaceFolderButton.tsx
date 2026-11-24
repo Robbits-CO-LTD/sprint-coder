@@ -5,12 +5,13 @@ import { ProjectEditorDialog } from '../ProjectEditorDialog';
 export function WorkspaceFolderButton({ taskId }: { taskId: string }) {
   const projectId = useAppStore((state) => state.tasks.find(({ id }) => id === taskId)?.projectId);
   const project = useAppStore((state) => state.projects.find(({ id }) => id === projectId));
+  const selectWorkspace = useAppStore((state) => state.selectTaskWorkspace);
   const [editing, setEditing] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const workspace = typeof window === 'undefined' ? undefined : window.sprintCoder?.workspace;
   const canChoose =
-    projectId == null ? typeof workspace?.select === 'function' : project !== undefined;
+    projectId === null ? typeof workspace?.select === 'function' : project !== undefined;
 
   async function chooseFolder() {
     if (projectId != null) {
@@ -20,11 +21,7 @@ export function WorkspaceFolderButton({ taskId }: { taskId: string }) {
     setPending(true);
     setError(null);
     try {
-      const selected = await workspace?.select(taskId);
-      if (selected != null)
-        useAppStore.setState((state) => ({
-          workspaceByTask: { ...state.workspaceByTask, [taskId]: selected },
-        }));
+      await selectWorkspace(taskId);
     } catch {
       setError('作業フォルダーを設定できませんでした。');
     } finally {

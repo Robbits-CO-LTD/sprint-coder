@@ -110,6 +110,22 @@ it('waits for a folder selection before resuming a folderless chat', async () =>
       [...container.querySelectorAll('button')].find((element) => element.textContent === label);
     await act(async () =>
       useAppStore.setState({
+        tasks: [
+          {
+            id: taskId,
+            title: 'Workspace continuation',
+            projectId: null,
+            pinned: false,
+            archived: false,
+            goal: null,
+            goalState: null,
+            workspacePath: null,
+            localOnly: false,
+            hasConversation: true,
+            createdAt: completedReply.createdAt,
+            updatedAt: completedReply.createdAt,
+          },
+        ],
         messagesByTask: {
           [taskId]: [{ ...completedReply, content: '作業フォルダーを選んでください。' }],
         },
