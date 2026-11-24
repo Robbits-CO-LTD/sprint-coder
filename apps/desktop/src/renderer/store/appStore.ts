@@ -522,18 +522,26 @@ async function loadWorkspace(
   get: () => AppState,
 ) {
   if (!window.sprintCoder) return;
+  const task = get().tasks.find((candidate) => candidate.id === taskId);
+  if (task === undefined) return;
+  const previousWorkspace = get().workspaceByTask[taskId];
+  const isCurrent = () =>
+    get().tasks.find((candidate) => candidate.id === taskId)?.projectId === task.projectId &&
+    get().workspaceByTask[taskId] === previousWorkspace;
   if (typeof window.sprintCoder.workspace?.get === 'function') {
     try {
       const workspace = await window.sprintCoder.workspace.get(taskId);
-      if (get().selectedTaskId !== taskId) return;
+      if (!isCurrent()) return;
       apply((state) => ({ workspaceByTask: { ...state.workspaceByTask, [taskId]: workspace } }));
       return;
     } catch {
       // Fall through to the TaskSummary-derived fallback below.
     }
   }
-  const task = get().tasks.find((t) => t.id === taskId);
-  const workspacePath = task?.workspacePath ?? null;
+  // A Project may retain the standalone path for later unassignment. Only Main can say
+  // whether that path is still available through the legacy Project fallback.
+  if (!isCurrent()) return;
+  const workspacePath = task.projectId === null ? task.workspacePath : null;
   if (workspacePath) {
     const name = workspacePath.split(/[\\/]/).filter(Boolean).pop() ?? workspacePath;
     apply((state) => ({
@@ -2309,8 +2317,10 @@ export const useAppStore = create<AppState>((set, get) => {
         });
         set((state) => ({
           tasks: state.tasks.map((candidate) => (candidate.id === taskId ? updated : candidate)),
+          workspaceByTask: { ...state.workspaceByTask, [taskId]: null },
         }));
         void get().refreshProjects();
+        await loadWorkspace(taskId, apply, get);
         return updated;
       } catch (err) {
         set({ error: describeError(err) });
@@ -2330,8 +2340,10 @@ export const useAppStore = create<AppState>((set, get) => {
         });
         set((state) => ({
           tasks: state.tasks.map((candidate) => (candidate.id === taskId ? updated : candidate)),
+          workspaceByTask: { ...state.workspaceByTask, [taskId]: null },
         }));
         void get().refreshProjects();
+        await loadWorkspace(taskId, apply, get);
         return updated;
       } catch (err) {
         set({ error: describeError(err) });
