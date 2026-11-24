@@ -5018,7 +5018,7 @@ if (runsWithElectronAbi)
       expect(settled).toBe(false);
       releaseIntegration();
       await integration;
-      await expect(assignment).rejects.toThrow(/clean/u);
+      await expect(assignment).rejects.toMatchObject({ code: 'workspace_dirty' });
       const team = persistence.getTeamByTask(task.id)!;
       expect(persistence.listTeamExecutions(team.id)).toEqual([]);
       persistence.close();
