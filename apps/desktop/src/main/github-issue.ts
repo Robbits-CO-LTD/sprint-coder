@@ -76,11 +76,13 @@ export async function writeGithubContent(
   request: GithubWriteRequest,
   signal: AbortSignal,
   canPost: () => boolean,
-  deps: { readToken: typeof githubLoginToken; fetch: typeof fetch } = {
-    readToken: githubLoginToken,
-    fetch,
-  },
+  options: {
+    readToken?: typeof githubLoginToken;
+    fetch?: typeof fetch;
+    onPostStarted?: (stopNotice: string) => void;
+  } = {},
 ): Promise<string> {
+  const { readToken = githubLoginToken, fetch: fetchRequest = fetch, onPostStarted } = options;
   if (parseGithubIssueRepository(request.repository) !== request.repository)
     throw new GithubIssueError(
       'GitHubのリポジトリ名を確認してください。GitHubには送信していません。',
@@ -96,7 +98,7 @@ export async function writeGithubContent(
     throw new GithubIssueError('GitHubへの送信先を確認してください。投稿は行っていません。');
   let token: string;
   try {
-    token = await deps.readToken(signal);
+    token = await readToken(signal);
     signal.throwIfAborted();
   } catch {
     throw new GithubIssueError(
@@ -118,14 +120,12 @@ export async function writeGithubContent(
   const issueUrl =
     request.action === 'comment' ? `${repository}/issues/${request.issueNumber}` : null;
   if (issueUrl !== null && request.action === 'comment') {
-    const issueResponse = await deps
-      .fetch(issueUrl, {
-        method: 'GET',
-        redirect: 'error',
-        headers,
-        signal: requestSignal,
-      })
-      .catch(() => null);
+    const issueResponse = await fetchRequest(issueUrl, {
+      method: 'GET',
+      redirect: 'error',
+      headers,
+      signal: requestSignal,
+    }).catch(() => null);
     const issue = z
       .object({
         number: z.number(),
@@ -143,8 +143,6 @@ export async function writeGithubContent(
       throw new GithubIssueError(
         '送信先のIssueを確認できませんでした。コメントは投稿していません。',
       );
-    if (!canPost())
-      throw new GithubIssueError('タスクの状態や権限が変わりました。コメントは投稿していません。');
   }
   const endpoint =
     request.action === 'comment'
@@ -162,19 +160,25 @@ export async function writeGithubContent(
       : request.action === 'pull'
         ? 'リポジトリのPR一覧'
         : 'リポジトリのIssue一覧';
-  const response = await deps
-    .fetch(endpoint, {
-      method: 'POST',
-      redirect: 'error',
-      headers,
-      body: JSON.stringify(payload),
-      signal: requestSignal,
-    })
-    .catch(() => {
-      throw new GithubIssueError(
-        `GitHubから結果を確認できませんでした。二重投稿を避けるため、再送する前に${location}を確認してください。`,
-      );
-    });
+  requestSignal.throwIfAborted();
+  if (!canPost())
+    throw new GithubIssueError(
+      request.action === 'comment'
+        ? 'タスクの状態や権限が変わりました。コメントは投稿していません。'
+        : 'タスクの状態や権限が変わりました。GitHubには送信していません。',
+    );
+  const unknownResult = `GitHubから結果を確認できませんでした。二重投稿を避けるため、再送する前に${location}を確認してください。`;
+  // The approval and abort checks above must stay in the same synchronous step as dispatch.
+  onPostStarted?.(unknownResult);
+  const response = await fetchRequest(endpoint, {
+    method: 'POST',
+    redirect: 'error',
+    headers,
+    body: JSON.stringify(payload),
+    signal: requestSignal,
+  }).catch(() => {
+    throw new GithubIssueError(unknownResult);
+  });
   if (response.status !== 201) {
     await response.body?.cancel().catch(() => undefined);
     throw new GithubIssueError(
