@@ -1,10 +1,29 @@
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import type { ResolvedCliCommand } from './protocol';
 
 export type CliCommandCandidate = Readonly<{
   executable: string;
   source: ResolvedCliCommand['source'];
 }>;
+
+export function windowsCliExecutableMissing(
+  executable: string,
+  unresolvedCommand: string,
+): boolean {
+  if (process.platform !== 'win32') return false;
+  // The standard Windows resolver returns the bare command only when it found no candidate.
+  if (executable === unresolvedCommand) return true;
+  if (!isAbsolute(executable)) return false;
+  try {
+    statSync(executable);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  }
+}
 
 export function environmentValue(
   environment: Readonly<NodeJS.ProcessEnv>,

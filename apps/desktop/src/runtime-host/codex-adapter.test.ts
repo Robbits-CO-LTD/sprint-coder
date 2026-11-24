@@ -101,7 +101,7 @@ describe('Codex runtime probe', () => {
         "    send({ jsonrpc: '2.0', method: 'future/unsupported', params: { private: 'not recorded' } });",
         "    process.stderr.write('token=abcd');",
         "    process.stderr.write('efghijkl at /Users/example/private/file.ts');",
-        '    setTimeout(() => process.exit(7), 30);',
+        '    setTimeout(() => process.exit(126), 30);',
         '  }',
         '});',
       ].join('\n'),
@@ -109,6 +109,7 @@ describe('Codex runtime probe', () => {
     const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
     adapter.setCliVersion('codex-cli 1.0.0');
     const diagnostics: RuntimeFailureDiagnostic[] = [];
+    const failure = vi.fn();
 
     await new Promise<void>((resolve) => {
       adapter.start(
@@ -119,13 +120,17 @@ describe('Codex runtime probe', () => {
         null,
         'auto',
         () => undefined,
-        (_error, diagnostic) => {
+        (error, diagnostic) => {
+          failure(error);
           if (diagnostic !== undefined) diagnostics.push(diagnostic);
         },
         () => resolve(),
       );
     });
 
+    expect(failure).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+    );
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toMatchObject({
       failureStage: 'abnormal_exit',

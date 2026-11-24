@@ -17,6 +17,21 @@ vi.mock('./owned-cli-process', () => ({
 }));
 vi.mock('./process-tree', () => ({ terminateRuntimeProcessTree: mocks.stop }));
 
+function createAdapter(kind: string, root: string): ClaudeRuntimeAdapter | CodexRuntimeAdapter {
+  const adapter =
+    kind === 'claude'
+      ? new ClaudeRuntimeAdapter(60_000)
+      : new CodexRuntimeAdapter(60_000, 'fixture', [], root);
+  // These tests exercise process stop after a CLI has been started by the mocked launcher.
+  adapter.setCliResolution({
+    executable: 'fixture',
+    source: 'explicit',
+    version: 'fixture',
+    compatibility: 'verified',
+    capabilities: [],
+  });
+  return adapter;
+}
 it.runIf(process.platform === 'win32').each(['claude', 'codex'] as const)(
   '%s reports an unconfirmed exit once even while inherited pipes prevent close',
   async (kind) => {
@@ -36,10 +51,7 @@ it.runIf(process.platform === 'win32').each(['claude', 'codex'] as const)(
         confirm = resolve;
       }),
     );
-    const adapter =
-      kind === 'claude'
-        ? new ClaudeRuntimeAdapter(60_000)
-        : new CodexRuntimeAdapter(60_000, 'fixture', [], root);
+    const adapter = createAdapter(kind, root);
     const failed = vi.fn(),
       exited = vi.fn();
     try {
@@ -91,10 +103,7 @@ it.each(
       rejectStop = reject;
     }),
   );
-  const adapter =
-    kind === 'claude'
-      ? new ClaudeRuntimeAdapter(60_000)
-      : new CodexRuntimeAdapter(60_000, 'fixture', [], root);
+  const adapter = createAdapter(kind, root);
   const exited = vi.fn();
   const failed = vi.fn();
   try {

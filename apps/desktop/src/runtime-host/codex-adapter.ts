@@ -60,6 +60,7 @@ import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics
 import { publishIsolatedThreadImages } from '../main/generated-image-collector';
 import {
   environmentValue,
+  windowsCliExecutableMissing,
   probeCliCommandCandidates,
   type CliCommandCandidate,
 } from './cli-command-resolution';
@@ -377,8 +378,21 @@ export class CodexRuntimeAdapter {
     void writeScope;
     let child: ChildProcessWithoutNullStreams;
     try {
+      const executable = this.cli?.executable ?? resolveCodexCommand(this.command);
+      // The Windows Job wrapper reports native launch failures as a generic nonzero exit.
+      // Catch an absent CLI before entering that boundary without reclassifying other launch failures.
+      if (windowsCliExecutableMissing(executable, 'codex')) {
+        void releaseLocalImages();
+        cleanupPaths();
+        failWithDiagnostic(
+          publicError('RUNTIME_CLI_MISSING', 'Codex CLIが見つかりません。', false),
+          'spawn_error',
+        );
+        exited(1, false);
+        return;
+      }
       child = spawnOwnedCliProcess(
-        this.cli?.executable ?? resolveCodexCommand(this.command),
+        executable,
         [
           ...this.commandPrefixArgs,
           ...buildCodexArgs(model, effort, teamMcpProfile, skillIsolation),
