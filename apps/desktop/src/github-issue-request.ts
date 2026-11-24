@@ -114,10 +114,13 @@ export function parseGithubPushInput(
     .trim()
     .split('\n');
   const intent =
-    /^(https:\/\/github\.com\/\S+)[ \t]*に[ \t]*(?:git[ \t]+)?push[ \t]*して(?:ください)?[。！!]?$/iu.exec(
+    /^(?:(https:\/\/github\.com\/\S+)[ \t]*に[ \t]*|GitHub[ \t]*(?:に|へ)[ \t]*)?(?:git[ \t]+)?push[ \t]*して(?:ください)?[。！!]?$/iu.exec(
       first.trim(),
     );
-  if (!intent?.[1]) return null;
+  if (!intent) return null;
+  // Without a URL, only a standalone request should displace ordinary chat.
+  if (!intent[1])
+    return !branchLine && !commitLine && extra.length === 0 ? { kind: 'incomplete' } : null;
   const repository = parseGithubIssueRepository(intent[1]);
   const branch = /^ブランチ[ \t]*[:：][ \t]*(\S+)[ \t]*$/u.exec(branchLine)?.[1];
   const commitOid = /^コミット[ \t]*[:：][ \t]*([0-9a-f]{40})[ \t]*$/u.exec(commitLine)?.[1];
@@ -130,6 +133,13 @@ export function parseGithubPushInput(
   )
     return { kind: 'incomplete' };
   return { kind: 'push', repository, branch, commitOid };
+}
+
+export function parseGithubChatInput(text: string) {
+  const push = parseGithubPushInput(text);
+  if (push !== null) return { operation: 'push' as const, input: push };
+  const write = parseGithubActionInput(text);
+  return write === null ? null : { operation: 'write' as const, input: write };
 }
 
 export function parseGithubActionInput(
