@@ -48,7 +48,7 @@ export function githubLoginEnvironment(
   return env;
 }
 
-async function githubLoginToken(signal: AbortSignal): Promise<string> {
+export async function githubLoginToken(signal: AbortSignal): Promise<string> {
   const env = githubLoginEnvironment();
   const paths = [
     environmentValue(process.env, 'PATH') ?? '',

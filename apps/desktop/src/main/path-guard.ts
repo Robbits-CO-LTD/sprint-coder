@@ -340,6 +340,19 @@ export function protectedWorkspaceRootClassification(
     : classification;
 }
 
+/** Classifies a contained historical path without resolving it against the current checkout. */
+export function isOrdinaryWorkspaceHistoryPath(
+  workspacePath: string,
+  absolutePath: string,
+): boolean {
+  const name = relative(workspacePath, absolutePath);
+  return (
+    name !== '' &&
+    isAtOrBelow(workspacePath, absolutePath) &&
+    classifyWorkspacePath(workspacePath, absolutePath) === 'workspace'
+  );
+}
+
 /**
  * Whether a Workspace root counts as protected only because a protected folder could not be
  * located and a folder of its name was taken for it (#835, #838), so the reason can say so.

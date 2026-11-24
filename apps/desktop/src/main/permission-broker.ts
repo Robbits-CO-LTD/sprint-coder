@@ -19,9 +19,11 @@ import {
   type ProjectPermissionTarget,
 } from './project-permission-settings';
 import type { PermissionPolicyRecord, PersistenceClient } from './persistence';
+import { LocalGithubPushError, readLocalGithubPush } from './local-github-push';
 import {
   pathGuardIdentityDigest,
   isIssuedPathGuard,
+  currentWorkspaceRootIdentityDigest,
   protectedWorkspaceRootClassification,
   protectedWorkspaceRootLabel,
   protectedWorkspaceRootLocationUnknown,
@@ -86,6 +88,7 @@ type PermissionPersistence = Pick<
   | 'markPermissionPolicyEpochDelivered'
   | 'getEffectiveWorkspaceSet'
   | 'readTurnWorkspaceSetForTask'
+  | 'getTurnWorkspaceRootIdentities'
   | 'registerPermissionOneTimeToken'
   | 'consumePermissionOneTimeToken'
   | 'commitPermissionEvaluation'
@@ -108,7 +111,7 @@ export class PermissionBroker {
     private readonly persistence: PermissionPersistence,
     private readonly coordinator: PolicyRevocationCoordinator = new NoActivePolicySubjects(),
     private readonly projectPermissions?: {
-      snapshot(workspacePath: string): ProjectPermissionSettings;
+      snapshot(workspacePath: string, expectedRootIdentity?: string): ProjectPermissionSettings;
     },
   ) {}
 
@@ -275,6 +278,67 @@ export class PermissionBroker {
     // Team isolation preserves root IDs. The original root, not a worker-editable worktree,
     // supplies the rules even when the actual guarded read/write takes place under isolation.
     return root === undefined ? undefined : this.projectPermissions?.snapshot(root.path);
+  }
+
+  async prepareLocalGithubPush(input: {
+    taskId: string;
+    turnId: string;
+    rootId: string;
+    commitOid: string;
+    signal: AbortSignal;
+  }) {
+    const { taskId, turnId, rootId, commitOid, signal } = input;
+    signal.throwIfAborted();
+    const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, turnId);
+    const root = workspace?.roots.find((entry) => entry.rootId === rootId);
+    const expectedRootIdentity = this.persistence
+      .getTurnWorkspaceRootIdentities(turnId)
+      .get(rootId);
+    if (!workspace || !root || root.status !== 'available' || !expectedRootIdentity)
+      throw new LocalGithubPushError('workspace_changed');
+    if (currentWorkspaceRootIdentityDigest(root.path) !== expectedRootIdentity)
+      throw new LocalGithubPushError('workspace_changed');
+    if (protectedWorkspaceRootClassification(root.path) !== null)
+      throw new LocalGithubPushError('protected_path');
+    const snapshot = this.projectPermissions?.snapshot(root.path, expectedRootIdentity);
+    const policy = this.persistence.getPermissionPolicy(taskId);
+    if (!snapshot?.valid || policy.revokedCapabilities.includes('workspace.read'))
+      throw new LocalGithubPushError('protected_path');
+    const isCurrent = () => {
+      const current = this.persistence.getPermissionPolicy(taskId);
+      return (
+        current.policyEpoch === policy.policyEpoch &&
+        !current.revokedCapabilities.includes('workspace.read') &&
+        this.persistence.getEffectiveWorkspaceSet(taskId).digest === workspace.digest &&
+        this.persistence.readTurnWorkspaceSetForTask(taskId, turnId)?.digest === workspace.digest &&
+        this.persistence.getTurnWorkspaceRootIdentities(turnId).get(rootId) === expectedRootIdentity
+      );
+    };
+    const prepared = await readLocalGithubPush({
+      workspacePath: root.path,
+      expectedRootIdentity,
+      commitOid,
+      signal,
+      isCurrent,
+      allowsPath: (path) => fileRuleDecision(snapshot, 'Read', root.path, path) !== 'deny',
+    });
+    const isStillAuthorized = () => {
+      if (
+        signal.aborted ||
+        !isCurrent() ||
+        currentWorkspaceRootIdentityDigest(root.path) !== expectedRootIdentity
+      )
+        return false;
+      const latest = this.projectPermissions?.snapshot(root.path, expectedRootIdentity);
+      return (
+        !!latest?.valid &&
+        latest.digest === snapshot.digest &&
+        latest.deny.length === snapshot.deny.length &&
+        latest.deny.every((rule, index) => rule === snapshot.deny[index])
+      );
+    };
+    if (!isStillAuthorized()) throw new LocalGithubPushError('workspace_changed');
+    return Object.freeze({ prepared, isStillAuthorized });
   }
 
   workspaceReadFilter(

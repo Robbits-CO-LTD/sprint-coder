@@ -41,8 +41,8 @@ export function projectRuleReviewPages(rules: ProjectPermissionSettings): string
 export class ProjectPermissionTrust {
   constructor(private readonly store: TrustStore) {}
 
-  snapshot(root: string): ProjectPermissionSettings {
-    const live = loadProjectPermissionSettings(root);
+  snapshot(root: string, expectedRootIdentity?: string): ProjectPermissionSettings {
+    const live = loadProjectPermissionSettings(root, expectedRootIdentity);
     if (!live.valid) return live;
     try {
       const raw = this.store.readProjectPermissionTrust(root);

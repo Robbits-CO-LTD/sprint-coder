@@ -163,6 +163,7 @@ function fixture(
         digest: 'd'.repeat(64),
       };
     },
+    getTurnWorkspaceRootIdentities: () => new Map<string, string>(),
     registerPermissionOneTimeToken: (_taskId: string, token: string) => {
       oneTimeTokens.add(token);
     },
