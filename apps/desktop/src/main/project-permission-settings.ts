@@ -31,17 +31,24 @@ const fileSchema = z.object({
 });
 
 /** Only this plain JSON value is stored after a person confirms the rules in Main. */
-export function loadProjectPermissionSettings(workspacePath: string): ProjectPermissionSettings {
+export function loadProjectPermissionSettings(
+  workspacePath: string,
+  expectedRootIdentity?: string,
+): ProjectPermissionSettings {
   const allow: string[] = [];
   const deny: string[] = [];
   try {
     const root = realpathSync(workspacePath);
+    const identity = currentWorkspaceRootIdentityDigest(root);
+    if (
+      identity === null ||
+      (expectedRootIdentity !== undefined && identity !== expectedRootIdentity)
+    )
+      throw new Error();
     const directory = join(root, settingsDirectory);
     const before = lstatSync(directory, { bigint: true, throwIfNoEntry: false });
     if (before !== undefined) {
       if (!before.isDirectory() || realpathSync(directory) !== directory) throw new Error();
-      const identity = currentWorkspaceRootIdentityDigest(root);
-      if (identity === null) throw new Error();
       for (const name of settingsFiles) {
         const result = readProjectReference({
           workspacePath: root,
@@ -59,6 +66,7 @@ export function loadProjectPermissionSettings(workspacePath: string): ProjectPer
         throw new Error();
       if (![...deny, ...allow].every((rule) => parseRule(rule) !== null)) throw new Error();
     }
+    if (currentWorkspaceRootIdentityDigest(root) !== identity) throw new Error();
     return {
       valid: true,
       digest: createHash('sha256')
