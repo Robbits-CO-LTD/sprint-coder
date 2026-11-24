@@ -33,13 +33,21 @@ vi.mock('./github-issue', async (importOriginal) => {
   return {
     ...actual,
     writeGithubContent: (...args: Parameters<typeof actual.writeGithubContent>) =>
-      actual.writeGithubContent(args[0], args[1], args[2], { readToken: login, fetch: request }),
+      actual.writeGithubContent(args[0], args[1], args[2], {
+        ...args[3],
+        readToken: login,
+        fetch: request,
+      }),
   };
 });
 
 const input =
   'https://github.com/team/repo に Issue を起票して\nタイトル: 設定が開かない\n本文: ボタンを押しても応答しません。\nWindowsで再現。';
 const endpoint = 'https://api.github.com/repos/team/repo';
+const commentInput =
+  'https://github.com/team/repo/issues/42 にコメントして\n本文: Windowsでも再現しました。';
+const pullInput =
+  'https://github.com/team/repo にPRを作成して\n元ブランチ: fix/settings\n先ブランチ: main\nタイトル: 設定の修正\n本文: 設定画面を修正しました。';
 
 function harness(text = input) {
   const localOnly = vi.fn(() => false);
@@ -49,8 +57,18 @@ function harness(text = input) {
     activeTurn = null;
   });
   const appendDelta = vi.fn();
+  const cancelTurnAndFinishGoal = vi.fn((_taskId: string, _turnId: string, _message?: string) => {
+    activeTurn = null;
+    return { event: null, task: null };
+  });
+  const replaceActiveTurn = vi.fn(() => {
+    activeTurn = 'turn-2';
+    return { started: { turnId: activeTurn }, canceledEvent: null };
+  });
   const persistence = {
     getActiveTurnId: () => activeTurn,
+    getOperationResult: () => ({ found: false }),
+    replaceActiveTurn,
     getPermissionPolicy: () => ({ policyEpoch, revokedCapabilities: [] }),
     getTask: () => ({ localOnly: localOnly() }),
     changeStage: vi.fn(),
@@ -100,17 +118,29 @@ function harness(text = input) {
   };
   return {
     start: () => router.startSelectedRuntime(started, true),
-    async startViaIpc() {
+    registerIpc() {
       type Handler = (input: object, event: object, envelope: object) => Promise<unknown>;
       const handlers = new Map<string, Handler>();
       const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
         handlers.set(channel, handler);
       let running: Promise<void> | undefined;
-      Object.assign(persistence, { startTurn: () => started });
+      Object.assign(persistence, {
+        startTurn: () => started,
+        cancelTurnAndFinishGoal,
+      });
       Object.assign(router, {
         handle: register,
         handleMutation: register,
         refreshTeamOfferWorkspace: vi.fn(),
+        resolveTurnSkills: async () => [],
+        pendingStopAndSendByOperation: new Map(),
+        cancelRuntime: async () => {
+          await running;
+          return true;
+        },
+        approvalCoordinator: { turnEnded: vi.fn() },
+        dispatchQueueTransition: vi.fn(),
+        releaseCanceledRuntime: (turnId: string) => router.githubActions.delete(turnId),
         runMutation: (
           _event: unknown,
           _envelope: unknown,
@@ -119,17 +149,37 @@ function harness(text = input) {
           run: () => unknown,
         ) => ({ executed: true, value: run() }),
         dispatchStarted: (turn: StartedTurn, isUserInput: boolean) => {
-          running = router.startSelectedRuntime(turn, isUserInput);
+          if (turn.turnId === started.turnId)
+            running = router.startSelectedRuntime(turn, isUserInput);
         },
       });
       router.register();
-      const accepted = await handlers.get(IPC_CHANNELS.turnsStart)!(
-        { taskId: started.event.taskId, text, skills: [], attachmentIds: [] },
-        {},
-        {},
-      );
-      await running;
-      return accepted;
+      return {
+        start: async () => {
+          const accepted = await handlers.get(IPC_CHANNELS.turnsStart)!(
+            { taskId: started.event.taskId, text, skills: [], attachmentIds: [] },
+            {},
+            {},
+          );
+          await running;
+          return accepted;
+        },
+        cancel: async () => {
+          await handlers.get(IPC_CHANNELS.turnsCancel)!(
+            { taskId: started.event.taskId, turnId: started.turnId },
+            {},
+            {},
+          );
+        },
+        replace: () => {
+          const payload = { taskId: started.event.taskId, text: 'next request', skills: [] };
+          return handlers.get(IPC_CHANNELS.turnsStopAndSend)!(
+            payload,
+            {},
+            { payload, operationId: 'replace-1' },
+          );
+        },
+      };
     },
     changePolicy: () => {
       policyEpoch += 1;
@@ -137,6 +187,8 @@ function harness(text = input) {
     localOnly,
     finish,
     appendDelta,
+    cancelTurnAndFinishGoal,
+    replaceActiveTurn,
   };
 }
 
@@ -255,6 +307,103 @@ describe('GitHub Issue request in chat', () => {
     expect(JSON.stringify(h.appendDelta.mock.calls)).not.toContain('local_test_credential');
   });
 
+  it.each([
+    { text: input, destination: 'リポジトリのIssue一覧' },
+    {
+      text: pullInput,
+      destination: 'リポジトリのPR一覧',
+    },
+  ])(
+    'persists an unknown result when stopping after a POST starts ($destination)',
+    async ({ text, destination }) => {
+      expect(parseGithubActionInput(text)).toMatchObject({ kind: 'create' });
+      showMessageBox.mockResolvedValue({ response: 1 });
+      request.mockImplementation(async (_url, init) => {
+        return await new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      });
+      const h = harness(text);
+      const ipc = h.registerIpc();
+      const started = ipc.start();
+      await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+      await ipc.cancel();
+      await started;
+
+      expect(h.cancelTurnAndFinishGoal).toHaveBeenCalledWith(
+        'task-1',
+        'turn-1',
+        expect.stringContaining(`再送する前に${destination}`),
+      );
+      expect(h.appendDelta).not.toHaveBeenCalled();
+      expect(h.finish).not.toHaveBeenCalled();
+      expect(request).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps the original POST notice when a stop-and-send transaction is retried', async () => {
+    showMessageBox.mockResolvedValue({ response: 1 });
+    request.mockImplementation(async (_url, init) => {
+      return await new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const h = harness();
+    h.replaceActiveTurn.mockImplementationOnce(() => {
+      throw new Error('replacement seal failed');
+    });
+    const ipc = h.registerIpc();
+    const started = ipc.start();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+    await expect(ipc.replace()).rejects.toThrow('replacement seal failed');
+    await started;
+    await expect(ipc.replace()).resolves.toBeUndefined();
+
+    expect(h.replaceActiveTurn).toHaveBeenCalledTimes(2);
+    expect(h.replaceActiveTurn).toHaveBeenLastCalledWith(
+      'task-1',
+      'turn-1',
+      'next request',
+      [],
+      false,
+      expect.stringContaining('再送する前にリポジトリのIssue一覧'),
+    );
+    expect(h.finish).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it('does not mark a comment as possibly sent when stopped during destination verification', async () => {
+    const text = commentInput;
+    expect(parseGithubActionInput(text)).toMatchObject({ kind: 'create' });
+    showMessageBox.mockResolvedValue({ response: 1 });
+    request.mockImplementation(async (_url, init) => {
+      return await new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const h = harness(text);
+    const ipc = h.registerIpc();
+    const started = ipc.start();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+    await ipc.cancel();
+    await started;
+
+    expect(h.cancelTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
+      'task-1',
+      'turn-1',
+      undefined,
+    );
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      `${endpoint}/issues/42`,
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
   it('does not authenticate or make a request when canceled', async () => {
     showMessageBox.mockResolvedValue({ response: 0 });
     const h = harness();
@@ -272,7 +421,7 @@ describe('GitHub Issue request in chat', () => {
   it('accepts the explicitly formatted composer request without a provider selection', async () => {
     showMessageBox.mockResolvedValue({ response: 1 });
     const h = harness();
-    await expect(h.startViaIpc()).resolves.toEqual({ turnId: 'turn-1' });
+    await expect(h.registerIpc().start()).resolves.toEqual({ turnId: 'turn-1' });
     expect(request).toHaveBeenCalledOnce();
     expect(h.finish).toHaveBeenCalledWith(
       'task-1',
@@ -334,11 +483,6 @@ describe('GitHub Issue request in chat', () => {
   });
 });
 
-const commentInput =
-  'https://github.com/team/repo/issues/42 にコメントして\n本文: Windowsでも再現しました。';
-const pullInput =
-  'https://github.com/team/repo にPRを作成して\n元ブランチ: fix/settings\n先ブランチ: main\nタイトル: 設定の修正\n本文: 設定画面を修正しました。';
-
 describe('GitHub comments and pull requests', () => {
   it.each(['#issuecomment-123456', '?view=compact#issuecomment-123456'])(
     'uses the containing Issue when its link ends in %s',
@@ -369,7 +513,7 @@ describe('GitHub comments and pull requests', () => {
         new Response(JSON.stringify({ id: 11, issue_url: issue }), { status: 201 }),
       );
     const h = harness(commentInput);
-    await h.startViaIpc();
+    await h.registerIpc().start();
     expect(showMessageBox.mock.calls[0]?.[1].detail).toContain(
       'https://github.com/team/repo/issues/42\n\n本文:\nWindowsでも再現しました。',
     );
@@ -440,7 +584,7 @@ describe('GitHub comments and pull requests', () => {
       ),
     );
     const h = harness(pullInput);
-    await h.startViaIpc();
+    await h.registerIpc().start();
     expect(showMessageBox.mock.calls[0]?.[1].detail).toContain(
       '元ブランチ: fix/settings\n\n先ブランチ: main',
     );

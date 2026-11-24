@@ -1173,7 +1173,7 @@ export class IpcRouter {
   >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
-  private readonly githubActions = new Map<string, AbortController>();
+  private readonly githubActions = new Map<string, AbortController & { stopNotice?: string }>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
   private readonly canceledRuntimeTurns = new Set<string>();
   /** What moves in each Task, as last sent to the window (`refreshTaskRunningWork`). */
@@ -4524,6 +4524,10 @@ export class IpcRouter {
           return cached.value;
         }
         const activeTurnId = this.persistence.getActiveTurnId(input.taskId);
+        const githubAction =
+          activeTurnId === null ? undefined : this.githubActions.get(activeTurnId);
+        const stopNotice = githubAction?.stopNotice;
+        githubAction?.abort();
         let runtimeStopped = true;
         if (activeTurnId !== null) {
           runtimeStopped = await this.cancelRuntime(input.taskId, activeTurnId);
@@ -4544,6 +4548,7 @@ export class IpcRouter {
                 const completion = this.persistence.cancelTurnAndFinishGoal(
                   input.taskId,
                   activeTurnId,
+                  stopNotice,
                 );
                 canceledEvent = completion.event;
                 goalTask = completion.task;
@@ -4574,6 +4579,7 @@ export class IpcRouter {
               input.text,
               skills,
               shouldSealBuiltinTeamSkill(input.text, skills),
+              stopNotice,
             );
           },
         );
@@ -4597,6 +4603,7 @@ export class IpcRouter {
       turnCancelInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
+        const stopNotice = this.githubActions.get(input.turnId)?.stopNotice;
         this.notifyTurnEnded(input.taskId, input.turnId, 'canceled');
         const runtimeStopped = await this.cancelRuntime(input.taskId, input.turnId);
         let canceledEvent: TurnEvent | null = null;
@@ -4608,7 +4615,11 @@ export class IpcRouter {
           input.taskId,
           IPC_CHANNELS.turnsCancel,
           () => {
-            const completion = this.persistence.cancelTurnAndFinishGoal(input.taskId, input.turnId);
+            const completion = this.persistence.cancelTurnAndFinishGoal(
+              input.taskId,
+              input.turnId,
+              stopNotice,
+            );
             canceledEvent = completion.event;
             goalTask = completion.task;
             next = shouldStartNextQueuedAfterCancel(
@@ -6243,7 +6254,7 @@ export class IpcRouter {
       event: { taskId },
     } = started;
     if (this.githubActions.has(turnId)) return;
-    const controller = new AbortController();
+    const controller: AbortController & { stopNotice?: string } = new AbortController();
     this.githubActions.set(turnId, controller);
     this.pendingTaskTitles.delete(turnId);
     const active = () =>
@@ -6301,7 +6312,11 @@ export class IpcRouter {
             throw new GithubIssueError(
               'タスクの状態や権限が変わりました。GitHubには送信していません。',
             );
-          const url = await writeGithubContent(request, controller.signal, canPost);
+          const url = await writeGithubContent(request, controller.signal, canPost, {
+            onPostStarted: (stopNotice) => {
+              controller.stopNotice = stopNotice;
+            },
+          });
           message = `GitHubに${label}を投稿しました。\n\n[投稿結果](${url})`;
         }
       }
@@ -6312,7 +6327,14 @@ export class IpcRouter {
           ? error.message
           : 'GitHubの処理を完了できませんでした。再送する前に送信先のページを確認してください。';
     } finally {
-      this.githubActions.delete(turnId);
+      // A failed Stop/Stop-and-send transaction can be retried after the request has settled.
+      // Keep its already-sent marker until cancellation commits so the retry can still report it.
+      if (
+        controller.stopNotice === undefined ||
+        !controller.signal.aborted ||
+        this.persistence.getActiveTurnId(taskId) !== turnId
+      )
+        this.githubActions.delete(turnId);
     }
     if (!active()) return;
     this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing'));
@@ -8825,6 +8847,7 @@ export class IpcRouter {
   }
 
   private releaseCanceledRuntime(turnId: string): void {
+    this.githubActions.delete(turnId);
     this.turnRuntimes.delete(turnId);
     this.canceledRuntimeTurns.delete(turnId);
   }
