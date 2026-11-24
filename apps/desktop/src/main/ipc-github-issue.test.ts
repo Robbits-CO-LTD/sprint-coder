@@ -10,6 +10,7 @@ import {
 import type * as GithubIssueModule from './github-issue';
 import { githubLoginEnvironment } from './github-issue';
 import type * as GithubPushModule from './github-push-transport';
+import { LocalGithubPushError } from './local-github-push';
 import { IPC_CHANNELS } from '@sprint-coder/contracts';
 
 const { showMessageBox, login, request, push } = vi.hoisted(() => ({
@@ -749,6 +750,23 @@ describe('Local commit push in normal chat', () => {
     h.prepareLocalGithubPush.mockResolvedValue({ prepared, isStillAuthorized });
     return { h, prepared, isStillAuthorized };
   };
+
+  it.each([
+    ['deletion_not_supported', '削除を含む'],
+    ['uncomparable_parent', 'ファイル構成を確認できませんでした'],
+  ] as const)('explains %s without opening approval or contacting GitHub', async (code, reason) => {
+    const { h } = prepare();
+    h.prepareLocalGithubPush.mockRejectedValue(new LocalGithubPushError(code));
+    await h.registerIpc().start();
+    expect(h.finish).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      'failed',
+      expect.stringContaining(reason),
+    );
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  });
 
   it('never sends on cancellation and hands the exact frozen bytes to the transport after approval', async () => {
     const canceled = prepare();

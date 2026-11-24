@@ -76,7 +76,6 @@ async function fixture() {
     await writeFile(path, deflateSync(raw));
     return oid;
   }
-  const parent = 'b'.repeat(40);
   const tree = (items: Array<[string, string]>) =>
     object(
       'tree',
@@ -87,12 +86,23 @@ async function fixture() {
         ]),
       ),
     );
-  const commit = (treeOid: string, extra = '') =>
+  const rootCommit = (treeOid: string) =>
     object(
       'commit',
       [
         'tree ' + treeOid,
-        'parent ' + parent,
+        'author Fixture <fixture@example.invalid> 1700000000 +0900',
+        'committer Fixture <fixture@example.invalid> 1700000010 +0000',
+        '\nFixture parent\n',
+      ].join('\n'),
+    );
+  const parent = await rootCommit(await tree([]));
+  const commit = (treeOid: string, extra = '', parentOid = parent) =>
+    object(
+      'commit',
+      [
+        'tree ' + treeOid,
+        'parent ' + parentOid,
         'author Fixture <fixture@example.invalid> 1700000000 +0900',
         'committer Fixture <fixture@example.invalid> 1700000010 +0000',
         extra + '\nFixture message\n',
@@ -108,12 +118,41 @@ async function fixture() {
     object,
     tree,
     commit,
+    rootCommit,
     prepare,
     bumpPolicy: () => ++policyEpoch,
   };
 }
 
 describe('offline local GitHub push preparation', () => {
+  it('allows additions and edits without reading prior blobs and refuses deletions or an unknown parent tree', async () => {
+    const f = await fixture();
+    const parentTree = await f.tree([['edited.txt', '4'.repeat(40)]]);
+    const parent = await f.rootCommit(parentTree);
+    const blob = await f.object('blob', 'new content');
+    const additionAndEdit = await f.tree([
+      ['added.txt', blob],
+      ['edited.txt', blob],
+    ]);
+    const result = await f.prepare(await f.commit(additionAndEdit, '', parent));
+    expect(result.prepared.paths).toEqual(['added.txt', 'edited.txt']);
+    expect(result.prepared.objects.map(({ oid }) => oid)).toEqual([blob, additionAndEdit]);
+
+    const removed = await f.tree([['added.txt', blob]]);
+    await expect(f.prepare(await f.commit(removed, '', parent))).rejects.toMatchObject({
+      code: 'deletion_not_supported',
+    });
+    const protectedParent = await f.rootCommit(await f.tree([['.env', '9'.repeat(40)]]));
+    await expect(f.prepare(await f.commit(removed, '', protectedParent))).rejects.toMatchObject({
+      code: 'deletion_not_supported',
+      message: 'deletion_not_supported',
+    });
+    const missingTreeParent = await f.rootCommit('5'.repeat(40));
+    await expect(f.prepare(await f.commit(removed, '', missingTreeParent))).rejects.toMatchObject({
+      code: 'uncomparable_parent',
+    });
+  });
+
   it('binds the selected root and exact immutable bytes without involving Git or the checkout', async () => {
     const f = await fixture();
     const blob = await f.object('blob', 'persisted only in Git');

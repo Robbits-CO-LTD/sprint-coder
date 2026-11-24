@@ -6476,12 +6476,17 @@ export class IpcRouter {
       } else if (error instanceof GithubIssueError) {
         message = error.message;
       } else if (error instanceof LocalGithubPushError) {
-        message =
-          error.code === 'protected_path'
-            ? 'プロジェクトの読み取りルールまたは保護対象のファイルにより、送信できません。'
-            : error.code === 'workspace_changed'
-              ? '作業フォルダーや権限が変わりました。'
-              : 'この履歴形式は送信できません。未署名で親が1つのコミットと、同じ作業フォルダー内にあるpackにまとめられていないGitオブジェクトが必要です。';
+        message = {
+          protected_path:
+            'プロジェクトの読み取りルールまたは保護対象のファイルにより、送信できません。',
+          workspace_changed: '作業フォルダーや権限が変わりました。',
+          unsupported_history:
+            'この履歴形式は送信できません。未署名で親が1つのコミットと、同じ作業フォルダー内にあるpackにまとめられていないGitオブジェクトが必要です。',
+          uncomparable_parent:
+            '作業フォルダー内で親コミットのファイル構成を確認できませんでした。GitHubには送信していません。',
+          deletion_not_supported:
+            'ファイルの削除を含むコミットには対応していません。GitHubには送信していません。',
+        }[error.code];
       } else {
         message =
           'GitHubへの送信処理を完了できませんでした。再送する前に送信先を確認してください。';

@@ -16,7 +16,14 @@ const maxEntries = 512;
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 export class LocalGithubPushError extends Error {
-  constructor(readonly code: 'unsupported_history' | 'protected_path' | 'workspace_changed') {
+  constructor(
+    readonly code:
+      | 'unsupported_history'
+      | 'protected_path'
+      | 'workspace_changed'
+      | 'uncomparable_parent'
+      | 'deletion_not_supported',
+  ) {
     super(code);
   }
 }
@@ -113,7 +120,6 @@ function parseTree(bytes: Buffer): readonly TreeEntry[] {
     );
     index = end + 21;
   }
-  if (!entries.length) return unsupported();
   return Object.freeze(entries);
 }
 
@@ -224,10 +230,42 @@ export async function readLocalGithubPush(input: {
         Object.freeze({ kind: 'tree', oid, entries, contentBase64: treeBytes.toString('base64') }),
       );
   };
+  const requireNoDeletions = async (parent: string) => {
+    const currentFiles = new Set(paths);
+    let inspectedParent = 0;
+    const visitParent = async (oid: string, segments: readonly string[]) => {
+      if (segments.length >= 16) return unsupported();
+      const entries = trees.get(oid)?.entries ?? parseTree(await read(oid, 'tree'));
+      for (const entry of entries) {
+        const path = [...segments, entry.name];
+        if (++inspectedParent > maxEntries) return unsupported();
+        if (entry.mode === '040000') {
+          await visitParent(entry.oid, path);
+        } else if (!currentFiles.has(path.join('/'))) {
+          // The prior name, like its content, stays off the confirmation and the wire.
+          throw new LocalGithubPushError('deletion_not_supported');
+        }
+      }
+    };
+    try {
+      const rawParent = await read(parent, 'commit');
+      const tree = /^tree ([a-f0-9]{40})\n/u.exec(
+        rawParent.subarray(0, 46).toString('latin1'),
+      )?.[1];
+      if (!tree) return unsupported();
+      await visitParent(tree, []);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof LocalGithubPushError && error.code !== 'unsupported_history')
+        throw error;
+      throw new LocalGithubPushError('uncomparable_parent');
+    }
+  };
   try {
     const commitBytes = await read(commitOid, 'commit');
     const commit = parseCommit(commitBytes);
     await visit(commit.tree, []);
+    await requireNoDeletions(commit.parent);
     const objects: PushObject[] = [];
     for (const oid of blobOids) {
       const bytes = await read(oid, 'blob');
