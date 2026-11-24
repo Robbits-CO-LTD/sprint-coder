@@ -24,7 +24,7 @@ import { buildSkillCatalogContext, SkillCatalogContextError } from './skill-cata
 import { createPortableSkillFile } from './skill-compatibility';
 import { expandSkillArguments } from '../runtime-host/skill-arguments';
 import { clipPublicMessage, formatZodIssues } from './zod-issue-message';
-import { SKILL_CONFLICT_REASONS } from '../skill-feedback';
+import { SKILL_CONFLICT_REASONS, SKILL_DRAFT_SOURCE_CHANGED } from '../skill-feedback';
 
 type SkillRuntime = 'codex' | 'claude' | 'grok' | 'provider';
 export type SkillCli = Exclude<SkillRef['source'], 'builtin' | 'created' | 'agents'> | 'codex';
@@ -383,7 +383,7 @@ export class SkillSettingsService {
     if (draft === undefined)
       throw new SkillSettingsError('NOT_FOUND', 'Skill Draftが見つかりません');
     if (draft.digest !== expectedDigest)
-      throw new SkillSettingsError('SOURCE_CHANGED', 'Skill Draftが確認後に変更されました');
+      throw new SkillSettingsError('SOURCE_CHANGED', SKILL_DRAFT_SOURCE_CHANGED);
     const validation = (await this.getStore()).validateCreatedSkill(draft.skillId, draft.files);
     assertDraftCompatibility(validation.compatibility);
     const installed = await (await this.getStore()).installCreatedSkill(draft.skillId, draft.files);

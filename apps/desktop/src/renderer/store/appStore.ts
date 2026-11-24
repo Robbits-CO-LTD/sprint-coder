@@ -387,8 +387,8 @@ type AppState = {
   removeDraftAttachment(taskId: string, attachmentId: string): Promise<boolean>;
   loadSkills(): Promise<void>;
   setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
-  installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
-  discardSkillDraft(taskId: string, draftId: string): Promise<void>;
+  installSkillDraft(draft: SkillDraft): Promise<void>;
+  discardSkillDraft(draftId: string): Promise<void>;
   /** Failure text for this request, or null when no separate error alert is needed. */
   startTurn(
     taskId: string,
@@ -1213,6 +1213,17 @@ export function showUnassignedTaskWorkspaceNote(state: AppState): boolean {
   );
 }
 
+function withoutSkillDraft(
+  draftsByTask: AppState['skillDraftsByTask'],
+  draftId: string,
+): AppState['skillDraftsByTask'] {
+  const updated = { ...draftsByTask };
+  for (const [taskId, drafts] of Object.entries(draftsByTask)) {
+    if (drafts.some(({ draft }) => draft.id === draftId))
+      updated[taskId] = drafts.filter(({ draft }) => draft.id !== draftId);
+  }
+  return updated;
+}
 export const useAppStore = create<AppState>((set, get) => {
   let runtimeRefresh: Promise<void> | null = null;
   let runtimeDetectionGeneration = 0;
@@ -3001,32 +3012,22 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async installSkillDraft(taskId: string, draft: SkillDraft) {
+    async installSkillDraft(draft: SkillDraft) {
       if (typeof window.sprintCoder?.skills?.installDraft !== 'function')
         throw new Error('Skill draft workflow is unavailable');
       await window.sprintCoder.skills.installDraft(draft.id, draft.digest, true);
       set((state) => ({
-        skillDraftsByTask: {
-          ...state.skillDraftsByTask,
-          [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
-            ({ draft: item }) => item.id !== draft.id,
-          ),
-        },
+        skillDraftsByTask: withoutSkillDraft(state.skillDraftsByTask, draft.id),
       }));
       await get().loadSkills();
     },
 
-    async discardSkillDraft(taskId: string, draftId: string) {
+    async discardSkillDraft(draftId: string) {
       if (typeof window.sprintCoder?.skills?.discardDraft !== 'function')
         throw new Error('Skill draft workflow is unavailable');
       await window.sprintCoder.skills.discardDraft(draftId);
       set((state) => ({
-        skillDraftsByTask: {
-          ...state.skillDraftsByTask,
-          [taskId]: (state.skillDraftsByTask[taskId] ?? []).filter(
-            ({ draft }) => draft.id !== draftId,
-          ),
-        },
+        skillDraftsByTask: withoutSkillDraft(state.skillDraftsByTask, draftId),
       }));
     },
 

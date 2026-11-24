@@ -1,3 +1,5 @@
+export const SKILL_DRAFT_SOURCE_CHANGED = 'Skill Draftが確認後に変更されました';
+
 export const SKILL_CONFLICT_REASONS = {
   nameExists: '同名のSkillが既に存在します。',
   autoSelectionLimit: '自動選択を許可できるSkillは最大32件です。',
@@ -14,6 +16,8 @@ export function skillActionFailure(action: string, error: unknown, fallback: str
         error && typeof error === 'object' && 'userMessage' in error
           ? error.userMessage
           : undefined;
+      if (publicMessage === SKILL_DRAFT_SOURCE_CHANGED)
+        return `${action}。${SKILL_DRAFT_SOURCE_CHANGED}。再読み込みしてください。`;
       const reason = Object.values(SKILL_CONFLICT_REASONS).find(
         (message) => message === publicMessage,
       );

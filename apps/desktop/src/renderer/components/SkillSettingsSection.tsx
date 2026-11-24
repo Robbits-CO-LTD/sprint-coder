@@ -170,10 +170,8 @@ export function SkillSettingsSection({
   async function installDraft(draft: SkillDraft) {
     clearFeedback();
     try {
-      const api = window.sprintCoder?.skills;
-      if (!api) throw new Error('unavailable');
-      await api.installDraft(draft.id, draft.digest, true);
-      await reload();
+      await useAppStore.getState().installSkillDraft(draft);
+      await refresh();
       setStatus(`${draft.name}をインストールしました。`);
     } catch (error) {
       setError(
@@ -188,9 +186,7 @@ export function SkillSettingsSection({
   async function discardDraft(draft: SkillDraft) {
     clearFeedback();
     try {
-      const api = window.sprintCoder?.skills;
-      if (!api) throw new Error('unavailable');
-      await api.discardDraft(draft.id);
+      await useAppStore.getState().discardSkillDraft(draft.id);
       setDrafts((xs) => xs.filter((x) => x.id !== draft.id));
       setStatus(`${draft.name}の下書きを破棄しました。`);
     } catch (error) {
