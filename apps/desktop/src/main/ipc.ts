@@ -10,7 +10,15 @@ import {
   type SkillReviewer,
 } from './github-skill-import';
 import { writeGithubContent, GithubIssueError } from './github-issue';
-import { githubInputHelp, parseGithubActionInput } from '../github-issue-request';
+import { GithubPushResultUnknown, pushApprovedGithubCommit } from './github-push-transport';
+import { LocalGithubPushError } from './local-github-push';
+import { APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS } from './approval-display-characters';
+import {
+  GITHUB_PUSH_INPUT_EXAMPLE,
+  githubInputHelp,
+  parseGithubActionInput,
+  parseGithubPushInput,
+} from '../github-issue-request';
 import { SKILL_REQUEST_GUIDANCE } from '../chat-continuation';
 import { projectFolderIdentity } from './project-folder-identity';
 import { FullAccessConfirmation, fullAccessConfirmationDetail } from './full-access-confirmation';
@@ -4341,9 +4349,9 @@ export class IpcRouter {
       turnStartInputSchema,
       turnStartResultSchema,
       async (input, event, envelope) => {
-        const githubIssue = parseGithubActionInput(input.text);
+        const githubAction = parseGithubPushInput(input.text) ?? parseGithubActionInput(input.text);
         let skills: PersistedTurnSkill[] = [];
-        if (githubIssue === null) {
+        if (githubAction === null) {
           const selection = this.persistence.getTaskModelSelection(input.taskId);
           if (selection !== null)
             assertNotRetiredManagedLocal(selection.connectionId, selection.requestedProvider);
@@ -6342,6 +6350,156 @@ export class IpcRouter {
     this.finishAndAdvance(taskId, turnId, state, message);
   }
 
+  private async runGithubPush(
+    started: StartedTurn,
+    input: NonNullable<ReturnType<typeof parseGithubPushInput>>,
+  ): Promise<void> {
+    const {
+      turnId,
+      event: { taskId },
+    } = started;
+    if (this.githubActions.has(turnId)) return;
+    const controller: AbortController & { stopNotice?: string } = new AbortController();
+    this.githubActions.set(turnId, controller);
+    this.pendingTaskTitles.delete(turnId);
+    const active = () =>
+      !this.disposed &&
+      !controller.signal.aborted &&
+      !this.canceledRuntimeTurns.has(turnId) &&
+      this.persistence.getActiveTurnId(taskId) === turnId;
+    let state: 'completed' | 'failed' = 'completed';
+    let message =
+      'GitHubへの送信先、既存ブランチ、40文字のコミットSHAを指定してください。リポジトリ名とブランチ名は半角英数字と一部の記号に対応しています。\n\n```text\n' +
+      GITHUB_PUSH_INPUT_EXAMPLE +
+      '\n```';
+    try {
+      for (const stage of ['understanding', 'planning', 'executing'] as const)
+        this.publish(this.persistence.changeStage(taskId, turnId, stage));
+      if (input.kind === 'push') {
+        const epoch = this.persistence.getPermissionPolicy(taskId).policyEpoch;
+        const canSend = () => {
+          if (!active() || this.persistence.getTask(taskId).localOnly) return false;
+          const current = this.persistence.getPermissionPolicy(taskId);
+          return (
+            current.policyEpoch === epoch && !current.revokedCapabilities.includes('network.fetch')
+          );
+        };
+        if (!canSend())
+          throw new GithubIssueError('このタスクではGitHubへの送信は許可されていません。');
+        const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, turnId);
+        const root = workspace?.roots.find(({ rootId }) => rootId === workspace.primaryRootId);
+        if (!root) throw new GithubIssueError('タスクの作業フォルダーを選んでください。');
+        if (/\p{Cc}/u.test(root.path) || APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS.test(root.path))
+          throw new GithubIssueError('確認画面に表示できる名前の作業フォルダーを選んでください。');
+        const { prepared, isStillAuthorized } = await this.permissionBroker.prepareLocalGithubPush({
+          taskId,
+          turnId,
+          rootId: root.rootId,
+          commitOid: input.commitOid,
+          signal: controller.signal,
+        });
+        const authorized = () => canSend() && isStillAuthorized();
+        if (!authorized()) throw new GithubIssueError('作業フォルダーや権限が変わりました。');
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]);
+        const pages: string[] = [];
+        let page: string[] = [];
+        let pageSize = 0;
+        for (const path of prepared.paths) {
+          if (path.length > 1200)
+            throw new GithubIssueError('確認画面に表示できない長さのファイル名が含まれています。');
+          if (page.length >= 12 || pageSize + path.length > 1200) {
+            pages.push(page.join('\n'));
+            page = [];
+            pageSize = 0;
+          }
+          page.push(path);
+          pageSize += path.length;
+        }
+        pages.push(page.join('\n'));
+        let confirmed = true;
+        for (const [index, paths] of pages.entries()) {
+          if (!authorized()) throw new GithubIssueError('作業フォルダーや権限が変わりました。');
+          const last = index === pages.length - 1;
+          const answer = await dialog.showMessageBox(this.window, {
+            type: 'question',
+            title: 'GitHub push の確認',
+            message: last
+              ? '確認した内容でGitHubにコミットを送信しますか？'
+              : '送信対象のファイルを確認してください。',
+            detail: [
+              '送信元: ' + root.path,
+              '送信先: https://github.com/' + input.repository,
+              'ブランチ: ' + input.branch,
+              '現在の先端に必要な親SHA: ' + prepared.commit.parent,
+              '送信するコミットSHA: ' + prepared.commitOid,
+              'ファイル ' +
+                prepared.paths.length +
+                '件（' +
+                (index + 1) +
+                '/' +
+                pages.length +
+                '）\n' +
+                paths,
+              'ファイルの内容に加え、コミットメッセージ、作者・コミッター情報も送信されます。',
+            ].join('\n\n'),
+            buttons: ['送信しない', last ? 'この内容で送信する' : '次へ'],
+            defaultId: 0,
+            cancelId: 0,
+            noLink: true,
+            signal,
+          });
+          if (signal.aborted || answer.response !== 1) {
+            confirmed = false;
+            break;
+          }
+        }
+        if (!confirmed) {
+          message = 'GitHubへの送信を取り消しました。';
+        } else {
+          const url = await pushApprovedGithubCommit({
+            repository: input.repository,
+            branch: input.branch,
+            prepared,
+            signal: controller.signal,
+            canSend: authorized,
+            onPostStarted: (notice) => {
+              controller.stopNotice = notice;
+            },
+          });
+          message = 'GitHubで指定したコミットを確認しました。\n\n[送信先](' + url + ')';
+        }
+      }
+    } catch (error) {
+      state = 'failed';
+      if (error instanceof GithubPushResultUnknown) {
+        message = error.message + '\n\n[送信先](' + error.url + ')';
+      } else if (error instanceof GithubIssueError) {
+        message = error.message;
+      } else if (error instanceof LocalGithubPushError) {
+        message =
+          error.code === 'protected_path'
+            ? 'プロジェクトの読み取りルールまたは保護対象のファイルにより、送信できません。'
+            : error.code === 'workspace_changed'
+              ? '作業フォルダーや権限が変わりました。'
+              : 'この履歴形式は送信できません。未署名で親が1つのコミットと、同じ作業フォルダー内にあるpackにまとめられていないGitオブジェクトが必要です。';
+      } else {
+        message =
+          'GitHubへの送信処理を完了できませんでした。再送する前に送信先を確認してください。';
+      }
+    } finally {
+      if (
+        controller.stopNotice === undefined ||
+        !controller.signal.aborted ||
+        this.persistence.getActiveTurnId(taskId) !== turnId
+      )
+        this.githubActions.delete(turnId);
+    }
+    if (!active()) return;
+    this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing'));
+    this.publish(this.persistence.appendDelta(taskId, turnId, randomUUID(), message));
+    this.finishAndAdvance(taskId, turnId, state, message);
+  }
+
   private async startSelectedRuntime(started: StartedTurn, userChatInput: boolean): Promise<void> {
     const taskId = started.event.taskId;
     // A Turn event can be published before its asynchronous Runtime startup reaches this method.
@@ -6352,6 +6510,16 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
+    const githubPush = userChatInput ? parseGithubPushInput(started.text) : null;
+    if (githubPush !== null) {
+      await this.runGithubPush(
+        started,
+        started.skills.length === 0 && !this.attachmentCapabilityByTurn.has(started.turnId)
+          ? githubPush
+          : { kind: 'incomplete' },
+      );
+      return;
+    }
     const githubIssue = userChatInput ? parseGithubActionInput(started.text) : null;
     if (githubIssue !== null) {
       await this.runGithubWrite(

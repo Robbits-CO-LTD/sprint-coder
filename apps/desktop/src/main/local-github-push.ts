@@ -35,7 +35,7 @@ function identity(line: string): Identity {
   const match = /^([^<>\p{Cc}\p{Cf}]+) <([!-~]+)> (0|[1-9]\d{0,10}) ([+-])(\d{2})(\d{2})$/u.exec(
     line,
   );
-  if (!match) return unsupported();
+  if (!match || match[0] !== line) return unsupported();
   const [, name, email, unix, sign, hour, minute] = match;
   if (!name || name.trim() !== name || !email || /[<>]/u.test(email) || !hour || !minute)
     return unsupported();
@@ -61,7 +61,15 @@ function parseCommit(bytes: Buffer) {
     /^tree ([\da-f]{40})\nparent ([\da-f]{40})\nauthor ([^\n]+)\ncommitter ([^\n]+)\n\n([^\0\r]+)$/u.exec(
       text,
     );
-  if (!match || !match[1] || !match[2] || !match[3] || !match[4] || !match[5]?.trim())
+  if (
+    !match ||
+    match[0] !== text ||
+    !match[1] ||
+    !match[2] ||
+    !match[3] ||
+    !match[4] ||
+    !match[5]?.trim()
+  )
     return unsupported();
   return Object.freeze({
     tree: match[1],
@@ -80,12 +88,12 @@ function parseTree(bytes: Buffer): readonly TreeEntry[] {
     const end = bytes.indexOf(0, index);
     if (end < 0 || end + 21 > bytes.length || end - index > 135 || entries.length >= maxEntries)
       return unsupported();
-    const match = /^(100644|100755|40000) ([A-Za-z0-9_. -]{1,128})$/u.exec(
-      utf8.decode(bytes.subarray(index, end)),
-    );
+    const header = utf8.decode(bytes.subarray(index, end));
+    const match = /^(100644|100755|40000) ([A-Za-z0-9_. -]{1,128})$/u.exec(header);
     const name = match?.[2];
     if (
       !name ||
+      match[0] !== header ||
       name === '.' ||
       name === '..' ||
       name.trim() !== name ||
@@ -211,7 +219,10 @@ export async function readLocalGithubPush(input: {
       }
     }
     if (treeBytes !== undefined)
-      trees.set(oid, Object.freeze({ kind: 'tree', oid, entries, contentBase64: treeBytes.toString('base64') }));
+      trees.set(
+        oid,
+        Object.freeze({ kind: 'tree', oid, entries, contentBase64: treeBytes.toString('base64') }),
+      );
   };
   try {
     const commitBytes = await read(commitOid, 'commit');

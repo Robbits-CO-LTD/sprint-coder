@@ -121,7 +121,7 @@ describe('offline local GitHub push preparation', () => {
     const commit = await f.commit(tree);
     await f.object('blob', 'unselected data');
     await expect(f.prepare(commit, 'unknown')).rejects.toMatchObject({ code: 'workspace_changed' });
-    const prepared = await f.prepare(commit);
+    const { prepared } = await f.prepare(commit);
     expect(prepared).toMatchObject({
       commitOid: commit,
       paths: ['readme.md'],
@@ -185,6 +185,10 @@ describe('offline local GitHub push preparation', () => {
     const commit = await f.commit(tree);
     const signed = await f.commit(tree, 'gpgsig fixture\n continuation\n');
     await expect(f.prepare(signed)).rejects.toMatchObject({ code: 'unsupported_history' });
+    const hiddenPath = await f.tree([['file.md\n', blob]]);
+    await expect(f.prepare(await f.commit(hiddenPath))).rejects.toMatchObject({
+      code: 'unsupported_history',
+    });
     const pending = f.prepare(commit);
     f.bumpPolicy();
     await expect(pending).rejects.toMatchObject({ code: 'workspace_changed' });

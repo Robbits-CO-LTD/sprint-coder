@@ -323,14 +323,19 @@ export class PermissionBroker {
       allowsPath: (path) => fileRuleDecision(snapshot, 'Read', root.path, path) !== 'deny',
     });
     const isStillAuthorized = () => {
-      if (signal.aborted || !isCurrent() ||
-        currentWorkspaceRootIdentityDigest(root.path) !== expectedRootIdentity)
+      if (
+        signal.aborted ||
+        !isCurrent() ||
+        currentWorkspaceRootIdentityDigest(root.path) !== expectedRootIdentity
+      )
         return false;
       const latest = this.projectPermissions?.snapshot(root.path, expectedRootIdentity);
-      return !!latest?.valid &&
+      return (
+        !!latest?.valid &&
         latest.digest === snapshot.digest &&
         latest.deny.length === snapshot.deny.length &&
-        latest.deny.every((rule, index) => rule === snapshot.deny[index]);
+        latest.deny.every((rule, index) => rule === snapshot.deny[index])
+      );
     };
     if (!isStillAuthorized()) throw new LocalGithubPushError('workspace_changed');
     return Object.freeze({ prepared, isStillAuthorized });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
-import { isGithubBranchName, parseGithubIssueRepository } from '../github-issue-request';
+import { isGithubPushDestination } from '../github-issue-request';
 import { GithubIssueError, githubLoginToken } from './github-issue';
 import type { PreparedLocalGithubPush } from './local-github-push';
 
@@ -14,7 +14,11 @@ const resultType = 'application/x-git-receive-pack-result';
 function pack(approved: PreparedLocalGithubPush): Buffer {
   const objects = [
     ...approved.objects,
-    { kind: 'commit' as const, oid: approved.commitOid, contentBase64: approved.commitContentBase64 },
+    {
+      kind: 'commit' as const,
+      oid: approved.commitOid,
+      contentBase64: approved.commitContentBase64,
+    },
   ];
   const head = Buffer.from('PACK00000000');
   head.writeUInt32BE(2, 4);
@@ -26,7 +30,8 @@ function pack(approved: PreparedLocalGithubPush): Buffer {
       .update(object.kind + ' ' + payload.length + '\0')
       .update(payload)
       .digest('hex');
-    if (oid !== object.oid) throw new GithubIssueError('送信するGitオブジェクトのSHAを確認できませんでした。');
+    if (oid !== object.oid)
+      throw new GithubIssueError('送信するGitオブジェクトのSHAを確認できませんでした。');
     const kind = object.kind === 'commit' ? 1 : object.kind === 'tree' ? 2 : 3;
     let remainder = payload.length >>> 4;
     const header = [(kind << 4) | (payload.length & 15) | (remainder ? 128 : 0)];
@@ -43,7 +48,10 @@ function pack(approved: PreparedLocalGithubPush): Buffer {
 
 function packet(text: string): Buffer {
   const contents = Buffer.from(text, 'ascii');
-  return Buffer.concat([Buffer.from((contents.length + 4).toString(16).padStart(4, '0')), contents]);
+  return Buffer.concat([
+    Buffer.from((contents.length + 4).toString(16).padStart(4, '0')),
+    contents,
+  ]);
 }
 
 function parsePackets(buffer: Buffer): Array<string | null> {
@@ -66,8 +74,11 @@ function parsePackets(buffer: Buffer): Array<string | null> {
 }
 
 async function boundedResponse(response: Response, type: string): Promise<Buffer> {
-  if (response.status !== 200 || response.headers.get('content-type')?.split(';')[0] !== type ||
-    !response.body) {
+  if (
+    response.status !== 200 ||
+    response.headers.get('content-type')?.split(';')[0] !== type ||
+    !response.body
+  ) {
     await response.body?.cancel().catch(() => undefined);
     throw new Error('Unexpected Git response');
   }
@@ -96,9 +107,16 @@ function advertisedRef(bytes: Buffer, targetRef: string): string | undefined {
   if (first == null) throw new Error('Missing Git capabilities');
   const boundary = first.indexOf('\0');
   if (boundary < 0) throw new Error('Missing Git capabilities');
-  const capabilities = first.slice(boundary + 1).trimEnd().split(' ');
-  if (!capabilities.includes('report-status') ||
-    capabilities.some((value) => value.startsWith('object-format=') && value !== 'object-format=sha1'))
+  const capabilities = first
+    .slice(boundary + 1)
+    .trimEnd()
+    .split(' ');
+  if (
+    !capabilities.includes('report-status') ||
+    capabilities.some(
+      (value) => value.startsWith('object-format=') && value !== 'object-format=sha1',
+    )
+  )
     throw new Error('Incompatible Git service');
   packets[0] = first.slice(0, boundary);
   let result: string | undefined;
@@ -113,26 +131,37 @@ function advertisedRef(bytes: Buffer, targetRef: string): string | undefined {
 
 export class GithubPushResultUnknown extends Error {
   constructor(readonly url: string) {
-    super('GitHubへの送信後、ブランチの状態を確認できませんでした。再送する前に送信先を確認してください。');
+    super(
+      'GitHubへの送信後、ブランチの状態を確認できませんでした。再送する前に送信先を確認してください。',
+    );
   }
 }
 
-export async function pushApprovedGithubCommit(input: {
-  repository: string;
-  branch: string;
-  prepared: PreparedLocalGithubPush;
-  signal: AbortSignal;
-  canSend: () => boolean;
-}, deps: { readToken: typeof githubLoginToken; fetch: typeof fetch } = {
-  readToken: githubLoginToken,
-  fetch,
-}): Promise<string> {
+export async function pushApprovedGithubCommit(
+  input: {
+    repository: string;
+    branch: string;
+    prepared: PreparedLocalGithubPush;
+    signal: AbortSignal;
+    canSend: () => boolean;
+    onPostStarted: (notice: string) => void;
+  },
+  deps: { readToken: typeof githubLoginToken; fetch: typeof fetch } = {
+    readToken: githubLoginToken,
+    fetch,
+  },
+): Promise<string> {
   const { repository, branch, prepared, signal } = input;
   const { commitOid, commit } = prepared;
   const parent = commit.parent;
-  if (parseGithubIssueRepository(repository) !== repository || !isGithubBranchName(branch) ||
-    !oidPattern.test(parent) || !oidPattern.test(commitOid) ||
-    /^0{40}$/u.test(parent) || /^0{40}$/u.test(commitOid) || parent === commitOid)
+  if (
+    !isGithubPushDestination(repository, branch) ||
+    !oidPattern.test(parent) ||
+    !oidPattern.test(commitOid) ||
+    /^0{40}$/u.test(parent) ||
+    /^0{40}$/u.test(commitOid) ||
+    parent === commitOid
+  )
     throw new GithubIssueError('送信するコミットとブランチを確認してください。');
   const requireAllowed = () => {
     signal.throwIfAborted();
@@ -144,9 +173,15 @@ export async function pushApprovedGithubCommit(input: {
   try {
     token = await deps.readToken(signal);
   } catch {
-    throw new GithubIssueError('GitHubのログインを確認できませんでした。GitHub CLI（gh）でログイン済みか確認してください。');
+    throw new GithubIssueError(
+      'GitHubのログインを確認できませんでした。GitHub CLI（gh）でログイン済みか確認してください。',
+    );
   }
-  const branchUrl = 'https://github.com/' + repository + '/tree/' + branch.split('/').map(encodeURIComponent).join('/');
+  const branchUrl =
+    'https://github.com/' +
+    repository +
+    '/tree/' +
+    branch.split('/').map(encodeURIComponent).join('/');
   const endpoint = 'https://github.com/' + repository + '.git';
   const headers = {
     Authorization: 'Basic ' + Buffer.from('x-access-token:' + token).toString('base64'),
@@ -158,7 +193,11 @@ export async function pushApprovedGithubCommit(input: {
   const discover = async () => {
     requireAllowed();
     const response = await deps.fetch(endpoint + '/info/refs?service=git-receive-pack', {
-      headers, method: 'GET', redirect: 'error', signal: requestSignal, cache: 'no-store',
+      headers,
+      method: 'GET',
+      redirect: 'error',
+      signal: requestSignal,
+      cache: 'no-store',
     });
     return advertisedRef(await boundedResponse(response, advertisementType), ref);
   };
@@ -177,21 +216,29 @@ export async function pushApprovedGithubCommit(input: {
       signal: requestSignal,
       cache: 'no-store',
     });
-    const identity: unknown = JSON.parse((await boundedResponse(repositoryResponse, 'application/json')).toString());
+    const identity: unknown = JSON.parse(
+      (await boundedResponse(repositoryResponse, 'application/json')).toString(),
+    );
     if (
-      typeof identity !== 'object' || identity === null ||
-      !('full_name' in identity) || typeof identity.full_name !== 'string' ||
+      typeof identity !== 'object' ||
+      identity === null ||
+      !('full_name' in identity) ||
+      typeof identity.full_name !== 'string' ||
       identity.full_name.toLowerCase() !== repository.toLowerCase()
     )
       throw new Error('Unexpected GitHub repository');
     old = await discover();
   } catch {
-    throw new GithubIssueError('GitHubで送信先ブランチを確認できませんでした。コミットは送信していません。');
+    throw new GithubIssueError(
+      'GitHubで送信先ブランチを確認できませんでした。コミットは送信していません。',
+    );
   }
   requireAllowed();
   if (old === commitOid) return branchUrl;
   if (old !== parent)
-    throw new GithubIssueError('送信先ブランチの先端が選んだコミットの親と一致しません。コミットは送信していません。');
+    throw new GithubIssueError(
+      '送信先ブランチの先端が選んだコミットの親と一致しません。コミットは送信していません。',
+    );
 
   // Git requires the old SHA to match while updating the ref. There is exactly one update command.
   const command = packet(parent + ' ' + commitOid + ' ' + ref + '\0report-status');
@@ -199,21 +246,40 @@ export async function pushApprovedGithubCommit(input: {
   requireAllowed();
   let packets: Array<string | null>;
   try {
+    input.onPostStarted(
+      '送信を開始したため、ブランチが更新された可能性があります。再送する前に送信先を確認してください。\n\n[送信先](' +
+        branchUrl +
+        ')',
+    );
     const response = await deps.fetch(endpoint + '/git-receive-pack', {
       headers: { ...headers, 'Content-Type': requestType, Accept: resultType },
-      redirect: 'error', method: 'POST', signal: requestSignal, body: Uint8Array.from(body),
+      redirect: 'error',
+      method: 'POST',
+      signal: requestSignal,
+      body: Uint8Array.from(body),
     });
     packets = parsePackets(await boundedResponse(response, resultType));
   } catch {
     throw new GithubPushResultUnknown(branchUrl);
   }
-  if (packets.length === 3 && packets[2] === null &&
-    packets[0]?.startsWith('unpack ') && packets[1]?.startsWith('ng ' + ref + ' '))
-    throw new GithubIssueError('GitHubはブランチを更新しませんでした。送信先の変更や権限を確認してください。');
-  if (packets.length !== 3 || packets[0] !== 'unpack ok\n' || packets[1] !== 'ok ' + ref + '\n' || packets[2] !== null)
+  if (
+    packets.length === 3 &&
+    packets[2] === null &&
+    packets[0]?.startsWith('unpack ') &&
+    packets[1]?.startsWith('ng ' + ref + ' ')
+  )
+    throw new GithubIssueError(
+      'GitHubはブランチを更新しませんでした。コミットのデータは送信済みの可能性があります。送信先の変更や権限を確認してください。',
+    );
+  if (
+    packets.length !== 3 ||
+    packets[0] !== 'unpack ok\n' ||
+    packets[1] !== 'ok ' + ref + '\n' ||
+    packets[2] !== null
+  )
     throw new GithubPushResultUnknown(branchUrl);
   try {
-    if (await discover() === commitOid) {
+    if ((await discover()) === commitOid) {
       requireAllowed();
       return branchUrl;
     }

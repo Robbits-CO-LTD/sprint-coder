@@ -94,17 +94,40 @@ export const GITHUB_PUSH_INPUT_EXAMPLE = [
   'コミット: <40文字のコミットSHA>',
 ].join('\n');
 
-export function parseGithubPushInput(text: string):
+export function isGithubPushDestination(repository: string, branch: string): boolean {
+  return (
+    !/[^A-Za-z0-9_./-]/u.test(repository) &&
+    !/[^A-Za-z0-9_./-]/u.test(branch) &&
+    parseGithubIssueRepository(repository) === repository &&
+    isGithubBranchName(branch)
+  );
+}
+
+export function parseGithubPushInput(
+  text: string,
+):
   | { kind: 'incomplete' }
   | { kind: 'push'; repository: string; branch: string; commitOid: string }
   | null {
-  const [first = '', branchLine = '', commitLine = '', ...extra] = text.replace(/\r\n/g, '\n').trim().split('\n');
-  const intent = /^(https:\/\/github\.com\/\S+)[ \t]*に[ \t]*(?:git[ \t]+)?push[ \t]*して(?:ください)?[。！!]?$/iu.exec(first.trim());
+  const [first = '', branchLine = '', commitLine = '', ...extra] = text
+    .replace(/\r\n/g, '\n')
+    .trim()
+    .split('\n');
+  const intent =
+    /^(https:\/\/github\.com\/\S+)[ \t]*に[ \t]*(?:git[ \t]+)?push[ \t]*して(?:ください)?[。！!]?$/iu.exec(
+      first.trim(),
+    );
   if (!intent?.[1]) return null;
   const repository = parseGithubIssueRepository(intent[1]);
   const branch = /^ブランチ[ \t]*[:：][ \t]*(\S+)[ \t]*$/u.exec(branchLine)?.[1];
   const commitOid = /^コミット[ \t]*[:：][ \t]*([0-9a-f]{40})[ \t]*$/u.exec(commitLine)?.[1];
-  if (!repository || !branch || !isGithubBranchName(branch) || !commitOid || extra.length)
+  if (
+    !repository ||
+    !branch ||
+    !isGithubPushDestination(repository, branch) ||
+    !commitOid ||
+    extra.length
+  )
     return { kind: 'incomplete' };
   return { kind: 'push', repository, branch, commitOid };
 }

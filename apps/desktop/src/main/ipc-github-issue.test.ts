@@ -9,12 +9,19 @@ import {
 } from '../github-issue-request';
 import type * as GithubIssueModule from './github-issue';
 import { githubLoginEnvironment } from './github-issue';
+import type * as GithubPushModule from './github-push-transport';
 import { IPC_CHANNELS } from '@sprint-coder/contracts';
 
-const { showMessageBox, login, request } = vi.hoisted(() => ({
+const { showMessageBox, login, request, push } = vi.hoisted(() => ({
   showMessageBox: vi.fn(),
   login: vi.fn<() => Promise<string>>(),
   request: vi.fn<typeof fetch>(),
+  push: vi.fn<typeof GithubPushModule.pushApprovedGithubCommit>(),
+}));
+
+vi.mock('./github-push-transport', async (importOriginal) => ({
+  ...(await importOriginal<typeof GithubPushModule>()),
+  pushApprovedGithubCommit: push,
 }));
 
 vi.mock('electron', () => ({
@@ -62,6 +69,7 @@ function harness(text = input) {
     activeTurn = null;
   });
   const appendDelta = vi.fn();
+  const prepareLocalGithubPush = vi.fn();
   const cancelTurnAndFinishGoal = vi.fn((_taskId: string, _turnId: string, _message?: string) => {
     activeTurn = null;
     return { event: null, task: null };
@@ -76,6 +84,10 @@ function harness(text = input) {
     replaceActiveTurn,
     getPermissionPolicy: () => ({ policyEpoch, revokedCapabilities: [] }),
     getTask: () => ({ localOnly: localOnly() }),
+    readTurnWorkspaceSetForTask: () => ({
+      primaryRootId: 'root',
+      roots: [{ rootId: 'root', path: '/fixture' }],
+    }),
     changeStage: vi.fn(),
     appendDelta,
   };
@@ -86,6 +98,7 @@ function harness(text = input) {
     },
     {
       persistence,
+      permissionBroker: { prepareLocalGithubPush },
       window: { webContents: { once: vi.fn() } },
       githubActions: new Map(),
       canceledRuntimeTurns: new Set(),
@@ -122,6 +135,7 @@ function harness(text = input) {
     },
   };
   return {
+    prepareLocalGithubPush,
     start: () => router.startSelectedRuntime(started, true),
     registerIpc() {
       type Handler = (input: object, event: object, envelope: object) => Promise<unknown>;
@@ -715,6 +729,80 @@ describe('GitHub comments and pull requests', () => {
       'turn-1',
       'failed',
       expect.stringContaining('PR一覧'),
+    );
+  });
+});
+
+describe('Local commit push in normal chat', () => {
+  const commitOid = 'a'.repeat(40);
+  const parent = 'b'.repeat(40);
+  const requestText =
+    'https://github.com/team/repo に push して\nブランチ: main\nコミット: ' + commitOid;
+  const prepare = () => {
+    const h = harness(requestText);
+    const prepared = Object.freeze({
+      commitOid,
+      commit: Object.freeze({ parent }),
+      paths: Object.freeze(['readme.md']),
+    });
+    const isStillAuthorized = vi.fn(() => true);
+    h.prepareLocalGithubPush.mockResolvedValue({ prepared, isStillAuthorized });
+    return { h, prepared, isStillAuthorized };
+  };
+
+  it('never sends on cancellation and hands the exact frozen bytes to the transport after approval', async () => {
+    const canceled = prepare();
+    showMessageBox.mockResolvedValueOnce({ response: 0 });
+    await canceled.h.registerIpc().start();
+    expect(push).not.toHaveBeenCalled();
+    expect(login).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+
+    const approved = prepare();
+    showMessageBox.mockImplementationOnce(async () => {
+      expect(push).not.toHaveBeenCalled();
+      return { response: 1 };
+    });
+    push.mockResolvedValue('https://github.com/team/repo/tree/main');
+    await approved.h.registerIpc().start();
+    expect(approved.h.prepareLocalGithubPush).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rootId: 'root',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        commitOid,
+      }),
+    );
+    expect(showMessageBox.mock.calls.at(-1)?.[1].detail).toContain('readme.md');
+    expect(showMessageBox.mock.calls.at(-1)?.[1].detail).toContain(parent);
+    expect(push).toHaveBeenCalledOnce();
+    expect(push.mock.calls[0]?.[0].prepared).toBe(approved.prepared);
+    expect(approved.h.finish).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      'completed',
+      expect.stringContaining('/tree/main'),
+    );
+  });
+
+  it('after upload has begun, stores a result warning when the user stops the Turn', async () => {
+    const { h } = prepare();
+    showMessageBox.mockResolvedValueOnce({ response: 1 });
+    push.mockImplementation(async ({ signal, onPostStarted }) => {
+      onPostStarted('確認先のブランチを再送前に確認してください。');
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const ipc = h.registerIpc();
+    const pending = ipc.start();
+    await vi.waitFor(() => expect(push).toHaveBeenCalledOnce());
+    await ipc.cancel();
+    await pending;
+    expect(h.cancelTurnAndFinishGoal).toHaveBeenCalledWith(
+      'task-1',
+      'turn-1',
+      '確認先のブランチを再送前に確認してください。',
     );
   });
 });
