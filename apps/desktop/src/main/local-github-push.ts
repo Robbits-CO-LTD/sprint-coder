@@ -28,7 +28,7 @@ function unsupported(): never {
 type TreeEntry = Readonly<{ name: string; mode: '100644' | '100755' | '040000'; oid: string }>;
 type PushObject =
   | Readonly<{ oid: string; kind: 'blob'; contentBase64: string }>
-  | Readonly<{ oid: string; kind: 'tree'; entries: readonly TreeEntry[] }>;
+  | Readonly<{ oid: string; kind: 'tree'; entries: readonly TreeEntry[]; contentBase64: string }>;
 type Identity = Readonly<{ name: string; email: string; date: string }>;
 
 function identity(line: string): Identity {
@@ -111,6 +111,7 @@ function parseTree(bytes: Buffer): readonly TreeEntry[] {
 
 export type PreparedLocalGithubPush = Readonly<{
   commitOid: string;
+  commitContentBase64: string;
   commit: ReturnType<typeof parseCommit>;
   objects: readonly PushObject[];
   paths: readonly string[];
@@ -190,7 +191,8 @@ export async function readLocalGithubPush(input: {
     if (segments.length >= 16) return unsupported();
     const cached = trees.get(oid);
     if (blobOids.has(oid)) return unsupported();
-    const entries = cached?.entries ?? parseTree(await read(oid, 'tree'));
+    const treeBytes = cached === undefined ? await read(oid, 'tree') : undefined;
+    const entries = cached?.entries ?? parseTree(treeBytes!);
     for (const entry of entries) {
       const path = [...segments, entry.name];
       const absolutePath = join(workspacePath, ...path);
@@ -208,10 +210,12 @@ export async function readLocalGithubPush(input: {
         blobOids.add(entry.oid);
       }
     }
-    if (!cached) trees.set(oid, Object.freeze({ kind: 'tree', oid, entries }));
+    if (treeBytes !== undefined)
+      trees.set(oid, Object.freeze({ kind: 'tree', oid, entries, contentBase64: treeBytes.toString('base64') }));
   };
   try {
-    const commit = parseCommit(await read(commitOid, 'commit'));
+    const commitBytes = await read(commitOid, 'commit');
+    const commit = parseCommit(commitBytes);
     await visit(commit.tree, []);
     const objects: PushObject[] = [];
     for (const oid of blobOids) {
@@ -222,6 +226,7 @@ export async function readLocalGithubPush(input: {
     requireCurrent();
     return Object.freeze({
       commitOid,
+      commitContentBase64: commitBytes.toString('base64'),
       commit,
       paths: Object.freeze(paths),
       objects: Object.freeze(objects),

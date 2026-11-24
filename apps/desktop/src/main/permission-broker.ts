@@ -309,6 +309,7 @@ export class PermissionBroker {
       return (
         current.policyEpoch === policy.policyEpoch &&
         !current.revokedCapabilities.includes('workspace.read') &&
+        this.persistence.getEffectiveWorkspaceSet(taskId).digest === workspace.digest &&
         this.persistence.readTurnWorkspaceSetForTask(taskId, turnId)?.digest === workspace.digest &&
         this.persistence.getTurnWorkspaceRootIdentities(turnId).get(rootId) === expectedRootIdentity
       );
@@ -321,17 +322,18 @@ export class PermissionBroker {
       isCurrent,
       allowsPath: (path) => fileRuleDecision(snapshot, 'Read', root.path, path) !== 'deny',
     });
-    const latestSettings = this.projectPermissions?.snapshot(root.path, expectedRootIdentity);
-    if (
-      !latestSettings?.valid ||
-      latestSettings.digest !== snapshot.digest ||
-      latestSettings.deny.length !== snapshot.deny.length ||
-      latestSettings.deny.some((rule, index) => rule !== snapshot.deny[index]) ||
-      !isCurrent() ||
-      currentWorkspaceRootIdentityDigest(root.path) !== expectedRootIdentity
-    )
-      throw new LocalGithubPushError('workspace_changed');
-    return prepared;
+    const isStillAuthorized = () => {
+      if (signal.aborted || !isCurrent() ||
+        currentWorkspaceRootIdentityDigest(root.path) !== expectedRootIdentity)
+        return false;
+      const latest = this.projectPermissions?.snapshot(root.path, expectedRootIdentity);
+      return !!latest?.valid &&
+        latest.digest === snapshot.digest &&
+        latest.deny.length === snapshot.deny.length &&
+        latest.deny.every((rule, index) => rule === snapshot.deny[index]);
+    };
+    if (!isStillAuthorized()) throw new LocalGithubPushError('workspace_changed');
+    return Object.freeze({ prepared, isStillAuthorized });
   }
 
   workspaceReadFilter(

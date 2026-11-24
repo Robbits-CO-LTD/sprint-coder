@@ -88,6 +88,27 @@ export function isGithubBranchName(value: string): boolean {
   );
 }
 
+export const GITHUB_PUSH_INPUT_EXAMPLE = [
+  'https://github.com/<所有者>/<リポジトリ> に push して',
+  'ブランチ: main',
+  'コミット: <40文字のコミットSHA>',
+].join('\n');
+
+export function parseGithubPushInput(text: string):
+  | { kind: 'incomplete' }
+  | { kind: 'push'; repository: string; branch: string; commitOid: string }
+  | null {
+  const [first = '', branchLine = '', commitLine = '', ...extra] = text.replace(/\r\n/g, '\n').trim().split('\n');
+  const intent = /^(https:\/\/github\.com\/\S+)[ \t]*に[ \t]*(?:git[ \t]+)?push[ \t]*して(?:ください)?[。！!]?$/iu.exec(first.trim());
+  if (!intent?.[1]) return null;
+  const repository = parseGithubIssueRepository(intent[1]);
+  const branch = /^ブランチ[ \t]*[:：][ \t]*(\S+)[ \t]*$/u.exec(branchLine)?.[1];
+  const commitOid = /^コミット[ \t]*[:：][ \t]*([0-9a-f]{40})[ \t]*$/u.exec(commitLine)?.[1];
+  if (!repository || !branch || !isGithubBranchName(branch) || !commitOid || extra.length)
+    return { kind: 'incomplete' };
+  return { kind: 'push', repository, branch, commitOid };
+}
+
 export function parseGithubActionInput(
   text: string,
 ):

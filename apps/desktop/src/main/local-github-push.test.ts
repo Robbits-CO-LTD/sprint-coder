@@ -50,7 +50,7 @@ async function fixture() {
         policyEpoch,
         revokedCapabilities: [],
       }),
-      getEffectiveWorkspaceSet: unused,
+      getEffectiveWorkspaceSet: () => workspace,
       setAccessPreset: unused,
       listPermissionGrants: unused,
       revokePermissionCapability: unused,
