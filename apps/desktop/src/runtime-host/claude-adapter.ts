@@ -65,6 +65,7 @@ import {
 import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
 import {
   environmentValue,
+  windowsCliExecutableMissing,
   probeCliCommandCandidates,
   type CliCommandCandidate,
 } from './cli-command-resolution';
@@ -373,8 +374,18 @@ export class ClaudeRuntimeAdapter {
     const normalizer = new ClaudeJsonlNormalizer(
       claudeExpectedCapabilities(teamMcpArgs?.toolNames),
     );
+    const executable = this.cli?.executable ?? resolveClaudeCommand('claude');
+    if (windowsCliExecutableMissing(executable, 'claude')) {
+      cleanup();
+      failWithDiagnostic(
+        publicError('RUNTIME_CLI_MISSING', 'Claude CLIが見つかりません。', false),
+        'spawn_error',
+      );
+      exited(1, false);
+      return;
+    }
     const child = spawnOwnedCliProcess(
-      this.cli?.executable ?? resolveClaudeCommand('claude'),
+      executable,
       buildClaudeArgs(
         model,
         teamMcpArgs,

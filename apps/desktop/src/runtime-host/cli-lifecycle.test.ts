@@ -1,12 +1,12 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import type * as ChildProcessModule from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { expect, it, vi } from 'vitest';
-import { ClaudeRuntimeAdapter } from './claude-adapter';
-import { CodexRuntimeAdapter } from './codex-adapter';
+import { ClaudeRuntimeAdapter, resolveClaudeCommand } from './claude-adapter';
+import { CodexRuntimeAdapter, resolveCodexCommand } from './codex-adapter';
 import type * as OwnedCliProcess from './owned-cli-process';
 
 const processMock = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -142,3 +142,61 @@ it.each(['claude', 'codex'] as const)('finalizes %s when spawning the CLI fails'
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.skipIf(process.platform !== 'win32').each([
+  ['claude', true],
+  ['claude', false],
+  ['codex', true],
+  ['codex', false],
+] as const)(
+  'reports that %s disappeared after detection (retained resolution: %s)',
+  async (kind, retainResolution) => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-cli-removed-'));
+    const executable = join(root, kind + '.exe');
+    const isClaude = kind === 'claude';
+    const adapter = isClaude ? new ClaudeRuntimeAdapter() : new CodexRuntimeAdapter();
+    try {
+      await copyFile(process.execPath, executable);
+      vi.stubEnv('PATH', [root, dirname(process.execPath)].join(delimiter));
+      for (const name of ['APPDATA', 'LOCALAPPDATA', 'HOME', 'USERPROFILE']) vi.stubEnv(name, root);
+      const resolveCommand = isClaude ? resolveClaudeCommand : resolveCodexCommand;
+      expect(resolveCommand(kind)).toBe(executable);
+      if (retainResolution)
+        adapter.setCliResolution({
+          executable,
+          source: 'path',
+          version: 'fixture',
+          compatibility: 'verified',
+          capabilities: [],
+        });
+      await mkdir(join(root, 'hold'));
+      await rename(executable, join(root, 'hold', kind + '.exe'));
+      if (!retainResolution) expect(resolveCommand(kind)).toBe(kind);
+      const accepted = vi.fn();
+      const failed = vi.fn();
+      const exited = vi.fn();
+      adapter.start(
+        'removed-cli',
+        'synthetic request',
+        [],
+        accepted,
+        root,
+        'auto',
+        vi.fn(),
+        failed,
+        exited,
+      );
+      await vi.waitFor(() => expect(exited).toHaveBeenCalledExactlyOnceWith(1, false));
+      expect(failed).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ code: 'RUNTIME_CLI_MISSING', retryable: false }),
+        expect.objectContaining({ failureStage: 'spawn_error' }),
+      );
+      expect(accepted).not.toHaveBeenCalled();
+      expect(JSON.stringify(failed.mock.calls)).not.toContain(root);
+    } finally {
+      vi.unstubAllEnvs();
+      adapter.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
