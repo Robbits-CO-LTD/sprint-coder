@@ -37,6 +37,9 @@ async function fixture() {
     digest: 'f'.repeat(64),
   };
   let policyEpoch = 1;
+  const unused = (): never => {
+    throw new Error('Unexpected persistence access during offline push preparation');
+  };
   const broker = new PermissionBroker(
     {
       readTurnWorkspaceSetForTask: () => workspace,
@@ -47,7 +50,17 @@ async function fixture() {
         policyEpoch,
         revokedCapabilities: [],
       }),
-    } as ConstructorParameters<typeof PermissionBroker>[0],
+      getEffectiveWorkspaceSet: unused,
+      setAccessPreset: unused,
+      listPermissionGrants: unused,
+      revokePermissionCapability: unused,
+      recordPermissionAudit: unused,
+      listPendingPermissionPolicyEpochs: unused,
+      markPermissionPolicyEpochDelivered: unused,
+      registerPermissionOneTimeToken: unused,
+      consumePermissionOneTimeToken: unused,
+      commitPermissionEvaluation: unused,
+    },
     undefined,
     {
       snapshot: loadProjectPermissionSettings,
