@@ -2990,6 +2990,59 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.each(['cancel', 'replace'] as const)(
+      'preserves one canceled Turn notice after reopening (%s)',
+      (mode) => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const active = persistence.startTurn(task.id, 'post a fixture');
+        const notice = 'GitHubから結果を確認できませんでした。';
+        let nextTurnId: string | undefined;
+        try {
+          const terminal =
+            mode === 'cancel'
+              ? persistence.cancelTurnAndFinishGoal(task.id, active.turnId, notice).event
+              : (() => {
+                  const result = persistence.replaceActiveTurn(
+                    task.id,
+                    active.turnId,
+                    'next request',
+                    [],
+                    false,
+                    notice,
+                  );
+                  nextTurnId = result.started.turnId;
+                  return result.canceledEvent;
+                })();
+          expect(terminal).toMatchObject({
+            type: 'turn.completed',
+            state: 'canceled',
+            message: { turnId: active.turnId, author: 'assistant', content: notice },
+          });
+          expect(terminal?.seq).toBe(
+            persistence
+              .listEventsAfter(task.id, 0)
+              .find((event) => event.type === 'turn.completed' && event.turnId === active.turnId)
+              ?.seq,
+          );
+          expect(
+            persistence.cancelTurnAndFinishGoal(task.id, active.turnId, notice).event,
+          ).toBeNull();
+        } finally {
+          persistence.close();
+        }
+        const reopened = new SqlitePersistenceClient(path);
+        try {
+          expect(
+            reopened.listMessages(task.id).filter(({ author }) => author === 'assistant'),
+          ).toEqual([expect.objectContaining({ turnId: active.turnId, content: notice })]);
+          if (nextTurnId !== undefined) expect(reopened.getActiveTurnId(task.id)).toBe(nextTurnId);
+        } finally {
+          reopened.close();
+        }
+      },
+    );
+
     it('rolls back stop-and-send cancellation when the replacement seal cannot commit', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('replace atomically');

@@ -6020,6 +6020,7 @@ export interface PersistenceClient {
   cancelTurnAndFinishGoal(
     taskId: string,
     turnId: string,
+    stopNotice?: string,
   ): { event: TurnEvent | null; task: TaskSummary | null };
   getDraft(taskId: string): string;
   setDraft(taskId: string, draft: string): void;
@@ -6372,6 +6373,7 @@ export interface PersistenceClient {
     text: string,
     skills?: readonly PersistedTurnSkill[],
     includeBuiltinTeamSkill?: boolean,
+    stopNotice?: string,
   ): StopAndSendTransition;
   getTurnSkills(taskId: string, turnId: string): PersistedTurnSkill[];
   pinTurnAutoSkills(taskId: string, turnId: string, skills: readonly PersistedTurnSkill[]): void;
@@ -14808,10 +14810,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
   cancelTurnAndFinishGoal(
     taskId: string,
     turnId: string,
+    stopNotice?: string,
   ): { event: TurnEvent | null; task: TaskSummary | null } {
     return this.db.transaction(() => {
       const turn = this.getTurn(taskId, turnId);
       if (isTerminal(turn.state)) return { event: null, task: null };
+      if (stopNotice !== undefined) {
+        // The terminal event below carries this message. Do not emit a separate delta for it.
+        if (turn.assistant_message_id === null) {
+          const messageId = randomUUID();
+          this.db
+            .prepare(
+              'INSERT INTO messages(id, task_id, turn_id, author, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+            )
+            .run(messageId, taskId, turnId, 'assistant', stopNotice, new Date().toISOString());
+          this.db
+            .prepare('UPDATE turns SET assistant_message_id = ? WHERE id = ?')
+            .run(messageId, turnId);
+        } else {
+          this.db.prepare('UPDATE messages SET content = content || ? WHERE id = ?').run(
+            `
+
+${stopNotice}`,
+            turn.assistant_message_id,
+          );
+        }
+      }
       transitionTurn(turn.state, 'canceling');
       this.updateTurn(turnId, 'canceling');
       return this.completeTurnAndFinishGoal(taskId, turnId, 'canceled');
@@ -19710,6 +19734,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     text: string,
     skills: readonly PersistedTurnSkill[] = [],
     includeBuiltinTeamSkill = false,
+    stopNotice?: string,
   ): StopAndSendTransition {
     return this.db.transaction(() => {
       this.assertTask(taskId);
@@ -19718,7 +19743,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (activeTurnId !== expectedActiveTurnId)
         throw new Error('Active Turn changed before stop-and-send commit');
       const canceledEvent =
-        activeTurnId === null ? null : this.cancelTurnAndFinishGoal(taskId, activeTurnId).event;
+        activeTurnId === null
+          ? null
+          : this.cancelTurnAndFinishGoal(taskId, activeTurnId, stopNotice).event;
       const started = this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
       return { canceledEvent, started };
     })();
