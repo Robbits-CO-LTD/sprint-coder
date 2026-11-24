@@ -335,6 +335,7 @@ type AppState = {
     expectedRevision: number,
     patch: { name?: string; archived?: boolean },
   ): Promise<ProjectSummary | null>;
+  selectTaskWorkspace(taskId: string): Promise<void>;
   assignTaskToProject(taskId: string, projectId: string): Promise<TaskSummary | null>;
   unassignTaskFromProject(taskId: string): Promise<TaskSummary | null>;
   renameTask(taskId: string, title: string): Promise<void>;
@@ -520,12 +521,14 @@ async function loadWorkspace(
   taskId: string,
   apply: (fn: (state: AppState) => Partial<AppState>) => void,
   get: () => AppState,
+  workspaceRevisionIsCurrent: () => boolean,
 ) {
   if (!window.sprintCoder) return;
   const task = get().tasks.find((candidate) => candidate.id === taskId);
   if (task === undefined) return;
   const previousWorkspace = get().workspaceByTask[taskId];
   const isCurrent = () =>
+    workspaceRevisionIsCurrent() &&
     get().tasks.find((candidate) => candidate.id === taskId)?.projectId === task.projectId &&
     get().workspaceByTask[taskId] === previousWorkspace;
   if (typeof window.sprintCoder.workspace?.get === 'function') {
@@ -1214,6 +1217,18 @@ export const useAppStore = create<AppState>((set, get) => {
   let runtimeRefresh: Promise<void> | null = null;
   let runtimeDetectionGeneration = 0;
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
+  // A Task can move away and back to the same Project with the same cached value.
+  // Stamp Workspace reads and picker results against the changes made in between.
+  const workspaceRevisions = new Map<string, number>();
+  const advanceWorkspaceRevision = (taskId: string) => {
+    workspaceRevisions.set(taskId, (workspaceRevisions.get(taskId) ?? 0) + 1);
+  };
+  const captureWorkspaceRevision = (taskId: string) => {
+    const revision = workspaceRevisions.get(taskId);
+    return () => workspaceRevisions.get(taskId) === revision;
+  };
+  const refreshTaskWorkspace = (taskId: string) =>
+    loadWorkspace(taskId, apply, get, captureWorkspaceRevision(taskId));
   // Snapshot of "the user is still looking at this Task". A late result or error from a Team
   // operation is dropped once the user has switched away (A -> B -> A included).
   const captureTaskView = (taskId: string) => {
@@ -1947,7 +1962,7 @@ export const useAppStore = create<AppState>((set, get) => {
       void restoreDraft(taskId, apply, get);
       void restoreSkillSelection(taskId, apply, get);
       void get().loadSkills();
-      void loadWorkspace(taskId, apply, get);
+      void refreshTaskWorkspace(taskId);
       void loadPermission(taskId, apply, get);
       // The model selection is per-Task (UI slice U1b), so both the legacy chips' source and the
       // V2 picker's flag/selection have to be re-read on every switch — not just at init.
@@ -2304,6 +2319,25 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    async selectTaskWorkspace(taskId) {
+      const workspace = window.sprintCoder?.workspace;
+      if (typeof workspace?.select !== 'function') return;
+      const isStandalone = () => get().tasks.find(({ id }) => id === taskId)?.projectId === null;
+      if (!isStandalone()) return;
+      const isCurrentRevision = captureWorkspaceRevision(taskId);
+      const isCurrent = () => isCurrentRevision() && isStandalone();
+      try {
+        const selected = await workspace.select(taskId);
+        if (selected === null || !isCurrent()) return;
+        advanceWorkspaceRevision(taskId);
+        set((state) => ({
+          workspaceByTask: { ...state.workspaceByTask, [taskId]: selected },
+        }));
+      } catch (error) {
+        if (isCurrent()) throw error;
+      }
+    },
+
     async assignTaskToProject(taskId, projectId) {
       if (!window.sprintCoder || typeof window.sprintCoder.projects?.assignTask !== 'function')
         return null;
@@ -2315,12 +2349,13 @@ export const useAppStore = create<AppState>((set, get) => {
           taskId,
           expectedProjectId: task.projectId,
         });
+        advanceWorkspaceRevision(taskId);
         set((state) => ({
           tasks: state.tasks.map((candidate) => (candidate.id === taskId ? updated : candidate)),
           workspaceByTask: { ...state.workspaceByTask, [taskId]: null },
         }));
         void get().refreshProjects();
-        await loadWorkspace(taskId, apply, get);
+        await refreshTaskWorkspace(taskId);
         return updated;
       } catch (err) {
         set({ error: describeError(err) });
@@ -2338,12 +2373,13 @@ export const useAppStore = create<AppState>((set, get) => {
           taskId,
           expectedProjectId: task.projectId,
         });
+        advanceWorkspaceRevision(taskId);
         set((state) => ({
           tasks: state.tasks.map((candidate) => (candidate.id === taskId ? updated : candidate)),
           workspaceByTask: { ...state.workspaceByTask, [taskId]: null },
         }));
         void get().refreshProjects();
-        await loadWorkspace(taskId, apply, get);
+        await refreshTaskWorkspace(taskId);
         return updated;
       } catch (err) {
         set({ error: describeError(err) });

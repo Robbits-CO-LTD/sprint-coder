@@ -78,4 +78,35 @@ describe('Task workspace after Project reassignment', () => {
     expect(useAppStore.getState().workspaceByTask[task.id]).toEqual(oldWorkspace);
     expect(taskHasEffectiveWorkspaceRoot(task.id, useAppStore.getState())).toBe(true);
   });
+
+  it('discards a stale standalone read after moving to a Project and back with a null cache', async () => {
+    const projectId = 'empty-project';
+    const assigned = { ...task, projectId };
+    let finishOldRead!: (workspace: typeof oldWorkspace) => void;
+    const oldRead = new Promise<typeof oldWorkspace>((resolve) => (finishOldRead = resolve));
+    const getWorkspace = vi.fn().mockReturnValueOnce(oldRead).mockResolvedValue(null);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        projects: {
+          assignTask: vi.fn().mockResolvedValue(assigned),
+          unassignTask: vi.fn().mockResolvedValue(task),
+        },
+        workspace: { get: getWorkspace },
+      },
+    });
+    useAppStore.setState({
+      tasks: [assigned],
+      projects: [],
+      selectedTaskId: task.id,
+      workspaceByTask: { [task.id]: null },
+    });
+
+    const oldUnassignment = useAppStore.getState().unassignTaskFromProject(task.id);
+    await vi.waitFor(() => expect(getWorkspace).toHaveBeenCalledOnce());
+    await useAppStore.getState().assignTaskToProject(task.id, projectId);
+    await useAppStore.getState().unassignTaskFromProject(task.id);
+    finishOldRead(oldWorkspace);
+    await oldUnassignment;
+    expect(useAppStore.getState().workspaceByTask[task.id]).toBeNull();
+  });
 });
