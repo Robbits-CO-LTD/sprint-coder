@@ -4,6 +4,7 @@ import type { SkillDraft } from '@sprint-coder/contracts';
 import { createRoot } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import { SkillSettingsSection } from './SkillSettingsSection';
+import { useAppStore } from '../store/appStore';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -219,5 +220,204 @@ it('waits for an explicit reload after a failed initial request', async () => {
   } finally {
     await act(async () => root.unmount());
     Reflect.deleteProperty(window, 'sprintCoder');
+  }
+});
+
+it.each(['破棄', '内容を確認してインストール'])(
+  'removes only the resolved chat draft after %s in Settings and switching Tasks',
+  async (action) => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const draft: SkillDraft = {
+      id: 'target-draft',
+      kind: 'chat',
+      skillId: 'test',
+      name: 'Test',
+      description: 'test',
+      digest: 'a'.repeat(64),
+      files: [{ path: 'SKILL.md', content: '# Test' }],
+      createdAt: '2026-07-29T00:00:00.000Z',
+      updatedAt: '2026-07-29T00:00:00.000Z',
+    };
+    const otherTaskDraft = { ...draft, id: 'other-draft' };
+    const initial = useAppStore.getState();
+    let stored = [draft];
+    const mutate = vi
+      .fn()
+      .mockRejectedValueOnce({
+        code: 'OPERATION_CONFLICT',
+        userMessage: 'failure',
+        retryable: true,
+      })
+      .mockImplementationOnce(async () => {
+        stored = [];
+      });
+    vi.stubGlobal('sprintCoder', {
+      skills: {
+        list: vi.fn().mockResolvedValue({ items: [] }),
+        listDrafts: vi.fn(async () => stored),
+        installDraft: mutate,
+        discardDraft: mutate,
+      },
+      tasks: { messages: vi.fn().mockResolvedValue([]) },
+      turns: { subscribe: vi.fn(() => () => undefined) },
+    });
+    useAppStore.setState({
+      selectedTaskId: 'task-a',
+      skillDraftsByTask: {
+        'task-a': [{ turnId: 'turn-a', draft }],
+        'task-b': [{ turnId: 'turn-b', draft: otherTaskDraft }],
+      },
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<SkillSettingsSection active />));
+      const details = container.querySelector<HTMLDetailsElement>('.settings-skill-draft-files');
+      if (!details) throw new Error('Draft details missing');
+      await act(async () => {
+        details.open = true;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const button = [...container.querySelectorAll('button')].find(
+        (item) => item.textContent?.trim() === action,
+      );
+      if (!button) throw new Error('Draft action missing');
+      await act(async () => button.click());
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(useAppStore.getState().skillDraftsByTask['task-a']?.[0]?.draft).toEqual(draft);
+      await act(async () => button.click());
+      expect(mutate).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await useAppStore.getState().selectTask('task-b');
+        await useAppStore.getState().selectTask('task-a');
+      });
+      expect(useAppStore.getState().skillDraftsByTask['task-a']).toEqual([]);
+      expect(useAppStore.getState().skillDraftsByTask['task-b']?.[0]?.draft).toEqual(
+        otherTaskDraft,
+      );
+    } finally {
+      await act(async () => root.unmount());
+      useAppStore.setState(initial);
+    }
+  },
+);
+
+const chatDraft: SkillDraft = {
+  id: 'chat-draft',
+  kind: 'chat',
+  skillId: 'test',
+  name: 'Test',
+  description: 'test',
+  digest: 'a'.repeat(64),
+  files: [{ path: 'SKILL.md', content: '# Test' }],
+  createdAt: '2026-07-29T00:00:00.000Z',
+  updatedAt: '2026-07-29T00:00:00.000Z',
+};
+
+it.each(['install', 'discard'] as const)(
+  'reloads on reopening Settings after Chat %s succeeded',
+  async (action) => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const draft = chatDraft;
+    let drafts = [draft];
+    const listDrafts = vi.fn(async () => drafts);
+    const mutate = vi.fn(async () => {
+      drafts = [];
+    });
+    vi.stubGlobal('sprintCoder', {
+      skills: {
+        list: vi.fn().mockResolvedValue({ items: [] }),
+        listDrafts,
+        installDraft: mutate,
+        discardDraft: mutate,
+      },
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const render = (active: boolean) =>
+      act(async () =>
+        root.render(
+          <StrictMode>
+            <SkillSettingsSection active={active} />
+          </StrictMode>,
+        ),
+      );
+    try {
+      await render(true);
+      const initialReads = listDrafts.mock.calls.length;
+      expect(container.querySelector('.settings-skill-draft-card')).not.toBeNull();
+      await render(false);
+      await act(async () => {
+        if (action === 'install') await useAppStore.getState().installSkillDraft(draft);
+        else await useAppStore.getState().discardSkillDraft(draft.id);
+      });
+      expect(listDrafts).toHaveBeenCalledTimes(initialReads);
+      await render(true);
+      expect(container.querySelector('.settings-skill-draft-card')).toBeNull();
+      expect(initialReads).toBe(1);
+      expect(listDrafts).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  },
+);
+
+it('blocks a competing Draft operation while allowing other drafts and retry', async () => {
+  let failInstall!: (reason: Error) => void;
+  const installDraft = vi.fn(
+    () =>
+      new Promise((_resolve, reject) => {
+        failInstall = reject;
+      }),
+  );
+  const discardDraft = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('sprintCoder', {
+    skills: { installDraft, discardDraft },
+  });
+  const store = useAppStore.getState();
+  const draft = { ...chatDraft, id: 'contested-draft' };
+  const install = store.installSkillDraft(draft);
+  const competing = store.discardSkillDraft(draft.id);
+  void competing.catch(() => undefined);
+  try {
+    await store.discardSkillDraft('different-draft');
+    expect(discardDraft.mock.calls).toEqual([['different-draft']]);
+    await expect(competing).rejects.toThrow();
+  } finally {
+    failInstall(new Error('synthetic failure'));
+    await expect(install).rejects.toThrow('synthetic failure');
+  }
+  await store.discardSkillDraft(draft.id);
+  expect(discardDraft).toHaveBeenLastCalledWith(draft.id);
+});
+
+it('does not overwrite the reopened Skill list with a delayed older read', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  let completeOldRead!: (drafts: SkillDraft[]) => void;
+  const listDrafts = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<SkillDraft[]>((resolve) => {
+          completeOldRead = resolve;
+        }),
+    )
+    .mockResolvedValueOnce([]);
+  vi.stubGlobal('sprintCoder', {
+    skills: { list: vi.fn().mockResolvedValue({ items: [] }), listDrafts },
+  });
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const render = (active: boolean) =>
+    act(async () => root.render(<SkillSettingsSection active={active} />));
+  try {
+    await render(true);
+    await render(false);
+    await render(true);
+    expect(listDrafts).toHaveBeenCalledTimes(2);
+    await act(async () => completeOldRead([chatDraft]));
+    expect(container.querySelector('.settings-skill-draft-card')).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
   }
 });

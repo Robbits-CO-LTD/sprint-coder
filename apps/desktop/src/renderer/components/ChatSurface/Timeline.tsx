@@ -585,8 +585,8 @@ export function Timeline({
                   <SkillDraftCard
                     key={draft.id}
                     draft={draft}
-                    onInstall={() => installSkillDraft(taskId, draft)}
-                    onDiscard={() => discardSkillDraft(taskId, draft.id)}
+                    onInstall={() => installSkillDraft(draft)}
+                    onDiscard={() => discardSkillDraft(draft.id)}
                   />
                 ))}
                 {imageRequestUnfulfilled && <MissingGeneratedImageNotice />}

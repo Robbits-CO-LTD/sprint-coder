@@ -30,48 +30,67 @@ export function SkillSettingsSection({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
-  const [loadFailed, setLoadFailed] = useState(false);
   const [creatingWithAi, setCreatingWithAi] = useState(false);
-  const loaded = useRef(false);
+  const opened = useRef(false);
+  const readVersion = useRef(0);
+  const pendingRead = useRef<{ version: number; promise: Promise<void> } | null>(null);
+  const pendingDrafts = useAppStore((state) => state.pendingSkillDraftIds);
 
   const clearFeedback = useCallback(() => {
     setError(null);
     setStatus('');
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
+    const version = readVersion.current;
+    if (pendingRead.current?.version === version) return pendingRead.current.promise;
     setLoading(true);
-    setLoadFailed(false);
     clearFeedback();
-    try {
-      const api = window.sprintCoder?.skills;
-      if (!api) throw new Error('unavailable');
-      const [nextCatalog, nextDrafts] = await Promise.all([api.list(), api.listDrafts()]);
-      setCatalog(
-        nextCatalog.items.filter(({ ref }) => ref.source === 'builtin' || ref.source === 'created'),
-      );
-      setDrafts(nextDrafts);
-      setReviewed(new Set());
-      loaded.current = true;
-      setStatus('Sprint Coder Skillsを読み込みました。');
-    } catch (error) {
-      setLoadFailed(true);
-      setError(
-        skillActionFailure(
-          'Skill一覧を取得できませんでした',
-          error,
-          '再読み込みし、解消しない場合はアプリを再起動してください。',
-        ),
-      );
-    } finally {
-      setLoading(false);
-    }
+    const promise = (async () => {
+      try {
+        const api = window.sprintCoder?.skills;
+        if (!api) throw new Error('unavailable');
+        const [nextCatalog, nextDrafts] = await Promise.all([api.list(), api.listDrafts()]);
+        if (version !== readVersion.current) return;
+        setCatalog(
+          nextCatalog.items.filter(
+            ({ ref }) => ref.source === 'builtin' || ref.source === 'created',
+          ),
+        );
+        setDrafts(nextDrafts);
+        setReviewed(new Set());
+        setStatus('Sprint Coder Skillsを読み込みました。');
+      } catch (error) {
+        if (version !== readVersion.current) return;
+        setError(
+          skillActionFailure(
+            'Skill一覧を取得できませんでした',
+            error,
+            '再読み込みし、解消しない場合はアプリを再起動してください。',
+          ),
+        );
+      }
+    })().finally(() => {
+      if (version === readVersion.current) {
+        pendingRead.current = null;
+        setLoading(false);
+      }
+    });
+    pendingRead.current = { version, promise };
+    return promise;
   }, [clearFeedback]);
   useEffect(() => {
-    if (active && !loaded.current && !loading && !loadFailed) void refresh();
-  }, [active, loading, loadFailed, refresh]);
+    if (!active) {
+      opened.current = false;
+      return;
+    }
+    if (!opened.current && pendingDrafts.size === 0) {
+      opened.current = true;
+      readVersion.current++;
+      void refresh();
+    }
+  }, [active, pendingDrafts.size, refresh]);
   async function reload() {
-    loaded.current = false;
     const state = useAppStore.getState();
     await Promise.all([refresh(), state.selectedTaskId === null ? undefined : state.loadSkills()]);
   }
@@ -170,10 +189,8 @@ export function SkillSettingsSection({
   async function installDraft(draft: SkillDraft) {
     clearFeedback();
     try {
-      const api = window.sprintCoder?.skills;
-      if (!api) throw new Error('unavailable');
-      await api.installDraft(draft.id, draft.digest, true);
-      await reload();
+      await useAppStore.getState().installSkillDraft(draft);
+      await refresh();
       setStatus(`${draft.name}をインストールしました。`);
     } catch (error) {
       setError(
@@ -188,9 +205,7 @@ export function SkillSettingsSection({
   async function discardDraft(draft: SkillDraft) {
     clearFeedback();
     try {
-      const api = window.sprintCoder?.skills;
-      if (!api) throw new Error('unavailable');
-      await api.discardDraft(draft.id);
+      await useAppStore.getState().discardSkillDraft(draft.id);
       setDrafts((xs) => xs.filter((x) => x.id !== draft.id));
       setStatus(`${draft.name}の下書きを破棄しました。`);
     } catch (error) {
@@ -231,7 +246,7 @@ export function SkillSettingsSection({
           <button
             type="button"
             className="settings-secondary-button"
-            disabled={loading}
+            disabled={loading || pendingDrafts.size > 0}
             onClick={() => void reload()}
           >
             再読み込み
@@ -399,6 +414,7 @@ export function SkillSettingsSection({
                 <button
                   type="button"
                   className="settings-secondary-button"
+                  disabled={loading || pendingDrafts.has(draft.id)}
                   onClick={() => void discardDraft(draft)}
                 >
                   破棄
@@ -406,7 +422,7 @@ export function SkillSettingsSection({
                 <button
                   type="button"
                   className="settings-primary-button"
-                  disabled={!reviewed.has(draft.id)}
+                  disabled={loading || pendingDrafts.has(draft.id) || !reviewed.has(draft.id)}
                   onClick={() => void installDraft(draft)}
                 >
                   内容を確認してインストール
