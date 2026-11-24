@@ -382,6 +382,8 @@ import { clipPublicMessage } from './zod-issue-message';
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
+const SKILL_DRAFT_UNAVAILABLE_MESSAGE =
+  'この接続ではSkillを作れません。ツールに対応するモデルを選んでください。';
 /** The longest a screenshot waits to learn whether its Turn's CLI model takes images. */
 export const SCREENSHOT_CATALOG_TIMEOUT_MS = 5_000;
 /**
@@ -6911,10 +6913,7 @@ export class IpcRouter {
       selections.some(({ ref }) => ref.source === 'builtin' && ref.skillId === 'skill-creator') &&
       !this.skillDraftAvailable(taskId)
     )
-      throw new SkillSettingsError(
-        'INVALID_SKILL',
-        'この接続ではSkillを作れません。ツールに対応するモデルを選んでください。',
-      );
+      throw new SkillSettingsError('INVALID_SKILL', SKILL_DRAFT_UNAVAILABLE_MESSAGE);
     const requested =
       skillRuntime === 'codex' && text !== undefined
         ? bindBuiltinImagegenSkillForTurn(text, skillRuntime, selections)
@@ -8963,10 +8962,7 @@ export class IpcRouter {
       const selectedModel = this.modelCatalog.find(connectionId, modelId);
       const toolCalling = externalCli ? true : selectedModel?.toolCalling.value;
       if (skillCreatorTurn && toolCalling === false)
-        throw new SkillSettingsError(
-          'INVALID_SKILL',
-          'この接続ではSkillを作れません。ツールに対応するモデルを選んでください。',
-        );
+        throw new SkillSettingsError('INVALID_SKILL', SKILL_DRAFT_UNAVAILABLE_MESSAGE);
       const workspaceToolsEligible = providerWorkspaceToolsEligible(
         teamTurn,
         started.workspaceSet.roots.length,
@@ -9321,7 +9317,9 @@ export class IpcRouter {
             toolCallCount: roundToolCalls.length,
             outputLength: roundOutput.join('').length,
           });
-          if (canRetryWithoutWorkspaceTools) {
+          // The user explicitly asked to create a Skill. Retrying without its only creation
+          // tool leaves the selected Skill instructions in a Turn that cannot produce a draft.
+          if (canRetryWithoutWorkspaceTools && !skillCreatorTurn) {
             await this.mailbox.run(taskId, () => {
               if (
                 this.turnRuntimes.get(started.turnId) === 'provider' &&
@@ -9352,7 +9350,9 @@ export class IpcRouter {
             cause,
             externalCli
               ? externalCliFailureDetail(roundError.providerCode)
-              : providerFailureMessage(roundError.providerCode),
+              : skillCreatorTurn && canRetryWithoutWorkspaceTools
+                ? SKILL_DRAFT_UNAVAILABLE_MESSAGE
+                : providerFailureMessage(roundError.providerCode),
           );
         }
         if (!roundCompleted)
