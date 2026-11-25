@@ -1,3 +1,8 @@
+import {
+  discoverWorkspaceRules,
+  workspaceRuleProviderMessages,
+  type WorkspaceRuleReadPolicy,
+} from './prompt-context';
 import { randomUUID } from 'node:crypto';
 import { formatProviderToolResult, providerWorkspaceToolFailure } from './provider-tool-result';
 import { isExternalAcpConnection } from './external-acp-profile';
@@ -71,6 +76,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     /** The labels Main declared for those roots (issue #849). */
     knownWorkspaceLabels: readonly string[];
   }): boolean | TeamWorkerEgressVerdict;
+  workspaceRuleReadPolicy?: (taskId: string) => WorkspaceRuleReadPolicy;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   managerGuidance: string | ((worker: AgentRecord) => string);
   managerTools: readonly ProviderTool[];
@@ -223,6 +229,14 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
       ),
     );
+    const workspaceRules =
+      input.workspaceSet === undefined
+        ? []
+        : await discoverWorkspaceRules(
+            input.workspaceSet,
+            this.deps.workspaceRuleReadPolicy?.(input.worker.taskId),
+          );
+    input.signal?.throwIfAborted();
     if (input.worker.writeCapable && (!externalCli || !this.deps.openCliWorkspace))
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
@@ -299,6 +313,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       ...(availableTools.length > 0 && effectiveToolGuidance !== ''
         ? [{ role: 'system' as const, content: effectiveToolGuidance }]
         : []),
+      ...workspaceRuleProviderMessages(workspaceRules),
       ...projectContextProviderMessages(inheritedContext.projectItems),
       ...inheritedContext.fragments.map((fragment) => ({
         role:

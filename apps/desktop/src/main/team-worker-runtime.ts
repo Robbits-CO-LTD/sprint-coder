@@ -36,6 +36,7 @@ import {
 } from '../runtime-host/protocol';
 import {
   capturePromptWorkspace,
+  type WorkspaceRuleReadPolicy,
   compilePromptGuidance,
   injectPromptGuidance,
 } from './prompt-context';
@@ -123,6 +124,7 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     /** The labels Main declared for those roots, named in the prompt and guidance (issue #849). */
     knownWorkspaceLabels: readonly string[],
   ) => boolean | TeamWorkerEgressVerdict;
+  workspaceRuleReadPolicy?: (taskId: string, turnId: string) => WorkspaceRuleReadPolicy;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
   /**
@@ -535,7 +537,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         writeLimitNotice,
         this.deps.writeApprovalRequiredFor?.(taskId) === true,
       );
-      const promptWorkspace = await capturePromptWorkspace(normalizedWorkspace);
+      const promptWorkspace = await capturePromptWorkspace(
+        normalizedWorkspace,
+        this.deps.workspaceRuleReadPolicy?.(taskId, turnId),
+      );
       input.signal?.throwIfAborted();
       teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
       if (input.worker.canDelegate === true && teamMcp === undefined)
@@ -1198,11 +1203,14 @@ export function applyWorkerContextInheritance(
         fragments: sealedContext.fragments.filter((fragment) => !isLeaderOnlyFragment(fragment)),
       }
     : sealedContext;
+  const globalInstructions = sealed.fragments.filter(({ id }) =>
+    id.startsWith('global-user-instructions:'),
+  );
   if (
     worker.contextInheritancePolicy === 'none' ||
     worker.contextInheritancePolicy === 'selected_items'
   )
-    return { ...sealed, fragments: [], compacted: false };
+    return { ...sealed, fragments: globalInstructions, compacted: false };
   if (worker.contextInheritancePolicy === 'full_fork') return sealed;
   const relevant = sealed.fragments.filter(
     ({ source, trust }) =>
@@ -1220,8 +1228,9 @@ export function applyWorkerContextInheritance(
     ...sealed,
     fragments:
       content === ''
-        ? []
+        ? globalInstructions
         : [
+            ...globalInstructions,
             {
               id: `team-context-summary:${worker.id}`,
               taskId: worker.taskId,

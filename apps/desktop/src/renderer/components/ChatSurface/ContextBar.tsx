@@ -226,10 +226,10 @@ export function PermissionChip({ taskId }: { taskId: string }) {
                 }}
               >
                 <span className="runtime-menu-title">
-                  {reviewingRules ? '権限ルールを確認中…' : 'プロジェクトの権限ルールを確認'}
+                  {reviewingRules ? '権限ルールを確認中…' : '権限ルールを確認'}
                 </span>
                 <span className="runtime-menu-desc">
-                  .sprint-coder 内の settings.json と settings.local.json を読み込みます
+                  自分の全プロジェクト共通のルールと、このプロジェクトのルールを確認します
                 </span>
               </button>
               {rulesStatus && (

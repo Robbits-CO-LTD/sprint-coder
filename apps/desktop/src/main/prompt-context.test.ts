@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,49 @@ describe('prompt context compiler', () => {
         expect.objectContaining({ path: join(root, 'AGENTS.md'), scope: root, depth: 0 }),
       ]),
     );
+  });
+
+  it('reads the actual Claude.md spelling and excludes denied or protected nested instructions', async () => {
+    const root = await realpath(await mkdtemp(join(process.cwd(), '.sprint-coder-rules-')));
+    const configured = {
+      ...workspace,
+      roots: [{ ...workspace.roots[0]!, path: root }],
+    };
+    try {
+      execFileSync('git', ['init', '--quiet', root]);
+      for (const directory of ['.ssh', '.sprint-coder', 'private', 'linked']) {
+        await mkdir(join(root, directory));
+      }
+      await writeFile(join(root, 'AGENTS.md'), 'agents guidance');
+      await writeFile(join(root, 'Claude.md'), 'fallback guidance');
+      await writeFile(join(root, '.ssh', 'AGENTS.md'), 'credential directory');
+      await writeFile(join(root, 'private', 'AGENTS.md'), 'denied directory');
+      await writeFile(
+        join(root, '.sprint-coder', 'settings.json'),
+        JSON.stringify({
+          permissions: { deny: ['Read(private/**)'] },
+        }),
+      );
+      await writeFile(join(root, 'outside-rule.txt'), 'hard-linked content');
+      await link(join(root, 'outside-rule.txt'), join(root, 'linked', 'AGENTS.md'));
+      expect(
+        (await discoverWorkspaceRules(configured)).map((rule) => [rule.path, rule.content]),
+      ).toEqual([
+        [join(root, 'AGENTS.md'), 'agents guidance'],
+        [join(root, 'Claude.md'), 'fallback guidance'],
+      ]);
+
+      if (process.platform !== 'linux') await rm(join(root, 'Claude.md'));
+      await writeFile(join(root, 'CLAUDE.md'), 'canonical guidance');
+      const canonical = await discoverWorkspaceRules(configured);
+      expect(canonical.filter((rule) => rule.path.endsWith('LAUDE.md'))).toEqual([
+        expect.objectContaining({ path: join(root, 'CLAUDE.md'), content: 'canonical guidance' }),
+      ]);
+      expect(canonical).toHaveLength(2);
+      expect(await discoverWorkspaceRules(configured, () => false)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('reports non-Git folders separately from a clean Git checkout', async () => {

@@ -90,6 +90,11 @@ import {
   type ThemeId,
 } from '../window-theme';
 import { readStoredTheme, saveStoredTheme } from './window-theme-store';
+import {
+  initializeUserConfig,
+  readGlobalSprintCoderInstructions,
+  userConfigHome,
+} from './user-config';
 
 const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
@@ -213,12 +218,20 @@ if (squirrelStartup || !hasLock) {
       );
       nativeSafeFs = loadNativeSafeFs({ lockDirectoryPath: nativeSafeFsLockDirectory });
       const databasePath = join(app.getPath('userData'), 'sprint-coder.sqlite3');
+      const configHome = userConfigHome();
+      try {
+        initializeUserConfig(configHome);
+      } catch {
+        secureLogger.warn('Global configuration files could not be initialized');
+      }
       persistence = new SqlitePersistenceClient(
         databasePath,
         (binding) => nativeSafeFs!.assertSession(binding),
         (workspaceKey, minimumFence) =>
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
+        configHome,
       );
+      persistence.setGlobalInstructionProvider(() => readGlobalSprintCoderInstructions(configHome));
       const startupQuarantines = persistence.initializeMutationRecovery(
         randomUUID(),
         new Date().toISOString(),

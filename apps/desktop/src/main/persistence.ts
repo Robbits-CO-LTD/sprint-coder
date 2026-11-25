@@ -6094,11 +6094,13 @@ export interface PersistenceClient {
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
   readProjectPermissionTrust(root: string): string | null;
+  readonly permissionRulesHome?: string | undefined;
   saveProjectPermissionTrust(entries: readonly { root: string; value: string }[]): void;
   getTeamModelSelectionGuidance(): string;
   setTeamModelSelectionGuidance(guidance: string): void;
   getTeamUsageMode(): TeamUsageMode;
   setTeamUsageMode(mode: TeamUsageMode): TeamUsageMode;
+  setGlobalInstructionProvider?(provider: () => string | null): void;
   getSprintCoderPrePrompt(): string;
   setSprintCoderPrePrompt(prompt: string): void;
   getAssistantPreferences(): { configured: boolean; preferences: AssistantPreferences };
@@ -7197,6 +7199,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private autoSkillProvider:
     ((runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[]) | null =
     null;
+  private globalInstructionProvider: (() => string | null) | null = null;
   private teamUsageOfferProvider: ((runtime: TeamUsageOfferRuntime) => boolean) | null = null;
   private sealedPostImageObserver: SealedPostImageObserver | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
@@ -7215,6 +7218,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       workspaceKey: string,
       minimumFence: string,
     ) => void = () => undefined,
+    readonly permissionRulesHome?: string,
   ) {
     mkdirSync(dirname(databasePath), { recursive: true });
     removeOrphanedPreMigrationValidationFiles(databasePath);
@@ -9587,7 +9591,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   private readReferenceForModel(root: string | null, reference: ProjectReferenceRow) {
     if (root !== null) {
-      const rules = new ProjectPermissionTrust(this).snapshot(root);
+      const rules = new ProjectPermissionTrust(this, this.permissionRulesHome).snapshot(root);
       if (
         matchProjectPermissionRules(rules, {
           tool: 'Read',
@@ -16124,6 +16128,25 @@ ${stopNotice}`,
     return parsed;
   }
 
+  setGlobalInstructionProvider(provider: () => string | null): void {
+    this.globalInstructionProvider = provider;
+  }
+
+  private globalInstructionFragment(taskId: string): ContextFragment | null {
+    const rules = this.globalInstructionProvider?.();
+    if (!rules?.trim()) return null;
+    const content = ['<global-user-instructions>', rules, '</global-user-instructions>'].join('\n');
+    return {
+      id: 'global-user-instructions:' + sha256(content),
+      taskId,
+      source: 'goal',
+      trust: 'user',
+      tokenEstimate: estimateTokens(content),
+      content,
+      createdAt: new Date().toISOString(),
+      messageId: null,
+    };
+  }
   getSprintCoderPrePrompt(): string {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'prompt.sprint-coder-pre-prompt'")
@@ -21053,7 +21076,9 @@ ${stopNotice}`,
     const previousReport = guidance === null ? null : readGoalReport(goalTask);
     const previousContent =
       previousReport?.status === 'continue' ? JSON.stringify(previousReport) : null;
+    const globalInstructions = this.globalInstructionFragment(taskId);
     const settingsFragments = [
+      ...(globalInstructions === null ? [] : [globalInstructions]),
       ...(guidance === null
         ? []
         : [
@@ -21262,6 +21287,7 @@ ${stopNotice}`,
   private assembleManualTeamContextSnapshot(taskId: string, executionId: string): PreparedContext {
     const task = this.getTaskRow(taskId);
     const createdAt = new Date().toISOString();
+    const globalInstructions = this.globalInstructionFragment(taskId);
     const prePrompt = this.getSprintCoderPrePrompt();
     const prePromptContent = sprintCoderPrePromptContent(prePrompt);
     const rows = this.db
@@ -21284,6 +21310,7 @@ ${stopNotice}`,
         createdAt,
         messageId: null,
       },
+      ...(globalInstructions === null ? [] : [globalInstructions]),
       ...(prePrompt === ''
         ? []
         : [
