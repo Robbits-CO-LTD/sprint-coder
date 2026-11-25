@@ -314,7 +314,7 @@ type AppState = {
     decision: ApprovalDecision,
     userInputSelection?: number,
     grantScope?: 'app',
-  ): Promise<void>;
+  ): Promise<string | undefined>;
   selectTask(taskId: string): Promise<void>;
   /** Opens the unstarted Task in the same place when one exists; `reuseUnstarted: false` always
    * makes a new Task (for callers that write into the Task they get back). */
@@ -1954,7 +1954,9 @@ export const useAppStore = create<AppState>((set, get) => {
           },
         }));
       } catch (err) {
-        set({ error: describeError(err) });
+        const error = describeError(err);
+        set({ error });
+        return error;
       } finally {
         set((state) => ({
           resolvingApprovalIds: { ...state.resolvingApprovalIds, [approvalId]: undefined },

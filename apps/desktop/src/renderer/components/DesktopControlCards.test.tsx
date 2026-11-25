@@ -56,7 +56,7 @@ const base: ApprovalSummary = {
   capability: 'shell.execute',
   challenge: 'challenge-value',
   createdAt: '2026-11-10T00:00:00.000Z',
-  expiresAt: '2026-11-10T01:00:00.000Z',
+  expiresAt: '2099-11-10T01:00:00.000Z',
 };
 
 const card = (desktopAction: DesktopAction, overrides: Partial<ApprovalSummary> = {}) =>
@@ -230,7 +230,9 @@ describe('desktop-control approval card', () => {
         <ApprovalCard
           approval={{ ...base, desktopAction: offered }}
           busy={false}
-          onDecision={(...args) => decisions.push(args)}
+          onDecision={(...args) => {
+            decisions.push(args);
+          }}
         />,
       ),
     );
