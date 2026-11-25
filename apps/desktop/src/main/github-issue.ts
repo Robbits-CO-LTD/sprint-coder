@@ -9,7 +9,11 @@ import {
   type GithubWriteRequest,
 } from '../github-issue-request';
 import { environmentValue } from '../runtime-host/cli-command-resolution';
-import { buildControlledEnvironment, resolveBareExecutable } from './command-runner';
+import {
+  buildControlledEnvironment,
+  CommandExecutableNotFoundError,
+  resolveBareExecutable,
+} from './command-runner';
 
 const run = promisify(execFile);
 const issueResult = z.object({
@@ -25,6 +29,16 @@ const pullResult = z.object({
 });
 
 export class GithubIssueError extends Error {}
+
+export class GithubCliNotFoundError extends GithubIssueError {
+  constructor() {
+    super(
+      'GitHub CLI（gh）が見つかりません。[公式サイト](https://cli.github.com/)からインストールし、' +
+        'ターミナルで `gh auth login --hostname github.com` を実行してログインしてください。' +
+        'その後、Sprint Coder を再起動してもう一度お試しください。GitHubには送信していません。',
+    );
+  }
+}
 
 export function githubLoginEnvironment(
   platform: NodeJS.Platform = process.platform,
@@ -57,6 +71,10 @@ export async function githubLoginToken(signal: AbortSignal): Promise<string> {
   // Win32's bare-executable lookup tries the working directory before PATH.
   const executable = await resolveBareExecutable(process.platform === 'win32' ? 'gh.exe' : 'gh', {
     PATH: paths.join(delimiter),
+  }).catch((error: unknown) => {
+    signal.throwIfAborted();
+    if (error instanceof CommandExecutableNotFoundError) throw new GithubCliNotFoundError();
+    throw error;
   });
   signal.throwIfAborted();
   const { stdout } = await run(executable, ['auth', 'token', '--hostname', 'github.com'], {
@@ -100,7 +118,8 @@ export async function writeGithubContent(
   try {
     token = await readToken(signal);
     signal.throwIfAborted();
-  } catch {
+  } catch (error) {
+    if (error instanceof GithubCliNotFoundError) throw error;
     throw new GithubIssueError(
       'GitHubのログインを確認できませんでした。GitHub CLI（gh）でログイン済みか確認してください。投稿は行っていません。',
     );
