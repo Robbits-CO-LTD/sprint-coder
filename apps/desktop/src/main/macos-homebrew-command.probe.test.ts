@@ -22,6 +22,12 @@ it('records the stage reached by Apple Silicon Homebrew programs and the HOME co
     { label: 'homebrew-gh-bare', command: 'gh', argv: ['--version'] },
     { label: 'system-first-git-bare', command: 'git', argv: ['--version'] },
     { label: 'homebrew-git-exact', command: '/opt/homebrew/bin/git', argv: ['--version'] },
+    {
+      label: 'admin-gh-absolute',
+      command: '/Library/Application Support/Sprint Coder 1404 CI Probe/bin/gh',
+      argv: ['--version'],
+    },
+    { label: 'admin-gh-first-PATH', command: 'sc-1404-managed-gh', argv: ['--version'] },
     { label: 'HOME-control', command: '/usr/bin/printenv', argv: ['HOME'] },
   ];
   try {
@@ -32,6 +38,12 @@ it('records the stage reached by Apple Silicon Homebrew programs and the HOME co
       const canonical = await realpath(found);
       const binary = await stat(canonical);
       const parent = await stat(dirname(canonical));
+      const ancestry = [];
+      for (let path = canonical;; path = dirname(path)) {
+        const node = await stat(path);
+        ancestry.push({ ownerUid: node.uid, mode: (node.mode & 0o777).toString(8) });
+        if (dirname(path) === path) break;
+      }
       const metadata = {
         label,
         found,
@@ -42,6 +54,7 @@ it('records the stage reached by Apple Silicon Homebrew programs and the HOME co
         mode: (binary.mode & 0o777).toString(8),
         parentMode: (parent.mode & 0o777).toString(8),
         links: binary.nlink,
+        ...(label.startsWith('admin-') ? { ancestry } : {}),
       };
       let stage = 'prepare';
       let enteredSpawn = false;

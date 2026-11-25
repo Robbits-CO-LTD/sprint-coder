@@ -27,6 +27,23 @@ jobs:
             test -x "/opt/homebrew/bin/$formula"
           done
           sw_vers -productVersion
+      - name: Stage a root-owned copy and inventory direct Mach-O dependencies
+        shell: bash
+        run: |
+          set -eu
+          src=/opt/homebrew/bin/gh
+          fixed="/Library/Application Support/Sprint Coder 1404 CI Probe/bin/gh"
+          alias=/usr/local/bin/sc-1404-managed-gh
+          test ! -e "$fixed"
+          test ! -e "$alias"
+          sudo /usr/bin/install -d -o root -g wheel -m 0755 "$(dirname "$fixed")"
+          sudo /usr/bin/install -o root -g wheel -m 0555 "$src" "$fixed"
+          sudo /usr/bin/install -o root -g wheel -m 0555 "$src" "$alias"
+          cmp -s "$src" "$fixed"
+          cmp -s "$src" "$alias"
+          /usr/bin/otool -L "$fixed" | tail -n +2
+          /usr/bin/otool -L /opt/homebrew/bin/git | tail -n +2
+          /usr/bin/otool -l "$fixed" | awk '/cmd LC_RPATH/{r=1} r && /path /{print; r=0}'
       - uses: ./.github/actions/install-deps
         with:
           node-version: 22.23.3
