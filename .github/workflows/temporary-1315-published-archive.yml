@@ -1,0 +1,42 @@
+name: Temporary 1315 published macOS archive verification
+on:
+  push:
+    branches: [codex/1315-published-macos-archive-probe]
+permissions: {}
+jobs:
+  verify-published-arm64-zip:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify the published 0.8.3 arm64 asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          sw_vers -productVersion
+          work="$(mktemp -d)"
+          archive="$work/Sprint-Coder-darwin-arm64-0.8.3.zip"
+          url=https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.8.3/Sprint-Coder-darwin-arm64-0.8.3.zip
+          /usr/bin/curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 --output "$archive" "$url"
+          archive_sha="$(/usr/bin/shasum -a 256 "$archive" | awk '{print $1}')"
+          test "$archive_sha" = c605cd9192032e0eadac688f658170db7632c1036c0c8717714950b1947d6f5b
+          printf 'SC1315 published_zip_sha256=%s bytes=%s\n' "$archive_sha" "$(stat -f %z "$archive")"
+          /usr/bin/ditto -x -k "$archive" "$work/extracted"
+          app="$work/extracted/Sprint Coder.app"
+          test -d "$app"
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          test "$version" = 0.8.3
+          helper="$app/Contents/Resources/sprint-coder-desktop-control"
+          manifest="$helper.sha256"
+          test -f "$helper" && test ! -L "$helper" && test -x "$helper"
+          test -f "$manifest" && test ! -L "$manifest"
+          test "$(/usr/bin/lipo -archs "$helper")" = arm64
+          manifest_sha="$(awk 'NF {print $1}' "$manifest")"
+          helper_sha="$(/usr/bin/shasum -a 256 "$helper" | awk '{print $1}')"
+          test "$manifest_sha" = "$helper_sha"
+          printf 'SC1315 version=%s helper_arch=arm64 helper_sha256=%s manifest_matches=yes\n' "$version" "$helper_sha"
+          /usr/bin/codesign --verify --strict --verbose=2 "$helper"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$app"
+          /usr/sbin/spctl --assess --type execute --verbose=2 "$app"
+          xcrun stapler validate "$app"
+          echo 'SC1315 helper_and_app_signature=pass gatekeeper=pass stapled_ticket=pass'
