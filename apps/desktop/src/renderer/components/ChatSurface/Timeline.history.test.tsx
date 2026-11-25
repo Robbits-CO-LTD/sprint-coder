@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { TurnEvent } from '@sprint-coder/contracts';
+import type { TurnEvent, TurnSnapshot } from '@sprint-coder/contracts';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -287,6 +287,48 @@ describe('Timeline history (issue #842)', () => {
     expect(html).toContain('<span>writer</span><span>完了</span>');
     expect(html).not.toContain('<span>writer</span><span>失敗');
   });
+});
+
+it('keeps a stop notice committed while the selected Task snapshot is pending', async () => {
+  const notice = 'GitHubから結果を確認できませんでした。再送する前に送信先を確認してください。';
+  let finishSnapshot!: (snapshot: TurnSnapshot) => void;
+  const pendingSnapshot = new Promise<TurnSnapshot>((resolve) => {
+    finishSnapshot = resolve;
+  });
+  let storedMessages = [message({ id: 'request' })];
+  const readMessages = vi.fn(async () => storedMessages);
+  const subscribe = vi.fn(() => () => undefined);
+  vi.stubGlobal('sprintCoder', {
+    tasks: { messages: readMessages },
+    turns: { snapshot: () => pendingSnapshot, subscribe },
+  });
+
+  const selection = useAppStore.getState().selectTask('task-1');
+  const readsBeforeStop = readMessages.mock.calls.length;
+  storedMessages = [
+    ...storedMessages,
+    message({ id: 'notice', author: 'assistant', content: notice }),
+  ];
+  finishSnapshot({
+    lastSeq: 2,
+    activeTurn: null,
+    queued: [],
+    contextUsage: { usedTokens: 0, hardCapTokens: 100, projectTokens: 0, fragments: [] },
+    pendingApprovals: [],
+    activatedSkills: [],
+    latestTurnDiff: null,
+    interruptedTurnIds: [],
+    canceledTurnIds: [],
+    autoDecisions: [],
+    autoDecisionCounts: [],
+  });
+  await selection;
+
+  const html = await render();
+  expect(html.split(notice)).toHaveLength(2);
+  expect(readsBeforeStop).toBe(0);
+  expect(readMessages).toHaveBeenCalledOnce();
+  expect(subscribe).toHaveBeenCalledWith('task-1', expect.any(Function), { afterSeq: 2 });
 });
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
