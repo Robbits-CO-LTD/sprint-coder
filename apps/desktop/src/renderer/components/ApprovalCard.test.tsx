@@ -3,12 +3,13 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DESKTOP_CONTROL_WORKER_ACCENTS,
   desktopControlWorkerAccent,
 } from '@sprint-coder/contracts';
 import { ApprovalCard } from './ApprovalCard';
+import { useAppStore } from '../store/appStore';
 import { darkInkReadsOn } from './WorkerAvatar';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
 
@@ -39,7 +40,7 @@ const approval: ApprovalSummary = {
   capability: 'external.open',
   challenge: 'challenge-value',
   createdAt: '2026-08-18T00:00:00.000Z',
-  expiresAt: '2026-08-18T01:00:00.000Z',
+  expiresAt: '2099-08-18T01:00:00.000Z',
 };
 
 describe('ApprovalCard user input mode', () => {
@@ -441,7 +442,9 @@ describe('ApprovalCard folded per-call content', () => {
         <ApprovalCard
           approval={card}
           busy={false}
-          onDecision={(decision) => decisions.push(decision)}
+          onDecision={(decision) => {
+            decisions.push(decision);
+          }}
         />,
       );
     });
@@ -525,3 +528,138 @@ describe('ApprovalCard folded per-call content', () => {
     expect(view.container.querySelector('[data-testid="approval-expand-to-allow"]')).toBeNull();
   });
 });
+
+it.each([false, true])(
+  'stops offering an approval at the exact deadline (desktop=%s)',
+  (desktop) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T12:00:00.000Z'));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const onDecision = vi.fn();
+    try {
+      const input: ApprovalSummary = {
+        ...approval,
+        expiresAt: '2026-09-01T12:00:01.000Z',
+        toolName: desktop ? 'desktop_control' : 'skill_draft_create',
+        capability: desktop ? 'external.open' : 'skill.draft.write',
+        execution: JSON.stringify({
+          kind: 'chat',
+          skillId: 'qa-draft',
+          files: [{ path: 'SKILL.md', content: '# QA draft' }],
+        }),
+        ...(desktop
+          ? {
+              desktopAction: {
+                kind: 'launch',
+                title: '検証アプリ',
+                mode: 'background',
+                allowTaskGrant: true,
+                notes: [],
+                openDetails: false,
+              },
+            }
+          : {}),
+      };
+      act(() =>
+        root.render(<ApprovalCard approval={input} busy={false} onDecision={onDecision} />),
+      );
+      const allow = container.querySelector<HTMLButtonElement>(
+        '[data-testid="approval-allow-once"]',
+      )!;
+      act(() => vi.advanceTimersByTime(999));
+      expect(allow.disabled).toBe(false);
+      act(() => allow.click());
+      expect(onDecision).toHaveBeenCalledOnce();
+      act(() => vi.advanceTimersByTime(1));
+      expect(allow.disabled).toBe(true);
+      expect(container.textContent).toContain('期限が切れました');
+      expect(container.textContent).toContain('停止してから');
+      act(() => allow.click());
+      expect(onDecision).toHaveBeenCalledOnce();
+      act(() =>
+        container.querySelector<HTMLButtonElement>('[data-testid="approval-deny"]')?.click(),
+      );
+      expect(onDecision).toHaveBeenCalledTimes(2);
+      expect(onDecision.mock.calls[1]?.[0]).toBe('deny');
+    } finally {
+      act(() => root.unmount());
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('keeps answering possible for a legacy card without a usable deadline', () => {
+  vi.useFakeTimers();
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const onDecision = vi.fn();
+  try {
+    act(() =>
+      root.render(
+        <ApprovalCard
+          approval={{ ...approval, expiresAt: '' }}
+          busy={false}
+          onDecision={onDecision}
+        />,
+      ),
+    );
+    act(() => vi.advanceTimersByTime(48 * 60 * 60 * 1000));
+    expect(container.textContent).not.toContain('期限が切れました');
+    const allow = container.querySelector<HTMLButtonElement>(
+      '[data-testid="approval-allow-once"]',
+    )!;
+    act(() => allow.click());
+    expect(onDecision).toHaveBeenCalledWith('allow_once', 0);
+  } finally {
+    act(() => root.unmount());
+    vi.useRealTimers();
+  }
+});
+
+it.each([
+  [
+    'Access modeが別の操作で更新されました。最新状態を読み直してください。',
+    'Access modeが別の操作で更新されました。最新状態を読み直してください。',
+  ],
+  [
+    'IPC validation failed: private technical details',
+    '承認結果を反映できませんでした。最新状態を読み直し、もう一度お試しください。',
+  ],
+])(
+  'shows safe approval feedback on the same card and clears it on retry (case %#)',
+  async (error, expected) => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const resolve = vi
+      .fn()
+      .mockRejectedValueOnce(new Error(error))
+      .mockResolvedValueOnce({
+        ...approval,
+        state: 'resolved',
+        decision: 'allow_once',
+      });
+    vi.stubGlobal('sprintCoder', { approvals: { resolve } });
+    const initial = useAppStore.getState();
+    useAppStore.setState({ approvalsByTask: { [approval.taskId]: [approval] } });
+    const onDecision = (decision: ApprovalDecision, selection?: number) =>
+      useAppStore.getState().resolveApproval(approval.taskId, approval.id, decision, selection);
+    try {
+      await act(async () =>
+        root.render(<ApprovalCard approval={approval} busy={false} onDecision={onDecision} />),
+      );
+      const allow = container.querySelector<HTMLButtonElement>(
+        '[data-testid="approval-allow-once"]',
+      )!;
+      await act(async () => allow.click());
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(expected);
+      expect(container.textContent).not.toContain('private technical details');
+      await act(async () => allow.click());
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      act(() => root.unmount());
+      useAppStore.setState(initial, true);
+      vi.unstubAllGlobals();
+    }
+  },
+);

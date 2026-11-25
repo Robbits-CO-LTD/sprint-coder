@@ -1,3 +1,7 @@
+import {
+  APPROVAL_DECISION_FAILED_MESSAGE,
+  APPROVAL_POLICY_CHANGED_MESSAGE,
+} from '../../approval-feedback';
 import { create } from 'zustand';
 import { applyTeamDetailPatch, publicErrorSchema } from '@sprint-coder/contracts';
 import type {
@@ -314,7 +318,7 @@ type AppState = {
     decision: ApprovalDecision,
     userInputSelection?: number,
     grantScope?: 'app',
-  ): Promise<void>;
+  ): Promise<string | undefined>;
   selectTask(taskId: string): Promise<void>;
   /** Opens the unstarted Task in the same place when one exists; `reuseUnstarted: false` always
    * makes a new Task (for callers that write into the Task they get back). */
@@ -1954,7 +1958,14 @@ export const useAppStore = create<AppState>((set, get) => {
           },
         }));
       } catch (err) {
-        set({ error: describeError(err) });
+        // contextBridge may preserve only Error.message. Match the fixed message rather than
+        // displaying any transport or validation exception.
+        const error =
+          err instanceof Error && err.message === APPROVAL_POLICY_CHANGED_MESSAGE
+            ? APPROVAL_POLICY_CHANGED_MESSAGE
+            : APPROVAL_DECISION_FAILED_MESSAGE;
+        set({ error });
+        return error;
       } finally {
         set((state) => ({
           resolvingApprovalIds: { ...state.resolvingApprovalIds, [approvalId]: undefined },

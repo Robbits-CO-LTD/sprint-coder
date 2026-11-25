@@ -1,3 +1,4 @@
+import { APPROVAL_DECISION_FAILED_MESSAGE } from '../../approval-feedback';
 import { useEffect, useId, useRef, useState } from 'react';
 import { Monitor, TriangleAlert } from './icons';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
@@ -9,16 +10,91 @@ import { WorkerAvatar } from './WorkerAvatar';
 type ApprovalCardProps = {
   approval: ApprovalSummary;
   busy: boolean;
-  onDecision: (decision: ApprovalDecision, userInputSelection?: number, grantScope?: 'app') => void;
+  onDecision: (
+    decision: ApprovalDecision,
+    userInputSelection?: number,
+    grantScope?: 'app',
+  ) => void | Promise<string | undefined>;
 };
 
-export function ApprovalCard(props: ApprovalCardProps) {
-  // A desktop-control run gets its own card, described by Main; any other approval, and a
-  // desktop-control approval recorded before that description existed, keeps the command card.
-  return props.approval.desktopAction === undefined ? (
-    <CommandApprovalCard {...props} />
+type ApprovalCardViewProps = Omit<ApprovalCardProps, 'onDecision'> & {
+  expired: boolean;
+  decisionError: string | null;
+  onDecision: (...args: Parameters<ApprovalCardProps['onDecision']>) => void;
+};
+
+export function ApprovalCard({ approval, onDecision, ...props }: ApprovalCardProps) {
+  const deadline = Date.parse(approval.expiresAt);
+  const [now, setNow] = useState(Date.now);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const expired = Number.isFinite(deadline) && now >= deadline;
+  useEffect(() => {
+    if (!Number.isFinite(deadline)) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      clearTimeout(timer);
+      const current = Date.now();
+      setNow((previous) => Math.max(previous, current));
+      if (current < deadline)
+        timer = setTimeout(check, Math.min(deadline - current, 2_147_483_647));
+    };
+    check();
+    window.addEventListener('focus', check);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('focus', check);
+    };
+  }, [deadline]);
+
+  const view: ApprovalCardViewProps = {
+    ...props,
+    approval,
+    expired,
+    decisionError,
+    onDecision: (...args) => {
+      // A backgrounded window's timer can be delayed. Check the clock before dispatch too.
+      if (
+        (expired || Date.now() >= deadline) &&
+        (args[0] !== 'deny' || approval.toolName === 'request_user_input')
+      ) {
+        setNow((previous) => Math.max(previous, Date.now()));
+        return;
+      }
+      setDecisionError(null);
+      const pending = onDecision(...args);
+      if (pending !== undefined)
+        void pending.then(
+          (error) => {
+            if (error !== undefined) setDecisionError(error);
+          },
+          () => setDecisionError(APPROVAL_DECISION_FAILED_MESSAGE),
+        );
+    },
+  };
+  return approval.desktopAction === undefined ? (
+    <CommandApprovalCard {...view} />
   ) : (
-    <DesktopControlApprovalCard {...props} action={props.approval.desktopAction} />
+    <DesktopControlApprovalCard {...view} action={approval.desktopAction} />
+  );
+}
+
+function ApprovalDecisionFeedback({
+  expired,
+  decisionError,
+}: Pick<ApprovalCardViewProps, 'expired' | 'decisionError'>) {
+  return (
+    <>
+      {expired && (
+        <p role="status" className="approval-card__note">
+          承認の期限が切れました。続けるには、現在のTurnを停止してから依頼を送り直してください。
+        </p>
+      )}
+      {decisionError !== null && (
+        <p role="alert" className="approval-card__note">
+          {decisionError}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -43,7 +119,13 @@ function WorkerRequester({ id, requester }: { id: string; requester: ApprovalReq
   );
 }
 
-function CommandApprovalCard({ approval, busy, onDecision }: ApprovalCardProps) {
+function CommandApprovalCard({
+  approval,
+  busy,
+  onDecision,
+  expired,
+  decisionError,
+}: ApprovalCardViewProps) {
   const cardRef = useRef<HTMLElement>(null);
   const [executionExpanded, setExecutionExpanded] = useState(false);
   const ids = useId();
@@ -77,7 +159,7 @@ function CommandApprovalCard({ approval, busy, onDecision }: ApprovalCardProps) 
   // something unread would sit. Deny stays available throughout.
   const perCallContentCollapsed = perCall !== null && executionIsLong && !executionExpanded;
   const allowDisabled =
-    busy || liveDetailMissing || perCallContentMissing || perCallContentCollapsed;
+    busy || expired || liveDetailMissing || perCallContentMissing || perCallContentCollapsed;
   const labelledBy = userInput === null ? `${headingId} ${targetId}` : headingId;
 
   useEffect(() => {
@@ -169,6 +251,7 @@ function CommandApprovalCard({ approval, busy, onDecision }: ApprovalCardProps) 
           </dd>
         </div>
       </dl>
+      <ApprovalDecisionFeedback expired={expired} decisionError={decisionError} />
       <div className="approval-card__actions">
         {/* Each button is named with the card's heading (and target), so two cards side by side
             read apart to a screen reader. */}
@@ -202,7 +285,7 @@ function CommandApprovalCard({ approval, busy, onDecision }: ApprovalCardProps) 
             type="button"
             id={`${ids}-deny`}
             aria-labelledby={`${ids}-deny ${labelledBy}`}
-            disabled={busy}
+            disabled={busy || (expired && userInput !== null)}
             onClick={() => onDecision('deny', userInput === null ? undefined : 2)}
           >
             {userInput?.choices[2] ?? '拒否'}
@@ -230,8 +313,10 @@ function DesktopControlApprovalCard({
   approval,
   busy,
   onDecision,
+  expired,
+  decisionError,
   action,
-}: ApprovalCardProps & { action: DesktopAction }) {
+}: ApprovalCardViewProps & { action: DesktopAction }) {
   const cardRef = useRef<HTMLElement>(null);
   const ids = useId();
   const headingId = `${ids}-heading`;
@@ -355,6 +440,7 @@ function DesktopControlApprovalCard({
           {desktopAppGrantNote(appGrant.app)}
         </p>
       )}
+      <ApprovalDecisionFeedback expired={expired} decisionError={decisionError} />
       <div className="approval-card__actions">
         <button
           type="button"
@@ -362,7 +448,7 @@ function DesktopControlApprovalCard({
           data-testid="approval-allow-once"
           id={`${ids}-once`}
           aria-labelledby={`${ids}-once ${labelledBy}`}
-          disabled={busy}
+          disabled={busy || expired}
           onClick={() => onDecision('allow_once')}
         >
           今回のみ許可
@@ -373,7 +459,7 @@ function DesktopControlApprovalCard({
             type="button"
             id={`${ids}-task`}
             aria-labelledby={`${ids}-task ${labelledBy}`}
-            disabled={busy}
+            disabled={busy || expired}
             onClick={() => onDecision('allow_task')}
           >
             Task中許可
@@ -386,7 +472,7 @@ function DesktopControlApprovalCard({
             id={`${ids}-app`}
             aria-labelledby={`${ids}-app ${labelledBy}`}
             aria-describedby={`${ids}-app-note`}
-            disabled={busy}
+            disabled={busy || expired}
             onClick={() => onDecision('allow_task', undefined, 'app')}
           >
             このアプリは Task 中許可
