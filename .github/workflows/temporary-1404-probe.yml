@@ -37,7 +37,7 @@ jobs:
           metadata="$RUNNER_TEMP/sc-1404-gh-formula.json"
           "$brew" info --json=v2 gh > "$metadata"
           tag=$("$brew" ruby -e 'puts Utils::Bottles.tag')
-          digest=$(/usr/bin/jq -er --arg tag "$tag" '.formulae[0].bottle.stable.files[$tag].sha256' "$metadata")
+          digest=$(jq -er --arg tag "$tag" '.formulae[0].bottle.stable.files[$tag].sha256' "$metadata")
           "$brew" fetch --force --bottle-tag="$tag" gh
           archive=$("$brew" --cache --bottle-tag="$tag" gh)
           test "$(/usr/bin/shasum -a 256 "$archive" | cut -d' ' -f1)" = "$digest"
