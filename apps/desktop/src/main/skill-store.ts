@@ -177,6 +177,7 @@ export class SkillStoreError extends Error {
       | 'CONFLICT'
       | 'NOT_FOUND'
       | 'NAME_EXISTS'
+      | 'PREVIEW_LIMIT'
       | 'AUTO_SELECTION_LIMIT'
       | 'EXPORT_EXISTS',
     message: string,
@@ -196,6 +197,7 @@ const issuedCandidates = new WeakSet<object>();
 const issuedPreviews = new WeakSet<object>();
 
 export class SkillStore {
+  private draftSave: Promise<void> = Promise.resolve();
   private constructor(private readonly rootPath: string) {}
 
   static async open(input: { rootPath: string }): Promise<SkillStore> {
@@ -500,12 +502,22 @@ export class SkillStore {
     };
   }
 
-  async saveCreatedDraft(draft: SkillDraft): Promise<void> {
+  saveCreatedDraft(draft: SkillDraft): Promise<void> {
+    // Serialize the count and publication so simultaneous creates cannot claim the last slot.
+    const save = this.draftSave.then(() => this.persistCreatedDraft(draft));
+    this.draftSave = save.catch(() => undefined);
+    return save;
+  }
+
+  private async persistCreatedDraft(draft: SkillDraft): Promise<void> {
     const parsed = skillDraftSchema.parse(draft);
     const validation = this.validateCreatedSkill(parsed.skillId, parsed.files);
     if (validation.kind !== parsed.kind || validation.digest !== parsed.digest)
       throw new SkillStoreError('SOURCE_CHANGED', 'Skill Draft identity does not match its files');
     const draftsRoot = join(this.rootPath, 'drafts');
+    const published = (await readdir(draftsRoot)).filter((name) => !name.startsWith('.'));
+    if (published.length >= 64)
+      throw new SkillStoreError('PREVIEW_LIMIT', 'Skill Draft数の上限に達しました');
     const destination = safeDraftPath(draftsRoot, parsed.id);
     if (await pathExists(destination))
       throw new SkillStoreError('CONFLICT', 'Skill Draft already exists');
