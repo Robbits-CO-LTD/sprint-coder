@@ -1,4 +1,8 @@
 // @vitest-environment jsdom
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { TurnEvent, TurnSnapshot } from '@sprint-coder/contracts';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -284,3 +288,130 @@ describe('Timeline history (issue #842)', () => {
     expect(html).not.toContain('<span>writer</span><span>失敗');
   });
 });
+
+it('keeps a stop notice committed while the selected Task snapshot is pending', async () => {
+  const notice = 'GitHubから結果を確認できませんでした。再送する前に送信先を確認してください。';
+  let finishSnapshot!: (snapshot: TurnSnapshot) => void;
+  const pendingSnapshot = new Promise<TurnSnapshot>((resolve) => {
+    finishSnapshot = resolve;
+  });
+  let storedMessages = [message({ id: 'request' })];
+  const readMessages = vi.fn(async () => storedMessages);
+  const subscribe = vi.fn(() => () => undefined);
+  vi.stubGlobal('sprintCoder', {
+    tasks: { messages: readMessages },
+    turns: { snapshot: () => pendingSnapshot, subscribe },
+  });
+
+  const selection = useAppStore.getState().selectTask('task-1');
+  const readsBeforeStop = readMessages.mock.calls.length;
+  storedMessages = [
+    ...storedMessages,
+    message({ id: 'notice', author: 'assistant', content: notice }),
+  ];
+  finishSnapshot({
+    lastSeq: 2,
+    activeTurn: null,
+    queued: [],
+    contextUsage: { usedTokens: 0, hardCapTokens: 100, projectTokens: 0, fragments: [] },
+    pendingApprovals: [],
+    activatedSkills: [],
+    latestTurnDiff: null,
+    interruptedTurnIds: [],
+    canceledTurnIds: [],
+    autoDecisions: [],
+    autoDecisionCounts: [],
+  });
+  await selection;
+
+  const html = await render();
+  expect(html.split(notice)).toHaveLength(2);
+  expect(readsBeforeStop).toBe(0);
+  expect(readMessages).toHaveBeenCalledOnce();
+  expect(subscribe).toHaveBeenCalledWith('task-1', expect.any(Function), { afterSeq: 2 });
+});
+
+if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
+  it.each(['live', 'during-open', 'replayed'] as const)(
+    'shows one persisted GitHub stop notice through Timeline (%s)',
+    async (timing) => {
+      const { SqlitePersistenceClient } = await import('../../../main/persistence');
+      const folder = mkdtempSync(join(tmpdir(), 'sc-stop-notice-renderer-'));
+      const database = join(folder, 'sprint-coder.sqlite3');
+      let persistence = new SqlitePersistenceClient(database);
+      try {
+        const target = persistence.createTask('GitHub Stop fixture');
+        const other = persistence.createTask('Other fixture');
+        const started = persistence.startTurn(target.id, 'Synthetic request');
+        const notice =
+          'GitHubから結果を確認できませんでした。二重投稿を避けるため、再送する前にリポジトリのIssue一覧を確認してください。';
+        let deliver = (_event: TurnEvent): void => undefined;
+        let stopped = false;
+        let replayed = false;
+        function stop() {
+          stopped = true;
+          const { event } = persistence.cancelTurnAndFinishGoal(target.id, started.turnId, notice);
+          if (!event) throw new Error('Missing synthetic completion');
+          return event;
+        }
+        vi.stubGlobal('sprintCoder', {
+          tasks: {
+            messages: async (taskId: string) => {
+              if (taskId === target.id && !stopped && timing === 'replayed') stop();
+              return persistence.listMessages(taskId);
+            },
+          },
+          turns: {
+            snapshot: async (taskId: string) => {
+              if (taskId === target.id && !stopped && timing === 'during-open') stop();
+              return persistence.snapshot(taskId);
+            },
+            subscribe: (
+              taskId: string,
+              handler: (event: TurnEvent) => void,
+              options?: { afterSeq: number },
+            ) => {
+              deliver = handler;
+              for (const event of persistence.listEventsAfter(taskId, options?.afterSeq ?? 0)) {
+                if (event.type === 'turn.completed' && event.state === 'canceled') replayed = true;
+                handler(event);
+              }
+              return () => undefined;
+            },
+          },
+        });
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+        const container = document.createElement('div');
+        const root = createRoot(container);
+        try {
+          await act(async () => {
+            await useAppStore.getState().selectTask(target.id);
+            root.render(<Timeline taskId={target.id} />);
+          });
+          if (timing === 'live') await act(async () => deliver(stop()));
+          expect(replayed).toBe(timing === 'replayed');
+          const verify = () => {
+            expect(container.textContent?.split(notice)).toHaveLength(2);
+            expect(container.querySelector('[data-testid="approval-canceled-row"]')).toBeNull();
+          };
+          verify();
+          expect(
+            container.querySelectorAll('[data-testid="run-card"][data-run-status="canceled"]'),
+          ).toHaveLength(timing === 'during-open' ? 0 : 1);
+          persistence.close();
+          persistence = new SqlitePersistenceClient(database);
+          await act(async () => {
+            await useAppStore.getState().selectTask(other.id);
+            await useAppStore.getState().selectTask(target.id);
+          });
+          verify();
+          expect(container.querySelector('[data-testid="run-card"]')).toBeNull();
+        } finally {
+          await act(async () => root.unmount());
+        }
+      } finally {
+        persistence.close();
+        rmSync(folder, { recursive: true, force: true });
+      }
+    },
+  );

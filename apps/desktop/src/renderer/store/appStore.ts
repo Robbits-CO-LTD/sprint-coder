@@ -2029,14 +2029,18 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       const sprintCoder = window.sprintCoder;
 
-      const [messagesResult, snapshot, commandsResult, approvalHistoryResult] = await Promise.all([
-        sprintCoder.tasks
-          .messages(taskId)
-          .then((v) => ({ ok: true as const, v }))
-          .catch((err: unknown) => ({ ok: false as const, err })),
+      const snapshotRequest =
         typeof sprintCoder.turns.snapshot === 'function'
           ? sprintCoder.turns.snapshot(taskId).catch(() => null)
-          : Promise.resolve(null),
+          : Promise.resolve(null);
+      // Replay starts after the snapshot's lastSeq. Read persisted messages afterwards so a
+      // terminal event already covered by the snapshot cannot leave its message out of history.
+      const [messagesResult, snapshot, commandsResult, approvalHistoryResult] = await Promise.all([
+        snapshotRequest
+          .then(() => sprintCoder.tasks.messages(taskId))
+          .then((v) => ({ ok: true as const, v }))
+          .catch((err: unknown) => ({ ok: false as const, err })),
+        snapshotRequest,
         typeof sprintCoder.commands?.list === 'function'
           ? sprintCoder.commands
               .list(taskId)
