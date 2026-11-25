@@ -10,7 +10,6 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
-  type EffectiveWorkspaceSet,
   graphRenderInputSchema,
   graphGetInputSchema,
   graphSourcesInputSchema,
