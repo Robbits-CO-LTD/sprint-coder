@@ -92,6 +92,23 @@ describe('prompt context compiler', () => {
     }
   });
 
+  it('does not start Git when a configured Workspace folder is unavailable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-rule-disconnect-'));
+    await rm(root, { recursive: true, force: true });
+    const listFiles = vi.spyOn(safeGit, 'safeGitExecFile');
+    try {
+      expect(
+        await discoverWorkspaceRules({
+          ...workspace,
+          roots: [{ ...workspace.roots[0]!, path: root }],
+        }),
+      ).toEqual([]);
+      expect(listFiles).not.toHaveBeenCalled();
+    } finally {
+      listFiles.mockRestore();
+    }
+  });
+
   it('reports non-Git folders separately from a clean Git checkout', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-vcs-'));
     const repo = join(root, 'repo');

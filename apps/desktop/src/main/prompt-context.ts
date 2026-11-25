@@ -371,7 +371,10 @@ export async function discoverWorkspaceRules(
   canRead?: WorkspaceRuleReadPolicy,
 ): Promise<PromptWorkspaceRule[]> {
   const candidates = new Map<string, readonly string[]>();
-  for (const { path } of workspace.roots) candidates.set(path, await workspaceRuleCandidates(path));
+  for (const { path } of workspace.roots) {
+    if (currentWorkspaceRootIdentityDigest(path) !== null)
+      candidates.set(path, await workspaceRuleCandidates(path));
+  }
   return readWorkspaceRules(workspace, candidates, canRead);
 }
 
