@@ -347,8 +347,6 @@ export class SkillSettingsService {
   }
 
   async createDraft(input: SkillDraftCreateInput): Promise<SkillDraft> {
-    if (this.drafts.size >= 64)
-      throw new SkillSettingsError('PREVIEW_LIMIT', 'Skill Draft数の上限に達しました');
     const store = await this.getStore();
     const validation = store.validateCreatedSkill(input.skillId, input.files);
     if (validation.kind !== input.kind)
@@ -558,6 +556,8 @@ export function skillSettingsPublicError(error: unknown): SkillSettingsError {
       return new SkillSettingsError('FORBIDDEN', 'Skillの保存場所に安全にアクセスできません。');
     if (error.code === 'NAME_EXISTS')
       return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.nameExists);
+    if (error.code === 'PREVIEW_LIMIT')
+      return new SkillSettingsError('PREVIEW_LIMIT', 'Skill Draft数の上限に達しました');
     if (error.code === 'AUTO_SELECTION_LIMIT')
       return new SkillSettingsError('CONFLICT', SKILL_CONFLICT_REASONS.autoSelectionLimit);
     if (error.code === 'EXPORT_EXISTS')

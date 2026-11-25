@@ -2,7 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SkillSettingsService } from './skill-settings-service';
+import { createSkillDraftWithPublicError, SkillSettingsService } from './skill-settings-service';
 
 const roots: string[] = [];
 
@@ -45,6 +45,41 @@ it('rejects incompatible or conflicting Skill drafts before displaying them for 
   expect(installed.ref.digest).toBe(draft.digest);
   await expect(service.createDraft(valid)).rejects.toMatchObject({ code: 'NAME_EXISTS' });
   expect(await service.listDrafts()).toEqual([]);
+});
+
+it('enforces the persisted draft limit before listing and across simultaneous creates', async () => {
+  const root = await home();
+  const service = new SkillSettingsService({ homePath: root });
+  const input = {
+    kind: 'chat' as const,
+    skillId: 'review-helper',
+    files: [
+      { path: 'SKILL.md', content: '---\nname: Review\ndescription: Review files\n---\nReview.' },
+    ],
+  };
+  for (let index = 0; index < 63; index++) await service.createDraft(input);
+
+  const reopened = new SkillSettingsService({ homePath: root });
+  const results = await Promise.allSettled([
+    reopened.createDraft(input),
+    reopened.createDraft(input),
+  ]);
+  expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+  expect(results).toContainEqual({
+    status: 'rejected',
+    reason: expect.objectContaining({ code: 'PREVIEW_LIMIT' }),
+  });
+
+  const atLimit = new SkillSettingsService({ homePath: root });
+  await expect(createSkillDraftWithPublicError(atLimit, input)).rejects.toMatchObject({
+    code: 'PREVIEW_LIMIT',
+    message: 'Skill Draft数の上限に達しました',
+  });
+  const drafts = await atLimit.listDrafts();
+  expect(drafts).toHaveLength(64);
+  await atLimit.discardDraft(drafts[0]!.id);
+  await atLimit.createDraft(input);
+  expect(await atLimit.listDrafts()).toHaveLength(64);
 });
 
 describe('Skill activation source boundary', () => {
