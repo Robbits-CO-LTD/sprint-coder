@@ -49,7 +49,8 @@ describe('prompt context compiler', () => {
   });
 
   it('reads the actual Claude.md spelling and excludes denied or protected nested instructions', async () => {
-    const root = await realpath(await mkdtemp(join(process.cwd(), '.sprint-coder-rules-')));
+    const fixtureParent = process.platform === 'darwin' ? tmpdir() : process.cwd();
+    const root = await realpath(await mkdtemp(join(fixtureParent, '.sprint-coder-rules-')));
     const configured = {
       ...workspace,
       roots: [{ ...workspace.roots[0]!, path: root }],

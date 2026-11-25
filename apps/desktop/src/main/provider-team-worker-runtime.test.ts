@@ -1,3 +1,5 @@
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   workerCompletionSchema,
@@ -1011,6 +1013,80 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       expect(close).toHaveBeenCalledOnce();
     },
   );
+  it('reads instructions from the isolated ACP writer only after binding its Workspace', async () => {
+    const root = await realpath(await mkdtemp(join(process.cwd(), '.sprint-coder-acp-rules-')));
+    const cli: ProviderConnection = {
+      ...connection,
+      id: 'builtin:antigravity-cli',
+      providerId: 'antigravity',
+      runtimeKind: 'builtin_cli',
+    };
+    try {
+      await writeFile(join(root, 'AGENTS.md'), 'agents rules from the isolated writer');
+      await writeFile(join(root, 'Claude.md'), 'Claude rules from the isolated writer');
+      let boundTurn: string | undefined;
+      const close = vi.fn();
+      const runtime: ProviderRuntime = {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        async *execute(_connection, request) {
+          expect(request.messages).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                role: 'user',
+                content: expect.stringContaining('agents rules from the isolated writer'),
+              }),
+              expect.objectContaining({
+                role: 'user',
+                content: expect.stringContaining('Claude rules from the isolated writer'),
+              }),
+            ]),
+          );
+          yield { type: 'output_delta', text: '完了' };
+          yield { type: 'completed', stopReason: 'end_turn' };
+        },
+      };
+      const registry = new MainProviderRegistry();
+      registry.register({ runtimeKind: 'builtin_cli', providerId: 'antigravity', runtime });
+      const policy = vi.fn(
+        (_taskId: string, turnId?: string) => () => boundTurn !== undefined && turnId === boundTurn,
+      );
+      const adapter = controlledProviderAdapter(runtime, {
+        registry,
+        getConnection: () => cli,
+        workspaceRuleReadPolicy: policy,
+        openCliWorkspace: async (_input, turnId) => {
+          boundTurn = turnId;
+          return { tools: [], writable: true, invoke: vi.fn(), close };
+        },
+      });
+      await adapter.execute({
+        worker: {
+          ...providerWorker(),
+          writeCapable: true,
+          modelSelection: {
+            connectionId: cli.id,
+            requestedProvider: 'antigravity',
+            requestedModel: 'sample',
+          },
+        },
+        envelope,
+        accessMode: 'workspace-write',
+        content: 'Write a note',
+        workspaceSet: {
+          primaryRootId: 'isolated',
+          roots: [{ rootId: 'isolated', path: root, role: 'primary', label: 'worktree' }],
+          digest: 'b'.repeat(64),
+        },
+      });
+      expect(policy).toHaveBeenCalledWith('task-1', boundTurn);
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(['grant', 'deny', 'changed'])(
     'binds a desktop Worker screenshot to one dispatch: %s',
     async (mode) => {

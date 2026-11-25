@@ -1644,7 +1644,7 @@ export class IpcRouter {
       onUnsettledTurnsChanged: (taskId) => this.refreshTaskRunningWork(taskId),
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
-      workspaceRuleReadPolicy: (taskId) => this.workspaceRuleReadPolicy(taskId),
+      workspaceRuleReadPolicy: (taskId, turnId) => this.workspaceRuleReadPolicy(taskId, turnId),
       fallback: this.cliTeamWorkerRuntime,
       verification: this.providerVerification,
       registry: this.providerRegistry,
@@ -8536,13 +8536,17 @@ export class IpcRouter {
       if (bound.path !== root || boundIdentity !== identity) return false;
       const target = { tool: 'Read' as const, relativePath };
       if (
-        matchProjectPermissionRules(this.projectPermissionTrust.snapshot(original.path), target) ===
-        'deny'
+        matchProjectPermissionRules(
+          this.projectPermissionTrust.snapshot(original.path, originalIdentity),
+          target,
+        ) === 'deny'
       )
         return false;
       if (original.path === root) return true;
-      return matchProjectPermissionRules(this.projectPermissionTrust.snapshot(root), target) ===
-        'deny'
+      return matchProjectPermissionRules(
+        this.projectPermissionTrust.snapshot(root, boundIdentity),
+        target,
+      ) === 'deny'
         ? false
         : 'sealed-team-isolation';
     };

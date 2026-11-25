@@ -76,7 +76,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     /** The labels Main declared for those roots (issue #849). */
     knownWorkspaceLabels: readonly string[];
   }): boolean | TeamWorkerEgressVerdict;
-  workspaceRuleReadPolicy?: (taskId: string) => WorkspaceRuleReadPolicy;
+  workspaceRuleReadPolicy?: (taskId: string, turnId?: string) => WorkspaceRuleReadPolicy;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   managerGuidance: string | ((worker: AgentRecord) => string);
   managerTools: readonly ProviderTool[];
@@ -229,14 +229,6 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
       ),
     );
-    const workspaceRules =
-      input.workspaceSet === undefined
-        ? []
-        : await discoverWorkspaceRules(
-            input.workspaceSet,
-            this.deps.workspaceRuleReadPolicy?.(input.worker.taskId),
-          );
-    input.signal?.throwIfAborted();
     if (input.worker.writeCapable && (!externalCli || !this.deps.openCliWorkspace))
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
@@ -313,7 +305,6 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       ...(availableTools.length > 0 && effectiveToolGuidance !== ''
         ? [{ role: 'system' as const, content: effectiveToolGuidance }]
         : []),
-      ...workspaceRuleProviderMessages(workspaceRules),
       ...projectContextProviderMessages(inheritedContext.projectItems),
       ...inheritedContext.fragments.map((fragment) => ({
         role:
@@ -344,13 +335,23 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       | undefined;
     try {
       controller.signal.throwIfAborted();
-      if (externalCli && this.deps.openCliWorkspace) {
-        workspace = await this.deps.openCliWorkspace(input, randomUUID());
+      const workspaceTurnId = externalCli && this.deps.openCliWorkspace ? randomUUID() : undefined;
+      if (workspaceTurnId !== undefined && this.deps.openCliWorkspace) {
+        workspace = await this.deps.openCliWorkspace(input, workspaceTurnId);
         availableTools.push(...workspace.tools);
         if (workspace.desktopGuidance)
           messages.unshift({ role: 'system', content: workspace.desktopGuidance });
         if (input.accessMode === 'workspace-write' && !workspace.writable)
           messages.unshift({ role: 'system', content: WORKER_CANNOT_WRITE_NOTICE });
+      }
+      if (input.workspaceSet !== undefined) {
+        const workspaceRules = await discoverWorkspaceRules(
+          input.workspaceSet,
+          this.deps.workspaceRuleReadPolicy?.(input.worker.taskId, workspaceTurnId),
+        );
+        controller.signal.throwIfAborted();
+        const firstNonSystem = messages.findIndex(({ role }) => role !== 'system');
+        messages.splice(firstNonSystem, 0, ...workspaceRuleProviderMessages(workspaceRules));
       }
       const runtime = this.deps.registry.resolve(connection);
       const streamBudget = new ProviderStreamBudget();
