@@ -1,3 +1,4 @@
+import { matchProjectPermissionRules } from './project-permission-settings';
 import { APPROVAL_POLICY_CHANGED_MESSAGE } from '../approval-feedback';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { ExternalAcpRuntime } from './external-acp-runtime';
@@ -77,6 +78,7 @@ import {
   sep,
 } from 'node:path';
 import {
+  currentWorkspaceRootIdentityDigest,
   protectedWorkspaceRootClassification,
   protectedWorkspaceRootLocationUnknown,
   protectedWorkspaceRootLabel,
@@ -306,6 +308,9 @@ import { digestCanonical } from './context-compiler';
 import { createEmptyToolCatalogSnapshot } from './default-tools';
 import {
   capturePromptWorkspace,
+  discoverWorkspaceRules,
+  workspaceRuleProviderMessages,
+  type WorkspaceRuleReadPolicy,
   compilePromptGuidance,
   injectPromptGuidance,
 } from './prompt-context';
@@ -1513,6 +1518,7 @@ export class IpcRouter {
     const workerWriteApprovalRequiredFor = (taskId: string): boolean =>
       workerWritesNeedApproval(this.persistence.getPermissionPolicy(taskId).preset);
     this.cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
+      workspaceRuleReadPolicy: (taskId, turnId) => this.workspaceRuleReadPolicy(taskId, turnId),
       // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
       // quota failures may use another policy-allowed real AI; permission failures remain explicit,
       // and simulated Team output is never used in production.
@@ -1638,6 +1644,7 @@ export class IpcRouter {
       onUnsettledTurnsChanged: (taskId) => this.refreshTaskRunningWork(taskId),
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
+      workspaceRuleReadPolicy: (taskId, turnId) => this.workspaceRuleReadPolicy(taskId, turnId),
       fallback: this.cliTeamWorkerRuntime,
       verification: this.providerVerification,
       registry: this.providerRegistry,
@@ -1927,7 +1934,10 @@ export class IpcRouter {
       workerRequesterFor: (taskId, turnId, callId) =>
         this.approvalWorkerRequesterOf(taskId, turnId, callId),
     });
-    this.projectPermissionTrust = new ProjectPermissionTrust(persistence);
+    this.projectPermissionTrust = new ProjectPermissionTrust(
+      persistence,
+      persistence.permissionRulesHome,
+    );
     this.permissionBroker = new PermissionBroker(
       persistence,
       {
@@ -3437,16 +3447,21 @@ export class IpcRouter {
         const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
         return this.projectPermissionTrust.review(
           workspace.roots.filter((root) => root.status === 'available').map((root) => root.path),
-          async (root, rules) => {
+          async (root, rules, scope) => {
             const pages = projectRuleReviewPages(rules);
+            const shared = scope === 'global';
             for (const [index, page] of pages.entries()) {
               const accepted = await this.fullAccessConfirmation.confirm(async (signal) => {
                 const result = await dialog.showMessageBox(this.window, {
                   signal,
                   type: 'question',
-                  title: 'プロジェクトの権限ルール',
-                  message: `${root} の権限ルールを確認してください（${index + 1}/${pages.length}）`,
-                  detail: `このフォルダーの以前のルールを次の内容で置き換えます。\n\n${page}`,
+                  title: shared ? '全体の権限ルール' : 'プロジェクトの権限ルール',
+                  message: shared
+                    ? `すべての作業フォルダーに適用するルールを確認してください（${index + 1}/${pages.length}）`
+                    : `${root} の権限ルールを確認してください（${index + 1}/${pages.length}）`,
+                  detail: shared
+                    ? `${root} の .sprint-coder/settings.json にあるルールを適用します。\n\n${page}`
+                    : `このフォルダーの以前のルールを次の内容で置き換えます。\n\n${page}`,
                   buttons: [
                     'キャンセル',
                     index + 1 === pages.length ? 'この内容を適用' : '次のルールへ',
@@ -6626,7 +6641,10 @@ export class IpcRouter {
     const promptWorkspace =
       external || started.runtimeKind === 'mock'
         ? undefined
-        : await capturePromptWorkspace(runtimeWorkspaceSet);
+        : await capturePromptWorkspace(
+            runtimeWorkspaceSet,
+            this.workspaceRuleReadPolicy(taskId, started.turnId),
+          );
     if (
       promptWorkspace !== undefined &&
       (this.canceledRuntimeTurns.has(started.turnId) ||
@@ -8491,6 +8509,48 @@ export class IpcRouter {
     );
   }
 
+  private workspaceRuleReadPolicy(taskId: string, turnId?: string): WorkspaceRuleReadPolicy {
+    return (root, relativePath, rootId, identity) => {
+      if (!this.projectPermissionTrust) return false;
+      const worker = turnId === undefined ? undefined : this.managedWorkerTurn.get(turnId);
+      const ownerTurn = worker?.parentTurnId ?? turnId;
+      const originalWorkspace =
+        ownerTurn === undefined
+          ? this.persistence.getEffectiveWorkspaceSet(taskId)
+          : this.persistence.readTurnWorkspaceSetForTask(taskId, ownerTurn);
+      const original = originalWorkspace?.roots.find((entry) => entry.rootId === rootId);
+      if (original === undefined || original.status !== 'available') return false;
+      const identities =
+        ownerTurn === undefined
+          ? this.persistence.getEffectiveWorkspaceRootIdentities(taskId)
+          : this.persistence.getTurnWorkspaceRootIdentities(ownerTurn);
+      const originalIdentity = identities.get(rootId);
+      if (
+        originalIdentity === undefined ||
+        currentWorkspaceRootIdentityDigest(original.path) !== originalIdentity
+      )
+        return false;
+      const bound = worker?.workspace.roots.find((entry) => entry.rootId === rootId) ?? original;
+      const boundIdentity =
+        worker?.mutationBindings.get(rootId)?.rootIdentityDigest ?? originalIdentity;
+      if (bound.path !== root || boundIdentity !== identity) return false;
+      const target = { tool: 'Read' as const, relativePath };
+      if (
+        matchProjectPermissionRules(
+          this.projectPermissionTrust.snapshot(original.path, originalIdentity),
+          target,
+        ) === 'deny'
+      )
+        return false;
+      if (original.path === root) return true;
+      return matchProjectPermissionRules(
+        this.projectPermissionTrust.snapshot(root, boundIdentity),
+        target,
+      ) === 'deny'
+        ? false
+        : 'sealed-team-isolation';
+    };
+  }
   private prepareContext(taskId: string, turnId: string, teamSkill = false): PreparedContext {
     const prepared = this.persistence.prepareContext(taskId, turnId);
     for (const event of prepared.usageEvents) this.publish(event);
@@ -9133,7 +9193,15 @@ export class IpcRouter {
         userMessageId,
         providerImageDispatch?.inlineImages,
       );
-      messages.unshift(...projectContextProviderMessages(context.projectItems));
+      const workspaceRules = await discoverWorkspaceRules(
+        toRuntimeWorkspaceSet(started.workspaceSet),
+        this.workspaceRuleReadPolicy(taskId, started.turnId),
+      );
+      controller.signal.throwIfAborted();
+      messages.unshift(
+        ...workspaceRuleProviderMessages(workspaceRules),
+        ...projectContextProviderMessages(context.projectItems),
+      );
       const selectedModel = this.modelCatalog.find(connectionId, modelId);
       const toolCalling = externalCli ? true : selectedModel?.toolCalling.value;
       if (skillCreatorTurn && toolCalling === false)

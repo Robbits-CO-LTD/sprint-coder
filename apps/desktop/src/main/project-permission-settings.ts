@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
-import { basename, join, posix, sep, win32 } from 'node:path';
+import { basename, join, posix, relative, sep, win32 } from 'node:path';
 import { z } from 'zod';
 import { APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS } from './approval-display-characters';
 import { currentWorkspaceRootIdentityDigest } from './path-guard';
@@ -25,15 +25,39 @@ export type ProjectPermissionTarget =
 
 const settingsDirectory = '.sprint-coder';
 const settingsFiles = ['settings.json', 'settings.local.json'];
+const globalTrustVersion = 'global-permission-v1';
 const ruleList = z.array(z.string().min(1).max(1024)).max(256);
 const fileSchema = z.object({
   permissions: z.object({ allow: ruleList.optional(), deny: ruleList.optional() }).strict(),
 });
 
+export function globalPermissionSource(home: string): { root: string; trustKey: string } | null {
+  try {
+    const root = realpathSync(home);
+    return { root, trustKey: `${globalTrustVersion}:${root}` };
+  } catch {
+    return null;
+  }
+}
+
+export function loadGlobalPermissionSettings(root: string): ProjectPermissionSettings {
+  return loadPermissionSettings(root, ['settings.json']);
+}
+
 /** Only this plain JSON value is stored after a person confirms the rules in Main. */
 export function loadProjectPermissionSettings(
   workspacePath: string,
   expectedRootIdentity?: string,
+  globalRoot?: string,
+): ProjectPermissionSettings {
+  return loadPermissionSettings(workspacePath, settingsFiles, expectedRootIdentity, globalRoot);
+}
+
+function loadPermissionSettings(
+  workspacePath: string,
+  names: readonly string[],
+  expectedRootIdentity?: string,
+  globalRoot?: string,
 ): ProjectPermissionSettings {
   const allow: string[] = [];
   const deny: string[] = [];
@@ -49,7 +73,13 @@ export function loadProjectPermissionSettings(
     const before = lstatSync(directory, { bigint: true, throwIfNoEntry: false });
     if (before !== undefined) {
       if (!before.isDirectory() || realpathSync(directory) !== directory) throw new Error();
-      for (const name of settingsFiles) {
+      for (const name of names) {
+        if (
+          name === 'settings.json' &&
+          globalRoot !== undefined &&
+          relative(globalRoot, root) === ''
+        )
+          continue;
         const result = readProjectReference({
           workspacePath: root,
           registeredRootIdentity: identity,

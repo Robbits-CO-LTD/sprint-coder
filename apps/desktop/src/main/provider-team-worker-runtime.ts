@@ -1,3 +1,8 @@
+import {
+  discoverWorkspaceRules,
+  workspaceRuleProviderMessages,
+  type WorkspaceRuleReadPolicy,
+} from './prompt-context';
 import { randomUUID } from 'node:crypto';
 import { formatProviderToolResult, providerWorkspaceToolFailure } from './provider-tool-result';
 import { isExternalAcpConnection } from './external-acp-profile';
@@ -71,6 +76,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     /** The labels Main declared for those roots (issue #849). */
     knownWorkspaceLabels: readonly string[];
   }): boolean | TeamWorkerEgressVerdict;
+  workspaceRuleReadPolicy?: (taskId: string, turnId?: string) => WorkspaceRuleReadPolicy;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   managerGuidance: string | ((worker: AgentRecord) => string);
   managerTools: readonly ProviderTool[];
@@ -329,13 +335,23 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       | undefined;
     try {
       controller.signal.throwIfAborted();
-      if (externalCli && this.deps.openCliWorkspace) {
-        workspace = await this.deps.openCliWorkspace(input, randomUUID());
+      const workspaceTurnId = externalCli && this.deps.openCliWorkspace ? randomUUID() : undefined;
+      if (workspaceTurnId !== undefined && this.deps.openCliWorkspace) {
+        workspace = await this.deps.openCliWorkspace(input, workspaceTurnId);
         availableTools.push(...workspace.tools);
         if (workspace.desktopGuidance)
           messages.unshift({ role: 'system', content: workspace.desktopGuidance });
         if (input.accessMode === 'workspace-write' && !workspace.writable)
           messages.unshift({ role: 'system', content: WORKER_CANNOT_WRITE_NOTICE });
+      }
+      if (input.workspaceSet !== undefined) {
+        const workspaceRules = await discoverWorkspaceRules(
+          input.workspaceSet,
+          this.deps.workspaceRuleReadPolicy?.(input.worker.taskId, workspaceTurnId),
+        );
+        controller.signal.throwIfAborted();
+        const firstNonSystem = messages.findIndex(({ role }) => role !== 'system');
+        messages.splice(firstNonSystem, 0, ...workspaceRuleProviderMessages(workspaceRules));
       }
       const runtime = this.deps.registry.resolve(connection);
       const streamBudget = new ProviderStreamBudget();

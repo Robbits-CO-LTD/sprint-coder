@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { matchProjectPermissionRules } from './project-permission-settings';
 import { ProjectPermissionTrust } from './project-permission-trust';
 
 let root: string;
@@ -83,4 +84,64 @@ it('fails closed when either set of rules is unreadable and recovers by confirmi
   expect(trust.snapshot(root).valid).toBe(true);
   writeFileSync(join(root, '.sprint-coder', 'settings.json'), '{');
   expect(trust.snapshot(root).valid).toBe(false);
+});
+
+it('shares only confirmed global allows across projects, with deny taking precedence across layers', async () => {
+  const projectRoot = join(root, 'project');
+  mkdirSync(join(projectRoot, '.sprint-coder'), { recursive: true });
+  const otherRoot = join(root, 'other');
+  mkdirSync(otherRoot);
+  writeFileSync(
+    join(projectRoot, '.sprint-coder', 'settings.json'),
+    JSON.stringify({ permissions: { allow: ['Read(private/a)'], deny: ['Read(src/b)'] } }),
+  );
+  configure(['Read(src/**)'], ['Read(private/**)']);
+  const withGlobal = new ProjectPermissionTrust(store, root);
+  expect(withGlobal.snapshot(projectRoot)).toMatchObject({
+    allow: [],
+    deny: ['Read(private/**)', 'Read(src/b)'],
+  });
+  const confirm = vi.fn(async () => true);
+  await withGlobal.review([projectRoot], confirm, () => true);
+  expect(confirm.mock.calls).toHaveLength(2);
+  const snapshot = withGlobal.snapshot(projectRoot);
+  expect(snapshot.allow).toEqual(['Read(src/**)', 'Read(private/a)']);
+  expect(matchProjectPermissionRules(snapshot, { tool: 'Read', relativePath: 'private/a' })).toBe(
+    'deny',
+  );
+  expect(matchProjectPermissionRules(snapshot, { tool: 'Read', relativePath: 'src/b' })).toBe(
+    'deny',
+  );
+  expect(withGlobal.snapshot(otherRoot).allow).toEqual(['Read(src/**)']);
+  confirm.mockClear();
+  await withGlobal.review([otherRoot], confirm, () => true);
+  expect(confirm).not.toHaveBeenCalled();
+});
+
+it('cannot gain global allows by replacing settings from a workspace that contains home', async () => {
+  const home = join(root, 'home');
+  const homeConfig = join(home, '.sprint-coder');
+  mkdirSync(homeConfig, { recursive: true });
+  const settings = join(homeConfig, 'settings.json');
+  writeFileSync(
+    settings,
+    JSON.stringify({ permissions: { allow: ['Read(src/a)'], deny: ['Bash'] } }),
+  );
+  writeFileSync(
+    join(homeConfig, 'settings.local.json'),
+    JSON.stringify({ permissions: { allow: ['Edit'] } }),
+  );
+  const withGlobal = new ProjectPermissionTrust(store, home);
+  const confirm = vi.fn(async (_path: string, _rules: unknown, _scope: string) => true);
+  await withGlobal.review([home], confirm, () => true);
+  expect(confirm.mock.calls.map((call) => call[2])).toEqual(['global', 'project']);
+  expect(withGlobal.snapshot(home).allow).toEqual(['Read(src/a)', 'Edit']);
+  expect(withGlobal.snapshot(root).allow).toEqual(['Read(src/a)']);
+  writeFileSync(settings, JSON.stringify({ permissions: { allow: ['Bash'] } }));
+  expect(withGlobal.snapshot(root)).toMatchObject({ allow: [], deny: ['Bash'] });
+  expect(withGlobal.snapshot(home)).toMatchObject({ allow: ['Edit'], deny: ['Bash'] });
+  rmSync(settings);
+  expect(withGlobal.snapshot(root)).toMatchObject({ allow: [], deny: ['Bash'] });
+  writeFileSync(settings, '{');
+  expect(withGlobal.snapshot(root).valid).toBe(false);
 });

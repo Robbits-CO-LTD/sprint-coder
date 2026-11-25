@@ -1,6 +1,13 @@
+import { currentWorkspaceRootIdentityDigest, isOrdinaryWorkspaceHistoryPath } from './path-guard';
+import {
+  matchProjectPermissionRules,
+  loadProjectPermissionSettings,
+} from './project-permission-settings';
+import { readProjectReference } from './project-reference-file';
+import { redactSecrets } from './secret-redactor';
 import { codexManagedToolName } from '../runtime-host/managed-tool-names';
-import { lstatSync, readFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeContextFragment, RuntimeWorkspaceSet } from '../runtime-host/protocol';
@@ -26,6 +33,13 @@ export type PromptAgent = Readonly<{
   writeApproval?: 'per-call';
   parentToolNames?: readonly string[];
 }>;
+
+export type WorkspaceRuleReadPolicy = (
+  root: string,
+  relativePath: string,
+  rootId: string,
+  identity: string,
+) => boolean | 'sealed-team-isolation';
 
 export type PromptWorkspaceRule = Readonly<{
   path: string;
@@ -211,15 +225,7 @@ export function injectPromptGuidance(
       source: 'history',
       authority: 'user',
       trust: 'user',
-      content: [
-        '<workspace-rule>',
-        `path: ${JSON.stringify(rule.path)}`,
-        `scope: ${JSON.stringify(rule.scope)}`,
-        `depth: ${rule.depth}`,
-        '',
-        rule.content,
-        '</workspace-rule>',
-      ].join('\n'),
+      content: formatWorkspaceRule(rule),
     }),
   );
   if (systemIndex < 0)
@@ -241,56 +247,119 @@ export function injectPromptGuidance(
   );
 }
 
+function formatWorkspaceRule(rule: PromptWorkspaceRule): string {
+  return [
+    '<workspace-rule>',
+    'path: ' + JSON.stringify(rule.path),
+    'scope: ' + JSON.stringify(rule.scope),
+    'depth: ' + rule.depth,
+    '',
+    rule.content,
+    '</workspace-rule>',
+  ].join('\n');
+}
+
+export function workspaceRuleProviderMessages(rules: readonly PromptWorkspaceRule[]) {
+  return rules.map((rule) => ({ role: 'user' as const, content: formatWorkspaceRule(rule) }));
+}
+
+const ruleNames = ['AGENTS.md', 'CLAUDE.md', 'Claude.md'];
+
 function readWorkspaceRules(
   workspace: RuntimeWorkspaceSet,
   candidates?: ReadonlyMap<string, readonly string[]>,
+  canRead?: WorkspaceRuleReadPolicy,
 ): PromptWorkspaceRule[] {
   const rules: PromptWorkspaceRule[] = [];
   let totalBytes = 0;
   for (const root of [...workspace.roots].sort((left, right) =>
     left.path.localeCompare(right.path),
   )) {
-    for (const path of candidates?.get(root.path) ?? [join(root.path, 'AGENTS.md')]) {
+    const identity = currentWorkspaceRootIdentityDigest(root.path);
+    if (identity === null) continue;
+    const policy =
+      canRead === undefined ? loadProjectPermissionSettings(root.path, identity) : null;
+    const candidatePaths =
+      candidates?.get(root.path) ?? ruleNames.map((name) => join(root.path, name));
+    const claudeNames = new Map<string, string | undefined>();
+    for (const path of candidatePaths) {
+      const name = basename(path);
+      const scope = dirname(path);
+      const relativePath = relative(root.path, path);
+      if (!ruleNames.includes(name)) continue;
+      const authorized =
+        canRead === undefined
+          ? policy === null ||
+            matchProjectPermissionRules(policy, { tool: 'Read', relativePath }) !== 'deny'
+          : canRead(root.path, relativePath, root.rootId, identity);
+      if (
+        authorized === false ||
+        !isOrdinaryWorkspaceHistoryPath(
+          root.path,
+          path,
+          authorized === 'sealed-team-isolation' ? authorized : undefined,
+        )
+      )
+        continue;
       try {
-        const stat = lstatSync(path);
-        if (!stat.isFile() || stat.size > MAX_WORKSPACE_RULE_BYTES) continue;
-        const content = readFileSync(path, 'utf8');
+        if (name !== 'AGENTS.md') {
+          if (!claudeNames.has(scope)) {
+            if (realpathSync.native(scope) !== scope) continue;
+            const entries = readdirSync(scope);
+            claudeNames.set(
+              scope,
+              ['CLAUDE.md', 'Claude.md'].find((entry) => entries.includes(entry)),
+            );
+          }
+          if (claudeNames.get(scope) !== name) continue;
+        }
+        const file = lstatSync(path);
+        if (!file.isFile() || file.size > MAX_WORKSPACE_RULE_BYTES) continue;
+        const { content } = readProjectReference({
+          workspacePath: root.path,
+          registeredRootIdentity: identity,
+          relativePath,
+        });
+        if (content === null || redactSecrets(content) !== content) continue;
         const contentBytes = Buffer.byteLength(content, 'utf8');
         if (
           contentBytes > MAX_WORKSPACE_RULE_BYTES ||
           totalBytes + contentBytes > MAX_WORKSPACE_RULE_TOTAL_BYTES
         )
           continue;
-        const scope = dirname(path);
         const nested = relative(root.path, scope);
-        rules.push({
-          path,
-          scope,
-          depth: nested === '' ? 0 : nested.split(sep).length,
-          content,
-        });
+        rules.push({ path, scope, depth: nested === '' ? 0 : nested.split(sep).length, content });
         totalBytes += contentBytes;
       } catch {
-        // Missing, unreadable, symlinked, and oversized rule files are omitted rather than guessed.
+        // Missing, unreadable, symlinked, and oversized rule files are omitted.
       }
     }
   }
-  return rules;
+  return rules.sort(
+    (left, right) => left.depth - right.depth || left.path.localeCompare(right.path),
+  );
 }
 
 async function workspaceRuleCandidates(root: string): Promise<string[]> {
-  const candidates = new Set([join(root, 'AGENTS.md')]);
+  const candidates = new Set(ruleNames.map((name) => join(root, name)));
   const output = await safeGitExecFile(
     root,
-    ['ls-files', '--cached', '--others', '--exclude-standard', '--', 'AGENTS.md', '**/AGENTS.md'],
+    [
+      'ls-files',
+      '--cached',
+      '--others',
+      '--exclude-standard',
+      '--',
+      ...ruleNames,
+      ...ruleNames.map((name) => '**/' + name),
+    ],
     PROMPT_GIT_OPTIONS,
   );
-  // A non-Git Workspace still receives its root AGENTS.md when present.
   if (output !== null) {
     for (const item of output.split(/\r?\n/u).filter(Boolean).slice(0, 64)) {
       const path = resolve(root, item);
       const nested = relative(root, path);
-      if (nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested))
+      if (nested !== '..' && !nested.startsWith('..' + sep) && !isAbsolute(nested))
         candidates.add(path);
     }
   }
@@ -299,20 +368,26 @@ async function workspaceRuleCandidates(root: string): Promise<string[]> {
 
 export async function discoverWorkspaceRules(
   workspace: RuntimeWorkspaceSet,
+  canRead?: WorkspaceRuleReadPolicy,
 ): Promise<PromptWorkspaceRule[]> {
   const candidates = new Map<string, readonly string[]>();
-  for (const { path } of workspace.roots) candidates.set(path, await workspaceRuleCandidates(path));
-  return readWorkspaceRules(workspace, candidates);
+  for (const { path } of workspace.roots) {
+    if (currentWorkspaceRootIdentityDigest(path) !== null)
+      candidates.set(path, await workspaceRuleCandidates(path));
+  }
+  return readWorkspaceRules(workspace, candidates, canRead);
 }
 
-export async function capturePromptWorkspace(workspace: RuntimeWorkspaceSet) {
+export async function capturePromptWorkspace(
+  workspace: RuntimeWorkspaceSet,
+  canRead?: WorkspaceRuleReadPolicy,
+) {
   const [vcs, workspaceRules] = await Promise.all([
     captureVcsSnapshot(workspace),
-    discoverWorkspaceRules(workspace),
+    discoverWorkspaceRules(workspace, canRead),
   ]);
   return { vcs, workspaceRules };
 }
-
 function unavailableVcs(root: string, failure: VcsFailure): PromptEnvironment['vcs'][number] {
   return { root, branch: null, changes: [], failure };
 }

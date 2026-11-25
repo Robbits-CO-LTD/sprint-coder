@@ -443,6 +443,8 @@ if (runsWithElectronAbi)
 
     it('seals a parentless manual execution from live Project state only at dispatch', () => {
       const { persistence } = createPersistence();
+      let globalInstruction = 'Before the normal Turn.';
+      persistence.setGlobalInstructionProvider(() => globalInstruction);
       const project = persistence.createProject('Manual context');
       const first = persistence.setProjectInstruction({
         projectId: project.id,
@@ -451,7 +453,16 @@ if (runsWithElectronAbi)
       });
       const task = persistence.createTask('manual', false, project.id);
       const prior = persistence.startTurn(task.id, 'Conversation before manual Team dispatch.');
+      const ordinary = persistence.prepareContext(task.id, prior.turnId);
+      expect(ordinary.fragments).toContainEqual(
+        expect.objectContaining({
+          source: 'goal',
+          trust: 'user',
+          content: expect.stringContaining('Before the normal Turn.'),
+        }),
+      );
       persistence.cancelTurn(task.id, prior.turnId);
+      globalInstruction = 'At manual dispatch.';
       const team = persistence.promoteTaskToTeam(task.id);
       const leader = persistence.getTaskLeader(task.id);
       persistence.transitionTeamState(team.id, 'forming');
@@ -476,6 +487,15 @@ if (runsWithElectronAbi)
       });
 
       const prepared = persistence.prepareTeamExecutionContext(task.id, execution.id);
+      expect(prepared.fragments).toContainEqual(
+        expect.objectContaining({
+          source: 'goal',
+          trust: 'user',
+          content: expect.stringContaining('At manual dispatch.'),
+        }),
+      );
+      globalInstruction = 'After manual dispatch.';
+      expect(persistence.prepareContext(task.id, prior.turnId)).toEqual(ordinary);
       expect(prepared.projectItems[0]?.content).toBe('At dispatch.');
       expect(prepared.fragments).toEqual(
         expect.arrayContaining([

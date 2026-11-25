@@ -4975,6 +4975,24 @@ describe('root-aware file selection', () => {
   });
 });
 
+function providerTestWorkspace(rootId: string): EffectiveWorkspaceSet {
+  return {
+    source: 'task',
+    projectId: null,
+    primaryRootId: rootId,
+    roots: [
+      {
+        rootId,
+        path: join(process.cwd(), '.missing-provider-test-workspace'),
+        role: 'primary',
+        label: 'test workspace',
+        status: 'available',
+      },
+    ],
+    digest: 'a'.repeat(64),
+  };
+}
+
 describe('Provider Team completion and model errors', () => {
   it('fails the real Provider turn before a second execute when final tool-image egress is denied', async () => {
     const taskId = 'task-tool-image-final-deny';
@@ -5168,10 +5186,7 @@ describe('Provider Team completion and model errors', () => {
         requestedProvider: connection.providerId,
         requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
       },
-      workspaceSet: {
-        digest: 'workspace-digest',
-        roots: [{ rootId: 'root-a' }],
-      },
+      workspaceSet: providerTestWorkspace('root-a'),
     };
     const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
       this: typeof fakeRouter,
@@ -5486,7 +5501,7 @@ describe('Provider Team completion and model errors', () => {
         requestedProvider: connection.providerId,
         requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
       },
-      workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+      workspaceSet: providerTestWorkspace('root-a'),
     };
     const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
       this: typeof fakeRouter,
@@ -5770,7 +5785,7 @@ describe('Provider Team completion and model errors', () => {
         requestedProvider: connection.providerId,
         requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
       },
-      workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+      workspaceSet: providerTestWorkspace('root-a'),
     };
     const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
       this: typeof fakeRouter,
@@ -6036,7 +6051,7 @@ describe('Provider Team completion and model errors', () => {
           requestedProvider: connection.providerId,
           requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
         },
-        workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+        workspaceSet: providerTestWorkspace('root-a'),
       };
       const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
         this: typeof fakeRouter,
@@ -6839,7 +6854,7 @@ describe('Provider Team completion and model errors', () => {
         skills: [],
         event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
         modelSelection: structuredClone(startedSelection),
-        workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+        workspaceSet: providerTestWorkspace('root-a'),
       };
       const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
         this: typeof fakeRouter,
@@ -9182,7 +9197,7 @@ describe('Ollama empty-round integration', () => {
           requestedProvider: providerId,
           requestedModel: 'test-model',
         },
-        workspaceSet: { digest: 'workspace', roots: [{ rootId: 'root-1' }] },
+        workspaceSet: providerTestWorkspace('root-1'),
       };
       const start = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
         started: unknown,

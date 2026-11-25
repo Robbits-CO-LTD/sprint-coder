@@ -344,12 +344,13 @@ export function protectedWorkspaceRootClassification(
 export function isOrdinaryWorkspaceHistoryPath(
   workspacePath: string,
   absolutePath: string,
+  workspaceAuthority?: 'sealed-team-isolation',
 ): boolean {
   const name = relative(workspacePath, absolutePath);
   return (
     name !== '' &&
     isAtOrBelow(workspacePath, absolutePath) &&
-    classifyWorkspacePath(workspacePath, absolutePath) === 'workspace'
+    classifyWorkspacePath(workspacePath, absolutePath, workspaceAuthority) === 'workspace'
   );
 }
 
