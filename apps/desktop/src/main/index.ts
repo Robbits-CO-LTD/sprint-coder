@@ -1,3 +1,5 @@
+import { SkillSettingsService } from './skill-settings-service';
+import { loadQa1413Session } from './qa-1413-session';
 import { projectFolderIdentity } from './project-folder-identity';
 import {
   app,
@@ -19,11 +21,10 @@ import { lstatSync, readdirSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
 import { GraphRenderService } from './graph-render';
-import { reportDesktopControlAvailability } from './desktop-control';
 import { endDesktopControlSessions } from './desktop-control-session';
 import { desktopControlActivity, sendDesktopControlActivity } from './desktop-control-activity';
 import {
@@ -153,6 +154,7 @@ ipcMain.handle(IPC_CHANNELS.updateCheckNow, async (event) => {
   return updateCheckResultSchema.parse(await autoUpdateController.checkNow());
 });
 ipcMain.on(IPC_CHANNELS.updateOpenManual, (event) => {
+  if (isDevelopment) return;
   if (trustedMainWindowTarget(event) === null) return;
   void shell
     .openExternal('https://github.com/Robbits-CO-LTD/sprint-coder/releases/latest')
@@ -166,6 +168,7 @@ ipcMain.handle(IPC_CHANNELS.desktopControlGetPermissions, (event) => {
   );
 });
 ipcMain.on(IPC_CHANNELS.desktopControlOpenPermissionSettings, (event, pane: unknown) => {
+  if (isDevelopment) return;
   if (trustedMainWindowTarget(event) === null) return;
   const url = desktopControlPermissionSettingsUrl(process.platform, pane);
   if (url === null) return;
@@ -174,6 +177,7 @@ ipcMain.on(IPC_CHANNELS.desktopControlOpenPermissionSettings, (event, pane: unkn
     .catch((error) => secureLogger.warn('System Settings could not be opened', error));
 });
 ipcMain.on(IPC_CHANNELS.updateOpenLog, (event) => {
+  if (isDevelopment) return;
   if (trustedMainWindowTarget(event) === null) return;
   const logPath =
     process.platform === 'win32'
@@ -182,13 +186,11 @@ ipcMain.on(IPC_CHANNELS.updateOpenLog, (event) => {
   shell.showItemInFolder(logPath);
 });
 
-const userDataOverride = process.env['SPRINT_CODER_USER_DATA_DIR'];
-if (userDataOverride !== undefined && userDataOverride.length > 0) {
-  // E2E and diagnostics isolate their state (and the single-instance lock) per directory.
-  app.setPath('userData', resolve(userDataOverride));
-} else if (isDevelopment) {
-  app.setPath('userData', resolve(process.cwd(), '.vite-user-data'));
-}
+if (!isDevelopment) throw new Error('QA #1413 is a development build only');
+const qaSession = loadQa1413Session(app.getAppPath());
+const userDataOverride = qaSession.profile;
+app.setPath('userData', userDataOverride);
+process.env['SPRINT_CODER_SKILL_HOME'] = qaSession.skillHome;
 
 const hasLock = !squirrelStartup && app.requestSingleInstanceLock();
 if (squirrelStartup || !hasLock) {
@@ -208,6 +210,15 @@ if (squirrelStartup || !hasLock) {
       if (process.platform === 'darwin' && usesHiddenWindowPresentation())
         app.setActivationPolicy('prohibited');
       registerProductionProtocol();
+      session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+        const url = new URL(details.url);
+        const loopback =
+          ['http:', 'ws:'].includes(url.protocol) &&
+          ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+        callback({
+          cancel: !loopback && !['app:', 'data:', 'blob:'].includes(url.protocol),
+        });
+      });
       const nativeSafeFsLockDirectory = await prepareNativeSafeFsLockDirectory(
         app.getPath('userData'),
       );
@@ -219,6 +230,32 @@ if (squirrelStartup || !hasLock) {
         (workspaceKey, minimumFence) =>
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
       );
+      if (process.env['SPRINT_CODER_QA_1413_CHECK_ONLY'] === '1') {
+        const messages = persistence.listMessages(qaSession.fixture.taskId);
+        if (
+          messages.length !== 2 ||
+          persistence.listRecentApprovals(qaSession.fixture.taskId).length
+        )
+          throw new Error('QA #1413 database contains unexpected data');
+        const service = new SkillSettingsService({ homePath: qaSession.skillHome });
+        const results = await Promise.allSettled([
+          service.installDraft(qaSession.fixture.conflict.id, qaSession.fixture.conflict.digest),
+          service.discardDraft(qaSession.fixture.missing.id),
+        ]);
+        if (
+          !results.every(
+            (result, index) =>
+              result.status === 'rejected' &&
+              result.reason instanceof Error &&
+              'code' in result.reason &&
+              result.reason.code === (index === 0 ? 'NAME_EXISTS' : 'NOT_FOUND'),
+          )
+        )
+          throw new Error('QA #1413 live store did not reproduce both expected failures');
+        process.stdout.write('QA #1413 Electron fixture verified before opening a window.\n');
+        app.exit(0);
+        return;
+      }
       const startupQuarantines = persistence.initializeMutationRecovery(
         randomUUID(),
         new Date().toISOString(),
@@ -237,7 +274,6 @@ if (squirrelStartup || !hasLock) {
         return workspace.roots.find((root) => root.rootId === rootId) ?? null;
       });
       await persistence.reconcileProjectFolderIdentities(projectFolderIdentity);
-      reportDesktopControlAvailability();
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
@@ -257,7 +293,8 @@ if (squirrelStartup || !hasLock) {
           parentOrigin: trustedOrigin,
         }),
       );
-      await router.initialize();
+      // This fixed fixture has no running calls. Do not probe or adopt installed providers.
+
       router.register();
       await loadRenderer(mainWindow);
       publishUpdateHealth(persistence.getUpdateHealth());

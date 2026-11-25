@@ -1,3 +1,4 @@
+import { loadQa1413Session } from './qa-1413-session';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { ExternalAcpRuntime } from './external-acp-runtime';
 import { EXTERNAL_ACP_AGENTS, isExternalAcpConnection } from './external-acp-profile';
@@ -4972,6 +4973,13 @@ export class IpcRouter {
       envelope: CommandEnvelope<TInput>,
     ) => TOutput | Promise<TOutput>,
   ): void {
+    const qaChannels: readonly string[] = [
+      IPC_CHANNELS.tasksMessages,
+      IPC_CHANNELS.skillsInstallDraft,
+      IPC_CHANNELS.skillsDiscardDraft,
+    ];
+    if (!qaChannels.includes(channel)) return;
+    const { fixture } = loadQa1413Session(app.getAppPath());
     const envelopeSchema = commandEnvelopeSchema(inputSchema);
     ipcMain.handle(
       channel,
@@ -4982,6 +4990,22 @@ export class IpcRouter {
           const envelope = envelopeSchema.parse(raw) as CommandEnvelope<TInput>;
           if (hasTaskId(envelope.payload) && envelope.taskId !== envelope.payload.taskId)
             throw new SecurityError();
+          const payload: unknown = envelope.payload;
+          const allowed =
+            typeof payload === 'object' &&
+            payload !== null &&
+            ((channel === IPC_CHANNELS.tasksMessages &&
+              'taskId' in payload &&
+              payload.taskId === fixture.taskId) ||
+              (channel === IPC_CHANNELS.skillsInstallDraft &&
+                'draftId' in payload &&
+                payload.draftId === fixture.conflict.id &&
+                'expectedDigest' in payload &&
+                payload.expectedDigest === fixture.conflict.digest) ||
+              (channel === IPC_CHANNELS.skillsDiscardDraft &&
+                'draftId' in payload &&
+                payload.draftId === fixture.missing.id));
+          if (!allowed) throw new SecurityError();
           const output = await handler(envelope.payload, event, envelope);
           let value: TOutput;
           try {

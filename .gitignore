@@ -27,3 +27,7 @@ playwright-report/
 
 # Python のキャッシュ（website/tools など）
 __pycache__/
+
+# Disposable QA #1413 profiles and renderer data.
+apps/desktop/qa-1413-local/
+apps/desktop/src/renderer/qa-1413-generated.json
