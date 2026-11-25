@@ -1,7 +1,4 @@
-import { execFile } from 'node:child_process';
-import { homedir } from 'node:os';
-import { delimiter } from 'node:path';
-import { promisify } from 'node:util';
+import { app } from 'electron';
 import { z } from 'zod';
 import {
   isGithubBranchName,
@@ -9,13 +6,8 @@ import {
   type GithubWriteRequest,
 } from '../github-issue-request';
 import { environmentValue } from '../runtime-host/cli-command-resolution';
-import {
-  buildControlledEnvironment,
-  CommandExecutableNotFoundError,
-  resolveBareExecutable,
-} from './command-runner';
-
-const run = promisify(execFile);
+import { buildControlledEnvironment } from './command-runner';
+import { isQa1455Request, receiveQa1455Post } from './github-issue-qa-1455';
 const issueResult = z.object({
   number: z.number().int().positive(),
   repository_url: z.string(),
@@ -63,31 +55,8 @@ export function githubLoginEnvironment(
 }
 
 export async function githubLoginToken(signal: AbortSignal): Promise<string> {
-  const env = githubLoginEnvironment();
-  const paths = [
-    environmentValue(process.env, 'PATH') ?? '',
-    ...(process.platform === 'darwin' ? ['/opt/homebrew/bin', '/usr/local/bin'] : []),
-  ];
-  // Win32's bare-executable lookup tries the working directory before PATH.
-  const executable = await resolveBareExecutable(process.platform === 'win32' ? 'gh.exe' : 'gh', {
-    PATH: paths.join(delimiter),
-  }).catch((error: unknown) => {
-    signal.throwIfAborted();
-    if (error instanceof CommandExecutableNotFoundError) throw new GithubCliNotFoundError();
-    throw error;
-  });
   signal.throwIfAborted();
-  const { stdout } = await run(executable, ['auth', 'token', '--hostname', 'github.com'], {
-    cwd: homedir(),
-    env,
-    signal,
-    windowsHide: true,
-    timeout: 5_000,
-    maxBuffer: 4096,
-  });
-  const token = stdout.trim();
-  if (!/^[a-z\d_]{1,512}$/iu.test(token)) throw new Error('Unexpected GitHub credential');
-  return token;
+  throw new GithubIssueError('このQA専用ビルドでは本物のGitHub認証を使用できません。');
 }
 
 export async function writeGithubContent(
@@ -100,7 +69,12 @@ export async function writeGithubContent(
     onPostStarted?: (stopNotice: string) => void;
   } = {},
 ): Promise<string> {
-  const { readToken = githubLoginToken, fetch: fetchRequest = fetch, onPostStarted } = options;
+  if (!isQa1455Request(request))
+    throw new GithubIssueError('このQA専用ビルドは固定の停止試験だけを受け付けます。');
+  const { onPostStarted } = options;
+  const readToken: typeof githubLoginToken = async () => 'sc_qa_fixture_not_a_credential';
+  const fetchRequest: typeof fetch = (url, init) =>
+    receiveQa1455Post(app.getPath('userData'), url, init);
   if (parseGithubIssueRepository(request.repository) !== request.repository)
     throw new GithubIssueError(
       'GitHubのリポジトリ名を確認してください。GitHubには送信していません。',
@@ -135,7 +109,7 @@ export async function writeGithubContent(
     'Content-Type': 'application/json',
     'User-Agent': 'Sprint-Coder',
   };
-  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(240_000)]);
   const issueUrl =
     request.action === 'comment' ? `${repository}/issues/${request.issueNumber}` : null;
   if (issueUrl !== null && request.action === 'comment') {

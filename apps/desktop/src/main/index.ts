@@ -19,9 +19,10 @@ import { lstatSync, readdirSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
+import { qa1455ProfileName } from './github-issue-qa-1455';
 import { GraphRenderService } from './graph-render';
 import { reportDesktopControlAvailability } from './desktop-control';
 import { endDesktopControlSessions } from './desktop-control-session';
@@ -183,6 +184,17 @@ ipcMain.on(IPC_CHANNELS.updateOpenLog, (event) => {
 });
 
 const userDataOverride = process.env['SPRINT_CODER_USER_DATA_DIR'];
+if (
+  !userDataOverride ||
+  !isAbsolute(userDataOverride) ||
+  basename(resolve(userDataOverride)) !== qa1455ProfileName
+) {
+  dialog.showErrorBox(
+    'Sprint Coder QA #1455',
+    'Set SPRINT_CODER_USER_DATA_DIR to a dedicated absolute path ending in sc-qa-1455-profile.',
+  );
+  app.exit(2);
+}
 if (userDataOverride !== undefined && userDataOverride.length > 0) {
   // E2E and diagnostics isolate their state (and the single-instance lock) per directory.
   app.setPath('userData', resolve(userDataOverride));
@@ -270,7 +282,7 @@ if (squirrelStartup || !hasLock) {
         getActiveTurns: async () => router?.getActiveTurnsForUpdate() ?? [],
         stopActiveTurns: async (turns) => router?.stopActiveTurnsForUpdate(turns),
         currentVersion: app.getVersion(),
-        isPackaged: app.isPackaged,
+        isPackaged: false, // Never check for or install a release from this QA binary.
         platform: process.platform,
         architecture: process.arch,
         executablePath: process.execPath,
