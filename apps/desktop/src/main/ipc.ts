@@ -1,3 +1,4 @@
+import { APPROVAL_POLICY_CHANGED_MESSAGE } from '../approval-feedback';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { ExternalAcpRuntime } from './external-acp-runtime';
 import { EXTERNAL_ACP_AGENTS, isExternalAcpConnection } from './external-acp-profile';
@@ -11513,7 +11514,7 @@ export function toPublicError(error: unknown): PublicError {
   if (error instanceof StalePermissionPolicyError)
     return {
       code: 'OPERATION_CONFLICT',
-      userMessage: 'Access modeが別の操作で更新されました。最新状態を読み直してください。',
+      userMessage: APPROVAL_POLICY_CHANGED_MESSAGE,
       retryable: true,
     };
   if (error instanceof FullAccessConfirmationDeclinedError)

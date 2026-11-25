@@ -617,37 +617,49 @@ it('keeps answering possible for a legacy card without a usable deadline', () =>
   }
 });
 
-it('shows a returned approval failure on the same card and clears it when retried', async () => {
-  const container = document.createElement('div');
-  const root = createRoot(container);
-  const error = 'Access modeが別の操作で更新されました。最新状態を読み直してください。';
-  const resolve = vi
-    .fn()
-    .mockRejectedValueOnce(new Error(error))
-    .mockResolvedValueOnce({
-      ...approval,
-      state: 'resolved',
-      decision: 'allow_once',
-    });
-  vi.stubGlobal('sprintCoder', { approvals: { resolve } });
-  const initial = useAppStore.getState();
-  useAppStore.setState({ approvalsByTask: { [approval.taskId]: [approval] } });
-  const onDecision = (decision: ApprovalDecision, selection?: number) =>
-    useAppStore.getState().resolveApproval(approval.taskId, approval.id, decision, selection);
-  try {
-    await act(async () =>
-      root.render(<ApprovalCard approval={approval} busy={false} onDecision={onDecision} />),
-    );
-    const allow = container.querySelector<HTMLButtonElement>(
-      '[data-testid="approval-allow-once"]',
-    )!;
-    await act(async () => allow.click());
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe(error);
-    await act(async () => allow.click());
-    expect(container.querySelector('[role="alert"]')).toBeNull();
-  } finally {
-    act(() => root.unmount());
-    useAppStore.setState(initial, true);
-    vi.unstubAllGlobals();
-  }
-});
+it.each([
+  [
+    'Access modeが別の操作で更新されました。最新状態を読み直してください。',
+    'Access modeが別の操作で更新されました。最新状態を読み直してください。',
+  ],
+  [
+    'IPC validation failed: private technical details',
+    '承認結果を反映できませんでした。最新状態を読み直し、もう一度お試しください。',
+  ],
+])(
+  'shows safe approval feedback on the same card and clears it on retry (case %#)',
+  async (error, expected) => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const resolve = vi
+      .fn()
+      .mockRejectedValueOnce(new Error(error))
+      .mockResolvedValueOnce({
+        ...approval,
+        state: 'resolved',
+        decision: 'allow_once',
+      });
+    vi.stubGlobal('sprintCoder', { approvals: { resolve } });
+    const initial = useAppStore.getState();
+    useAppStore.setState({ approvalsByTask: { [approval.taskId]: [approval] } });
+    const onDecision = (decision: ApprovalDecision, selection?: number) =>
+      useAppStore.getState().resolveApproval(approval.taskId, approval.id, decision, selection);
+    try {
+      await act(async () =>
+        root.render(<ApprovalCard approval={approval} busy={false} onDecision={onDecision} />),
+      );
+      const allow = container.querySelector<HTMLButtonElement>(
+        '[data-testid="approval-allow-once"]',
+      )!;
+      await act(async () => allow.click());
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(expected);
+      expect(container.textContent).not.toContain('private technical details');
+      await act(async () => allow.click());
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      act(() => root.unmount());
+      useAppStore.setState(initial, true);
+      vi.unstubAllGlobals();
+    }
+  },
+);

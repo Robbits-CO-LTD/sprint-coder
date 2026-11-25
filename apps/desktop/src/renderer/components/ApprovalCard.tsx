@@ -1,3 +1,4 @@
+import { APPROVAL_DECISION_FAILED_MESSAGE } from '../../approval-feedback';
 import { useEffect, useId, useRef, useState } from 'react';
 import { Monitor, TriangleAlert } from './icons';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
@@ -66,7 +67,7 @@ export function ApprovalCard({ approval, onDecision, ...props }: ApprovalCardPro
           (error) => {
             if (error !== undefined) setDecisionError(error);
           },
-          () => setDecisionError('処理を完了できませんでした。もう一度お試しください。'),
+          () => setDecisionError(APPROVAL_DECISION_FAILED_MESSAGE),
         );
     },
   };
