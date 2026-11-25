@@ -41,7 +41,7 @@ jobs:
           "$brew" fetch --force --bottle-tag="$tag" gh
           archive=$("$brew" --cache --bottle-tag="$tag" gh)
           test "$(/usr/bin/shasum -a 256 "$archive" | cut -d' ' -f1)" = "$digest"
-          member=$(/usr/bin/tar -tf "$archive" | awk '/^gh\/[^/]+\/bin\/gh$/{print; count++} END{if(count!=1)exit 1}')
+          member=$(/usr/bin/tar -tf "$archive" | awk -F/ 'NF==4 && $1=="gh" && $3=="bin" && $4=="gh" {print; count++} END{if(count!=1)exit 1}')
           origin="$RUNNER_TEMP/sc-1404-gh-verified"
           /usr/bin/tar -xOf "$archive" "$member" > "$origin"
           echo "SC1404 official_bottle_sha256=$digest member=$member"
