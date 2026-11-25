@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { isGithubPushDestination } from '../github-issue-request';
-import { GithubIssueError, githubLoginToken } from './github-issue';
+import { GithubCliNotFoundError, GithubIssueError, githubLoginToken } from './github-issue';
 import type { PreparedLocalGithubPush } from './local-github-push';
 
 const oidPattern = /^[a-f0-9]{40}$/u;
@@ -172,7 +172,8 @@ export async function pushApprovedGithubCommit(
   let token: string;
   try {
     token = await deps.readToken(signal);
-  } catch {
+  } catch (error) {
+    if (error instanceof GithubCliNotFoundError) throw error;
     throw new GithubIssueError(
       'GitHubのログインを確認できませんでした。GitHub CLI（gh）でログイン済みか確認してください。',
     );

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pushApprovedGithubCommit, GithubPushResultUnknown } from './github-push-transport';
 import { readLocalGithubPush } from './local-github-push';
 import { workspaceMutationBinding } from './path-guard';
+import { GithubCliNotFoundError } from './github-issue';
 import { parseGithubPushInput } from '../github-issue-request';
 
 const gitAvailable = (() => {
@@ -153,6 +154,14 @@ async function fixture() {
 }
 
 describe.skipIf(!gitAvailable)('offline conditional GitHub push', () => {
+  it('returns the missing CLI guidance before attempting to contact GitHub', async () => {
+    const f = await fixture();
+    f.login.mockRejectedValueOnce(new GithubCliNotFoundError());
+    await expect(f.push()).rejects.toThrow('gh auth login --hostname github.com');
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.onPostStarted).not.toHaveBeenCalled();
+  });
+
   it('sends one ref update, preserves the exact commit and reads it back', async () => {
     const f = await fixture();
     expect(f.head()).toBe(f.parent);

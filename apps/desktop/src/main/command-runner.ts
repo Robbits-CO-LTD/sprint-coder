@@ -157,6 +157,12 @@ export class CommandRunnerError extends Error {
   }
 }
 
+export class CommandExecutableNotFoundError extends CommandRunnerError {
+  constructor(message: string) {
+    super('EXECUTION_SPEC_INVALID', message);
+  }
+}
+
 export async function prepareExecutionSpec(
   input: PrepareExecutionSpecInput,
 ): Promise<ExecutionSpec> {
@@ -258,16 +264,26 @@ export async function resolveBareExecutable(
     process.platform === 'win32' && extname(executable) === ''
       ? [`${executable}.exe`, `${executable}.com`]
       : [executable];
+  let checked = false;
+  let uncertain = false;
   for (const directory of searchPath.split(delimiter)) {
     if (!isAbsolute(directory)) continue;
     for (const name of names) {
+      checked = true;
       const candidate = join(directory, name);
       try {
         const candidateStats = await stat(candidate);
-        if (!candidateStats.isFile()) continue;
-        if (process.platform !== 'win32' && (candidateStats.mode & 0o111) === 0) continue;
+        if (
+          !candidateStats.isFile() ||
+          (process.platform !== 'win32' && (candidateStats.mode & 0o111) === 0)
+        ) {
+          uncertain = true;
+          continue;
+        }
         return candidate;
-      } catch {
+      } catch (error) {
+        const code = error instanceof Error && 'code' in error ? error.code : undefined;
+        if (code !== 'ENOENT' && code !== 'ENOTDIR') uncertain = true;
         // Continue through the sealed, fixed PATH. No shell lookup or cwd fallback is allowed.
       }
     }
@@ -277,6 +293,7 @@ export async function resolveBareExecutable(
     process.platform === 'win32' ? executable.toLowerCase().replace(/\.exe$/, '') : executable;
   if (name === 'git') message = GIT_INSTALL_GUIDANCE;
   if (name === 'gh') message = GITHUB_CLI_INSTALL_GUIDANCE;
+  if (checked && !uncertain) throw new CommandExecutableNotFoundError(message);
   throw new CommandRunnerError('EXECUTION_SPEC_INVALID', message);
 }
 
