@@ -1,0 +1,79 @@
+name: Temporary 1404 macOS command probe
+on:
+  push:
+    branches: [codex/1404-macos-managed-proof]
+permissions:
+  contents: read
+jobs:
+  macos-command-probe:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.23.3
+      - name: Ensure Apple Silicon Homebrew executables are installed
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(/opt/homebrew/bin/brew --prefix)" = /opt/homebrew
+          for formula in gh git; do
+            if [ ! -x "/opt/homebrew/bin/$formula" ]; then
+              /opt/homebrew/bin/brew install "$formula"
+            fi
+            test -x "/opt/homebrew/bin/$formula"
+          done
+          sw_vers -productVersion
+      - name: Verify official bottle, protected ancestry and loader prerequisites
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew=/opt/homebrew/bin/brew
+          metadata="$RUNNER_TEMP/sc-1404-gh-formula.json"
+          "$brew" info --json=v2 gh > "$metadata"
+          tag=$("$brew" ruby -e 'puts Utils::Bottles.tag')
+          digest=$(/usr/bin/jq -er --arg tag "$tag" '.formulae[0].bottle.stable.files[$tag].sha256' "$metadata")
+          "$brew" fetch --force --bottle-tag="$tag" gh
+          archive=$("$brew" --cache --bottle-tag="$tag" gh)
+          test "$(/usr/bin/shasum -a 256 "$archive" | cut -d' ' -f1)" = "$digest"
+          member=$(/usr/bin/tar -tf "$archive" | awk '/^gh\/[^/]+\/bin\/gh$/{print; count++} END{if(count!=1)exit 1}')
+          origin="$RUNNER_TEMP/sc-1404-gh-verified"
+          /usr/bin/tar -xOf "$archive" "$member" > "$origin"
+          echo "SC1404 official_bottle_sha256=$digest member=$member"
+          fixed="/Library/Application Support/Sprint Coder 1404 CI Probe/bin/gh"
+          test ! -e "$fixed"
+          sudo /usr/bin/install -d -o root -g wheel -m 0755 "$(dirname "$fixed")"
+          sudo /usr/bin/install -o root -g wheel -m 0555 "$origin" "$fixed"
+          cmp -s "$origin" "$fixed"
+          p="$fixed"
+          while :; do
+            test ! -L "$p"
+            test "$(/usr/bin/stat -f '%u' "$p")" = 0
+            mode=$(/usr/bin/stat -f '%Lp' "$p")
+            test "$((8#$mode & 8#22))" = 0
+            test "$(/bin/ls -lde "$p" | wc -l | tr -d ' ')" = 1
+            test ! -w "$p"
+            echo "SC1404 protected mode=$mode path=$p"
+            test "$p" != / || break
+            p="$(dirname "$p")"
+          done
+          test "$(/usr/bin/stat -f '%l' "$fixed")" = 1
+          /usr/bin/codesign --verify --strict "$fixed"
+          /usr/bin/otool -L "$fixed" | awk 'NR > 1 {
+            print "SC1404 direct_image=" $1
+            if ($1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\//) exit 1
+            count++
+          } END { if (!count) exit 1 }'
+          if /usr/bin/otool -l "$fixed" | grep -E '^[[:space:]]*cmd LC_RPATH$'; then exit 1; fi
+      - uses: ./.github/actions/install-deps
+        with:
+          node-version: 22.23.3
+      - uses: ./.github/actions/prepare-sandbox
+      - name: Probe normal sandboxed command execution
+        working-directory: apps/desktop
+        run: node ../../node_modules/vitest/vitest.mjs run src/main/macos-homebrew-command.probe.test.ts
