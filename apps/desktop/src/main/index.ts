@@ -70,7 +70,9 @@ import {
   desktopControlPermissionsSchema,
   updateCheckResultSchema,
   updateHealthSchema,
+  updateInstallStateSchema,
   type UpdateHealth,
+  type UpdateInstallState,
 } from '@sprint-coder/contracts';
 import {
   applyWindowControl,
@@ -156,6 +158,14 @@ ipcMain.handle(IPC_CHANNELS.updateCheckNow, async (event) => {
   if (trustedMainWindowTarget(event) === null || autoUpdateController === null)
     return updateCheckResultSchema.parse({ status: 'unsupported' });
   return updateCheckResultSchema.parse(await autoUpdateController.checkNow());
+});
+ipcMain.handle(IPC_CHANNELS.updateGetInstallState, (event) =>
+  trustedMainWindowTarget(event) === null
+    ? 'unavailable'
+    : (autoUpdateController?.getInstallState() ?? 'unavailable'),
+);
+ipcMain.handle(IPC_CHANNELS.updateRestartToInstall, async (event) => {
+  if (trustedMainWindowTarget(event) !== null) await autoUpdateController?.restart();
 });
 ipcMain.on(IPC_CHANNELS.updateOpenManual, (event) => {
   if (trustedMainWindowTarget(event) === null) return;
@@ -276,12 +286,11 @@ if (squirrelStartup || !hasLock) {
       publishUpdateHealth(persistence.getUpdateHealth());
       autoUpdateController = startAutoUpdate({
         updater: autoUpdater,
-        dialog,
         fetch: (url, init) => net.fetch(url, init),
         logger: secureLogger,
         restartToInstall: restartToInstallUpdate,
-        getActiveTurns: async () => router?.getActiveTurnsForUpdate() ?? [],
-        stopActiveTurns: async (turns) => router?.stopActiveTurnsForUpdate(turns),
+        hasActiveWork: () => router?.hasActiveWorkForUpdate() ?? false,
+        onInstallStateChanged: publishUpdateInstallState,
         currentVersion: app.getVersion(),
         isPackaged: app.isPackaged,
         platform: process.platform,
@@ -552,6 +561,15 @@ function publishUpdateHealth(health: UpdateHealth): void {
   const window = mainWindow;
   if (window === null || window.isDestroyed() || window.webContents.isDestroyed()) return;
   window.webContents.send(IPC_CHANNELS.updateHealthEvent, safe);
+}
+
+function publishUpdateInstallState(state: UpdateInstallState): void {
+  const window = mainWindow;
+  if (window === null || window.isDestroyed() || window.webContents.isDestroyed()) return;
+  window.webContents.send(
+    IPC_CHANNELS.updateInstallStateEvent,
+    updateInstallStateSchema.parse(state),
+  );
 }
 
 function showMainWindow(): void {

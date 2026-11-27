@@ -3494,6 +3494,8 @@ export const updateCheckResultSchema = z.discriminatedUnion('status', [
     .strict(),
 ]);
 export type UpdateCheckResult = z.infer<typeof updateCheckResultSchema>;
+export const updateInstallStateSchema = z.enum(['unavailable', 'busy', 'ready', 'restarting']);
+export type UpdateInstallState = z.infer<typeof updateInstallStateSchema>;
 export const resolvedCliCommandSchema = z
   .object({
     source: z.enum([
@@ -4973,6 +4975,9 @@ export interface SprintCoderApi {
   };
   updates: {
     subscribeHealth(listener: (health: UpdateHealth) => void): () => void;
+    subscribeInstallState(listener: (state: UpdateInstallState) => void): () => void;
+    getInstallState(): Promise<UpdateInstallState>;
+    restartToInstall(): Promise<void>;
     checkNow(): Promise<UpdateCheckResult>;
     openManualUpdate(): void;
     openUpdateLog(): void;
@@ -5244,6 +5249,9 @@ export const IPC_CHANNELS = {
   runtimeStatusEvent: 'sprint-coder:runtime:status',
   /** Push-only update health contains classifications, never raw updater errors or paths. */
   updateHealthEvent: 'sprint-coder:update:health',
+  updateInstallStateEvent: 'sprint-coder:update:install-state',
+  updateGetInstallState: 'sprint-coder:update:get-install-state',
+  updateRestartToInstall: 'sprint-coder:update:restart-to-install',
   updateCheckNow: 'sprint-coder:update:check-now',
   updateOpenManual: 'sprint-coder:update:open-manual',
   updateOpenLog: 'sprint-coder:update:open-log',

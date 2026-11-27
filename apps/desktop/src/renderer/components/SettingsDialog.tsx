@@ -678,7 +678,7 @@ export function updateCheckResultText(result: UpdateCheckUiResult): string {
     case 'up_to_date':
       return '最新版を使用しています。';
     case 'update_available':
-      return `v${result.version.replace(/^v/, '')} が見つかりました。バックグラウンドでダウンロードしています。`;
+      return `v${result.version.replace(/^v/, '')} が見つかりました。準備ができるとタイトルバーに更新ボタンが表示されます。`;
     case 'already_checking':
       return 'アップデートを確認中です。少し待ってからもう一度お試しください。';
     case 'unsupported':

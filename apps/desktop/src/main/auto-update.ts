@@ -1,5 +1,9 @@
-import type { AutoUpdater, Dialog } from 'electron';
-import type { UpdateCheckResult, UpdateErrorCategory } from '@sprint-coder/contracts';
+import type { AutoUpdater } from 'electron';
+import type {
+  UpdateCheckResult,
+  UpdateErrorCategory,
+  UpdateInstallState,
+} from '@sprint-coder/contracts';
 
 const GITHUB_REPOSITORY = 'Robbits-CO-LTD/sprint-coder';
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=20`;
@@ -34,13 +38,7 @@ export type UpdateRelease = Readonly<{
   feedUrl: string;
 }>;
 
-export type UpdateActiveTurn = Readonly<{
-  taskId: string;
-  turnId: string | null;
-  taskTitle: string;
-}>;
-
-export type UpdateRestartResult = 'started' | 'busy' | 'shutdown_in_progress';
+type UpdateRestartResult = 'started' | 'busy' | 'shutdown_in_progress';
 
 type ParsedVersion = Readonly<{
   major: number;
@@ -52,14 +50,11 @@ type ParsedVersion = Readonly<{
 
 export type AutoUpdateOptions = Readonly<{
   updater: Pick<AutoUpdater, 'setFeedURL' | 'checkForUpdates' | 'on' | 'removeListener'>;
-  dialog: Pick<Dialog, 'showMessageBox'>;
   fetch: (url: string, init: RequestInit) => Promise<FetchResponse>;
   logger: Logger;
-  restartToInstall: () =>
-    UpdateRestartResult | boolean | void | Promise<UpdateRestartResult | boolean | void>;
-  getActiveTurns?: () => Promise<readonly UpdateActiveTurn[]>;
-  stopActiveTurns?: (turns: readonly UpdateActiveTurn[]) => Promise<void>;
-  activeTurnPollIntervalMs?: number;
+  restartToInstall: () => Promise<UpdateRestartResult>;
+  hasActiveWork: () => boolean;
+  onInstallStateChanged?: (state: UpdateInstallState) => void;
   currentVersion: string;
   isPackaged: boolean;
   platform: Platform;
@@ -73,6 +68,8 @@ export type AutoUpdateOptions = Readonly<{
 
 export type AutoUpdateController = Readonly<{
   checkNow(): Promise<UpdateCheckResult>;
+  getInstallState(): UpdateInstallState;
+  restart(): Promise<void>;
   stop(): void;
 }>;
 
@@ -104,12 +101,20 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
       platform: options.platform,
       architecture: options.architecture,
     });
-    return { checkNow: async () => ({ status: 'unsupported' }), stop: () => undefined };
+    return {
+      checkNow: async () => ({ status: 'unsupported' }),
+      getInstallState: () => 'unavailable',
+      restart: async () => undefined,
+      stop: () => undefined,
+    };
   }
 
   let stopped = false;
   let checking = false;
-  let promptShown = false;
+  let downloaded = false;
+  let restarting = false;
+  let publishedState: UpdateInstallState = 'unavailable';
+  let installStateTimer: ReturnType<typeof setInterval> | undefined;
   let targetVersion: string | null = null;
   let failureRecordedForAttempt = false;
   const recordFailure = (error: unknown): void => {
@@ -129,48 +134,42 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
     }
   };
 
-  const getActiveTurns = async (): Promise<readonly UpdateActiveTurn[]> =>
-    options.getActiveTurns === undefined ? [] : options.getActiveTurns();
-
-  const waitForActiveTurns = async (): Promise<void> => {
-    while (!stopped && (await getActiveTurns()).length > 0)
-      await delay(options.activeTurnPollIntervalMs ?? 1_000);
+  const getInstallState = (): UpdateInstallState => {
+    if (stopped || !downloaded) return 'unavailable';
+    if (restarting) return 'restarting';
+    return options.hasActiveWork() ? 'busy' : 'ready';
   };
 
-  const requestSafeRestart = async (): Promise<void> => {
-    let activeTurns = await getActiveTurns();
-    while (!stopped) {
-      if (activeTurns.length === 0) {
-        // Main owns the atomic final gate. `busy` (and legacy `false`) means work won the race
-        // between this advisory query and the mutation gate. If it has already finished by the
-        // re-query, loop and retry the gate; `shutdown_in_progress` returns immediately.
-        const restart = await options.restartToInstall();
-        if (restart !== false && restart !== 'busy') return;
-        activeTurns = await getActiveTurns();
-        if (activeTurns.length === 0) continue;
-      }
-      const { response } = await options.dialog.showMessageBox({
-        type: 'warning',
-        buttons: ['完了を待つ', 'Turnを停止して更新', 'あとで'],
-        defaultId: 0,
-        cancelId: 2,
-        title: '実行中の作業があります',
-        message: `${activeTurns.length}件のTurnが実行中です。`,
-        detail:
-          '完了を待つと、すべてのTurnが終了した時点で更新を開始します。停止して更新する場合は、実行中Turnを安全にキャンセルしてから再起動します。',
-      });
-      if (response === 2 || stopped) return;
-      if (response === 0) await waitForActiveTurns();
-      else {
-        if (options.stopActiveTurns === undefined) return;
-        await options.stopActiveTurns(activeTurns);
-      }
-      activeTurns = await getActiveTurns();
+  const publishInstallState = (): void => {
+    const state = getInstallState();
+    if (state === publishedState) return;
+    publishedState = state;
+    options.onInstallStateChanged?.(state);
+  };
+
+  const restart = async (): Promise<void> => {
+    if (getInstallState() !== 'ready') {
+      publishInstallState();
+      return;
+    }
+    restarting = true;
+    publishInstallState();
+    try {
+      // The mutation gate rechecks after draining handlers that were already in flight.
+      restarting = (await options.restartToInstall()) !== 'busy';
+    } catch (error) {
+      restarting = false;
+      options.logger.warn('Automatic update restart failed', error);
+      throw new Error('更新を開始できませんでした。', { cause: error });
+    } finally {
+      publishInstallState();
     }
   };
 
   const checkNow = async (): Promise<UpdateCheckResult> => {
     if (stopped) return { status: 'unsupported' };
+    if (downloaded && targetVersion !== null)
+      return { status: 'update_available', version: targetVersion };
     if (checking) return { status: 'already_checking' };
     checking = true;
     failureRecordedForAttempt = false;
@@ -208,30 +207,13 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
     options.logger.warn('Automatic updater reported an error', error);
   };
   const onUpdateDownloaded = (): void => {
-    if (stopped || promptShown) return;
+    if (stopped || downloaded) return;
     recordSuccess();
-    promptShown = true;
+    downloaded = true;
     clearInterval(timer);
-    void options.dialog
-      .showMessageBox({
-        type: 'info',
-        buttons: ['再起動して更新', 'あとで'],
-        defaultId: 0,
-        cancelId: 1,
-        title: 'Sprint Coder の更新',
-        message:
-          targetVersion === null
-            ? 'Sprint Coder の更新を適用できます。'
-            : `Sprint Coder ${targetVersion} を適用できます。`,
-        detail: '更新はダウンロード済みです。再起動すると新しいバージョンに切り替わります。',
-      })
-      .then(({ response }) => {
-        if (response === 0) return requestSafeRestart();
-        return undefined;
-      })
-      .catch((error: unknown) => {
-        options.logger.warn('Automatic update prompt failed', error);
-      });
+    installStateTimer = setInterval(publishInstallState, 1_000);
+    installStateTimer.unref();
+    publishInstallState();
   };
 
   options.updater.on('error', onUpdaterError);
@@ -246,10 +228,13 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
 
   return {
     checkNow,
+    getInstallState,
+    restart,
     stop: () => {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      clearInterval(installStateTimer);
       // Squirrel can still emit an asynchronous `error` after quitAndInstall. Keep this listener
       // until process exit so EventEmitter never turns that expected failure into an uncaught throw.
       options.updater.removeListener('update-downloaded', onUpdateDownloaded);
@@ -291,13 +276,6 @@ export function classifyUpdateError(error: unknown): UpdateErrorCategory {
     return 'network';
   if (error instanceof Error) return 'updater';
   return 'unknown';
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    (timer as { unref?: () => void }).unref?.();
-  });
 }
 
 export async function discoverUpdate(
