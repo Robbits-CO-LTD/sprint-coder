@@ -160,7 +160,7 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
     } catch (error) {
       restarting = false;
       options.logger.warn('Automatic update restart failed', error);
-      throw new Error('更新を開始できませんでした。');
+      throw new Error('更新を開始できませんでした。', { cause: error });
     } finally {
       publishInstallState();
     }
