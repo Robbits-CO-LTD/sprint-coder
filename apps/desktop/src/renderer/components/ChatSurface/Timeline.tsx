@@ -351,6 +351,7 @@ export function Timeline({
       <div
         className="timeline-scroll"
         data-testid="timeline-scroll"
+        data-task-id={taskId}
         ref={scrollRef}
         onScroll={handleScroll}
       >

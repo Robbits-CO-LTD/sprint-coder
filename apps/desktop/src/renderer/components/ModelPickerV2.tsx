@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 import type {
   ModelCatalogAccessType,
   ModelCatalogQueryInput,
@@ -316,7 +316,7 @@ export function AccessTypeToggle({
   );
 }
 
-export function ModelPickerV2({ taskId }: { taskId: string }) {
+export function ModelPickerV2({ taskId, footer }: { taskId: string; footer?: ReactNode }) {
   // Scoped to this Task, not just read off the slot: the store holds one canonical selection at a
   // time, so between a Task switch and that Task's answer arriving the slot still describes the
   // Task the user left. Ticking a row — or labelling the trigger — from that would attribute
@@ -742,7 +742,20 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
         {triggerLabel}
       </button>
       {open && (
-        <div className="runtime-menu model-picker-v2" data-testid="model-picker-v2">
+        <div
+          className="runtime-menu model-picker-v2"
+          data-testid="model-picker-v2"
+          onKeyDown={(event) => {
+            if (
+              !event.defaultPrevented &&
+              !event.nativeEvent.isComposing &&
+              event.key === 'Escape'
+            ) {
+              event.preventDefault();
+              close(true);
+            }
+          }}
+        >
           <input
             ref={inputRef}
             data-testid="model-picker-v2-search"
@@ -947,6 +960,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               <div className="mpv2-more">読み込み中…</div>
             )}
           </div>
+          {footer}
         </div>
       )}
     </div>
