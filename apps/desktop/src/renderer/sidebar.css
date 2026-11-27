@@ -378,13 +378,14 @@
   background: var(--neutral-wash);
 }
 .sb-row.active {
-  background: var(--neutral-wash-strong);
+  background: var(--accent-wash-strong);
+  box-shadow: inset 0 0 0 1px var(--accent-line-soft);
 }
 .sb-row.active::before {
   position: absolute;
   top: 8px;
   left: 0;
-  width: 2px;
+  width: 3px;
   height: calc(var(--sb-row) - 16px);
   border-radius: 1px;
   background: linear-gradient(
@@ -431,7 +432,7 @@
 }
 .sb-row.active .sb-item {
   color: var(--text-primary);
-  font-weight: 550;
+  font-weight: 650;
 }
 
 /* The row's end column. Never narrower than the menu button that takes its place, so a title is

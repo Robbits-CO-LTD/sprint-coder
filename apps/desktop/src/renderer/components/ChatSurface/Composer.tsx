@@ -1263,14 +1263,13 @@ export function Composer({ taskId }: { taskId: string }) {
                   one Task, so switching Tasks remounts it rather than adjusting that state during
                   render. */}
                 {modelPickerV2 ? (
-                  <ModelPickerV2 key={taskId} taskId={taskId} />
+                  <ModelPickerV2 key={taskId} taskId={taskId} footer={<ModelEffortSettings />} />
                 ) : (
                   <>
                     <RuntimeChip />
                     <ModelChip />
                   </>
                 )}
-                <EffortChip />
               </div>
               <ComposerActionButtons
                 policy={
@@ -1589,21 +1588,24 @@ function ModelChip() {
         {selected.displayName}
       </button>
       {open && (
-        <div className="runtime-menu model-menu" role="menu" aria-label="Model選択">
-          {runtime.models.map((model) => (
-            <button
-              data-testid={`model-option-${model.id}`}
-              key={model.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={runtime.model === model.id}
-              className={`runtime-menu-item${runtime.model === model.id ? ' active' : ''}`}
-              onClick={() => choose(model.id)}
-            >
-              <span className="runtime-menu-title">{model.displayName}</span>
-              <span className="runtime-menu-desc">{model.description}</span>
-            </button>
-          ))}
+        <div className="runtime-menu model-menu">
+          <div role="menu" aria-label="Model選択">
+            {runtime.models.map((model) => (
+              <button
+                data-testid={`model-option-${model.id}`}
+                key={model.id}
+                type="button"
+                role="menuitemradio"
+                aria-checked={runtime.model === model.id}
+                className={`runtime-menu-item${runtime.model === model.id ? ' active' : ''}`}
+                onClick={() => choose(model.id)}
+              >
+                <span className="runtime-menu-title">{model.displayName}</span>
+                <span className="runtime-menu-desc">{model.description}</span>
+              </button>
+            ))}
+          </div>
+          <ModelEffortSettings />
         </div>
       )}
     </div>
@@ -1619,20 +1621,6 @@ function effortLabel(id: string): string {
     EFFORT_LABEL[id as ClaudeEffort] ??
     (id === 'ultra' ? 'Ultra' : id.replace(/^./, (c) => c.toUpperCase()))
   );
-}
-
-/** Compact Japanese labels keep Model + Effort readable as one control cluster in the Composer. */
-function compactEffortLabel(id: string): string {
-  const labels: Record<string, string> = {
-    low: '低',
-    medium: '中程度',
-    high: '高',
-    xhigh: '非常に高',
-    max: '最大',
-    ultra: 'Ultra',
-    ultracode: 'Ultracode',
-  };
-  return labels[id] ?? effortLabel(id);
 }
 
 /**
@@ -1701,81 +1689,47 @@ function effortChoicesFor(runtime: RuntimeState): {
   };
 }
 
-// Effort selector (FR-SET-03 follow-up), now available for both real Runtimes. Mock has no effort
-// concept at all, so it stays disabled with a static display, mirroring how ModelChip disables for
-// an inactive Runtime.
-function EffortChip() {
+// A model's reasoning options live with the model, not on the main composer toolbar.
+function ModelEffortSettings() {
   const runtime = useAppStore((s) => s.runtime);
   const setEffort = useAppStore((s) => s.setEffort);
   const setCodexEffort = useAppStore((s) => s.setCodexEffort);
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement>(null);
   const supported =
-    typeof window !== 'undefined' &&
-    typeof window.sprintCoder?.settings?.setEffort === 'function' &&
-    typeof window.sprintCoder?.settings?.setCodexEffort === 'function';
+    (runtime.kind === 'claude' && typeof window.sprintCoder?.settings?.setEffort === 'function') ||
+    (runtime.kind === 'codex' &&
+      typeof window.sprintCoder?.settings?.setCodexEffort === 'function');
   const { choices, selected, disabledReason } = effortChoicesFor(runtime);
-  const enabled = supported && disabledReason === null && choices.length > 0;
+  const enabled = supported && choices.length > 0 && disabledReason === null;
+  const selectedChoice = choices.find(({ id }) => id === selected);
 
-  useEffect(() => {
-    if (!open) return;
-    function handlePointerDown(e: MouseEvent) {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
-  }, [open]);
-
-  function choose(effort: string) {
-    setOpen(false);
-    if (effort === selected) return;
-    if (runtime.kind === 'claude') void setEffort(effort as ClaudeEffort);
-    else if (runtime.kind === 'codex') void setCodexEffort(effort);
-  }
-
-  if (runtime.kind === 'grok') return null;
+  if (runtime.kind !== 'claude' && runtime.kind !== 'codex') return null;
 
   return (
-    <div
-      className="runtime-chip-wrap"
-      ref={wrapRef}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          setOpen(false);
-        }
-      }}
-    >
-      <button
-        data-testid="effort-selector"
-        type="button"
-        className="cmp-chip runtime-chip effort-chip"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        disabled={!enabled}
-        onClick={() => setOpen((value) => !value)}
-        title={enabled ? 'Effortを選択' : (disabledReason ?? 'Effortを変更できません')}
-      >
-        {selected === '' ? '—' : compactEffortLabel(selected)}
-      </button>
-      {open && (
-        <div className="runtime-menu effort-menu" role="menu" aria-label="Effort選択">
-          {choices.map(({ id, label, description }) => (
-            <button
-              data-testid={`effort-option-${id}`}
-              key={id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={selected === id}
-              className={`runtime-menu-item${selected === id ? ' active' : ''}`}
-              onClick={() => choose(id)}
-            >
-              <span className="runtime-menu-title">{label}</span>
-              <span className="runtime-menu-desc">{description}</span>
-            </button>
+    <div className="model-effort-settings">
+      <label className="model-effort-label">
+        <span>
+          推論の強さ <small>Effort</small>
+        </span>
+        <select
+          data-testid="effort-selector"
+          value={selectedChoice?.id ?? ''}
+          onChange={(event) => {
+            const effort = event.currentTarget.value;
+            if (!enabled || effort === selected || !choices.some(({ id }) => id === effort)) return;
+            if (runtime.kind === 'claude') void setEffort(effort as ClaudeEffort);
+            else void setCodexEffort(effort);
+          }}
+          disabled={!enabled}
+        >
+          {selectedChoice === undefined && <option value="">自動</option>}
+          {choices.map(({ id, label }) => (
+            <option key={id} value={id}>
+              {label}
+            </option>
           ))}
-        </div>
-      )}
+        </select>
+      </label>
+      <p>{enabled ? selectedChoice?.description : (disabledReason ?? 'Effortを変更できません')}</p>
     </div>
   );
 }
