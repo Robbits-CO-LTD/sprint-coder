@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { UpdateInstallState } from '@sprint-coder/contracts';
 import { useLogoGlyph } from '../lib/logo-glyph';
 
 function fallbackPlatform(): string {
@@ -37,6 +38,75 @@ function CloseIcon() {
     <svg viewBox="0 0 12 12" aria-hidden="true" className="window-control-icon">
       <path d="m1.5 1.5 9 9m0-9-9 9" />
     </svg>
+  );
+}
+
+function TitlebarUpdateButton() {
+  const updates = window.sprintCoder?.updates;
+  const [state, setState] = useState<UpdateInstallState>('unavailable');
+  const [requesting, setRequesting] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (updates?.subscribeInstallState === undefined) return;
+    let readSnapshot = true;
+    const unsubscribe = updates.subscribeInstallState((next) => {
+      readSnapshot = false;
+      setState(next);
+    });
+    void updates
+      .getInstallState()
+      .then((next) => {
+        if (readSnapshot) setState(next);
+      })
+      .catch(() => undefined);
+    return () => {
+      readSnapshot = false;
+      unsubscribe();
+    };
+  }, [updates]);
+
+  if (state === 'unavailable' || updates === undefined) return null;
+
+  const restarting = requesting || state === 'restarting';
+  const disabled = restarting || state === 'busy';
+  const status = restarting
+    ? '更新を開始しています。'
+    : state === 'busy'
+      ? '作業が終わると更新できます。'
+      : failed
+        ? '更新を開始できませんでした。もう一度お試しください。'
+        : 'ダウンロード済みの更新を適用します。';
+
+  async function restart() {
+    if (disabled || updates === undefined) return;
+    setRequesting(true);
+    setFailed(false);
+    try {
+      await updates.restartToInstall();
+    } catch {
+      setFailed(true);
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        className="titlebar-update-button"
+        aria-disabled={disabled}
+        aria-describedby="titlebar-update-status"
+        title={status}
+        onClick={() => void restart()}
+      >
+        {restarting ? '更新を開始中…' : failed && !disabled ? '更新を再試行' : '再起動して更新'}
+      </button>
+      <span id="titlebar-update-status" className="sr-only" role="status">
+        {status}
+      </span>
+    </>
   );
 }
 
@@ -83,6 +153,7 @@ export function AppTitlebar() {
         </span>
         <span className="app-titlebar-text">Sprint Coder</span>
       </span>
+      <TitlebarUpdateButton />
       {windows && controls !== undefined && (
         <div className="window-controls" role="group" aria-label="ウィンドウ操作">
           <button

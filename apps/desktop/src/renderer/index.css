@@ -488,6 +488,31 @@ button {
 .app-titlebar--windows {
   padding-right: 0;
 }
+.titlebar-update-button {
+  flex: none;
+  margin-inline-start: auto;
+  padding: 6px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--text-primary);
+  font: inherit;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.titlebar-update-button:not([aria-disabled='true']):hover {
+  background: var(--accent-wash-strong);
+}
+.titlebar-update-button[aria-disabled='true'] {
+  border-color: var(--hairline-strong);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: default;
+}
+.titlebar-update-button ~ .window-controls {
+  margin-left: 8px;
+}
 .window-controls {
   display: flex;
   align-self: stretch;

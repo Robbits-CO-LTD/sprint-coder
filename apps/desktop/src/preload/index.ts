@@ -107,6 +107,7 @@ import {
   reasoningBatchSchema,
   runtimeStatusSchema,
   updateCheckResultSchema,
+  updateInstallStateSchema,
   updateHealthSchema,
   desktopControlActivitySchema,
   desktopControlPermissionPaneSchema,
@@ -813,6 +814,19 @@ const api: SprintCoderApi = {
       ),
   },
   updates: {
+    subscribeInstallState: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        const parsed = updateInstallStateSchema.safeParse(raw);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.updateInstallStateEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.updateInstallStateEvent, handler);
+    },
+    getInstallState: async () =>
+      updateInstallStateSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.updateGetInstallState)),
+    restartToInstall: async () => {
+      await ipcRenderer.invoke(IPC_CHANNELS.updateRestartToInstall);
+    },
     subscribeHealth: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, raw: unknown) => {
         const parsed = updateHealthSchema.safeParse(raw);

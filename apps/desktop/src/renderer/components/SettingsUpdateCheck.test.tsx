@@ -64,7 +64,7 @@ describe('manual update check', () => {
 
   it('uses clear, non-sensitive copy for every result', () => {
     expect(updateCheckResultText({ status: 'update_available', version: 'v0.4.1' })).toBe(
-      'v0.4.1 が見つかりました。バックグラウンドでダウンロードしています。',
+      'v0.4.1 が見つかりました。準備ができるとタイトルバーに更新ボタンが表示されます。',
     );
     expect(updateCheckResultText({ status: 'already_checking' })).toContain('確認中');
     expect(updateCheckResultText({ status: 'unsupported' })).toContain('インストール版');

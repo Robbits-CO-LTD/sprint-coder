@@ -4932,50 +4932,19 @@ export class IpcRouter {
     return this.graphs?.response(url) ?? new Response('Not found', { status: 404 });
   }
 
-  getActiveTurnsForUpdate(): readonly {
-    taskId: string;
-    turnId: string | null;
-    taskTitle: string;
-  }[] {
-    return this.persistence.listTasks().flatMap((task) => {
-      const turnId = this.persistence.getActiveTurnId(task.id);
-      const teamBusy = this.teamCoordinator.hasBusyWorkers(task.id);
-      return turnId === null && !teamBusy
-        ? []
-        : [{ taskId: task.id, turnId, taskTitle: task.title }];
-    });
-  }
-
-  async stopActiveTurnsForUpdate(
-    expected: readonly { taskId: string; turnId: string | null }[],
-  ): Promise<void> {
-    for (const turn of expected)
-      await this.mailbox.run(turn.taskId, async () => {
-        if (turn.turnId !== null && this.persistence.getActiveTurnId(turn.taskId) === turn.turnId) {
-          const runtimeStopped = await this.cancelRuntime(turn.taskId, turn.turnId);
-          if (!runtimeStopped)
-            throw new Error(
-              'Runtime停止を確認できないため、更新を開始しません。Runtimeの停止を再試行してください。',
-            );
-          this.notifyTurnEnded(turn.taskId, turn.turnId, 'canceled');
-          const completion = this.persistence.cancelTurnAndFinishGoal(turn.taskId, turn.turnId);
-          if (completion.task !== null) this.pushTaskUpdated(completion.task);
-          if (completion.event !== null) this.publish(completion.event);
-          this.releaseCanceledRuntime(turn.turnId);
-        }
-        if (this.teamCoordinator.hasBusyWorkers(turn.taskId))
-          await this.teamCoordinator.stopAll(turn.taskId);
-        // Do not start the next queued input: the user chose to update, and the queued work remains
-        // durable for the relaunched app.
-      });
+  hasActiveWorkForUpdate(): boolean {
+    return this.persistence
+      .listTasks()
+      .some(
+        ({ id }) =>
+          this.persistence.getActiveTurnId(id) !== null || this.teamCoordinator.hasBusyWorkers(id),
+      );
   }
 
   async prepareUpdateInstall(): Promise<boolean> {
     // Close the common mutation boundary first, then drain handlers that entered before the gate.
     // This covers TeamCoordinator calls and dialog-backed mutations that do not use runMutation.
-    return this.updateInstallMutationGate.closeWhenIdle(
-      () => this.getActiveTurnsForUpdate().length === 0,
-    );
+    return this.updateInstallMutationGate.closeWhenIdle(() => !this.hasActiveWorkForUpdate());
   }
 
   private handle<TInput, TOutput>(
