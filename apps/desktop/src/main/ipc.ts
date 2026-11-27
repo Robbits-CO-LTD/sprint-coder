@@ -9444,23 +9444,24 @@ export class IpcRouter {
               '画像を安全に送信できなかったため、Providerへの送信を中止しました。',
             );
         }
-        for await (const providerEvent of providerEventsWithSafeFailure(
-          providerEventsWithDeadline(
-            runtime.execute(
-              connection,
-              {
-                executionId,
-                connectionId,
-                modelId,
-                messages: dispatchRound.messages,
-                ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
-                  ? {}
-                  : { tools: dispatchRound.tools }),
-              },
-              controller.signal,
-              streamBudget,
-            ),
-            {
+        const events = runtime.execute(
+          connection,
+          {
+            executionId,
+            connectionId,
+            modelId,
+            messages: dispatchRound.messages,
+            ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
+              ? {}
+              : { tools: dispatchRound.tools }),
+          },
+          controller.signal,
+          streamBudget,
+        );
+        // ACP has its own bounded requests and publishes tool calls only after the CLI stops.
+        const boundedEvents = externalCli
+          ? events
+          : providerEventsWithDeadline(events, {
               executionId,
               firstEventTimeoutMs: providerFirstEventTimeoutMs({
                 providerId: connection.providerId,
@@ -9470,8 +9471,9 @@ export class IpcRouter {
                 ),
               }),
               idleTimeoutMs: PROVIDER_IDLE_TIMEOUT_MS,
-            },
-          ),
+            });
+        for await (const providerEvent of providerEventsWithSafeFailure(
+          boundedEvents,
           connection.providerId === 'ollama' ? 'completed' : 'not_required',
         )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;

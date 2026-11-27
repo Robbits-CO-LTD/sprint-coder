@@ -30,9 +30,11 @@ it.each([
   { reasoning: false, verificationFailure: 'api_timeout' },
   { reasoning: false, rejectTools: 'draft' },
   { reasoning: false, rejectTools: 'ordinary' },
+  { reasoning: false, slowAntigravityLeader: true },
 ] as const)(
-  'settles the Provider Turn ($reasoning, $verificationFailure, $rejectTools)',
+  'settles the Provider Turn ($reasoning, $verificationFailure, $rejectTools, $slowAntigravityLeader)',
   async ({ reasoning, ...options }) => {
+    const slowAntigravityLeader = 'slowAntigravityLeader' in options;
     const verificationFailure =
       'verificationFailure' in options ? options.verificationFailure : undefined;
     const rejectTools = 'rejectTools' in options ? options.rejectTools : undefined;
@@ -51,9 +53,9 @@ it.each([
     const resources = new TurnStreamingResources(emit);
     if (reasoning) resources.begin(taskId, turnId);
     const connection = {
-      id: 'profile:ollama-658',
-      providerId: 'ollama',
-      runtimeKind: 'openai_compatible',
+      id: slowAntigravityLeader ? 'builtin:antigravity-cli' : 'profile:ollama-658',
+      providerId: slowAntigravityLeader ? 'antigravity' : 'ollama',
+      runtimeKind: slowAntigravityLeader ? 'builtin_cli' : 'openai_compatible',
       displayName: 'terminal',
       enabled: true,
       secretReference: null,
@@ -78,6 +80,7 @@ it.each([
     const execute = vi.fn((_connection: unknown, request: ProviderExecutionRequest) =>
       (async function* () {
         try {
+          if (slowAntigravityLeader) await new Promise((resolve) => setTimeout(resolve, 100_000));
           if (rejectTools !== undefined && request.tools?.length) {
             yield {
               type: 'error' as const,
@@ -172,6 +175,7 @@ it.each([
         projectItems: [],
         projectSnapshotDigest: null,
       })),
+      acknowledgeRuntimeContext: vi.fn(),
       prepareProviderTurnImageAttachments: vi.fn(() => undefined),
       providerImageAttachmentStillValid: vi.fn().mockResolvedValue(true),
       providerEgressTrustForConnection: () => 'trusted-local',
@@ -212,19 +216,27 @@ it.each([
       autoSkills: readonly unknown[],
     ) => Promise<void>;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    if (slowAntigravityLeader) vi.useFakeTimers();
     try {
-      await Promise.race([
-        startProviderTurn.call(fakeRouter, started, connection.id, false, []),
+      const settled = Promise.race([
+        startProviderTurn.call(fakeRouter, started, connection.id, slowAntigravityLeader, []),
         new Promise((_, reject) => {
           timer = setTimeout(
             () => reject(new Error('Provider Turn still waiting after completed')),
-            1_000,
+            slowAntigravityLeader ? 110_000 : 1_000,
           );
         }),
       ]);
+      if (slowAntigravityLeader) await vi.advanceTimersByTimeAsync(100_000);
+      await settled;
     } finally {
       clearTimeout(timer);
       resources.dispose();
+      if (slowAntigravityLeader) vi.useRealTimers();
+    }
+    if (slowAntigravityLeader) {
+      expect(fakeRouter.completeProviderTeamTurn).toHaveBeenCalledOnce();
+      expect(fakeRouter.cancelProviderExecution).not.toHaveBeenCalled();
     }
     if (verificationFailure !== undefined) {
       expect(execute).not.toHaveBeenCalled();
