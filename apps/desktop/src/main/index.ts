@@ -92,6 +92,7 @@ import {
   type ThemeId,
 } from '../window-theme';
 import { readStoredTheme, saveStoredTheme } from './window-theme-store';
+import { createRendererCrashRecovery } from './renderer-crash-recovery';
 import {
   initializeUserConfig,
   readGlobalSprintCoderInstructions,
@@ -494,6 +495,40 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false,
       ...(usesHiddenWindowPresentation() ? { backgroundThrottling: false } : {}),
     },
+  });
+  const recoverRenderer = createRendererCrashRecovery({
+    canRecover: () => !shutdownInFlight && !shutdownCommitted && !window.isDestroyed(),
+    reload: () => {
+      secureLogger.info(
+        'Reloading the main window after a renderer failure',
+        { process: 'renderer' },
+        { event: 'system.renderer.reload_requested', status: 'started' },
+      );
+      window.webContents.reload();
+    },
+    confirmRetry: async () => {
+      const { response } = await dialog.showMessageBox(window, {
+        type: 'warning',
+        title: 'Sprint Coder の画面を再読み込み',
+        message: '画面の表示に失敗しました。',
+        detail: 'アプリを終了せず、画面だけを再読み込みできます。',
+        buttons: ['再読み込み', 'キャンセル'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      return response === 0;
+    },
+    reportFailure: (error) => {
+      secureLogger.error(
+        'Renderer recovery failed',
+        { process: 'renderer', error },
+        { event: 'system.renderer.recovery_failed', status: 'failed' },
+      );
+    },
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    void recoverRenderer(details.reason);
   });
   if (process.platform !== 'darwin') window.setMenu(null);
   window.webContents.on('will-navigate', (event) => event.preventDefault());
