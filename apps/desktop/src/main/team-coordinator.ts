@@ -599,6 +599,7 @@ export class TeamCoordinator {
     private readonly diagnostic?: (event: TeamDiagnosticEvent) => void,
     /** What a workspace-write Worker's managed tools cannot do (Issue #542); null = no limit known. */
     readonly workspaceWriteLimits: WorkspaceWriteLimits | null = null,
+    private readonly releaseBlenderWorker?: (taskId: string, agentId: string) => Promise<void>,
   ) {
     this.integrationScheduler = integrationScheduler ?? new TeamIntegrationScheduler();
     if (executionScheduler !== undefined) this.executionScheduler = executionScheduler;
@@ -5098,6 +5099,7 @@ export class TeamCoordinator {
         .agents.find(({ id, kind }) => id === agentId && kind === 'worker');
       if (worker === undefined) throw new Error('Worker not found');
       await this.cancelWorkerExecutions(team.id, worker.id);
+      await this.releaseBlenderWorker?.(taskId, worker.id);
       const stopped = ['done', 'failed', 'stopped'].includes(worker.state)
         ? worker
         : this.persistence.transitionWorkerState(worker.id, 'stopped');
@@ -5117,6 +5119,9 @@ export class TeamCoordinator {
         .getTeamSnapshot(team.id)
         .agents.filter(({ kind }) => kind === 'worker');
       for (const worker of workers) await this.cancelWorkerExecutions(team.id, worker.id);
+      const releaseBlenderWorker = this.releaseBlenderWorker;
+      if (releaseBlenderWorker !== undefined)
+        await Promise.all(workers.map(({ id }) => releaseBlenderWorker(taskId, id)));
       const graphMissions = this.persistence
         .listTeamMissions(team.id)
         .filter(

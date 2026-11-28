@@ -41,7 +41,85 @@ export const TEAM_CORE_MCP_TOOL_NAMES = [
   'team_stop_worker',
 ] as const;
 
+export const BLENDER_TEAM_MCP_TOOLS = [
+  {
+    name: 'blender_observe',
+    description:
+      'Get a PNG of your assigned Blender mesh from your own view. Returns a one-use observation token. Inspect the image before deciding on an edit. Returns up to 64 face centers and normals in mesh-local coordinates. Set target to claim a named mesh from the selected Blender meshes on your first observation. Your target stays assigned to you. An optional face index selects the face for an extrusion.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        azimuth: { type: 'number', minimum: -360, maximum: 360 },
+        elevation: { type: 'number', minimum: -89, maximum: 89 },
+        faceIndex: { type: 'integer', minimum: 0 },
+        target: { type: 'string', minLength: 1, maxLength: 1024 },
+      },
+      required: ['azimuth', 'elevation'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'blender_pointer',
+    description:
+      'Move your own Blender cursor, or click to select a visible vertex or face. Use coordinates from your current image: (0,0) is top left and (1,1) is bottom right. Move the cursor first, then select. A missed hit is null.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        observation: { type: 'string' },
+        x: { type: 'number', minimum: 0, maximum: 1 },
+        y: { type: 'number', minimum: 0, maximum: 1 },
+        kind: { enum: ['vertex', 'face'] },
+        action: { enum: ['move', 'select'] },
+      },
+      required: ['observation', 'x', 'y', 'kind', 'action'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'blender_edit',
+    description:
+      'Edit your assigned Blender mesh using its observation token. For cursor modeling, move_vertex changes the clicked vertex by a mesh-local XYZ offset and extrude_selected extrudes the clicked face by a nonzero distance along its normal. Legacy move offsets the object and extrude uses the observed face index. create_base creates one horizontal quad in an empty assigned mesh using [width, depth]. detail_face adds one feature to the clicked face: gable_roof or hip_roof on an upward face, window_bank or entrance on a wall, street_detail on the street top. Observe again after editing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        observation: { type: 'string' },
+        operation: {
+          enum: [
+            'move',
+            'extrude',
+            'move_vertex',
+            'extrude_selected',
+            'create_base',
+            'detail_face',
+          ],
+        },
+        value: {
+          anyOf: [
+            { type: 'number' },
+            { enum: ['gable_roof', 'hip_roof', 'window_bank', 'entrance', 'street_detail'] },
+            {
+              type: 'array',
+              items: { type: 'number' },
+              minItems: 2,
+              maxItems: 3,
+            },
+          ],
+        },
+      },
+      required: ['observation', 'operation', 'value'],
+      additionalProperties: false,
+    },
+  },
+] as const;
+
+export type BlenderTeamToolName = (typeof BLENDER_TEAM_MCP_TOOLS)[number]['name'];
+
+export function isBlenderTeamTool(name: string): name is BlenderTeamToolName {
+  return BLENDER_TEAM_MCP_TOOLS.some((tool) => tool.name === name);
+}
+
 export const TEAM_MCP_TOOL_NAMES = [
+  ...BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name),
   ...PROJECT_MEMORY_MCP_TOOL_NAMES,
   ...SKILL_DRAFT_MCP_TOOL_NAMES,
   ...TEAM_CORE_MCP_TOOL_NAMES,
@@ -59,6 +137,7 @@ export type TeamMcpToolCapabilities = Readonly<{
   allowSkillDrafts?: boolean;
   allowTeamTools?: boolean;
   role?: TeamMcpRole;
+  blenderEnabled?: boolean;
   allowedTools?: readonly TeamMcpToolName[];
 }>;
 
@@ -74,6 +153,11 @@ export function teamMcpToolNamesForCapabilities(
     ...(capabilities.allowProjectMemory === true ? PROJECT_MEMORY_MCP_TOOL_NAMES : []),
     ...(capabilities.allowSkillDrafts === true ? SKILL_DRAFT_MCP_TOOL_NAMES : []),
     ...(capabilities.allowTeamTools === false ? [] : roleTools),
+    ...(capabilities.role === 'worker' &&
+    capabilities.allowTeamTools !== false &&
+    capabilities.blenderEnabled === true
+      ? BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name)
+      : []),
   ];
   if (capabilities.allowedTools === undefined) return candidates;
   const allowed = new Set(capabilities.allowedTools);

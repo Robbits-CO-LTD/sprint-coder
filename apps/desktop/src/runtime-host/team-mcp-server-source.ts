@@ -21,6 +21,7 @@ import {
   desktopControlTeamCursorsEnabled,
 } from '../main/desktop-control-build';
 import {
+  BLENDER_TEAM_MCP_TOOLS,
   TEAM_ASSIGN_TASKS_MAX,
   TEAM_ASSIGN_TASKS_MAX_BYTES,
   TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
@@ -57,6 +58,7 @@ const ASSIGN_TASKS_MAX_BYTES = ${TEAM_ASSIGN_TASKS_MAX_BYTES};
 const ASSIGN_TASKS_TOO_LARGE_MESSAGE = ${JSON.stringify(TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE)};
 
 const TOOLS = [
+  ...${JSON.stringify(BLENDER_TEAM_MCP_TOOLS)},
   {
     name: 'project_memory_remember',
     description:
@@ -385,6 +387,8 @@ const LONG_BRIDGE_TIMEOUT_MS =
   process.env.NODE_ENV === 'test' && process.env.TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS
     ? Number(process.env.TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS)
     : 70000;
+// Blender observation can wait for a per-image decision after obtaining the view.
+const BLENDER_OBSERVE_TIMEOUT_MS = 135000;
 // Host tools can wait for an explicit user decision (the host approval TTL is one hour).
 const MANAGED_BRIDGE_TIMEOUT_MS =
   process.env.NODE_ENV === 'test' && process.env.TEAM_BRIDGE_TEST_MANAGED_TIMEOUT_MS
@@ -552,6 +556,8 @@ function callBridge(tool, args) {
         args,
         connection.managedNames.has(tool)
           ? MANAGED_BRIDGE_TIMEOUT_MS
+          : tool === 'blender_observe'
+          ? BLENDER_OBSERVE_TIMEOUT_MS
           : tool === 'team_wait_reports' ||
         tool === 'team_wait_events' ||
         tool === 'team_assign_tasks' ||
@@ -596,6 +602,16 @@ function contentForResult(result) {
       type: 'text',
       text: JSON.stringify(
         Object.assign(
+          typeof result.observation === 'string'
+            ? {
+                observation: result.observation,
+                target: result.target,
+                location: result.location,
+                face_count: result.face_count,
+                faces: result.faces,
+                face_index: result.face_index,
+              }
+            : {},
           {
             path: result.path,
             mimeType: result.mimeType,

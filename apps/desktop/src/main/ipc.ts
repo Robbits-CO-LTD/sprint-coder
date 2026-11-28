@@ -1,3 +1,5 @@
+import { BlenderTeamConnection } from './blender-team';
+import { BLENDER_TEAM_MCP_TOOLS } from '../runtime-host/team-mcp-tool-contract';
 import { matchProjectPermissionRules } from './project-permission-settings';
 import { APPROVAL_POLICY_CHANGED_MESSAGE } from '../approval-feedback';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
@@ -236,6 +238,8 @@ import {
   teamRetainedWorktreeListInputSchema,
   teamRetainedWorktreeRefSchema,
   teamMessageSummarySchema,
+  teamBlenderPairInputSchema,
+  teamBlenderTargetsSchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
   teamSendMessageInputSchema,
@@ -315,6 +319,7 @@ import {
   injectPromptGuidance,
 } from './prompt-context';
 import type {
+  AgentRecord,
   PersistedTurnSkill,
   ImageAttachmentAcceptanceSelection,
   PersistenceClient,
@@ -1288,6 +1293,8 @@ export class IpcRouter {
       });
     },
   );
+  private readonly blenderTeams = new Map<string, BlenderTeamConnection>();
+  private readonly pendingBlenderPairs = new Map<string, AbortController>();
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
@@ -1799,6 +1806,8 @@ export class IpcRouter {
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
+      blenderForWorker: (worker, connection, executionId, requestId) =>
+        this.providerBlenderWorkerBinding(worker, connection, executionId, requestId),
       executeManagerTool: ({
         worker,
         name,
@@ -1884,6 +1893,13 @@ export class IpcRouter {
           ...(event.result === undefined ? {} : { result: event.result }),
         }),
       workspaceWriteLimits,
+      async (taskId, workerId) => {
+        try {
+          await this.blenderTeams.get(taskId)?.releaseWorker(workerId);
+        } catch (error) {
+          throw new Error('Blender Worker stop is unconfirmed', { cause: error });
+        }
+      },
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than
@@ -3678,6 +3694,7 @@ export class IpcRouter {
           // desktop-control session (and its cursors), and stops a run that slipped through.
           // A hire still checking the Workspace must not create a Worker in an archived Task.
           this.teamCoordinator.revokePendingHires(input.taskId);
+          this.disconnectBlenderTeam(input.taskId);
           void this.endArchivedTaskDesktopControl(input.taskId);
         }
         return result;
@@ -4155,6 +4172,49 @@ export class IpcRouter {
     );
     this.handle(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), (input) =>
       this.teamCoordinator.get(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.teamsBlenderStatus,
+      taskIdPayloadSchema,
+      teamBlenderTargetsSchema.nullable(),
+      async ({ taskId }) => {
+        const team = this.blenderTeams.get(taskId);
+        if (team === undefined) return null;
+        if (await team.isAvailable()) return team.targets;
+        if (this.blenderTeams.get(taskId) === team) this.disconnectBlenderTeam(taskId);
+        return null;
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsBlenderPair,
+      teamBlenderPairInputSchema,
+      teamBlenderTargetsSchema,
+      async ({ taskId, code }) => {
+        if (this.teamCoordinator.get(taskId) === null)
+          throw new Error('Blender can only be paired with a Team Task');
+        if (this.blenderTeams.has(taskId) || this.pendingBlenderPairs.has(taskId))
+          throw new Error('Disconnect this Team before pairing again');
+        const controller = new AbortController();
+        this.pendingBlenderPairs.set(taskId, controller);
+        try {
+          const connection = await BlenderTeamConnection.pair(
+            code ?? clipboard.readText(),
+            controller.signal,
+          );
+          controller.signal.throwIfAborted();
+          this.blenderTeams.set(taskId, connection);
+          return connection.targets;
+        } finally {
+          if (this.pendingBlenderPairs.get(taskId) === controller)
+            this.pendingBlenderPairs.delete(taskId);
+        }
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsBlenderDisconnect,
+      taskIdPayloadSchema,
+      z.void(),
+      ({ taskId }) => this.disconnectBlenderTeam(taskId),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsUpdatePolicy,
@@ -4924,6 +4984,8 @@ export class IpcRouter {
     await this.attachmentCustodyStore.dispose();
     this.attachmentCustodyByTurn.clear();
     this.attachmentCapabilityByTurn.clear();
+    for (const taskId of [...this.blenderTeams.keys(), ...this.pendingBlenderPairs.keys()])
+      this.disconnectBlenderTeam(taskId);
     await this.teamMcpBridge.dispose();
     if (streamingFailure !== undefined) throw streamingFailure.cause;
   }
@@ -7425,8 +7487,25 @@ export class IpcRouter {
         modelId,
         this.persistence.getTaskModelSelection(taskId),
       );
+    return this.officialScreenshotBinding(
+      taskId,
+      started.turnId,
+      connection,
+      modelId,
+      this.persistence.getTaskModelSelection(taskId),
+      started.modelSelection,
+    );
+  }
+
+  private officialScreenshotBinding(
+    taskId: string,
+    turnId: string,
+    connection: ProviderConnection,
+    modelId: string,
+    selection: ModelSelection | null,
+    startingSelection: ModelSelection | null,
+  ): CloudScreenshotBinding | null {
     const current = this.persistence.getProviderConnection(connection.id);
-    const selection = this.persistence.getTaskModelSelection(taskId);
     if (
       connection.runtimeKind !== 'official_api' ||
       !current.enabled ||
@@ -7442,7 +7521,7 @@ export class IpcRouter {
       selection.connectionId !== connection.id ||
       selection.requestedModel !== modelId ||
       selection.requestedProvider !== connection.providerId ||
-      digestCanonical(selection) !== digestCanonical(started.modelSelection)
+      digestCanonical(selection) !== digestCanonical(startingSelection)
     )
       return null;
     const model = this.modelCatalog.find(connection.id, modelId);
@@ -7456,7 +7535,7 @@ export class IpcRouter {
     const requestUrl = this.providerRegistry.resolve(current).cloudScreenshotUrl;
     if (!requestUrl) return null;
     const identity = digestCanonical({
-      turnId: started.turnId,
+      turnId,
       taskId,
       current,
       selection,
@@ -7467,20 +7546,83 @@ export class IpcRouter {
     return { kind: 'cloud-screenshot', requestUrl, identity };
   }
 
+  private providerBlenderWorkerBinding(
+    worker: AgentRecord,
+    connection: ProviderConnection,
+    executionId: string | undefined,
+    requestId: string,
+  ) {
+    const session = this.blenderTeams.get(worker.taskId);
+    const modelId = worker.modelSelection.requestedModel;
+    if (session === undefined || !modelId) return undefined;
+    const state = () => {
+      if (!session.active || this.blenderTeams.get(worker.taskId) !== session) return null;
+      try {
+        const execution =
+          executionId === undefined ? null : this.persistence.getTeamExecution(executionId);
+        if (execution !== null && execution.assigneeAgentId !== worker.id) return null;
+        const selection =
+          execution?.modelSelection ?? this.directWorkerSelection(worker.taskId, worker.id);
+        if (digestCanonical(selection) !== digestCanonical(worker.modelSelection)) return null;
+        const current = this.persistence.getProviderConnection(connection.id);
+        if (!current.enabled || digestCanonical(current) !== digestCanonical(connection))
+          return null;
+        if (this.providerEgressTrustForConnection(current) === 'trusted-local') {
+          return { kind: 'local' as const, identity: 'local' };
+        }
+        return isExternalAcpConnection(connection.id)
+          ? this.cliScreenshotBinding(worker.taskId, requestId, connection, modelId, selection)
+          : this.officialScreenshotBinding(
+              worker.taskId,
+              requestId,
+              connection,
+              modelId,
+              selection,
+              worker.modelSelection,
+            );
+      } catch {
+        return null;
+      }
+    };
+    const initial = state();
+    if (initial === null) return undefined;
+    return {
+      session,
+      authorizeImage: async (picture: ScreenshotPicture, signal: AbortSignal) => {
+        const stillCurrent = () => state()?.identity === initial.identity;
+        if (!stillCurrent()) return null;
+        if (
+          initial.kind !== 'local' &&
+          !(await this.approveCloudScreenshot(
+            initial,
+            connection,
+            modelId,
+            picture,
+            signal,
+            'Blenderの視点画像',
+          ))
+        )
+          return null;
+        return stillCurrent() ? stillCurrent : null;
+      },
+    };
+  }
+
   private async approveCloudScreenshot(
     binding: CloudScreenshotBinding | CliScreenshotBinding,
     connection: ProviderConnection,
     modelId: string,
     picture: ScreenshotPicture,
     signal: AbortSignal,
+    subject = 'スクリーンショット',
   ): Promise<boolean> {
     const promptSignal = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
     promptSignal.throwIfAborted();
     if (this.window.isDestroyed()) return false;
     const answer = await dialog.showMessageBox(this.window, {
       type: 'question',
-      title: 'スクリーンショットの外部送信',
-      message: 'このスクリーンショットを次の接続先に1回送りますか？',
+      title: `${subject}の外部送信`,
+      message: `この${subject}を次の接続先に1回送りますか？`,
       detail: [
         `接続先: ${binding.kind === 'cli-screenshot' ? binding.destination : binding.requestUrl}`,
         `Provider: ${connection.providerId}`,
@@ -7651,6 +7793,7 @@ export class IpcRouter {
         : null,
       // Only with the Team's desktop cursors on, so with them off the guidance is as it was.
       leaderDesktopControlGuidance(options.teamTurn),
+      this.blenderLeaderGuidance(taskId, options.teamTurn),
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
         : null,
@@ -8049,6 +8192,19 @@ export class IpcRouter {
     };
   }
 
+  private blenderLeaderGuidance(taskId: string, teamTurn: boolean): string | null {
+    const size = this.blenderTeams.get(taskId)?.targets.length;
+    if (!teamTurn || size === undefined) return null;
+    return `このTaskのBlenderには${size}個の編集対象が接続されています。Blender作業を依頼された場合は、画像入力とツール呼び出しに対応するWorkerに並行で割り当ててください。対象が指定されている場合は、そのメッシュ名をWorkerの指示に含め、最初のblender_observeのtargetに指定するよう伝えてください。Workerは画像を確認し、blender_pointerでカーソルを動かして頂点や面を選択するよう指示してください。blender_editで選択箇所を一手ずつ編集し、再観察して結果を確かめます。`;
+  }
+
+  private disconnectBlenderTeam(taskId: string): void {
+    this.pendingBlenderPairs.get(taskId)?.abort();
+    this.pendingBlenderPairs.delete(taskId);
+    this.blenderTeams.get(taskId)?.close();
+    this.blenderTeams.delete(taskId);
+  }
+
   private registerWorkerMcp(
     turnId: string,
     taskId: string,
@@ -8059,12 +8215,60 @@ export class IpcRouter {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
+    const paired = this.blenderTeams.get(taskId);
+    const currentSelection = () => {
+      if (executionId === undefined) return this.directWorkerSelection(taskId, requesterAgentId);
+      const execution = this.persistence.getTeamExecution(executionId);
+      return execution.assigneeAgentId === requesterAgentId ? execution.modelSelection : null;
+    };
+    const initialSelection = paired ? currentSelection() : null;
+    const connectionId = initialSelection?.connectionId;
+    const modelId = initialSelection?.requestedModel;
+    const provider = initialSelection?.requestedProvider;
+    const model =
+      connectionId && modelId ? this.modelCatalog.find(connectionId, modelId) : undefined;
+    const blenderConnection =
+      model?.available &&
+      (model.imageInput?.value === true || model.multimodalInput?.value === true) &&
+      !this.persistence.getTask(taskId).localOnly
+        ? paired
+        : undefined;
     const registration: TeamMcpRegistration = {
       taskId,
       token,
       role: 'worker',
       allowTeamTools: true,
-      allowedTools: WORKER_TEAM_MCP_TOOL_NAMES,
+      allowedTools:
+        blenderConnection === undefined
+          ? WORKER_TEAM_MCP_TOOL_NAMES
+          : [...WORKER_TEAM_MCP_TOOL_NAMES, ...BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name)],
+      ...(blenderConnection === undefined
+        ? {}
+        : {
+            blenderEnabled: true,
+            blenderConnection,
+            approveBlenderObservation: async (observation, signal) => {
+              const stillCurrent = () =>
+                blenderConnection.active &&
+                !this.persistence.getTask(taskId).localOnly &&
+                digestCanonical(currentSelection()) === digestCanonical(initialSelection);
+              if (!provider || !modelId || !stillCurrent() || this.window.isDestroyed())
+                return false;
+              const promptSignal = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
+              const answer = await dialog.showMessageBox(this.window, {
+                type: 'question',
+                title: 'Blenderの視点画像の外部送信',
+                message: 'このBlender画像を次の接続先に1回送りますか？',
+                detail: `接続先: ${provider} CLI\nモデル: ${modelId}\n画像: ${JSON.stringify(observation.target.slice(0, 128))}`,
+                buttons: ['送らない', 'この画像を送る'],
+                defaultId: 0,
+                cancelId: 0,
+                noLink: true,
+                signal: promptSignal,
+              });
+              return !promptSignal.aborted && answer.response === 1 && stillCurrent();
+            },
+          }),
       requesterAgentId,
       initialWaitCursor: this.teamCoordinator.latestTeamMessageSeq(taskId),
       ...(executionId === undefined
@@ -8088,9 +8292,13 @@ export class IpcRouter {
       token,
       // A Worker marked for desktop control is told how to share the desktop (cursors on only).
       guidance:
-        desktopControlWorker(taskId, requesterAgentId) === undefined
-          ? WORKER_MCP_SYSTEM_PROMPT
-          : `${WORKER_MCP_SYSTEM_PROMPT}${WORKER_DESKTOP_CONTROL_PROMPT}`,
+        WORKER_MCP_SYSTEM_PROMPT +
+        (desktopControlWorker(taskId, requesterAgentId) === undefined
+          ? ''
+          : WORKER_DESKTOP_CONTROL_PROMPT) +
+        (blenderConnection === undefined
+          ? ''
+          : '\nA Blender scene is paired. For Blender work, call blender_observe, move your cursor and click a vertex or face with blender_pointer, edit that selection with blender_edit, and observe again to verify.'),
       toolNames: teamMcpToolNamesForCapabilities(registration),
       ...(managedTools.length === 0
         ? {}
@@ -9235,6 +9443,7 @@ export class IpcRouter {
             content: [
               ...renderDesktopControl(command, process.platform === 'darwin'),
               leaderDesktopControlGuidance(teamTurn),
+              this.blenderLeaderGuidance(taskId, teamTurn),
             ].join('\n'),
           });
       }

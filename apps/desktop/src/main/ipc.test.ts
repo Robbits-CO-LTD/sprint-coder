@@ -9772,3 +9772,57 @@ describe('completed file edit frames', () => {
     }
   });
 });
+
+describe('Team Blender Worker registration', () => {
+  it.each([
+    [true, true, false, true],
+    [true, false, false, false],
+    [false, true, false, false],
+    [true, true, true, false],
+  ])(
+    'offers Blender tools only for the paired Task and an eligible CLI model',
+    (paired, takesPictures, localOnly, enabled) => {
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      const register = vi.fn();
+      Object.assign(router, {
+        blenderTeams: new Map(paired ? [['task-blender', { active: true }]] : []),
+        teamMcpBridge: { socketPath: '/synthetic-socket', register },
+        teamCoordinator: { latestTeamMessageSeq: () => 0 },
+        directWorkerSelection: () => ({
+          connectionId: 'builtin:codex',
+          requestedModel: 'gpt-6.2-sol',
+          requestedProvider: 'openai',
+        }),
+        modelCatalog: {
+          find: () => ({ available: true, multimodalInput: { value: takesPictures } }),
+        },
+        persistence: { getTask: () => ({ localOnly }) },
+      });
+      const start = Reflect.get(IpcRouter.prototype, 'registerWorkerMcp') as (
+        this: typeof router,
+        turnId: string,
+        taskId: string,
+        workerId: string,
+      ) => RuntimeTeamMcpOption;
+      const result = start.call(router, 'turn-blender', 'task-blender', 'worker-blender');
+      expect(result.toolNames.includes('blender_observe')).toBe(enabled);
+      expect(result.toolNames.includes('blender_edit')).toBe(enabled);
+      expect(register).toHaveBeenCalledWith(
+        'turn-blender',
+        expect.objectContaining({
+          taskId: 'task-blender',
+          role: 'worker',
+          requesterAgentId: 'worker-blender',
+        }),
+      );
+      if (enabled) {
+        expect(register).toHaveBeenCalledWith(
+          'turn-blender',
+          expect.objectContaining({
+            approveBlenderObservation: expect.any(Function),
+          }),
+        );
+      }
+    },
+  );
+});

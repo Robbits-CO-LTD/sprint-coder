@@ -150,7 +150,7 @@ export class ToolImageBridge {
     result: unknown;
   }): Promise<ToolImageAcceptance> {
     this.stagedImage = null;
-    if (input.toolName !== 'view_image')
+    if (input.toolName !== 'view_image' && input.toolName !== 'blender_observe')
       return Object.freeze({
         toolMessage: invalidImageMessage(input.toolCallId, input.toolName),
         accepted: false,
