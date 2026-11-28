@@ -387,6 +387,8 @@ const LONG_BRIDGE_TIMEOUT_MS =
   process.env.NODE_ENV === 'test' && process.env.TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS
     ? Number(process.env.TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS)
     : 70000;
+// Blender observation can wait for a per-image decision after obtaining the view.
+const BLENDER_OBSERVE_TIMEOUT_MS = 135000;
 // Host tools can wait for an explicit user decision (the host approval TTL is one hour).
 const MANAGED_BRIDGE_TIMEOUT_MS =
   process.env.NODE_ENV === 'test' && process.env.TEAM_BRIDGE_TEST_MANAGED_TIMEOUT_MS
@@ -554,6 +556,8 @@ function callBridge(tool, args) {
         args,
         connection.managedNames.has(tool)
           ? MANAGED_BRIDGE_TIMEOUT_MS
+          : tool === 'blender_observe'
+          ? BLENDER_OBSERVE_TIMEOUT_MS
           : tool === 'team_wait_reports' ||
         tool === 'team_wait_events' ||
         tool === 'team_assign_tasks' ||

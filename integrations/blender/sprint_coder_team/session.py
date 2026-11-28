@@ -6,7 +6,7 @@ from secrets import token_urlsafe
 import bpy
 
 from . import (
-    AgentView, COLORS, agents, assign_agent, extrude_face, face_vertices, move_target, set_view,
+    AgentView, COLORS, agents, assign_agent, extrude_face, face_vertices, move_target, request_redraw, set_view,
     _clear_views,
 )
 
@@ -60,6 +60,15 @@ class TeamSceneSession:
             raise ValueError("Slot already belongs to a Worker")
         view = assign_agent(worker_id, self.targets[slot], azimuth=slot * 36, elevation=28, slot=slot)
         self.assigned[worker_id] = (slot, view)
+
+    def release(self, worker_id):
+        self.observations.pop(worker_id, None)
+        assignment = self.assigned.pop(worker_id, None)
+        if assignment is not None:
+            view = agents.pop(worker_id, None)
+            if view is not None and view.preview is not None:
+                view.preview.free()
+            request_redraw()
 
     def _view(self, worker_id):
         if self.closed or bpy.context.scene != self.scene:

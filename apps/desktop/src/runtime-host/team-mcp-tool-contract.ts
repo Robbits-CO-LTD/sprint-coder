@@ -45,13 +45,14 @@ export const BLENDER_TEAM_MCP_TOOLS = [
   {
     name: 'blender_observe',
     description:
-      'Get a PNG of your assigned Blender mesh from your own view. Returns a one-use observation token. Inspect the image before deciding on an edit. Returns up to 64 face centers and normals in mesh-local coordinates. An optional face index selects the face for an extrusion.',
+      'Get a PNG of your assigned Blender mesh from your own view. Returns a one-use observation token. Inspect the image before deciding on an edit. Returns up to 64 face centers and normals in mesh-local coordinates. Set target to claim a named mesh from the selected Blender meshes on your first observation. Your target stays assigned to you. An optional face index selects the face for an extrusion.',
     inputSchema: {
       type: 'object',
       properties: {
         azimuth: { type: 'number', minimum: -360, maximum: 360 },
         elevation: { type: 'number', minimum: -89, maximum: 89 },
         faceIndex: { type: 'integer', minimum: 0 },
+        target: { type: 'string', minLength: 1, maxLength: 1024 },
       },
       required: ['azimuth', 'elevation'],
       additionalProperties: false,

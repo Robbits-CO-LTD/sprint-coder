@@ -29,7 +29,7 @@ export function TeamBlenderSettings({ taskId }: { taskId: string }) {
     setError(null);
     try {
       if (targets === null) {
-        setTargets(await api.pairBlender(taskId, code));
+        setTargets(await api.pairBlender(taskId, code.trim() || undefined));
         setCode('');
       } else {
         await api.disconnectBlender(taskId);
@@ -53,10 +53,10 @@ export function TeamBlenderSettings({ taskId }: { taskId: string }) {
         <>
           <p className="settings-hint" id={`${id}-hint`}>
             Blenderでメッシュを選び、Teamパネルでペアリングを開始してコードをコピーします。
-            このTeamのWorkerは選んだメッシュを編集でき、視点画像は利用中のAIに送られます。
+            このTeamのWorkerは選んだメッシュを編集できます。ローカル接続には視点画像を渡し、対応する外部接続では画像ごとに送信を確認します。
           </p>
           <label className="settings-field" htmlFor={id}>
-            <span className="settings-field-label">ペアリングコード</span>
+            <span className="settings-field-label">ペアリングコード（手入力の場合）</span>
             <input
               id={id}
               type="password"
@@ -70,7 +70,7 @@ export function TeamBlenderSettings({ taskId }: { taskId: string }) {
               onKeyDown={(event) => {
                 if (event.key !== 'Enter') return;
                 event.preventDefault();
-                if (code.trim() !== '' && !pending) void changeConnection();
+                if (!pending) void changeConnection();
               }}
             />
           </label>
@@ -83,10 +83,15 @@ export function TeamBlenderSettings({ taskId }: { taskId: string }) {
       <button
         type="button"
         className="settings-secondary-button"
-        disabled={targets === null && code.trim() === ''}
         onClick={() => void changeConnection()}
       >
-        {pending ? '処理中…' : targets === null ? 'このTeamに接続' : '接続を解除'}
+        {pending
+          ? '処理中…'
+          : targets !== null
+            ? '接続を解除'
+            : code.trim() === ''
+              ? 'コピーしたコードで接続'
+              : '入力したコードで接続'}
       </button>
       {error !== null && (
         <p className="team-policy-error" role="alert">

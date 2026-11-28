@@ -470,7 +470,7 @@ export type TeamBlueprint = z.infer<typeof teamBlueprintSchema>;
 export const teamBlenderPairInputSchema = z
   .object({
     taskId: z.string().min(1),
-    code: z.string().max(100),
+    code: z.string().max(100).optional(),
   })
   .strict();
 
@@ -4937,7 +4937,7 @@ export interface SprintCoderApi {
     promote(taskId: string): Promise<TeamSummary>;
     get(taskId: string): Promise<TeamDetail | null>;
     blenderStatus(taskId: string): Promise<string[] | null>;
-    pairBlender(taskId: string, code: string): Promise<string[]>;
+    pairBlender(taskId: string, code?: string): Promise<string[]>;
     disconnectBlender(taskId: string): Promise<void>;
     updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail>;
     hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;

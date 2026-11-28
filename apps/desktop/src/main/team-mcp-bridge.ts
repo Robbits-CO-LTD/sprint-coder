@@ -27,7 +27,7 @@ import {
   type TeamMcpRole,
   type TeamMcpToolName,
 } from '../runtime-host/team-mcp-tool-contract';
-import type { BlenderTeamConnection } from './blender-team';
+import type { BlenderObservation, BlenderTeamConnection } from './blender-team';
 import type { RuntimeManagedToolDefinition } from '../runtime-host/protocol';
 import {
   isNativeProcessDescendant,
@@ -276,6 +276,10 @@ export type TeamMcpRegistration = Readonly<{
   allowTeamTools?: boolean;
   blenderEnabled?: boolean;
   blenderConnection?: BlenderTeamConnection;
+  approveBlenderObservation?: (
+    observation: BlenderObservation,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
   role?: TeamMcpRole;
   allowedTools?: readonly TeamMcpToolName[];
   managedTools?: readonly RuntimeManagedToolDefinition[];
@@ -821,6 +825,12 @@ export class TeamMcpBridge {
           request.args,
           registration.turnAbort.signal,
         );
+        if (
+          'dataUrl' in result &&
+          !(await registration.approveBlenderObservation?.(result, registration.turnAbort.signal))
+        )
+          throw new Error('Sending the Blender view was not approved');
+        registration.turnAbort.signal.throwIfAborted();
         respond({ ok: true, result });
         return;
       }

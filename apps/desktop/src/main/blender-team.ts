@@ -29,11 +29,14 @@ const observationSchema = z.object({
   dataUrl: z.string().regex(/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/),
 });
 
+export type BlenderObservation = z.infer<typeof observationSchema>;
+
 export const blenderObserveInputSchema = z
   .object({
     azimuth: z.number().min(-360).max(360),
     elevation: z.number().min(-89).max(89),
     faceIndex: z.number().int().nonnegative().optional(),
+    target: targetSchema.optional(),
   })
   .strict();
 
@@ -63,7 +66,7 @@ export const blenderEditInputSchema = z.discriminatedUnion('operation', [
 type BlenderEndpoint = Readonly<{ port: number; token: string }>;
 
 function readEndpoint(code: string): BlenderEndpoint {
-  const match = pairingPattern.exec(code.trim());
+  const match = code.length <= 100 ? pairingPattern.exec(code.trim()) : null;
   if (match === null || Number(match[1]) > 65535 || match[2] === undefined)
     throw new Error('Invalid Blender pairing code');
   return { port: Number(match[1]), token: match[2] };
@@ -115,6 +118,8 @@ export class BlenderTeamConnection {
   private readonly lifetime = new AbortController();
   private readonly slots = new Map<string, number>();
   private readonly busy = new Set<string>();
+  private readonly stopped = new Set<string>();
+  private readonly releasing = new Set<string>();
   private readonly observations = new Map<string, { token: string; turn: AbortSignal }>();
 
   get active(): boolean {
@@ -146,6 +151,23 @@ export class BlenderTeamConnection {
     );
   }
 
+  async releaseWorker(worker: string): Promise<void> {
+    if (!this.active || !this.slots.has(worker) || this.releasing.has(worker)) return;
+    this.stopped.add(worker);
+    this.observations.delete(worker);
+    this.releasing.add(worker);
+    try {
+      await blenderRequest(
+        this.endpoint,
+        { method: 'release', worker },
+        AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(2_000)]),
+      );
+      this.slots.delete(worker);
+    } finally {
+      this.releasing.delete(worker);
+    }
+  }
+
   async isAvailable(): Promise<boolean> {
     try {
       return (
@@ -168,18 +190,24 @@ export class BlenderTeamConnection {
   ) {
     const signal = AbortSignal.any([callerSignal, this.lifetime.signal]);
     signal.throwIfAborted();
+    if (this.stopped.has(worker)) throw new Error('This Blender Worker was stopped');
     if (this.busy.has(worker))
       throw new Error('This Worker already has a pending Blender operation');
     this.busy.add(worker);
     try {
       if (tool === 'blender_observe') {
-        const args = blenderObserveInputSchema.parse(input);
+        const { target, ...args } = blenderObserveInputSchema.parse(input);
+        const requestedSlot = target === undefined ? undefined : this.targets.indexOf(target);
+        if (requestedSlot === -1) throw new Error('Target is outside the paired Blender meshes');
         let slot = this.slots.get(worker);
         if (slot === undefined) {
-          slot = this.slots.size;
-          if (slot >= this.targets.length)
-            throw new Error('All paired Blender targets have a Worker');
+          const occupied = new Set(this.slots.values());
+          slot = requestedSlot ?? this.targets.findIndex((_, index) => !occupied.has(index));
+          if (slot < 0) throw new Error('All paired Blender targets have a Worker');
+          if (occupied.has(slot)) throw new Error('This Blender target already has a Worker');
           this.slots.set(worker, slot);
+        } else if (requestedSlot !== undefined && requestedSlot !== slot) {
+          throw new Error('This Worker already has a different Blender target');
         }
         await blenderRequest(this.endpoint, { method: 'bind', worker, slot }, signal);
         this.observations.delete(worker);
@@ -187,6 +215,7 @@ export class BlenderTeamConnection {
           await blenderRequest(this.endpoint, { method: 'observe', worker, ...args }, signal),
         );
         signal.throwIfAborted();
+        if (this.stopped.has(worker)) throw new Error('This Blender Worker was stopped');
         this.observations.set(worker, { token: observation.observation, turn: callerSignal });
         return observation;
       }

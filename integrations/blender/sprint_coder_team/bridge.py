@@ -159,9 +159,9 @@ class BlenderBridge:
             result = self.session.edit(
                 worker, request["observation"], request["operation"], request["value"]
             )
-        elif method == "invalidate":
-            self.session.observations.pop(worker, None)
-            result = {"invalidated": True}
+        elif method == "release":
+            self.session.release(worker)
+            result = {"released": True}
         else:
             raise ValueError("Unknown Blender operation")
         self._reply(peer, ok=True, result=result)

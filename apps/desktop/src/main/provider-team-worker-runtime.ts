@@ -86,7 +86,20 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   managerTools: readonly ProviderTool[];
   workerGuidance: string;
   workerTools: readonly ProviderTool[];
-  blenderForWorker?(worker: AgentRecord): BlenderTeamConnection | undefined;
+  blenderForWorker?(
+    worker: AgentRecord,
+    connection: ProviderConnection,
+    executionId: string | undefined,
+    requestId: string,
+  ):
+    | {
+        session: BlenderTeamConnection;
+        authorizeImage(
+          picture: ScreenshotPicture,
+          signal: AbortSignal,
+        ): Promise<(() => boolean) | null>;
+      }
+    | undefined;
   onCliStopUnconfirmed?(taskId: string): void;
   openCliWorkspace?(
     input: Parameters<TeamWorkerRuntime['execute']>[0],
@@ -275,7 +288,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     const blender =
       input.worker.canDelegate || inheritedContext.projectItems.some((item) => item.localOnly)
         ? undefined
-        : this.deps.blenderForWorker?.(input.worker);
+        : this.deps.blenderForWorker?.(input.worker, connection, input.executionId, executionId);
     const availableTools = [
       ...(blender === undefined
         ? []
@@ -515,7 +528,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             try {
               if (toolCall.name === 'blender_observe' && imageGrant !== null)
                 throw new Error('Observe in a separate response to receive the image');
-              const result = await blender.call(
+              const result = await blender.session.call(
                 input.worker.id,
                 toolCall.name,
                 toolCall.input,
@@ -525,18 +538,29 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
                 const { dataUrl, ...facts } = result;
                 const bytes = Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64');
                 const image = await canonicalizeProviderToolImage(bytes);
+                const picture = {
+                  mimeType: 'image/png' as const,
+                  byteLength: image.bytes.byteLength,
+                  sha256: image.sha256,
+                  dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
+                };
+                const endWait = input.onApprovalWait?.();
+                let approved: (() => boolean) | null;
+                try {
+                  approved = await blender.authorizeImage(picture, controller.signal);
+                } finally {
+                  endWait?.();
+                }
+                controller.signal.throwIfAborted();
+                if (approved === null || !approved())
+                  throw new Error('Sending the Blender view was not approved');
                 const accepted = await imageBridge.acceptToolResult({
                   toolCallId: toolCall.callId,
                   toolName: toolCall.name,
-                  result: {
-                    mimeType: image.mimeType,
-                    byteLength: image.bytes.byteLength,
-                    sha256: image.sha256,
-                    dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
-                  },
+                  result: picture,
                 });
                 if (!accepted.accepted) throw new Error('The Blender image could not be delivered');
-                imageGrant = () => blender.active;
+                imageGrant = approved;
                 toolResult = JSON.stringify(facts);
               } else {
                 toolResult = JSON.stringify(result);

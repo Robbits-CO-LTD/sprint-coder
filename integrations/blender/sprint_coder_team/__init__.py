@@ -27,7 +27,6 @@ COLORS = (
     (1.0, 0.46, 0.73, 1.0),
 )
 VIEW_SIZE = (256, 144)
-PREVIEW_SIZE = (120, 67)
 
 
 @dataclass
@@ -194,8 +193,11 @@ def camera_matrices(view, width, height):
     offset = Vector((math.cos(elevation) * math.cos(azimuth),
                      math.cos(elevation) * math.sin(azimuth), math.sin(elevation)))
     pose = (-offset).to_track_quat("-Z", "Y").to_matrix().to_4x4()
-    pose.translation = center + offset * (radius * 3.2)
-    near, far = radius * 0.01, radius * 20
+    distance = radius * 3.2
+    pose.translation = center + offset * distance
+    # Frame the assigned mesh even when a neighboring mesh sits between its center and the camera.
+    # Keep a margin around the whole target bounding sphere and retain farther scene context.
+    near, far = distance - radius * 1.08, radius * 20
     right = near * math.tan(math.radians(23))
     top = right * height / width
     projection = Matrix(((near / right, 0, 0, 0), (0, near / top, 0, 0),
@@ -259,7 +261,7 @@ def _draw_cursors():
 
 
 def _text(text, x, y, color):
-    blf.size(0, 13)
+    blf.size(0, 16)
     blf.color(0, *color)
     blf.position(0, x, y, 0)
     blf.draw(0, text)
@@ -284,10 +286,15 @@ def _draw_views():
             _schedule_redraw()
             return
     shader = gpu.shader.from_builtin("UNIFORM_COLOR")
-    width, height = PREVIEW_SIZE
-    left = context.region.width - 2 * (width + 8) - 40
+    sidebars = sum(region.width for region in context.area.regions if region.type == "UI")
+    right = context.region.width - sidebars - 52
     top = context.region.height - 80
-    can_show_previews = left > 150 and top > 5 * (height + 10)
+    gap = 12
+    rows = (max(view.slot for view in views) // 2) + 1
+    width = min(250, right // 9, ((top - 24) // rows - gap) * 16 // 9)
+    height = round(width * 9 / 16)
+    left = right - 2 * width - gap
+    can_show_previews = width >= 92 and left > 180
     now = time.monotonic()
     if any(now - view.moved_at < 0.18 for view in views):
         _schedule_redraw()
@@ -299,8 +306,8 @@ def _draw_views():
             _text(view.label, point.x + 11, point.y + 11, view.color)
         if not can_show_previews or view.preview is None:
             continue
-        x = left + (view.slot % 2) * (width + 8)
-        y = top - (view.slot // 2 + 1) * (height + 10)
+        x = left + (view.slot % 2) * (width + gap)
+        y = top - (view.slot // 2 + 1) * (height + gap)
         draw_texture_2d(view.preview.texture_color, (x, y), width, height)
         corners = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
         _line(shader, [corners[index] for index in (0, 1, 1, 2, 2, 3, 3, 0)], view.color)
