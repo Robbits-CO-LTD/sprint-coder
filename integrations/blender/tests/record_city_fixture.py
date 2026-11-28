@@ -22,6 +22,7 @@ if (
 bridge = None
 targets = []
 frame = 0
+closing = 0
 colors = [(0.73, 0.56, 0.37, 1), (0.32, 0.55, 0.60, 1), (0.46, 0.56, 0.34, 1),
           (0.64, 0.39, 0.33, 1), (0.55, 0.48, 0.65, 1)]
 
@@ -69,7 +70,7 @@ def setup():
 
 
 def record():
-    global frame
+    global frame, closing
     window = bpy.context.window_manager.windows[0]
     area = next(a for a in window.screen.areas if a.type == "VIEW_3D")
     path = directory / f"capture-{frame:05}.png"
@@ -79,9 +80,18 @@ def record():
     if frame == 2:
         Path(sys.argv[-1]).write_text(bridge.pairing_code, encoding="ascii")
     if (directory / "finish-request").exists():
+        closing += 1
+        if closing <= 12:
+            area.spaces.active.region_3d.view_rotation = Euler(
+                (0.87, 0, -0.32 + closing * 0.16)
+            ).to_quaternion()
+            area.tag_redraw()
+            return 0.27
         witness = [
             {"name": obj.name, "faces": len(obj.data.polygons),
-             "vertices": len(obj.data.vertices), "height": obj.dimensions.z}
+             "vertices": len(obj.data.vertices), "height": obj.dimensions.z,
+             "detail_materials": sorted({obj.data.materials[face.material_index].name
+                                         for face in obj.data.polygons})}
             for obj in targets
         ]
         bpy.ops.wm.save_as_mainfile(filepath=str(directory / "worker-built-street.blend"))

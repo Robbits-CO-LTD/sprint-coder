@@ -94,6 +94,38 @@ def test_empty_base():
     session.close()
 
 
+def test_facade_details(targets):
+    session = TeamSceneSession(bpy.context.scene, targets)
+    session.bind("detail-worker", 4)
+    target = targets[4]
+    before = len(target.data.polygons)
+    for mode, angles, label in (
+        ("gable_roof", (5, 72), "Team Detail • Roof tile"),
+        ("window_bank", (0, 8), "Team Detail • Blue glazing"),
+    ):
+        token = session.begin_observation("detail-worker", *angles)
+        view = addon.agents["detail-worker"]
+        camera, projection = addon.camera_matrices(view, *addon.VIEW_SIZE)
+        view.capture_matrix = projection @ camera
+        view.captured_revision = view.revision
+        view.png = b"fixture only"
+        for y in (.55, .62, .70, .49):
+            pick = session.pointer("detail-worker", token, .5, y, "face", "select")["hit"]
+            if pick is None:
+                continue
+            z = target.data.polygons[pick["index"]].normal.z
+            if (mode == "gable_roof" and z > .95) or (mode == "window_bank" and abs(z) < .1):
+                break
+        else:
+            raise AssertionError(f"No visible face for {mode}")
+        session.edit("detail-worker", token, "detail_face", mode)
+        assert len(target.data.polygons) > before
+        assert any(target.data.materials[face.material_index].name == label
+                   for face in target.data.polygons)
+        before = len(target.data.polygons)
+    session.close()
+
+
 def test_vertex_pointer(targets):
     session = TeamSceneSession(bpy.context.scene, targets)
     session.bind("vertex-worker", 3)
@@ -227,6 +259,7 @@ def test():
     session.close()
     test_empty_base()
     test_vertex_pointer(targets)
+    test_facade_details(targets)
     test_undo(targets)
     addon.unregister()
     assert not addon.agents

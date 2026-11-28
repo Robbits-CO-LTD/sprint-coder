@@ -12,6 +12,7 @@ from . import (
     _clear_views, VIEW_SIZE,
 )
 from .picking import pick_mesh
+from .details import add_face_detail
 
 
 @dataclass(frozen=True)
@@ -165,11 +166,11 @@ class TeamSceneSession:
         view, observation = self._observation(worker_id, token)
         if view.captured_revision != observation.revision or view.png is None:
             raise ValueError("Wait for the current view before editing")
-        if operation in ("move_vertex", "extrude_selected") and any(
+        if operation in ("move_vertex", "extrude_selected", "detail_face") and any(
             mod.show_viewport for mod in view.target.modifiers
         ):
             raise ValueError("Cursor editing requires a mesh without active modifiers")
-        if operation in ("move_vertex", "extrude_selected", "extrude", "create_base") and any(
+        if operation in ("move_vertex", "extrude_selected", "extrude", "create_base", "detail_face") and any(
             child.parent_type in ("VERTEX", "VERTEX_3") for child in view.target.children
         ):
             raise ValueError("Geometry edits require a mesh without vertex-parented children")
@@ -200,6 +201,8 @@ class TeamSceneSession:
         elif operation == "extrude_selected" and view.selected is not None and view.selected.kind == "face":
             selection = view.selected
             extrude_face(worker_id, selection.index, value, selection.coordinates)
+        elif operation == "detail_face" and view.selected is not None and view.selected.kind == "face":
+            add_face_detail(view, view.selected, value)
         elif operation == "move_vertex" and view.selected is not None and view.selected.kind == "vertex":
             selection = view.selected
             mesh = view.target.data

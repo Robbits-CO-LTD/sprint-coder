@@ -61,6 +61,13 @@ export const blenderEditInputSchema = z.discriminatedUnion('operation', [
   z
     .object({
       observation: tokenSchema,
+      operation: z.literal('detail_face'),
+      value: z.enum(['gable_roof', 'hip_roof', 'window_bank', 'entrance', 'street_detail']),
+    })
+    .strict(),
+  z
+    .object({
+      observation: tokenSchema,
       operation: z.literal('create_base'),
       value: z.tuple([z.number().min(0.1).max(48), z.number().min(0.1).max(48)]),
     })

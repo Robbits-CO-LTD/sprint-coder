@@ -78,15 +78,25 @@ export const BLENDER_TEAM_MCP_TOOLS = [
   {
     name: 'blender_edit',
     description:
-      'Edit your assigned Blender mesh using its observation token. For cursor modeling, move_vertex changes the clicked vertex by a mesh-local XYZ offset and extrude_selected extrudes the clicked face by a nonzero distance along its normal. Legacy move offsets the object and extrude uses the observed face index. create_base creates one horizontal quad in an empty assigned mesh using [width, depth]. Observe again after editing.',
+      'Edit your assigned Blender mesh using its observation token. For cursor modeling, move_vertex changes the clicked vertex by a mesh-local XYZ offset and extrude_selected extrudes the clicked face by a nonzero distance along its normal. Legacy move offsets the object and extrude uses the observed face index. create_base creates one horizontal quad in an empty assigned mesh using [width, depth]. detail_face adds one feature to the clicked face: gable_roof or hip_roof on an upward face, window_bank or entrance on a wall, street_detail on the street top. Observe again after editing.',
     inputSchema: {
       type: 'object',
       properties: {
         observation: { type: 'string' },
-        operation: { enum: ['move', 'extrude', 'move_vertex', 'extrude_selected', 'create_base'] },
+        operation: {
+          enum: [
+            'move',
+            'extrude',
+            'move_vertex',
+            'extrude_selected',
+            'create_base',
+            'detail_face',
+          ],
+        },
         value: {
           anyOf: [
             { type: 'number' },
+            { enum: ['gable_roof', 'hip_roof', 'window_bank', 'entrance', 'street_detail'] },
             {
               type: 'array',
               items: { type: 'number' },

@@ -474,7 +474,7 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
     vi.spyOn(team, 'call').mockImplementation(async (worker, tool, input, caller) => {
       const trace = attempts.get(worker) ?? [];
       attempts.set(worker, trace);
-      const args = input as { action?: string; operation?: string };
+      const args = input as { action?: string; operation?: string; value?: unknown };
       trace.push(`${tool}:${args.action ?? args.operation ?? 'request'}`);
       const result = await call(worker, tool, input, caller).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : '';
@@ -497,7 +497,9 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
         if (args.action === 'move') witness.moves++;
         if (args.action === 'select') witness.selects++;
       } else if ('revision' in result && args.operation !== undefined)
-        witness.edits.push(args.operation);
+        witness.edits.push(
+          args.operation === 'detail_face' ? `detail_face:${args.value}` : args.operation,
+        );
       actions.set(worker, witness);
       return result;
     });
@@ -517,6 +519,18 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
     });
     const runs: Promise<{ code: number; completed: boolean; error: string | null }>[] = [];
     const toolNames = BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name);
+    function roofFor(index: number) {
+      return index % 3 === 0 ? 'hip_roof' : 'gable_roof';
+    }
+    function buildOperations(index: number) {
+      return [
+        'create_base',
+        'extrude_selected',
+        ...(index === 9
+          ? ['detail_face:street_detail']
+          : [`detail_face:${roofFor(index)}`, 'detail_face:window_bank', 'detail_face:entrance']),
+      ];
+    }
     function runWorker(index: number, retry = false) {
       const worker = workerIds[index]!;
       if (retry) bridge.unregister(worker);
@@ -545,15 +559,17 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
         index === 9
           ? 'Build the street with a [28,3.6] base and extrude the selected face by 0.14.'
           : `Build a distinctive building with a base roughly [${3.3 + (index % 3) * 0.2},3.3] and extrude its selected face by about ${2.6 + (index % 4) * 0.6} units.`;
-      const roofInstruction =
-        index % 2 === 1 && index < 9
-          ? ' Then observe again, move your cursor to a visible upper vertex, click to select it with kind vertex, and use move_vertex with value [0,0,0.6] to raise that corner before a final observation.'
-          : '';
       const completedOperations = actions.get(worker)?.edits ?? [];
+      const remaining = buildOperations(index).slice(completedOperations.length);
+      const facadeAngle = index < 5 ? 90 : 270;
+      const detailInstructions =
+        index === 9
+          ? 'After extrusion, select the top surface and apply detail_face street_detail for sidewalks, alley paving, and lane markings.'
+          : `After extrusion, select the top and apply detail_face value ${roofFor(index)}. Then look from the STREET (azimuth ${facadeAngle}, elevation 10) to see the front vertical wall. In two separate steps select the wall and apply detail_face value window_bank, then select the wall again and apply detail_face value entrance. Aim at a bare part of the front wall so you select the wall, not a window or roof.`;
       const resumeInstructions = retry
-        ? `You are reconnecting to the SAME mesh in the SAME recording. Already applied operations: ${completedOperations.join(', ') || 'none'}. Your first call must be blender_observe. Only perform missing operations in order (create_base, extrude_selected${roofInstruction ? ', move_vertex' : ''}), followed by verification, to avoid repeating edits. `
+        ? `You are reconnecting to the SAME mesh in the SAME recording. Already completed: ${completedOperations.join(', ') || 'none'}. Only carry out the remaining operations: ${remaining.join(', ') || 'none; observe final result'}. Do not repeat a successful edit. `
         : '';
-      const buildingPrompt = `${resumeInstructions}Build only "${team.targets[index]}" in the shared street. ${buildInstruction} Observe your assigned mesh at azimuth ${azimuth}, elevation 72. If face_count is 0, use blender_edit operation create_base and value [width,depth]. Copy the exact observation token string from the most recent tool result. Observe. Move your cursor to the visible face and click select using blender_pointer with kind face, then use blender_edit extrude_selected with the same token. If you get an error, observe afresh and copy the entire newest token. If the pointer misses, try another point on the visible surface. ${roofInstruction} Finish with an observation after the edit; perform the tool calls before reporting. Up to three attempts if a step is rejected.`;
+      const buildingPrompt = `${resumeInstructions}Build only "${team.targets[index]}" in the shared street. ${buildInstruction} Start with blender_observe at azimuth ${azimuth}, elevation 72. If face_count is 0, use blender_edit create_base and value [width,depth]. Observe again. Move and then click the center of the base with blender_pointer kind face, and use blender_edit extrude_selected. ${detailInstructions} For every edit after the base, take a fresh observation, move and click the relevant face with blender_pointer, and use the EXACT most recent observation token for blender_edit. If you miss, try a nearby point. Observe completed geometry before you finish. Required order: ${remaining.join(', ')}. Make one tool call at a time and don't stop until the assigned geometry is built.`;
       return new Promise<{ code: number; completed: boolean; error: string | null }>((resolve) => {
         let completed = false;
         let error: string | null = null;
@@ -632,7 +648,7 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
       if (recordingDirectory !== undefined) {
         for (const [run, index] of indexes.entries()) {
           const worker = workerIds[index]!;
-          const expected = index % 2 === 1 && index < 9 ? 3 : 2;
+          const expected = buildOperations(index).length;
           if (
             (actions.get(worker)?.edits.length ?? 0) !== expected ||
             outcomes[run]?.error !== null
@@ -653,13 +669,9 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
           diagnostic: diagnostics.get(worker),
           expectedEdit:
             recordingDirectory !== undefined
-              ? [
-                  'create_base',
-                  'extrude_selected',
-                  ...(index % 2 === 1 && index < 9 ? ['move_vertex'] : []),
-                ]
+              ? buildOperations(index)
               : [index % 2 === 0 ? 'extrude_selected' : 'move_vertex'],
-          expectedFaces: recordingDirectory !== undefined ? 5 : index % 2 === 0 ? 10 : 6,
+          expectedFaces: recordingDirectory !== undefined ? 6 : index % 2 === 0 ? 10 : 6,
           imageChanged: pictures.get(worker)?.[0] !== pictures.get(worker)?.at(-1),
           pictures: pictures.get(worker)?.length ?? 0,
         };
@@ -696,7 +708,9 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
             actions.selects < 1 ||
             actions.moves < 1 ||
             actions.edits.join(',') !== expectedEdit.join(',') ||
-            actions.faces !== expectedFaces ||
+            (recordingDirectory !== undefined
+              ? (actions.faces ?? 0) < expectedFaces
+              : actions.faces !== expectedFaces) ||
             !imageChanged ||
             pictures < 2,
         ),
