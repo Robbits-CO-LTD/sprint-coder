@@ -351,7 +351,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       messages.unshift({
         role: 'system',
         content:
-          'For Blender work, observe your assigned mesh using blender_observe, decide based on the image, edit it, and observe again to verify.',
+          'For Blender work, observe with blender_observe, move your cursor and click a vertex or face with blender_pointer, edit the selection with blender_edit, and observe again to verify.',
       });
     input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
     input.onEvent?.({

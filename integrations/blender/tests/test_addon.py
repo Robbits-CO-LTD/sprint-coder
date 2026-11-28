@@ -66,6 +66,41 @@ def test_closed_edit(session):
     assert tuple(view.target.location) == position, "A disconnected sender changed the mesh"
 
 
+def test_vertex_pointer(targets):
+    session = TeamSceneSession(bpy.context.scene, targets)
+    session.bind("vertex-worker", 3)
+    token = session.begin_observation("vertex-worker", 0, 70)
+    view = addon.agents["vertex-worker"]
+    view.captured_revision = view.revision
+    view.png = b"fixture only"
+    camera, projection = addon.camera_matrices(view, *addon.VIEW_SIZE)
+    view.capture_matrix = projection @ camera
+    target = targets[3]
+    vertex = max(target.data.vertices, key=lambda vert: (vert.co.z, vert.co.x, vert.co.y))
+    index = vertex.index
+    clip = view.capture_matrix @ (target.matrix_world @ vertex.co).to_4d()
+    x = (clip.x / clip.w + 1) / 2
+    y = (1 - clip.y / clip.w) / 2
+    x, y = x * 0.96 + 0.02, y * 0.96 + 0.02
+    before = [tuple(v.co) for v in target.data.vertices]
+    pointer = session.pointer("vertex-worker", token, x, y, "vertex", "move")
+    assert pointer["hit"] == {"kind": "vertex", "index": index}, pointer
+    assert view.selected is None
+    try:
+        session.edit("vertex-worker", token, "move_vertex", (0, 0, 0.25))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Hover must not authorize a vertex edit")
+    pick = session.pointer("vertex-worker", token, x, y, "vertex", "select")
+    assert pick == pointer
+    session.edit("vertex-worker", token, "move_vertex", (0, 0, 0.25))
+    after = [tuple(v.co) for v in target.data.vertices]
+    assert [i for i, (old, new) in enumerate(zip(before, after)) if old != new] == [index], (before, after, index)
+    assert abs(after[index][2] - before[index][2] - 0.25) < 0.0001
+    session.close()
+
+
 def test_undo(targets):
     session = TeamSceneSession(bpy.context.scene, targets)
     session.bind("undo-worker", 0)
@@ -162,10 +197,11 @@ def test():
         raise AssertionError("A late bind restored a released Worker")
     session.bind("replacement", 0)
     session.close()
+    test_vertex_pointer(targets)
     test_undo(targets)
     addon.unregister()
     assert not addon.agents
-    print("PASS: ten slots, independent matrices, isolated edits, stale edits, Worker-scoped observations")
+    print("PASS: ten slots, independent matrices, isolated edits, stale edits, Worker-scoped observations and cursor-selected vertex moves")
 
 
 if __name__ == "__main__":

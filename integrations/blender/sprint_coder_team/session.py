@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from secrets import token_urlsafe
 
 import bpy
+from mathutils import Vector
 
 from . import (
     AgentView, COLORS, agents, assign_agent, extrude_face, face_vertices, move_target, request_redraw, set_view,
-    _clear_views,
+    _clear_views, VIEW_SIZE,
 )
+from .picking import pick_mesh
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,7 @@ class TeamSceneSession:
             if type(face_index) is not int or not 0 <= face_index < len(view.target.data.polygons):
                 raise ValueError("Face index is outside the assigned mesh")
             vertices = face_vertices(view.target, face_index)
+        view.selected = None
         set_view(worker_id, azimuth, elevation)
         observation = Observation(
             token_urlsafe(24), view.revision, tuple(view.target.location),
@@ -138,10 +141,37 @@ class TeamSceneSession:
             "png": view.png,
         }
 
+    def pointer(self, worker_id, token, x, y, kind, action):
+        view, observation = self._observation(worker_id, token)
+        if view.captured_revision != observation.revision or view.png is None:
+            raise ValueError("Wait for the current view before pointing")
+        if action not in ("move", "select") or kind not in ("vertex", "face"):
+            raise ValueError("Choose pointer move or select and vertex or face mode")
+        if view.target.mode != "OBJECT" or any(mod.show_viewport for mod in view.target.modifiers):
+            raise ValueError("Cursor editing requires an Object Mode mesh without active modifiers")
+        pick, position = pick_mesh(
+            self.scene, bpy.context.evaluated_depsgraph_get(), view, x, y, kind, *VIEW_SIZE
+        )
+        view.point_cursor(position)
+        if action == "select":
+            view.selected = pick
+        return {
+            "target": view.target.name,
+            "hit": None if pick is None else {"kind": pick.kind, "index": pick.index},
+        }
+
     def edit(self, worker_id, token, operation, value):
         view, observation = self._observation(worker_id, token)
         if view.captured_revision != observation.revision or view.png is None:
             raise ValueError("Wait for the current view before editing")
+        if operation in ("move_vertex", "extrude_selected") and any(
+            mod.show_viewport for mod in view.target.modifiers
+        ):
+            raise ValueError("Cursor editing requires a mesh without active modifiers")
+        if operation in ("move_vertex", "extrude_selected", "extrude") and any(
+            child.parent_type in ("VERTEX", "VERTEX_3") for child in view.target.children
+        ):
+            raise ValueError("Geometry edits require a mesh without vertex-parented children")
         record_undo = bpy.context.preferences.edit.use_global_undo
         if record_undo and not bpy.ops.ed.undo_push.poll():
             raise ValueError("Wait until Blender can record the Team edit in Undo History")
@@ -149,8 +179,27 @@ class TeamSceneSession:
             move_target(worker_id, value, observation.location)
         elif operation == "extrude" and observation.face_index is not None:
             extrude_face(worker_id, observation.face_index, value, observation.vertices)
+        elif operation == "extrude_selected" and view.selected is not None and view.selected.kind == "face":
+            selection = view.selected
+            extrude_face(worker_id, selection.index, value, selection.coordinates)
+        elif operation == "move_vertex" and view.selected is not None and view.selected.kind == "vertex":
+            selection = view.selected
+            mesh = view.target.data
+            delta = Vector(value)
+            if len(delta) != 3 or not all(-100 <= component <= 100 for component in delta):
+                raise ValueError("Expected three finite offsets of at most 100 units")
+            if mesh.users != 1 or mesh.shape_keys or selection.index >= len(mesh.vertices):
+                raise ValueError("Choose an unshared mesh without shape keys")
+            vertex = mesh.vertices[selection.index]
+            if tuple(vertex.co) != selection.coordinates[0]:
+                raise ValueError("Vertex changed since selection")
+            vertex.co += delta
+            position = view.target.matrix_world @ vertex.co
+            mesh.update()
+            bpy.context.view_layer.update()
+            view.move_cursor(position)
         else:
-            raise ValueError("Choose move or observe the desired face before extrusion")
+            raise ValueError("Choose a vertex or face with the pointer before editing it")
         self.observations.pop(worker_id)
         if record_undo:
             bpy.ops.ed.undo_push(message="Sprint Coder Team: " + operation)

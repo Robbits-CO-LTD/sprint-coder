@@ -14,6 +14,8 @@ from gpu_extras.batch import batch_for_shader
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix, Vector
 
+from .picking import MeshPick
+
 COLORS = (
     (1.0, 0.31, 0.32, 1.0),
     (1.0, 0.55, 0.19, 1.0),
@@ -40,16 +42,22 @@ class AgentView:
     captured_revision: int = -1
     preview: gpu.types.GPUOffScreen | None = None
     png: bytes | None = None
+    capture_matrix: Matrix | None = None
+    selected: MeshPick | None = None
     previous_position: Vector | None = None
     moved_at: float = 0.0
 
-    def move_cursor(self, position):
+    def point_cursor(self, position):
         now = time.monotonic()
         self.previous_position = self.cursor_position(now)
         self.position = position
         self.moved_at = now
-        self.revision += 1
         _schedule_redraw()
+
+    def move_cursor(self, position):
+        self.point_cursor(position)
+        self.selected = None
+        self.revision += 1
 
     def cursor_position(self, now):
         if self.previous_position is None:
@@ -236,6 +244,7 @@ def _capture(context, view):
             )
             pixels.dimensions = width * height * 4
             view.png = _png(width, height, bytes(pixels))
+        view.capture_matrix = projection @ view_matrix
         view.captured_revision = view.revision
     finally:
         _capturing = False
@@ -258,6 +267,21 @@ def _draw_cursors():
         size = max(0.12, min(view.target.dimensions.length * 0.08, 0.5))
         vertices = [position + axis * size * sign for axis in axes for sign in (-1, 1)]
         _line(shader, vertices, view.color)
+        selection = view.selected
+        if selection is not None:
+            points = [view.target.matrix_world @ Vector(co) for co in selection.coordinates]
+            if selection.kind == "face":
+                outline = [point for edge in zip(points, points[1:] + points[:1]) for point in edge]
+                _line(shader, outline, view.color)
+            else:
+                point = points[0]
+                rotation = bpy.context.region_data.view_rotation
+                offset = size * 0.72
+                right, up = (rotation @ axis * offset for axis in axes[:2])
+                diamond = [point + right, point + up, point - right, point - up]
+                outline = [corner for edge in zip(diamond, diamond[1:] + diamond[:1])
+                           for corner in edge]
+                _line(shader, outline, view.color)
 
 
 def _text(text, x, y, color):
@@ -305,7 +329,10 @@ def _draw_views():
             context.region, context.region_data, view.cursor_position(now)
         )
         if point is not None:
-            _text(view.label, point.x + 11, point.y + 11, view.color)
+            label = view.label
+            if view.selected is not None:
+                label += "  " + view.selected.kind.capitalize()
+            _text(label, point.x + 11, point.y + 11, view.color)
         if not can_show_previews or view.preview is None:
             continue
         x = left + (view.slot % 2) * (width + gap)

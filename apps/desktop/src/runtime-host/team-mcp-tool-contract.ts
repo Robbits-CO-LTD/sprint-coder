@@ -59,14 +59,31 @@ export const BLENDER_TEAM_MCP_TOOLS = [
     },
   },
   {
-    name: 'blender_edit',
+    name: 'blender_pointer',
     description:
-      'Edit your assigned Blender mesh using the token from your last observation. Move takes an XYZ offset. Extrude takes a nonzero distance along the observed face normal. Observe again after the edit to verify it.',
+      'Move your own Blender cursor, or click to select a visible vertex or face. Use coordinates from your current image: (0,0) is top left and (1,1) is bottom right. Move the cursor first, then select. A missed hit is null.',
     inputSchema: {
       type: 'object',
       properties: {
         observation: { type: 'string' },
-        operation: { enum: ['move', 'extrude'] },
+        x: { type: 'number', minimum: 0, maximum: 1 },
+        y: { type: 'number', minimum: 0, maximum: 1 },
+        kind: { enum: ['vertex', 'face'] },
+        action: { enum: ['move', 'select'] },
+      },
+      required: ['observation', 'x', 'y', 'kind', 'action'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'blender_edit',
+    description:
+      'Edit your assigned Blender mesh using its observation token. For cursor modeling, move_vertex changes the clicked vertex by a mesh-local XYZ offset and extrude_selected extrudes the clicked face by a nonzero distance along its normal. Legacy move offsets the object and extrude uses the observed face index. Observe again after editing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        observation: { type: 'string' },
+        operation: { enum: ['move', 'extrude', 'move_vertex', 'extrude_selected'] },
         value: {
           anyOf: [
             { type: 'number' },

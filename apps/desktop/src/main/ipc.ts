@@ -8195,7 +8195,7 @@ export class IpcRouter {
   private blenderLeaderGuidance(taskId: string, teamTurn: boolean): string | null {
     const size = this.blenderTeams.get(taskId)?.targets.length;
     if (!teamTurn || size === undefined) return null;
-    return `このTaskのBlenderには${size}個の編集対象が接続されています。Blender作業を依頼された場合は、画像入力とツール呼び出しに対応するWorkerに並行で割り当ててください。対象が指定されている場合は、そのメッシュ名をWorkerの指示に含め、最初のblender_observeのtargetに指定するよう伝えてください。Workerは画像を確認してからblender_editで編集します。編集後の画像で結果を確かめるよう指示してください。`;
+    return `このTaskのBlenderには${size}個の編集対象が接続されています。Blender作業を依頼された場合は、画像入力とツール呼び出しに対応するWorkerに並行で割り当ててください。対象が指定されている場合は、そのメッシュ名をWorkerの指示に含め、最初のblender_observeのtargetに指定するよう伝えてください。Workerは画像を確認し、blender_pointerでカーソルを動かして頂点や面を選択するよう指示してください。blender_editで選択箇所を一手ずつ編集し、再観察して結果を確かめます。`;
   }
 
   private disconnectBlenderTeam(taskId: string): void {
@@ -8298,7 +8298,7 @@ export class IpcRouter {
           : WORKER_DESKTOP_CONTROL_PROMPT) +
         (blenderConnection === undefined
           ? ''
-          : '\nA Blender scene is paired. For Blender work, call blender_observe to see your actual assigned mesh, edit with blender_edit, then observe again to verify.'),
+          : '\nA Blender scene is paired. For Blender work, call blender_observe, move your cursor and click a vertex or face with blender_pointer, edit that selection with blender_edit, and observe again to verify.'),
       toolNames: teamMcpToolNamesForCapabilities(registration),
       ...(managedTools.length === 0
         ? {}

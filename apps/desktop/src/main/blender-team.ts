@@ -40,11 +40,28 @@ export const blenderObserveInputSchema = z
   })
   .strict();
 
+const blenderPointerInputSchema = z
+  .object({
+    observation: tokenSchema,
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    kind: z.enum(['vertex', 'face']),
+    action: z.enum(['move', 'select']),
+  })
+  .strict();
+
+const blenderPointerResultSchema = z.object({
+  target: targetSchema,
+  hit: z
+    .object({ kind: z.enum(['vertex', 'face']), index: z.number().int().nonnegative() })
+    .nullable(),
+});
+
 export const blenderEditInputSchema = z.discriminatedUnion('operation', [
   z
     .object({
       observation: tokenSchema,
-      operation: z.literal('move'),
+      operation: z.enum(['move', 'move_vertex']),
       value: coordinatesSchema.refine((coordinates) =>
         coordinates.every((n) => Math.abs(n) <= 100),
       ),
@@ -53,7 +70,7 @@ export const blenderEditInputSchema = z.discriminatedUnion('operation', [
   z
     .object({
       observation: tokenSchema,
-      operation: z.literal('extrude'),
+      operation: z.enum(['extrude', 'extrude_selected']),
       value: z
         .number()
         .min(-100)
@@ -215,7 +232,7 @@ export class BlenderTeamConnection {
 
   async call(
     worker: string,
-    tool: 'blender_observe' | 'blender_edit',
+    tool: 'blender_observe' | 'blender_edit' | 'blender_pointer',
     input: unknown,
     callerSignal: AbortSignal,
   ) {
@@ -259,10 +276,18 @@ export class BlenderTeamConnection {
       }
       if (!this.slots.has(worker))
         throw new Error('Observe the assigned Blender target before editing');
-      const args = blenderEditInputSchema.parse(input);
+      const args =
+        tool === 'blender_pointer'
+          ? blenderPointerInputSchema.parse(input)
+          : blenderEditInputSchema.parse(input);
       const observation = this.observations.get(worker);
       if (observation?.turn !== callerSignal || observation.token !== args.observation)
         throw new Error('Observation expired or belongs to a different Worker or Turn');
+      if (tool === 'blender_pointer') {
+        return blenderPointerResultSchema.parse(
+          await blenderRequest(this.endpoint, { method: 'pointer', worker, ...args }, signal),
+        );
+      }
       this.observations.delete(worker);
       return z
         .object({ target: targetSchema, revision: z.number().int().positive() })

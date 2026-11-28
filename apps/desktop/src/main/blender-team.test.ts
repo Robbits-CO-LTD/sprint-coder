@@ -273,7 +273,7 @@ async function startBlender(visualWorker = false) {
 it.skipIf(blenderExecutable === undefined)(
   'pairs with Blender and returns ten separate editable GPU views',
   async () => {
-    const { code, directory } = await startBlender();
+    const { code, directory } = await startBlender(true);
     const signal = AbortSignal.timeout(35_000);
     const team = await BlenderTeamConnection.pair(code, signal);
     connection = team;
@@ -330,9 +330,8 @@ it.skipIf(blenderExecutable === undefined)(
     const first = await Promise.all(
       workers.map(({ token }, index) =>
         callMcp(path, token, 'blender_observe', {
-          azimuth: index * 36,
-          elevation: 24,
-          faceIndex: 2,
+          azimuth: 25 + index * 30,
+          elevation: 75,
           target: team.targets[index],
         }),
       ),
@@ -357,10 +356,25 @@ it.skipIf(blenderExecutable === undefined)(
       error: 'Observation expired or belongs to a different Worker or Turn',
     });
 
+    for (const action of ['move', 'select'] as const) {
+      const clicks = await Promise.all(
+        workers.map(({ token }, index) =>
+          callMcp(path, token, 'blender_pointer', {
+            observation: first[index]?.result?.observation,
+            x: 0.5,
+            y: 0.5,
+            kind: 'face',
+            action,
+          }),
+        ),
+      );
+      for (const click of clicks)
+        expect(click).toMatchObject({ ok: true, result: { hit: { kind: 'face' } } });
+    }
     const edits = await Promise.all(
       workers.map(({ token }, index) =>
         callMcp(path, token, 'blender_edit', {
-          operation: 'extrude',
+          operation: 'extrude_selected',
           value: (index + 1) / 10,
           observation: first[index]?.result?.observation,
         }),
@@ -369,7 +383,7 @@ it.skipIf(blenderExecutable === undefined)(
     expect(edits.every(({ ok }) => ok)).toBe(true);
     const updated = await Promise.all(
       workers.map(({ token }, index) =>
-        callMcp(path, token, 'blender_observe', { azimuth: index * 36, elevation: 24 }),
+        callMcp(path, token, 'blender_observe', { azimuth: 25 + index * 30, elevation: 75 }),
       ),
     );
     expect(updated.every(({ ok, result }) => ok && result?.face_count === 10)).toBe(true);
@@ -436,7 +450,7 @@ it.skipIf(blenderExecutable === undefined)(
 const codexExecutable = process.env['SPRINT_CODER_TEST_BLENDER_CODEX'];
 
 it.skipIf(blenderExecutable === undefined || !codexExecutable)(
-  'runs ten real Codex Worker Turns that use different Blender images to decide and verify their edits',
+  'runs ten real Codex Worker Turns that point, click and edit their own Blender meshes',
   async () => {
     if (!codexExecutable) throw new Error('Codex CLI is required');
     const { code, directory } = await startBlender(true);
@@ -449,16 +463,33 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
     if (socketPath === null) throw new Error('Team MCP failed to start');
     const adapter = new CodexRuntimeAdapter(220_000, codexExecutable, [], directory);
     const pictures = new Map<string, string[]>();
-    const edits = new Map<string, { count: number; z?: number }>();
+    const actions = new Map<
+      string,
+      { selects: number; moves: number; edits: string[]; faces?: number }
+    >();
     const call = team.call.bind(team);
     vi.spyOn(team, 'call').mockImplementation(async (worker, tool, input, caller) => {
       const result = await call(worker, tool, input, caller);
-      const witness = edits.get(worker) ?? { count: 0 };
-      if ('location' in result) witness.z = result.location[2];
-      else witness.count++;
-      edits.set(worker, witness);
+      const witness = actions.get(worker) ?? { selects: 0, moves: 0, edits: [] };
+      const args = input as { action?: string; operation?: string };
+      if ('face_count' in result) witness.faces = result.face_count;
+      else if ('hit' in result && result.hit !== null) {
+        if (args.action === 'move') witness.moves++;
+        if (args.action === 'select') witness.selects++;
+      } else if ('revision' in result && args.operation !== undefined)
+        witness.edits.push(args.operation);
+      actions.set(worker, witness);
       return result;
     });
+    const configuredIndexes = process.env['SPRINT_CODER_TEST_BLENDER_WORKER_INDEXES'];
+    const indexes =
+      configuredIndexes?.split(',').map(Number) ?? team.targets.map((_, index) => index);
+    if (
+      new Set(indexes).size !== indexes.length ||
+      indexes.some((i) => !Number.isInteger(i) || i < 0 || i >= team.targets.length)
+    )
+      throw new Error('Use distinct zero-based Blender Worker indexes');
+    const firstIndex = indexes[0]!;
     const workerIds = team.targets.map((_, index) => `codex-blender-worker-${index + 1}`);
     let releaseFirstPicture = (): void => undefined;
     const firstPicture = new Promise<void>((done) => {
@@ -481,16 +512,20 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
           const hashes = pictures.get(worker) ?? [];
           hashes.push(createHash('sha256').update(view.dataUrl).digest('hex'));
           pictures.set(worker, hashes);
-          if (index === 0) releaseFirstPicture();
+          if (index === firstIndex) releaseFirstPicture();
           return true; // The user opted in to these synthetic images and this CLI test.
         },
       });
+      const kind = index % 2 === 0 ? 'face' : 'vertex';
+      const operation = kind === 'face' ? 'extrude_selected' : 'move_vertex';
+      const editValue = kind === 'face' ? '0.25' : '[0,0,0.25]';
+      const azimuth = 25 + index * 30;
       return new Promise<{ code: number; completed: boolean; error: string | null }>((resolve) => {
         let completed = false;
         let error: string | null = null;
         adapter.start(
           worker,
-          `Use blender_observe for target "${team.targets[index]}" at azimuth ${25 + index * 30} and elevation 25. Look only at the color of the large object at the center of the image. If the center object is red, move the object up 0.25 units; if blue, move it up 0.50 units. Use blender_edit with operation move, XYZ value and the exact observation token. Perform one successful edit, then observe again at the same angle and report the new Z coordinate. Do not edit a second time after a successful move.`,
+          `Observe only "${team.targets[index]}" with blender_observe at azimuth ${azimuth} and elevation 75 (no faceIndex). The assigned object is the cube in the center. From its image choose a visible ${kind}. For a vertex, aim just inside a visible top corner, and try a nearby position if the hit is null. Use blender_pointer first with action move, kind ${kind} and normalized image coordinates, then again with action select at the hit coordinates. Use the same observation token for those calls and for blender_edit with operation ${operation} and value ${editValue}. After exactly one successful edit, observe again from the same angle and briefly report the result.`,
           [],
           () => undefined,
           null,
@@ -524,7 +559,7 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
       });
     }
     try {
-      runs.push(runWorker(0));
+      runs.push(runWorker(firstIndex));
       await Promise.race([
         firstPicture,
         runs[0]!.then((outcome) => {
@@ -533,26 +568,37 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
           );
         }),
       ]);
-      for (let index = 1; index < workerIds.length; index++) runs.push(runWorker(index));
+      for (const index of indexes.slice(1)) runs.push(runWorker(index));
       const outcomes = await Promise.all(runs);
-      const witnesses = workerIds.map((worker, index) => ({
-        index,
-        outcome: outcomes[index],
-        edits: edits.get(worker)?.count ?? 0,
-        actualZ: Number(edits.get(worker)?.z?.toFixed(4)),
-        expectedZ: [0, 3, 4, 7, 9].includes(index) ? 0.7 : 0.95,
-        pictures: pictures.get(worker)?.length ?? 0,
-      }));
+      const witnesses = indexes.map((index, run) => {
+        const worker = workerIds[index]!;
+        return {
+          index,
+          outcome: outcomes[run],
+          actions: actions.get(worker),
+          expectedEdit: index % 2 === 0 ? 'extrude_selected' : 'move_vertex',
+          expectedFaces: index % 2 === 0 ? 10 : 6,
+          imageChanged: pictures.get(worker)?.[0] !== pictures.get(worker)?.at(-1),
+          pictures: pictures.get(worker)?.length ?? 0,
+        };
+      });
       console.info('Codex + Blender acceptance', JSON.stringify(witnesses));
-      expect(new Set(workerIds.map((worker) => pictures.get(worker)?.[0])).size).toBe(10);
+      expect(new Set(indexes.map((index) => pictures.get(workerIds[index]!)?.[0])).size).toBe(
+        indexes.length,
+      );
       expect(
         witnesses.filter(
-          ({ outcome, edits, actualZ, expectedZ, pictures }) =>
+          ({ outcome, actions, expectedEdit, expectedFaces, imageChanged, pictures }) =>
             outcome?.error !== null ||
             !outcome.completed ||
-            edits !== 1 ||
-            pictures < 2 ||
-            actualZ !== expectedZ,
+            !actions ||
+            actions.selects < 1 ||
+            actions.moves < 1 ||
+            actions.edits.length !== 1 ||
+            actions.edits[0] !== expectedEdit ||
+            actions.faces !== expectedFaces ||
+            !imageChanged ||
+            pictures < 2,
         ),
       ).toEqual([]);
     } finally {

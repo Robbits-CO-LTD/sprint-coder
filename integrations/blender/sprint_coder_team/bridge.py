@@ -159,6 +159,11 @@ class BlenderBridge:
             )
             peer.observation = (worker, observation)
             return
+        elif method == "pointer":
+            result = self.session.pointer(
+                worker, request["observation"], request["x"], request["y"], request["kind"],
+                request["action"],
+            )
         elif method == "edit":
             result = self.session.edit(
                 worker, request["observation"], request["operation"], request["value"]
