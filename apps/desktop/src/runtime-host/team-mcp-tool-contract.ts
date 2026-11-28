@@ -78,19 +78,19 @@ export const BLENDER_TEAM_MCP_TOOLS = [
   {
     name: 'blender_edit',
     description:
-      'Edit your assigned Blender mesh using its observation token. For cursor modeling, move_vertex changes the clicked vertex by a mesh-local XYZ offset and extrude_selected extrudes the clicked face by a nonzero distance along its normal. Legacy move offsets the object and extrude uses the observed face index. Observe again after editing.',
+      'Edit your assigned Blender mesh using its observation token. For cursor modeling, move_vertex changes the clicked vertex by a mesh-local XYZ offset and extrude_selected extrudes the clicked face by a nonzero distance along its normal. Legacy move offsets the object and extrude uses the observed face index. create_base creates one horizontal quad in an empty assigned mesh using [width, depth]. Observe again after editing.',
     inputSchema: {
       type: 'object',
       properties: {
         observation: { type: 'string' },
-        operation: { enum: ['move', 'extrude', 'move_vertex', 'extrude_selected'] },
+        operation: { enum: ['move', 'extrude', 'move_vertex', 'extrude_selected', 'create_base'] },
         value: {
           anyOf: [
             { type: 'number' },
             {
               type: 'array',
               items: { type: 'number' },
-              minItems: 3,
+              minItems: 2,
               maxItems: 3,
             },
           ],

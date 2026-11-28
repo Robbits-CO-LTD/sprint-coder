@@ -1,7 +1,7 @@
 import sharp from 'sharp';
 import { createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createConnection, createServer } from 'node:net';
@@ -235,18 +235,18 @@ afterEach(async () => {
   if (tempDir !== undefined) await rm(tempDir, { recursive: true, force: true });
 });
 
-async function startBlender(visualWorker = false) {
+async function startBlender(visualWorker = false, recordingDirectory?: string) {
   if (blenderExecutable === undefined) throw new Error('Blender is required');
   tempDir = await mkdtemp(join(tmpdir(), 'sc-blender-test-'));
-  const pairingPath = join(tempDir, 'pairing-code');
+  const pairingPath = join(recordingDirectory ?? tempDir, 'pairing-code');
   processHandle = spawn(
     blenderExecutable,
     [
-      '--factory-startup',
+      recordingDirectory === undefined ? '--factory-startup' : '--disable-autoexec',
       '--python-exit-code',
       '1',
       '--python',
-      fixture,
+      recordingDirectory === undefined ? fixture : resolve(fixture, '../record_city_fixture.py'),
       '--',
       ...(visualWorker ? ['--visual-worker'] : []),
       pairingPath,
@@ -453,7 +453,8 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
   'runs ten real Codex Worker Turns that point, click and edit their own Blender meshes',
   async () => {
     if (!codexExecutable) throw new Error('Codex CLI is required');
-    const { code, directory } = await startBlender(true);
+    const recordingDirectory = process.env['SPRINT_CODER_TEST_BLENDER_RECORD_DIR'];
+    const { code, directory } = await startBlender(true, recordingDirectory);
     const signal = AbortSignal.timeout(260_000);
     const team = await BlenderTeamConnection.pair(code, signal);
     connection = team;
@@ -462,6 +463,8 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
     const socketPath = await bridge.ensureStarted();
     if (socketPath === null) throw new Error('Team MCP failed to start');
     const adapter = new CodexRuntimeAdapter(220_000, codexExecutable, [], directory);
+    const attempts = new Map<string, string[]>();
+    const diagnostics = new Map<string, string>();
     const pictures = new Map<string, string[]>();
     const actions = new Map<
       string,
@@ -469,9 +472,26 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
     >();
     const call = team.call.bind(team);
     vi.spyOn(team, 'call').mockImplementation(async (worker, tool, input, caller) => {
-      const result = await call(worker, tool, input, caller);
-      const witness = actions.get(worker) ?? { selects: 0, moves: 0, edits: [] };
+      const trace = attempts.get(worker) ?? [];
+      attempts.set(worker, trace);
       const args = input as { action?: string; operation?: string };
+      trace.push(`${tool}:${args.action ?? args.operation ?? 'request'}`);
+      const result = await call(worker, tool, input, caller).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : '';
+        const rejected = message.includes('different Worker or Turn')
+          ? 'stale token'
+          : message.includes('empty, unshared')
+            ? 'mesh already initialized'
+            : message.includes('observation')
+              ? 'invalid observation input'
+              : message.includes('width and depth') || message.includes('"value"')
+                ? 'invalid edit value'
+                : 'rejected';
+        trace.push(rejected);
+        throw error;
+      });
+      trace.push('hit' in result && result.hit === null ? 'miss' : 'ok');
+      const witness = actions.get(worker) ?? { selects: 0, moves: 0, edits: [] };
       if ('face_count' in result) witness.faces = result.face_count;
       else if ('hit' in result && result.hit !== null) {
         if (args.action === 'move') witness.moves++;
@@ -497,8 +517,9 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
     });
     const runs: Promise<{ code: number; completed: boolean; error: string | null }>[] = [];
     const toolNames = BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name);
-    function runWorker(index: number) {
+    function runWorker(index: number, retry = false) {
       const worker = workerIds[index]!;
+      if (retry) bridge.unregister(worker);
       const token = TeamMcpBridge.generateToken();
       bridge.register(worker, {
         taskId: 'codex-blender-acceptance',
@@ -520,18 +541,56 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
       const operation = kind === 'face' ? 'extrude_selected' : 'move_vertex';
       const editValue = kind === 'face' ? '0.25' : '[0,0,0.25]';
       const azimuth = 25 + index * 30;
+      const buildInstruction =
+        index === 9
+          ? 'Build the street with a [28,3.6] base and extrude the selected face by 0.14.'
+          : `Build a distinctive building with a base roughly [${3.3 + (index % 3) * 0.2},3.3] and extrude its selected face by about ${2.6 + (index % 4) * 0.6} units.`;
+      const roofInstruction =
+        index % 2 === 1 && index < 9
+          ? ' Then observe again, move your cursor to a visible upper vertex, click to select it with kind vertex, and use move_vertex with value [0,0,0.6] to raise that corner before a final observation.'
+          : '';
+      const completedOperations = actions.get(worker)?.edits ?? [];
+      const resumeInstructions = retry
+        ? `You are reconnecting to the SAME mesh in the SAME recording. Already applied operations: ${completedOperations.join(', ') || 'none'}. Your first call must be blender_observe. Only perform missing operations in order (create_base, extrude_selected${roofInstruction ? ', move_vertex' : ''}), followed by verification, to avoid repeating edits. `
+        : '';
+      const buildingPrompt = `${resumeInstructions}Build only "${team.targets[index]}" in the shared street. ${buildInstruction} Observe your assigned mesh at azimuth ${azimuth}, elevation 72. If face_count is 0, use blender_edit operation create_base and value [width,depth]. Copy the exact observation token string from the most recent tool result. Observe. Move your cursor to the visible face and click select using blender_pointer with kind face, then use blender_edit extrude_selected with the same token. If you get an error, observe afresh and copy the entire newest token. If the pointer misses, try another point on the visible surface. ${roofInstruction} Finish with an observation after the edit; perform the tool calls before reporting. Up to three attempts if a step is rejected.`;
       return new Promise<{ code: number; completed: boolean; error: string | null }>((resolve) => {
         let completed = false;
         let error: string | null = null;
+        let syntheticResponse = '';
         adapter.start(
           worker,
-          `Observe only "${team.targets[index]}" with blender_observe at azimuth ${azimuth} and elevation 75 (no faceIndex). The assigned object is the cube in the center. From its image choose a visible ${kind}. For a vertex, aim just inside a visible top corner, and try a nearby position if the hit is null. Use blender_pointer first with action move, kind ${kind} and normalized image coordinates, then again with action select at the hit coordinates. Use the same observation token for those calls and for blender_edit with operation ${operation} and value ${editValue}. After exactly one successful edit, observe again from the same angle and briefly report the result.`,
+          recordingDirectory !== undefined
+            ? buildingPrompt
+            : `Observe only "${team.targets[index]}" with blender_observe at azimuth ${azimuth} and elevation 75 (no faceIndex). The assigned object is the cube in the center. From its image choose a visible ${kind}. For a vertex, aim just inside a visible top corner, and try a nearby position if the hit is null. Use blender_pointer first with action move, kind ${kind} and normalized image coordinates, then again with action select at the hit coordinates. Use the same observation token for those calls and for blender_edit with operation ${operation} and value ${editValue}. After exactly one successful edit, observe again from the same angle and briefly report the result.`,
           [],
           () => undefined,
           null,
           process.env['SPRINT_CODER_TEST_BLENDER_CODEX_MODEL'] ?? 'gpt-6.2-sol',
           (event) => {
-            if (event.type === 'completed') completed = true;
+            if (event.type === 'delta')
+              syntheticResponse = (syntheticResponse + event.delta).slice(-4000);
+            if (event.type === 'completed') {
+              completed = true;
+              const markers = [
+                [
+                  'image delivery refused',
+                  /(?:view|image|picture).{0,60}(?:not be delivered|could not see|unavailable|did not receive|not available)|could not (?:see|receive|deliver) (?:an?|the) (?:image|picture)/i,
+                ],
+                ['tool issue', /tool.{0,45}(?:fail|timeout|unavailable|error)/i],
+                [
+                  'no operation performed',
+                  /(?:no edit|not perform|unable to edit|could not edit|did not edit)/i,
+                ],
+              ] as const;
+              diagnostics.set(
+                worker,
+                markers
+                  .filter(([, match]) => match.test(syntheticResponse))
+                  .map(([label]) => label)
+                  .join(', '),
+              );
+            }
           },
           (failure, diagnostic) => {
             error = [failure.code, diagnostic?.failureStage].filter(Boolean).join(':');
@@ -570,22 +629,64 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
       ]);
       for (const index of indexes.slice(1)) runs.push(runWorker(index));
       const outcomes = await Promise.all(runs);
+      if (recordingDirectory !== undefined) {
+        for (const [run, index] of indexes.entries()) {
+          const worker = workerIds[index]!;
+          const expected = index % 2 === 1 && index < 9 ? 3 : 2;
+          if (
+            (actions.get(worker)?.edits.length ?? 0) !== expected ||
+            outcomes[run]?.error !== null
+          ) {
+            console.info('Continuing in the same scene for Worker', index + 1);
+            await adapter.cancel(worker);
+            outcomes[run] = await runWorker(index, true);
+          }
+        }
+      }
       const witnesses = indexes.map((index, run) => {
         const worker = workerIds[index]!;
         return {
           index,
           outcome: outcomes[run],
           actions: actions.get(worker),
-          expectedEdit: index % 2 === 0 ? 'extrude_selected' : 'move_vertex',
-          expectedFaces: index % 2 === 0 ? 10 : 6,
+          attempts: attempts.get(worker),
+          diagnostic: diagnostics.get(worker),
+          expectedEdit:
+            recordingDirectory !== undefined
+              ? [
+                  'create_base',
+                  'extrude_selected',
+                  ...(index % 2 === 1 && index < 9 ? ['move_vertex'] : []),
+                ]
+              : [index % 2 === 0 ? 'extrude_selected' : 'move_vertex'],
+          expectedFaces: recordingDirectory !== undefined ? 5 : index % 2 === 0 ? 10 : 6,
           imageChanged: pictures.get(worker)?.[0] !== pictures.get(worker)?.at(-1),
           pictures: pictures.get(worker)?.length ?? 0,
         };
       });
       console.info('Codex + Blender acceptance', JSON.stringify(witnesses));
-      expect(new Set(indexes.map((index) => pictures.get(workerIds[index]!)?.[0])).size).toBe(
-        indexes.length,
-      );
+      if (recordingDirectory !== undefined) {
+        await writeFile(join(recordingDirectory, 'finish-request'), '');
+        await expect
+          .poll(
+            async () => {
+              try {
+                await readFile(join(recordingDirectory, 'finish-result.json'));
+                return true;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      }
+      const hashes = indexes.map((index) => pictures.get(workerIds[index]!));
+      expect(
+        new Set(
+          hashes.map((items) => (recordingDirectory === undefined ? items?.[0] : items?.at(-1))),
+        ).size,
+      ).toBe(indexes.length);
       expect(
         witnesses.filter(
           ({ outcome, actions, expectedEdit, expectedFaces, imageChanged, pictures }) =>
@@ -594,8 +695,7 @@ it.skipIf(blenderExecutable === undefined || !codexExecutable)(
             !actions ||
             actions.selects < 1 ||
             actions.moves < 1 ||
-            actions.edits.length !== 1 ||
-            actions.edits[0] !== expectedEdit ||
+            actions.edits.join(',') !== expectedEdit.join(',') ||
             actions.faces !== expectedFaces ||
             !imageChanged ||
             pictures < 2,

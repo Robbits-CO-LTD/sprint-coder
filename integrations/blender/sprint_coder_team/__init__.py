@@ -194,9 +194,13 @@ def _png(width, height, rgba):
 
 def camera_matrices(view, width, height):
     target = view.target
-    center = sum((target.matrix_world @ Vector(corner) for corner in target.bound_box),
-                 Vector((0, 0, 0))) / 8
-    radius = max(target.dimensions.length / 2, 0.25)
+    if len(target.data.vertices) == 0:
+        center = target.matrix_world.translation.copy()
+        radius = 2.0
+    else:
+        center = sum((target.matrix_world @ Vector(corner) for corner in target.bound_box),
+                     Vector((0, 0, 0))) / 8
+        radius = max(target.dimensions.length / 2, 0.25)
     azimuth, elevation = math.radians(view.azimuth), math.radians(view.elevation)
     offset = Vector((math.cos(elevation) * math.cos(azimuth),
                      math.cos(elevation) * math.sin(azimuth), math.sin(elevation)))

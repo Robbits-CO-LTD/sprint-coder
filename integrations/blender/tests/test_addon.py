@@ -66,6 +66,34 @@ def test_closed_edit(session):
     assert tuple(view.target.location) == position, "A disconnected sender changed the mesh"
 
 
+def test_empty_base():
+    mesh = bpy.data.meshes.new("Empty site")
+    target = bpy.data.objects.new("Empty site", mesh)
+    bpy.context.scene.collection.objects.link(target)
+    bpy.context.view_layer.update()
+    session = TeamSceneSession(bpy.context.scene, [target])
+    session.bind("base-worker", 0)
+    view = addon.agents["base-worker"]
+    for attempt in range(2):
+        token = session.begin_observation("base-worker", 25, 72)
+        view.captured_revision = view.revision
+        view.png = b"fixture only"
+        if attempt == 0:
+            assert len(mesh.vertices) == 0
+            session.edit("base-worker", token, "create_base", (3.4, 4))
+            assert len(mesh.vertices) == 4 and len(mesh.polygons) == 1
+            assert abs(target.dimensions.x - 3.4) < 0.0001
+            assert target.dimensions.y == 4
+        else:
+            try:
+                session.edit("base-worker", token, "create_base", (3.4, 4))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Existing geometry must not be replaced with a base")
+    session.close()
+
+
 def test_vertex_pointer(targets):
     session = TeamSceneSession(bpy.context.scene, targets)
     session.bind("vertex-worker", 3)
@@ -197,6 +225,7 @@ def test():
         raise AssertionError("A late bind restored a released Worker")
     session.bind("replacement", 0)
     session.close()
+    test_empty_base()
     test_vertex_pointer(targets)
     test_undo(targets)
     addon.unregister()

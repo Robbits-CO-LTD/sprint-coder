@@ -1,6 +1,7 @@
 """Blender main-thread boundary for one explicitly paired Team and scene."""
 
 from dataclasses import dataclass
+import math
 from secrets import token_urlsafe
 
 import bpy
@@ -168,14 +169,31 @@ class TeamSceneSession:
             mod.show_viewport for mod in view.target.modifiers
         ):
             raise ValueError("Cursor editing requires a mesh without active modifiers")
-        if operation in ("move_vertex", "extrude_selected", "extrude") and any(
+        if operation in ("move_vertex", "extrude_selected", "extrude", "create_base") and any(
             child.parent_type in ("VERTEX", "VERTEX_3") for child in view.target.children
         ):
             raise ValueError("Geometry edits require a mesh without vertex-parented children")
         record_undo = bpy.context.preferences.edit.use_global_undo
         if record_undo and not bpy.ops.ed.undo_push.poll():
             raise ValueError("Wait until Blender can record the Team edit in Undo History")
-        if operation == "move":
+        if operation == "create_base":
+            mesh = view.target.data
+            if len(mesh.vertices) or mesh.users != 1 or mesh.shape_keys or any(
+                mod.show_viewport for mod in view.target.modifiers
+            ):
+                raise ValueError("Base creation requires an empty, unshared mesh without active modifiers")
+            if len(value) != 2 or not all(math.isfinite(n) and 0.1 <= n <= 48 for n in value):
+                raise ValueError("Choose a width and depth between 0.1 and 48")
+            half_x, half_y = (n / 2 for n in value)
+            mesh.from_pydata(
+                [(-half_x, -half_y, 0), (half_x, -half_y, 0),
+                 (half_x, half_y, 0), (-half_x, half_y, 0)],
+                [], [(0, 1, 2, 3)],
+            )
+            mesh.update()
+            bpy.context.view_layer.update()
+            view.move_cursor(view.target.matrix_world.translation.copy())
+        elif operation == "move":
             move_target(worker_id, value, observation.location)
         elif operation == "extrude" and observation.face_index is not None:
             extrude_face(worker_id, observation.face_index, value, observation.vertices)

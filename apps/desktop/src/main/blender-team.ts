@@ -61,6 +61,13 @@ export const blenderEditInputSchema = z.discriminatedUnion('operation', [
   z
     .object({
       observation: tokenSchema,
+      operation: z.literal('create_base'),
+      value: z.tuple([z.number().min(0.1).max(48), z.number().min(0.1).max(48)]),
+    })
+    .strict(),
+  z
+    .object({
+      observation: tokenSchema,
       operation: z.enum(['move', 'move_vertex']),
       value: coordinatesSchema.refine((coordinates) =>
         coordinates.every((n) => Math.abs(n) <= 100),
