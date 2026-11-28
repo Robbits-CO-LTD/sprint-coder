@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useAppStore, type TeamPolicyValues } from '../store/appStore';
 import { X } from './icons';
+import { TeamBlenderSettings } from './TeamBlenderSettings';
 import {
   TEAM_CONCURRENCY_DEFAULT,
   TEAM_CONCURRENCY_RANGE,
@@ -325,6 +326,8 @@ export function TeamPolicyDialog({
             </label>
           ))}
         </fieldset>
+
+        {open && <TeamBlenderSettings key={taskId} taskId={taskId} />}
 
         {/* Failure surface. `role="alert"` so it is announced without moving focus off the field
             the user was in, and it carries the reload guidance as words — the red border and the

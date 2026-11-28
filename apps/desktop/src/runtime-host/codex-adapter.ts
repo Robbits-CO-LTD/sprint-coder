@@ -621,7 +621,30 @@ export class CodexRuntimeAdapter {
                       tool,
                       arguments: params['arguments'],
                     });
-                    response = codexDynamicToolResponseFromMcp(result);
+                    if (tool === 'blender_observe' && asRecord(result)['isError'] !== true) {
+                      const picture = codexBlenderPictureItem(result);
+                      const delivery =
+                        picture === undefined || !canRespond()
+                          ? 'not_given'
+                          : await codexPictureDelivery(
+                              send('thread/inject_items', { threadId, items: [picture] }),
+                              CODEX_PICTURE_INJECT_TIMEOUT_MS,
+                            );
+                      response =
+                        delivery === 'given'
+                          ? codexDynamicToolResponseFromMcp(result)
+                          : {
+                              success: false,
+                              contentItems: [
+                                {
+                                  type: 'inputText',
+                                  text: 'The Blender view could not be delivered. Observe again before editing.',
+                                },
+                              ],
+                            };
+                    } else {
+                      response = codexDynamicToolResponseFromMcp(result);
+                    }
                   } finally {
                     resumeActivity();
                   }
@@ -1457,6 +1480,27 @@ export function codexDynamicToolResponseFromManaged(
       },
     ],
   };
+}
+
+export function codexBlenderPictureItem(response: unknown): Record<string, unknown> | undefined {
+  const result = asRecord(response);
+  if (result['isError'] === true || !Array.isArray(result['content'])) return undefined;
+  const image = result['content']
+    .map(asRecord)
+    .find(
+      (item) =>
+        item['type'] === 'image' &&
+        item['mimeType'] === 'image/png' &&
+        typeof item['data'] === 'string' &&
+        item['data'].length <= 384 * 1024 &&
+        /^[A-Za-z0-9+/]+={0,2}$/.test(item['data']),
+    );
+  return image === undefined
+    ? undefined
+    : codexManagedPictureItem({
+        success: true,
+        output: { dataUrl: `data:image/png;base64,${image['data']}` },
+      });
 }
 
 export function codexDynamicToolResponseFromMcp(response: unknown): CodexDynamicToolResponse {

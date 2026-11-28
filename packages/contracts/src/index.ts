@@ -467,6 +467,15 @@ export const teamBlueprintSchema = z
     });
   });
 export type TeamBlueprint = z.infer<typeof teamBlueprintSchema>;
+export const teamBlenderPairInputSchema = z
+  .object({
+    taskId: z.string().min(1),
+    code: z.string().max(100),
+  })
+  .strict();
+
+export const teamBlenderTargetsSchema = z.array(z.string().min(1).max(1024)).min(1).max(10);
+
 export const teamPolicyUpdateInputSchema = z
   .object({
     taskId: idSchema,
@@ -4927,6 +4936,9 @@ export interface SprintCoderApi {
   teams: {
     promote(taskId: string): Promise<TeamSummary>;
     get(taskId: string): Promise<TeamDetail | null>;
+    blenderStatus(taskId: string): Promise<string[] | null>;
+    pairBlender(taskId: string, code: string): Promise<string[]>;
+    disconnectBlender(taskId: string): Promise<void>;
     updatePolicy(input: TeamPolicyUpdateInput): Promise<TeamDetail>;
     hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;
     resumeMission(input: TeamResumeMissionInput): Promise<TeamMissionSummary>;
@@ -5208,6 +5220,9 @@ export const IPC_CHANNELS = {
   projectsUnassignTask: 'sprint-coder:projects:unassign-task',
   teamsPromote: 'sprint-coder:teams:promote',
   teamsGet: 'sprint-coder:teams:get',
+  teamsBlenderStatus: 'sprint-coder:teams:blender-status',
+  teamsBlenderPair: 'sprint-coder:teams:blender-pair',
+  teamsBlenderDisconnect: 'sprint-coder:teams:blender-disconnect',
   teamsUpdatePolicy: 'sprint-coder:teams:update-policy',
   teamsHireWorker: 'sprint-coder:teams:hire-worker',
   teamsSend: 'sprint-coder:teams:send',

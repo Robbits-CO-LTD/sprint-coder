@@ -36,6 +36,7 @@ import {
   CODEX_PICTURE_NOT_GIVEN,
   CODEX_PICTURE_UNCONFIRMED,
   codexPictureDelivery,
+  codexBlenderPictureItem,
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 import type { RuntimeCanonicalEvent, RuntimeFailureDiagnostic } from './protocol';
@@ -1921,3 +1922,20 @@ function processExists(pid: number): boolean {
     return false;
   }
 }
+
+it('injects the Blender MCP image into Codex without including the observation token in the picture message', () => {
+  const item = codexBlenderPictureItem({
+    content: [
+      { type: 'text', text: '{"observation":"lease-token"}' },
+      { type: 'image', mimeType: 'image/png', data: 'QUFB' },
+    ],
+  });
+  expect(item).toMatchObject({
+    role: 'user',
+    content: expect.arrayContaining([
+      { type: 'input_image', image_url: 'data:image/png;base64,QUFB' },
+    ]),
+  });
+  expect(JSON.stringify(item)).not.toContain('lease-token');
+  expect(codexBlenderPictureItem({ isError: true, content: [] })).toBeUndefined();
+});

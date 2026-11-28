@@ -1,0 +1,12 @@
+schema_version = "1.0.0"
+id = "sprint_coder_team"
+version = "0.1.0"
+name = "Sprint Coder Team"
+tagline = "Show team cursors and independent views in a shared 3D scene"
+maintainer = "Sprint Coder"
+type = "add-on"
+blender_version_min = "5.1.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Pair with Sprint Coder on the local machine"

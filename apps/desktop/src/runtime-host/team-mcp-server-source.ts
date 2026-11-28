@@ -21,6 +21,7 @@ import {
   desktopControlTeamCursorsEnabled,
 } from '../main/desktop-control-build';
 import {
+  BLENDER_TEAM_MCP_TOOLS,
   TEAM_ASSIGN_TASKS_MAX,
   TEAM_ASSIGN_TASKS_MAX_BYTES,
   TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
@@ -57,6 +58,7 @@ const ASSIGN_TASKS_MAX_BYTES = ${TEAM_ASSIGN_TASKS_MAX_BYTES};
 const ASSIGN_TASKS_TOO_LARGE_MESSAGE = ${JSON.stringify(TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE)};
 
 const TOOLS = [
+  ...${JSON.stringify(BLENDER_TEAM_MCP_TOOLS)},
   {
     name: 'project_memory_remember',
     description:
@@ -596,6 +598,16 @@ function contentForResult(result) {
       type: 'text',
       text: JSON.stringify(
         Object.assign(
+          typeof result.observation === 'string'
+            ? {
+                observation: result.observation,
+                target: result.target,
+                location: result.location,
+                face_count: result.face_count,
+                faces: result.faces,
+                face_index: result.face_index,
+              }
+            : {},
           {
             path: result.path,
             mimeType: result.mimeType,

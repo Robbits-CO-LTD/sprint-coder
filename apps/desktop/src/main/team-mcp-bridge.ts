@@ -21,11 +21,13 @@ import {
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
 import {
+  isBlenderTeamTool,
   TEAM_BRIDGE_MAX_REQUEST_BYTES,
   teamMcpToolNamesForCapabilities,
   type TeamMcpRole,
   type TeamMcpToolName,
 } from '../runtime-host/team-mcp-tool-contract';
+import type { BlenderTeamConnection } from './blender-team';
 import type { RuntimeManagedToolDefinition } from '../runtime-host/protocol';
 import {
   isNativeProcessDescendant,
@@ -272,6 +274,8 @@ export type TeamMcpRegistration = Readonly<{
   allowSkillDrafts?: boolean;
   allowProjectMemory?: boolean;
   allowTeamTools?: boolean;
+  blenderEnabled?: boolean;
+  blenderConnection?: BlenderTeamConnection;
   role?: TeamMcpRole;
   allowedTools?: readonly TeamMcpToolName[];
   managedTools?: readonly RuntimeManagedToolDefinition[];
@@ -802,6 +806,23 @@ export class TeamMcpBridge {
             status: 'received',
           },
         );
+      }
+      if (isBlenderTeamTool(request.tool)) {
+        if (
+          !allowedTools.has(request.tool) ||
+          registration.role !== 'worker' ||
+          registration.blenderConnection === undefined ||
+          registration.requesterAgentId === undefined
+        )
+          throw new Error('Blender tools require a paired Team Worker');
+        const result = await registration.blenderConnection.call(
+          registration.requesterAgentId,
+          request.tool,
+          request.args,
+          registration.turnAbort.signal,
+        );
+        respond({ ok: true, result });
+        return;
       }
       const result =
         managedTool !== undefined

@@ -1,3 +1,5 @@
+import sharp from 'sharp';
+import type { BlenderTeamConnection } from './blender-team';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -1085,6 +1087,72 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('sends a paired Blender image to the Worker only after its normal egress check', async () => {
+    const bytes = await sharp({
+      create: { width: 16, height: 16, channels: 3, background: 'red' },
+    })
+      .png()
+      .toBuffer();
+    const call = vi.fn(async () => ({
+      observation: 'fixture-observation',
+      target: 'Roof',
+      face_count: 6,
+      dataUrl: `data:image/png;base64,${bytes.toString('base64')}`,
+    }));
+    const blender = { active: true, call } as unknown as BlenderTeamConnection;
+    const sent: ProviderExecutionRequest[] = [];
+    const authorizeEgress = vi.fn(() => true);
+    const adapter = controlledProviderAdapter(
+      {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        async *execute(_connection, request) {
+          sent.push(request);
+          if (sent.length === 1)
+            yield {
+              type: 'tool_call',
+              callId: 'observe',
+              name: 'blender_observe',
+              input: { azimuth: 45, elevation: 20 },
+            };
+          else yield { type: 'output_delta', text: 'Roof observed' };
+          yield { type: 'completed', stopReason: 'end_turn' };
+        },
+      },
+      { blenderForWorker: () => blender, authorizeEgress },
+    );
+    const result = await adapter.execute({
+      worker: providerWorker(),
+      envelope,
+      content: 'Observe the mesh',
+    });
+    expect(result.completion).toMatchObject({ status: 'succeeded', summary: 'Roof observed' });
+    expect(call).toHaveBeenCalledWith(
+      'worker-1',
+      'blender_observe',
+      { azimuth: 45, elevation: 20 },
+      expect.any(AbortSignal),
+    );
+    expect(sent[1]?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'tool',
+          toolCallId: 'observe',
+          content: expect.stringContaining('fixture-observation'),
+        }),
+        expect.objectContaining({
+          inlineImages: [expect.objectContaining({ mimeType: 'image/png' })],
+        }),
+      ]),
+    );
+    expect(authorizeEgress).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        attachment: { manifestDigest: expect.any(String), byteCount: expect.any(Number) },
+      }),
+    );
   });
 
   it.each(['grant', 'deny', 'changed'])(

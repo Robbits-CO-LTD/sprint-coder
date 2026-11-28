@@ -1,3 +1,5 @@
+import { BlenderTeamConnection } from './blender-team';
+import { BLENDER_TEAM_MCP_TOOLS } from '../runtime-host/team-mcp-tool-contract';
 import { matchProjectPermissionRules } from './project-permission-settings';
 import { APPROVAL_POLICY_CHANGED_MESSAGE } from '../approval-feedback';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
@@ -236,6 +238,8 @@ import {
   teamRetainedWorktreeListInputSchema,
   teamRetainedWorktreeRefSchema,
   teamMessageSummarySchema,
+  teamBlenderPairInputSchema,
+  teamBlenderTargetsSchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
   teamSendMessageInputSchema,
@@ -1288,6 +1292,8 @@ export class IpcRouter {
       });
     },
   );
+  private readonly blenderTeams = new Map<string, BlenderTeamConnection>();
+  private readonly pendingBlenderPairs = new Map<string, AbortController>();
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
@@ -1799,6 +1805,7 @@ export class IpcRouter {
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
+      blenderForWorker: (worker) => this.blenderTeams.get(worker.taskId),
       executeManagerTool: ({
         worker,
         name,
@@ -3678,6 +3685,7 @@ export class IpcRouter {
           // desktop-control session (and its cursors), and stops a run that slipped through.
           // A hire still checking the Workspace must not create a Worker in an archived Task.
           this.teamCoordinator.revokePendingHires(input.taskId);
+          this.disconnectBlenderTeam(input.taskId);
           void this.endArchivedTaskDesktopControl(input.taskId);
         }
         return result;
@@ -4155,6 +4163,46 @@ export class IpcRouter {
     );
     this.handle(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), (input) =>
       this.teamCoordinator.get(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.teamsBlenderStatus,
+      taskIdPayloadSchema,
+      teamBlenderTargetsSchema.nullable(),
+      async ({ taskId }) => {
+        const team = this.blenderTeams.get(taskId);
+        if (team === undefined) return null;
+        if (await team.isAvailable()) return team.targets;
+        if (this.blenderTeams.get(taskId) === team) this.disconnectBlenderTeam(taskId);
+        return null;
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsBlenderPair,
+      teamBlenderPairInputSchema,
+      teamBlenderTargetsSchema,
+      async ({ taskId, code }) => {
+        if (this.teamCoordinator.get(taskId) === null)
+          throw new Error('Blender can only be paired with a Team Task');
+        if (this.blenderTeams.has(taskId) || this.pendingBlenderPairs.has(taskId))
+          throw new Error('Disconnect this Team before pairing again');
+        const controller = new AbortController();
+        this.pendingBlenderPairs.set(taskId, controller);
+        try {
+          const connection = await BlenderTeamConnection.pair(code, controller.signal);
+          controller.signal.throwIfAborted();
+          this.blenderTeams.set(taskId, connection);
+          return connection.targets;
+        } finally {
+          if (this.pendingBlenderPairs.get(taskId) === controller)
+            this.pendingBlenderPairs.delete(taskId);
+        }
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsBlenderDisconnect,
+      taskIdPayloadSchema,
+      z.void(),
+      ({ taskId }) => this.disconnectBlenderTeam(taskId),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsUpdatePolicy,
@@ -4924,6 +4972,8 @@ export class IpcRouter {
     await this.attachmentCustodyStore.dispose();
     this.attachmentCustodyByTurn.clear();
     this.attachmentCapabilityByTurn.clear();
+    for (const taskId of [...this.blenderTeams.keys(), ...this.pendingBlenderPairs.keys()])
+      this.disconnectBlenderTeam(taskId);
     await this.teamMcpBridge.dispose();
     if (streamingFailure !== undefined) throw streamingFailure.cause;
   }
@@ -7651,6 +7701,7 @@ export class IpcRouter {
         : null,
       // Only with the Team's desktop cursors on, so with them off the guidance is as it was.
       leaderDesktopControlGuidance(options.teamTurn),
+      this.blenderLeaderGuidance(taskId, options.teamTurn),
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
         : null,
@@ -8049,6 +8100,19 @@ export class IpcRouter {
     };
   }
 
+  private blenderLeaderGuidance(taskId: string, teamTurn: boolean): string | null {
+    const size = this.blenderTeams.get(taskId)?.targets.length;
+    if (!teamTurn || size === undefined) return null;
+    return `このTaskのBlenderには${size}個の編集対象が接続されています。Blender作業を依頼された場合は、画像入力とツール呼び出しに対応するWorkerに並行で割り当ててください。Workerはblender_observeで担当メッシュを知り、画像を確認してからblender_editで編集します。編集後の画像で結果を確かめるよう指示してください。`;
+  }
+
+  private disconnectBlenderTeam(taskId: string): void {
+    this.pendingBlenderPairs.get(taskId)?.abort();
+    this.pendingBlenderPairs.delete(taskId);
+    this.blenderTeams.get(taskId)?.close();
+    this.blenderTeams.delete(taskId);
+  }
+
   private registerWorkerMcp(
     turnId: string,
     taskId: string,
@@ -8059,12 +8123,17 @@ export class IpcRouter {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
     const token = TeamMcpBridge.generateToken();
+    const blenderConnection = this.blenderTeams.get(taskId);
     const registration: TeamMcpRegistration = {
       taskId,
       token,
       role: 'worker',
       allowTeamTools: true,
-      allowedTools: WORKER_TEAM_MCP_TOOL_NAMES,
+      allowedTools:
+        blenderConnection === undefined
+          ? WORKER_TEAM_MCP_TOOL_NAMES
+          : [...WORKER_TEAM_MCP_TOOL_NAMES, ...BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name)],
+      ...(blenderConnection === undefined ? {} : { blenderEnabled: true, blenderConnection }),
       requesterAgentId,
       initialWaitCursor: this.teamCoordinator.latestTeamMessageSeq(taskId),
       ...(executionId === undefined
@@ -8088,9 +8157,13 @@ export class IpcRouter {
       token,
       // A Worker marked for desktop control is told how to share the desktop (cursors on only).
       guidance:
-        desktopControlWorker(taskId, requesterAgentId) === undefined
-          ? WORKER_MCP_SYSTEM_PROMPT
-          : `${WORKER_MCP_SYSTEM_PROMPT}${WORKER_DESKTOP_CONTROL_PROMPT}`,
+        WORKER_MCP_SYSTEM_PROMPT +
+        (desktopControlWorker(taskId, requesterAgentId) === undefined
+          ? ''
+          : WORKER_DESKTOP_CONTROL_PROMPT) +
+        (blenderConnection === undefined
+          ? ''
+          : '\nA Blender scene is paired. For Blender work, call blender_observe to see your actual assigned mesh, edit with blender_edit, then observe again to verify.'),
       toolNames: teamMcpToolNamesForCapabilities(registration),
       ...(managedTools.length === 0
         ? {}
@@ -9235,6 +9308,7 @@ export class IpcRouter {
             content: [
               ...renderDesktopControl(command, process.platform === 'darwin'),
               leaderDesktopControlGuidance(teamTurn),
+              this.blenderLeaderGuidance(taskId, teamTurn),
             ].join('\n'),
           });
       }

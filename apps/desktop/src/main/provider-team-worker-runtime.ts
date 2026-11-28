@@ -50,6 +50,10 @@ import {
 import { ToolAuthorizationDeniedError, type ApprovalWaitObserver } from './tool-broker';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ToolImageBridge } from './tool-image-bridge';
+import type { BlenderTeamConnection } from './blender-team';
+import { BLENDER_TEAM_MCP_TOOLS, isBlenderTeamTool } from '../runtime-host/team-mcp-tool-contract';
+import { providerToolSchema } from '@sprint-coder/contracts';
+import { canonicalizeProviderToolImage } from './image-attachment-store';
 import {
   matchesScreenshotPicture,
   isScreenshotToolResult,
@@ -82,6 +86,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   managerTools: readonly ProviderTool[];
   workerGuidance: string;
   workerTools: readonly ProviderTool[];
+  blenderForWorker?(worker: AgentRecord): BlenderTeamConnection | undefined;
   onCliStopUnconfirmed?(taskId: string): void;
   openCliWorkspace?(
     input: Parameters<TeamWorkerRuntime['execute']>[0],
@@ -267,7 +272,14 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       15_000,
     );
     heartbeat.unref();
+    const blender =
+      input.worker.canDelegate || inheritedContext.projectItems.some((item) => item.localOnly)
+        ? undefined
+        : this.deps.blenderForWorker?.(input.worker);
     const availableTools = [
+      ...(blender === undefined
+        ? []
+        : BLENDER_TEAM_MCP_TOOLS.map((tool) => providerToolSchema.parse(tool))),
       ...(input.worker.canDelegate ? this.deps.managerTools : this.deps.workerTools),
     ];
     const webSearch =
@@ -322,6 +334,12 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       })),
       { role: 'user', content: prompt },
     ];
+    if (blender !== undefined)
+      messages.unshift({
+        role: 'system',
+        content:
+          'For Blender work, observe your assigned mesh using blender_observe, decide based on the image, edit it, and observe again to verify.',
+      });
     input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
     input.onEvent?.({
       type: 'activity',
@@ -356,7 +374,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       const runtime = this.deps.registry.resolve(connection);
       const streamBudget = new ProviderStreamBudget();
       const imageBridge = new ToolImageBridge();
-      let screenshotGrant: (() => boolean) | null = null;
+      let imageGrant: (() => boolean) | null = null;
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         controller.signal.throwIfAborted();
         providerCallCount += 1;
@@ -404,9 +422,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           );
         else await modelLease.prepare(controller.signal);
         controller.signal.throwIfAborted();
-        if (dispatch.hasToolImage && !screenshotGrant?.())
+        if (dispatch.hasToolImage && !imageGrant?.())
           throw new Error('画像の送信先が変わったため、Workerを停止しました。');
-        screenshotGrant = null;
+        imageGrant = null;
         const providerExecutionId = providerCallExecutionId(executionId, providerCallCount);
         this.active.set(input.worker.id, {
           executionId: providerExecutionId,
@@ -493,7 +511,41 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             at: new Date().toISOString(),
           });
           let toolResult: string;
-          if (workspace?.tools.some((tool) => tool.name === toolCall.name)) {
+          if (blender !== undefined && isBlenderTeamTool(toolCall.name)) {
+            try {
+              if (toolCall.name === 'blender_observe' && imageGrant !== null)
+                throw new Error('Observe in a separate response to receive the image');
+              const result = await blender.call(
+                input.worker.id,
+                toolCall.name,
+                toolCall.input,
+                controller.signal,
+              );
+              if ('dataUrl' in result) {
+                const { dataUrl, ...facts } = result;
+                const bytes = Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64');
+                const image = await canonicalizeProviderToolImage(bytes);
+                const accepted = await imageBridge.acceptToolResult({
+                  toolCallId: toolCall.callId,
+                  toolName: toolCall.name,
+                  result: {
+                    mimeType: image.mimeType,
+                    byteLength: image.bytes.byteLength,
+                    sha256: image.sha256,
+                    dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
+                  },
+                });
+                if (!accepted.accepted) throw new Error('The Blender image could not be delivered');
+                imageGrant = () => blender.active;
+                toolResult = JSON.stringify(facts);
+              } else {
+                toolResult = JSON.stringify(result);
+              }
+            } catch (error) {
+              controller.signal.throwIfAborted();
+              toolResult = providerWorkspaceToolFailure(error);
+            }
+          } else if (workspace?.tools.some((tool) => tool.name === toolCall.name)) {
             try {
               let picture: ScreenshotPicture | undefined;
               let result = await workspace.invoke(toolCall, controller.signal, (taken) => {
@@ -501,14 +553,14 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
               });
               if (
                 picture &&
-                !screenshotGrant &&
+                !imageGrant &&
                 matchesScreenshotPicture(result, picture) &&
                 isScreenshotToolResult(result) &&
                 !inheritedContext.projectItems.some((item) => item.localOnly)
               ) {
-                screenshotGrant =
+                imageGrant =
                   (await workspace.approveScreenshot?.(picture, controller.signal)) ?? null;
-                if (screenshotGrant) {
+                if (imageGrant) {
                   imageBridge.acceptScreenshot(toolCall.callId, picture);
                   result = { ...result, picture: SCREENSHOT_PICTURE_ATTACHED };
                 }

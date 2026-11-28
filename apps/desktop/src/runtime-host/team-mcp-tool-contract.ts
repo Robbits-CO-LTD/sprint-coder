@@ -41,7 +41,57 @@ export const TEAM_CORE_MCP_TOOL_NAMES = [
   'team_stop_worker',
 ] as const;
 
+export const BLENDER_TEAM_MCP_TOOLS = [
+  {
+    name: 'blender_observe',
+    description:
+      'Get a PNG of your assigned Blender mesh from your own view. Returns a one-use observation token. Inspect the image before deciding on an edit. Returns up to 64 face centers and normals in mesh-local coordinates. An optional face index selects the face for an extrusion.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        azimuth: { type: 'number', minimum: -360, maximum: 360 },
+        elevation: { type: 'number', minimum: -89, maximum: 89 },
+        faceIndex: { type: 'integer', minimum: 0 },
+      },
+      required: ['azimuth', 'elevation'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'blender_edit',
+    description:
+      'Edit your assigned Blender mesh using the token from your last observation. Move takes an XYZ offset. Extrude takes a nonzero distance along the observed face normal. Observe again after the edit to verify it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        observation: { type: 'string' },
+        operation: { enum: ['move', 'extrude'] },
+        value: {
+          anyOf: [
+            { type: 'number' },
+            {
+              type: 'array',
+              items: { type: 'number' },
+              minItems: 3,
+              maxItems: 3,
+            },
+          ],
+        },
+      },
+      required: ['observation', 'operation', 'value'],
+      additionalProperties: false,
+    },
+  },
+] as const;
+
+export type BlenderTeamToolName = (typeof BLENDER_TEAM_MCP_TOOLS)[number]['name'];
+
+export function isBlenderTeamTool(name: string): name is BlenderTeamToolName {
+  return BLENDER_TEAM_MCP_TOOLS.some((tool) => tool.name === name);
+}
+
 export const TEAM_MCP_TOOL_NAMES = [
+  ...BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name),
   ...PROJECT_MEMORY_MCP_TOOL_NAMES,
   ...SKILL_DRAFT_MCP_TOOL_NAMES,
   ...TEAM_CORE_MCP_TOOL_NAMES,
@@ -59,6 +109,7 @@ export type TeamMcpToolCapabilities = Readonly<{
   allowSkillDrafts?: boolean;
   allowTeamTools?: boolean;
   role?: TeamMcpRole;
+  blenderEnabled?: boolean;
   allowedTools?: readonly TeamMcpToolName[];
 }>;
 
@@ -74,6 +125,11 @@ export function teamMcpToolNamesForCapabilities(
     ...(capabilities.allowProjectMemory === true ? PROJECT_MEMORY_MCP_TOOL_NAMES : []),
     ...(capabilities.allowSkillDrafts === true ? SKILL_DRAFT_MCP_TOOL_NAMES : []),
     ...(capabilities.allowTeamTools === false ? [] : roleTools),
+    ...(capabilities.role === 'worker' &&
+    capabilities.allowTeamTools !== false &&
+    capabilities.blenderEnabled === true
+      ? BLENDER_TEAM_MCP_TOOLS.map(({ name }) => name)
+      : []),
   ];
   if (capabilities.allowedTools === undefined) return candidates;
   const allowed = new Set(capabilities.allowedTools);

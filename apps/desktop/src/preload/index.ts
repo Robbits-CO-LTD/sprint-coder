@@ -157,6 +157,8 @@ import {
   teamRetainedWorktreeListInputSchema,
   teamRetainedWorktreeRefSchema,
   teamMessageSummarySchema,
+  teamBlenderPairInputSchema,
+  teamBlenderTargetsSchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
   teamModelResearchSettingsSchema,
@@ -657,6 +659,20 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.teamsPromote, taskIdPayloadSchema, teamSummarySchema, { taskId }),
     get: (taskId) =>
       invoke(IPC_CHANNELS.teamsGet, taskIdPayloadSchema, teamDetailSchema.nullable(), { taskId }),
+    blenderStatus: (taskId) =>
+      invoke(
+        IPC_CHANNELS.teamsBlenderStatus,
+        taskIdPayloadSchema,
+        teamBlenderTargetsSchema.nullable(),
+        { taskId },
+      ),
+    pairBlender: (taskId, code) =>
+      invoke(IPC_CHANNELS.teamsBlenderPair, teamBlenderPairInputSchema, teamBlenderTargetsSchema, {
+        taskId,
+        code,
+      }),
+    disconnectBlender: (taskId) =>
+      invoke(IPC_CHANNELS.teamsBlenderDisconnect, taskIdPayloadSchema, z.void(), { taskId }),
     updatePolicy: (input) =>
       invoke(IPC_CHANNELS.teamsUpdatePolicy, teamPolicyUpdateInputSchema, teamDetailSchema, input),
     hireWorker: (input) =>
