@@ -119,7 +119,7 @@ export class BlenderTeamConnection {
   private readonly slots = new Map<string, number>();
   private readonly busy = new Set<string>();
   private readonly stopped = new Set<string>();
-  private readonly releasing = new Set<string>();
+  private readonly releasing = new Map<string, Promise<void>>();
   private readonly observations = new Map<string, { token: string; turn: AbortSignal }>();
 
   get active(): boolean {
@@ -152,20 +152,24 @@ export class BlenderTeamConnection {
   }
 
   async releaseWorker(worker: string): Promise<void> {
-    if (!this.active || !this.slots.has(worker) || this.releasing.has(worker)) return;
+    if (!this.active) return;
     this.stopped.add(worker);
+    if (!this.slots.has(worker)) return;
+    const pending = this.releasing.get(worker);
+    if (pending !== undefined) return pending;
     this.observations.delete(worker);
-    this.releasing.add(worker);
-    try {
-      await blenderRequest(
-        this.endpoint,
-        { method: 'release', worker },
-        AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(2_000)]),
-      );
-      this.slots.delete(worker);
-    } finally {
-      this.releasing.delete(worker);
-    }
+    const release = blenderRequest(
+      this.endpoint,
+      { method: 'release', worker },
+      AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(2_000)]),
+    )
+      .then((result) => {
+        z.object({ released: z.literal(true) }).parse(result);
+        this.slots.delete(worker);
+      })
+      .finally(() => this.releasing.delete(worker));
+    this.releasing.set(worker, release);
+    await release;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -201,6 +205,13 @@ export class BlenderTeamConnection {
         if (requestedSlot === -1) throw new Error('Target is outside the paired Blender meshes');
         let slot = this.slots.get(worker);
         if (slot === undefined) {
+          const releasing = [...this.slots].filter(
+            ([owner, index]) =>
+              this.stopped.has(owner) && (requestedSlot === undefined || requestedSlot === index),
+          );
+          await Promise.allSettled(releasing.map(([owner]) => this.releaseWorker(owner)));
+          signal.throwIfAborted();
+          if (this.stopped.has(worker)) throw new Error('This Blender Worker was stopped');
           const occupied = new Set(this.slots.values());
           slot = requestedSlot ?? this.targets.findIndex((_, index) => !occupied.has(index));
           if (slot < 0) throw new Error('All paired Blender targets have a Worker');

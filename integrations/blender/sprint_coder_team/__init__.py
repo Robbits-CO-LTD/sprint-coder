@@ -127,8 +127,8 @@ def move_target(agent_id, displacement, expected_location):
     delta = Vector(displacement)
     if len(delta) != 3 or not all(math.isfinite(value) and abs(value) <= 100 for value in delta):
         raise ValueError("Expected three finite offsets of at most 100 units")
-    if target.parent:
-        raise ValueError("This operation requires an unparented target")
+    if target.parent or target.children:
+        raise ValueError("Move requires a target without parents or children")
     target.location += delta
     bpy.context.view_layer.update()
     view.move_cursor(target.matrix_world.translation.copy())

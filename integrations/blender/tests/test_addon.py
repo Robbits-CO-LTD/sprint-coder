@@ -1,4 +1,6 @@
 """Run in Blender with --factory-startup --python-exit-code 1 --python."""
+import json
+import socket
 import sys
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import bpy
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import sprint_coder_team as addon
 from sprint_coder_team.session import TeamSceneSession
+from sprint_coder_team.bridge import BlenderBridge, Connection
 
 
 def setup():
@@ -24,6 +27,65 @@ def setup():
         bpy.context.view_layer.update()
         addon.assign_agent(f"worker-{i}", obj, i * 36, 15 + i * 5)
     return addon.agents
+
+
+def test_parent_move(worker):
+    target = addon.agents[worker].target
+    child = bpy.data.objects.new("Unpaired child", None)
+    bpy.context.scene.collection.objects.link(child)
+    child.parent = target
+    bpy.context.view_layer.update()
+    original = child.matrix_world.copy()
+    try:
+        addon.move_target(worker, (0, 0, 1), tuple(target.location))
+    except ValueError:
+        pass
+    bpy.context.view_layer.update()
+    assert child.matrix_world == original, "Moving the target changed an unpaired child"
+    bpy.data.objects.remove(child, do_unlink=True)
+
+
+def test_closed_edit(session):
+    worker = "worker-first"
+    token = session.begin_observation(worker, 30, 25)
+    view = addon.agents[worker]
+    view.captured_revision = view.revision
+    view.png = b"fixture only"
+    position = tuple(view.target.location)
+    bridge = BlenderBridge.__new__(BlenderBridge)
+    bridge.session = session
+    bridge.session_token = "test-session"
+    receiver, sender = socket.socketpair()
+    with receiver, sender:
+        receiver.setblocking(False)
+        sender.sendall(json.dumps({"method": "edit", "token": bridge.session_token,
+                                  "worker": worker, "observation": token,
+                                  "operation": "move", "value": [1, 0, 0]}).encode() + b"\n")
+        sender.shutdown(socket.SHUT_WR)
+        bridge._step(Connection(receiver))
+    assert tuple(view.target.location) == position, "A disconnected sender changed the mesh"
+
+
+def test_undo(targets):
+    session = TeamSceneSession(bpy.context.scene, targets)
+    session.bind("undo-worker", 0)
+    target = targets[0]
+    name = target.name
+    initial_z = target.location.z
+    bpy.ops.ed.undo_push(message="Before Team edit")
+    token = session.begin_observation("undo-worker", 30, 25)
+    view = addon.agents["undo-worker"]
+    view.captured_revision = view.revision
+    view.png = b"fixture only"
+    session.edit("undo-worker", token, "move", (0, 0, 1))
+    changed_z = target.location.z
+    target.location.z += 1
+    bpy.ops.ed.undo_push(message="Human edit")
+    session.close()
+    bpy.ops.ed.undo()
+    assert abs(bpy.data.objects[name].location.z - changed_z) < 0.0001, "Human undo also lost the Team edit"
+    bpy.ops.ed.undo()
+    assert abs(bpy.data.objects[name].location.z - initial_z) < 0.0001, "Team edit did not undo separately"
 
 
 def test():
@@ -89,7 +151,18 @@ def test():
         pass
     else:
         raise AssertionError("Observation token was accepted twice")
+    test_closed_edit(session)
+    test_parent_move("worker-first")
+    session.release("worker-first")
+    try:
+        session.bind("worker-first", 0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("A late bind restored a released Worker")
+    session.bind("replacement", 0)
     session.close()
+    test_undo(targets)
     addon.unregister()
     assert not addon.agents
     print("PASS: ten slots, independent matrices, isolated edits, stale edits, Worker-scoped observations")

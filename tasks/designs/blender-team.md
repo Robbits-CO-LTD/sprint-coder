@@ -27,11 +27,13 @@ blender --command extension build --source-dir integrations/blender/sprint_coder
 
 ペアリングコードは一度だけ使え、BlenderとSprint Coderはループバックで通信する。CLIのWorkerはTeam MCPの登録から、ProviderのWorkerはTeam実行時のIDから担当を決める。観察トークンはWorkerとTurnに束縛し、編集後は再観察を要求する。Provider側は画像送信を既存の送信ポリシーに通す。画像対応を確認できた外部接続では送信先とモデルを表示し、画像ごとに承認する。
 
+移動は親子関係のない対象に限る。BlenderのグローバルUndoが有効な場合、Workerの編集は個別に履歴に記録される。Undo・Redoの際は、古い観察を無効にするためペアリングを解除する。
+
 ## Team側の検証
 
 - macOSの隔離開発版でBlenderのTeamパネルからペアリングを開始し、Sprint Coderで10メッシュの名称が表示されることと解除を確認した。接続コードは検証用のものを入力しており、アプリ間のクリップボード操作は未確認。
 - 認証済みTeam MCPに接続した10個のWorker IDで、Blender 5.1.2への観察 → 押し出し → 再観察を同時に実行した。10個すべてで面数が増え、画像も変わった。別Team、別Worker、登録解除済みのTurnは拒否された。
-- Codexの画像添付、Provider画像の承認・拒否、CLIモデルに応じた実行時のツール公開を対象テストで確認した。停止したWorkerから編集権を外し、別のWorkerへ同じ対象を割り当てられる。
+- Codexの画像添付、Provider画像の承認・拒否、CLIモデルに応じた実行時のツール公開を対象テストで確認した。停止時はBlender側の担当解放を確認してから完了を返し、別のWorkerへ同じ対象を割り当てられる。解放応答が取れない場合は停止未確認となり、停止の再試行または後続の割り当てで再確認する。
 
 ## 街区デモ
 

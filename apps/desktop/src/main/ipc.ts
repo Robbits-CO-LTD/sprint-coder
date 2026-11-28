@@ -1842,13 +1842,6 @@ export class IpcRouter {
       persistence,
       this.teamWorkerRuntime,
       (taskId, detail) => {
-        const blender = this.blenderTeams.get(taskId);
-        if (blender !== undefined) {
-          for (const worker of detail.workers) {
-            if (worker.state === 'stopped')
-              void blender.releaseWorker(worker.id).catch(() => undefined);
-          }
-        }
         this.teamDetailStream.publish(taskId, detail);
         // Workers keep the Task moving after the Leader's Turn (issue #1225).
         this.refreshTaskRunningWork(taskId);
@@ -1900,6 +1893,13 @@ export class IpcRouter {
           ...(event.result === undefined ? {} : { result: event.result }),
         }),
       workspaceWriteLimits,
+      async (taskId, workerId) => {
+        try {
+          await this.blenderTeams.get(taskId)?.releaseWorker(workerId);
+        } catch (error) {
+          throw new Error('Blender Worker stop is unconfirmed', { cause: error });
+        }
+      },
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than

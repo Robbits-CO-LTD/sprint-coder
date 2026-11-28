@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { createInterface } from 'node:readline';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -15,7 +15,7 @@ import {
 
 import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
 import { queryNativeProcessIdentity } from './native-process-identity';
-import type { TeamCoordinator } from './team-coordinator';
+import { TeamCoordinator } from './team-coordinator';
 import {
   BLENDER_TEAM_MCP_TOOLS,
   type BlenderTeamToolName,
@@ -65,6 +65,110 @@ describe('Blender Team tools', () => {
     ).toBe(false);
   });
 });
+
+it('retries release before a replacement claims the same Blender target', async () => {
+  let attempts = 0;
+  let bound: string | undefined;
+  const server = createServer((socket) => {
+    const lines = createInterface({ input: socket });
+    lines.once('line', (line) => {
+      const request = JSON.parse(line) as { method: string; worker: string };
+      let result: unknown;
+      switch (request.method) {
+        case 'pair':
+          result = { token: 't'.repeat(43), targets: ['Roof'] };
+          break;
+        case 'bind':
+          if (bound !== undefined && bound !== request.worker) {
+            socket.end(
+              JSON.stringify({ ok: false, error: 'Slot already belongs to a Worker' }) + '\n',
+            );
+            return;
+          }
+          bound = request.worker;
+          result = { bound: true };
+          break;
+        case 'release':
+          if (++attempts === 1) {
+            socket.destroy();
+            return;
+          }
+          bound = undefined;
+          result = { released: true };
+          break;
+        case 'observe':
+          result = {
+            observation: 'q'.repeat(32),
+            target: 'Roof',
+            location: [0, 0, 0],
+            face_count: 0,
+            faces: [],
+            face_index: null,
+            dataUrl: 'data:image/png;base64,QUFB',
+          };
+          break;
+      }
+      socket.end(JSON.stringify({ ok: true, result }) + '\n');
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  try {
+    const endpoint = server.address();
+    if (endpoint === null || typeof endpoint === 'string')
+      throw new Error('Listening port required');
+    const signal = AbortSignal.timeout(5_000);
+    const team = await BlenderTeamConnection.pair(
+      `blender1:${endpoint.port}:${'t'.repeat(43)}`,
+      signal,
+    );
+    const observe = { azimuth: 0, elevation: 20, target: 'Roof' };
+    await team.call('before', 'blender_observe', observe, signal);
+    await expect(team.releaseWorker('before')).rejects.toThrow('Blender disconnected');
+    await expect(team.call('after', 'blender_observe', observe, signal)).resolves.toMatchObject({
+      target: 'Roof',
+    });
+    expect(attempts).toBe(2);
+    expect(bound).toBe('after');
+  } finally {
+    await new Promise<void>((done, reject) =>
+      server.close((error) => (error === undefined ? done() : reject(error))),
+    );
+  }
+});
+
+it.each(['done', 'failed'])(
+  'waits for Blender release when stopping a %s Worker',
+  async (state) => {
+    const worker = { id: 'worker', kind: 'worker', state };
+    const publish = vi.fn();
+    const release = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Blender Worker stop is unconfirmed'))
+      .mockResolvedValueOnce(undefined);
+    const coordinator = Object.create(TeamCoordinator.prototype) as TeamCoordinator;
+    Object.assign(coordinator, {
+      enqueue: (_task: string, work: () => Promise<unknown>) => work(),
+      cancelWorkerExecutions: async () => undefined,
+      releaseBlenderWorker: release,
+      workerSummary: () => worker,
+      now: () => new Date(0),
+      emit: publish,
+      persistence: {
+        getTeamByTask: () => ({ id: 'team' }),
+        getTeamSnapshot: () => ({ agents: [worker] }),
+        setWorkerCurrentActivity: () => undefined,
+      },
+    });
+    await expect(coordinator.stopWorker('task', worker.id)).rejects.toThrow(
+      'Blender Worker stop is unconfirmed',
+    );
+    expect(publish).not.toHaveBeenCalled();
+    await expect(coordinator.stopWorker('task', worker.id)).resolves.toMatchObject({ state });
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenLastCalledWith('task', worker.id);
+    expect(publish).toHaveBeenCalledOnce();
+  },
+);
 
 const blenderExecutable = process.env['SPRINT_CODER_TEST_BLENDER_EXECUTABLE'];
 const fixture = resolve(

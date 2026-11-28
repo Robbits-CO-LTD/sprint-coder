@@ -38,6 +38,7 @@ class TeamSceneSession:
         self.observations: dict[str, Observation] = {}
         self.assigned: dict[str, tuple[int, AgentView]] = {}
         self.closed = False
+        self.stopped = set()
 
     def close(self):
         if not self.closed:
@@ -49,6 +50,8 @@ class TeamSceneSession:
     def bind(self, worker_id, slot):
         if self.closed or bpy.context.scene != self.scene:
             raise ValueError("The paired Blender scene is no longer active")
+        if worker_id in self.stopped:
+            raise ValueError("This Blender Worker was stopped")
         if type(slot) is not int or not 0 <= slot < len(self.targets):
             raise ValueError("Slot is outside the paired targets")
         old = self.assigned.get(worker_id)
@@ -62,6 +65,7 @@ class TeamSceneSession:
         self.assigned[worker_id] = (slot, view)
 
     def release(self, worker_id):
+        self.stopped.add(worker_id)
         self.observations.pop(worker_id, None)
         assignment = self.assigned.pop(worker_id, None)
         if assignment is not None:
@@ -138,6 +142,9 @@ class TeamSceneSession:
         view, observation = self._observation(worker_id, token)
         if view.captured_revision != observation.revision or view.png is None:
             raise ValueError("Wait for the current view before editing")
+        record_undo = bpy.context.preferences.edit.use_global_undo
+        if record_undo and not bpy.ops.ed.undo_push.poll():
+            raise ValueError("Wait until Blender can record the Team edit in Undo History")
         if operation == "move":
             move_target(worker_id, value, observation.location)
         elif operation == "extrude" and observation.face_index is not None:
@@ -145,4 +152,6 @@ class TeamSceneSession:
         else:
             raise ValueError("Choose move or observe the desired face before extrusion")
         self.observations.pop(worker_id)
+        if record_undo:
+            bpy.ops.ed.undo_push(message="Sprint Coder Team: " + operation)
         return {"target": view.target.name, "revision": view.revision}

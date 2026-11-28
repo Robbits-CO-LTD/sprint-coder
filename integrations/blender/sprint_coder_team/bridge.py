@@ -83,19 +83,23 @@ class BlenderBridge:
                     return None
         return 0.025
 
+    @staticmethod
+    def _peer_closed(peer):
+        # A request stays open until its response. Readable data after the frame is invalid too.
+        try:
+            peer.socket.recv(1, socket.MSG_PEEK)
+            return True
+        except BlockingIOError:
+            return False
+
     def _step(self, peer):
         try:
             if peer.response is not None:
                 peer.response = peer.response[peer.socket.send(peer.response):]
                 return len(peer.response) == 0
             if peer.observation is not None:
-                # Requests keep the write half open until the response. A disconnected
-                # Worker has no pending request to serve after a viewport capture.
-                try:
-                    peer.socket.recv(1, socket.MSG_PEEK)
+                if self._peer_closed(peer):
                     return True
-                except BlockingIOError:
-                    pass
                 result = self.session.read_observation(*peer.observation)
                 if result is not None:
                     png = result.pop("png")
@@ -110,7 +114,7 @@ class BlenderBridge:
                 return True
             if b"\n" in peer.request:
                 line, trailing = peer.request.split(b"\n", 1)
-                if trailing:
+                if trailing or self._peer_closed(peer):
                     return True
                 self._dispatch(peer, json.loads(line))
         except BlockingIOError:
@@ -243,11 +247,13 @@ CLASSES = (SPRINTTEAM_OT_pair, SPRINTTEAM_OT_copy_code,
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
-    bpy.app.handlers.load_pre.append(stop_bridge)
+    for handlers in (bpy.app.handlers.load_pre, bpy.app.handlers.undo_pre, bpy.app.handlers.redo_pre):
+        handlers.append(stop_bridge)
 
 
 def unregister():
     stop_bridge()
-    bpy.app.handlers.load_pre.remove(stop_bridge)
+    for handlers in (bpy.app.handlers.load_pre, bpy.app.handlers.undo_pre, bpy.app.handlers.redo_pre):
+        handlers.remove(stop_bridge)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
