@@ -37,6 +37,12 @@ blender --command extension build --source-dir integrations/blender/sprint_coder
 
 `integrations/blender/demo/build_city_block.py` で、屋根やひさしなど10個の編集対象を含む自己完結型の街区を生成できる。保存済みの街区で10本のカーソルと10枚の独立視点を目視した。街区での継続的な操作レスポンスは計測していない。
 
+生成する場合は、新規の出力ファイルを指定する。
+
+```sh
+blender --background --factory-startup --python-exit-code 1 --python integrations/blender/demo/build_city_block.py -- /path/to/new-city-block.blend
+```
+
 ## 実Codex CLI受入 2026-11-28
 
 利用者が許可した使い捨てシーンで、macOS arm64、Blender 5.1.2、Codex CLI 0.170.0、GPT-6.2 Solを使用。Sprint CoderのCodexアダプターと認証済みTeam MCPを通して10個の独立したWorker Turnを並行起動した。各Workerが別の角度・担当メッシュの画像から赤か青かを見て、対応する移動量を実行し、再観察した。10/10で各1回の編集と期待位置を確認した。取得画像は計21枚。Blender上の位置と画像の識別子を照合した。試験は25.8秒で完了した。

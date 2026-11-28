@@ -120,10 +120,18 @@ def build(scene):
 
 
 def main():
+    if not bpy.app.background or bpy.data.filepath:
+        raise RuntimeError("Generate the demo in a fresh background Blender process")
+    args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+    if len(args) != 1 or Path(args[0]).suffix.lower() != ".blend":
+        raise ValueError("Specify one new .blend file after --")
+    output = Path(args[0]).resolve()
+    if output.exists():
+        raise FileExistsError("Choose a new file for the city block demo")
+
+    bpy.ops.wm.read_factory_settings(use_empty=True)
     scene = bpy.context.scene
     scene.name = "Sprint Coder • City Block"
-    for obj in list(scene.objects):
-        bpy.data.objects.remove(obj, do_unlink=True)
     targets = build(scene)
     for target in targets:
         assert target.type == "MESH" and target.data.users == 1 and target.is_editable
@@ -143,7 +151,7 @@ def main():
                 view.region_3d.view_location = (1.3, 0.0, 0.9)
                 view.region_3d.view_distance = 42
                 view.region_3d.view_rotation = Euler((0.88, 0.0, -0.40)).to_quaternion()
-    bpy.ops.wm.save_as_mainfile(filepath=str(Path(sys.argv[-1]).resolve()))
+    bpy.ops.wm.save_as_mainfile(filepath=str(output))
 
 
 if __name__ == "__main__":
