@@ -136,6 +136,48 @@ it('retries release before a replacement claims the same Blender target', async 
   }
 });
 
+it('confirms stop once the paired Blender listener has closed', async () => {
+  const server = createServer((socket) => {
+    createInterface({ input: socket }).once('line', (line) => {
+      const { method } = JSON.parse(line) as { method: string };
+      const result =
+        method === 'pair'
+          ? { token: 't'.repeat(43), targets: ['Roof'] }
+          : method === 'bind'
+            ? { bound: true }
+            : {
+                observation: 'q'.repeat(32),
+                target: 'Roof',
+                location: [0, 0, 0],
+                face_count: 0,
+                faces: [],
+                face_index: null,
+                dataUrl: 'data:image/png;base64,QUFB',
+              };
+      socket.end(JSON.stringify({ ok: true, result }) + '\n');
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const closeServer = () =>
+    new Promise<void>((done, reject) =>
+      server.close((error) => (error === undefined ? done() : reject(error))),
+    );
+  let team: BlenderTeamConnection;
+  try {
+    const endpoint = server.address();
+    if (endpoint === null || typeof endpoint === 'string')
+      throw new Error('Listening port required');
+    const signal = AbortSignal.timeout(5_000);
+    team = await BlenderTeamConnection.pair(`blender1:${endpoint.port}:${'t'.repeat(43)}`, signal);
+    await team.call('one', 'blender_observe', { azimuth: 0, elevation: 20 }, signal);
+  } finally {
+    await closeServer();
+  }
+  await expect(team.releaseWorker('one')).resolves.toBeUndefined();
+  expect(team.active).toBe(false);
+  expect(await team.isAvailable()).toBe(false);
+});
+
 it.each(['done', 'failed'])(
   'waits for Blender release when stopping a %s Worker',
   async (state) => {

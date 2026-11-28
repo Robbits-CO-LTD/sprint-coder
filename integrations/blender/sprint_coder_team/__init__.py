@@ -287,7 +287,9 @@ def _draw_views():
             return
     shader = gpu.shader.from_builtin("UNIFORM_COLOR")
     sidebars = sum(region.width for region in context.area.regions if region.type == "UI")
-    right = context.region.width - sidebars - 52
+    preferences = context.preferences
+    nav_margin = max(52, round((preferences.view.gizmo_size + 18) * preferences.system.pixel_size))
+    right = context.region.width - sidebars - nav_margin
     top = context.region.height - 80
     gap = 12
     rows = (max(view.slot for view in views) // 2) + 1

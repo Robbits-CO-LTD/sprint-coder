@@ -120,6 +120,7 @@ export class BlenderTeamConnection {
   private readonly busy = new Set<string>();
   private readonly stopped = new Set<string>();
   private readonly releasing = new Map<string, Promise<void>>();
+  private listenerGone = false;
   private readonly observations = new Map<string, { token: string; turn: AbortSignal }>();
 
   get active(): boolean {
@@ -144,11 +145,32 @@ export class BlenderTeamConnection {
 
   close(): void {
     if (this.lifetime.signal.aborted) return;
-    this.lifetime.abort();
-    this.observations.clear();
+    this.invalidate();
     void blenderRequest(this.endpoint, { method: 'disconnect' }, AbortSignal.timeout(2_000)).catch(
       () => undefined,
     );
+  }
+
+  private invalidate(): void {
+    this.lifetime.abort();
+    this.slots.clear();
+    this.observations.clear();
+  }
+
+  private listenerHasClosed(error: unknown): boolean {
+    if (this.listenerGone) return true;
+    if (
+      typeof error !== 'object' ||
+      error === null ||
+      !('code' in error) ||
+      error.code !== 'ECONNREFUSED'
+    )
+      return false;
+    // A paired bridge owns one loopback listener. It closes all peers and their editing session
+    // when that listener is closed. A timed-out or interrupted request alone cannot prove this.
+    this.listenerGone = true;
+    this.invalidate();
+    return true;
   }
 
   async releaseWorker(worker: string): Promise<void> {
@@ -167,12 +189,16 @@ export class BlenderTeamConnection {
         z.object({ released: z.literal(true) }).parse(result);
         this.slots.delete(worker);
       })
+      .catch((error: unknown) => {
+        if (!this.listenerHasClosed(error)) throw error;
+      })
       .finally(() => this.releasing.delete(worker));
     this.releasing.set(worker, release);
     await release;
   }
 
   async isAvailable(): Promise<boolean> {
+    if (!this.active) return false;
     try {
       return (
         (await blenderRequest(
@@ -181,8 +207,9 @@ export class BlenderTeamConnection {
           AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(2_000)]),
         )) === true
       );
-    } catch {
-      return false;
+    } catch (error) {
+      if (this.listenerHasClosed(error)) return false;
+      throw error;
     }
   }
 
